@@ -140,6 +140,10 @@ impl Resident {
             (Some(_), None) => Err(ResidentError::BootstrapMultiaddrNotSet),
         }
     }
+
+    pub fn swarm(&self) -> ResidentResult<&Swarm<ResidentBehaviour>> {
+        self.swarm.as_ref().ok_or(ResidentError::PeerIdNotSet)
+    }
 }
 
 #[derive(NetworkBehaviour)]
