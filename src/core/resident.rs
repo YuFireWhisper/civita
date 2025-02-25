@@ -125,7 +125,9 @@ impl Resident {
     }
 
     fn get_multiaddr_clone(&self) -> ResidentResult<Multiaddr> {
-        self.multiaddr.clone().ok_or(ResidentError::MissingMultiaddr)
+        self.multiaddr
+            .clone()
+            .ok_or(ResidentError::MissingMultiaddr)
     }
 
     fn get_bootstrap_info(&self) -> ResidentResult<Option<(PeerId, Multiaddr)>> {
@@ -174,7 +176,7 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    use crate::core::resident::Resident;
+    use crate::core::resident::{Resident, ResidentError};
 
     struct TestFixtures {
         base_multiaddr: Multiaddr,
@@ -308,5 +310,23 @@ mod tests {
         assert!(built_resident.swarm.is_some());
         assert!(built_resident.peer_id.is_some());
         assert!(built_resident.multiaddr.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_build_missing_keypair() {
+        let fixtures = TestFixtures::new();
+        let resident = Resident::new().with_multiaddr(fixtures.base_multiaddr.clone());
+        let result = resident.build();
+
+        assert!(matches!(result, Err(ResidentError::MissingPeerId)));
+    }
+
+    #[tokio::test]
+    async fn test_build_missing_multiaddr() {
+        let fixtures = TestFixtures::new();
+        let resident = Resident::new().with_keypair(fixtures.keypair.clone());
+        let result = resident.build();
+
+        assert!(matches!(result, Err(ResidentError::MissingMultiaddr)));
     }
 }
