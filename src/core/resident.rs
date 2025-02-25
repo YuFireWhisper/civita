@@ -1,3 +1,5 @@
+use std::fs;
+
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
 
 #[derive(Debug, Default)]
@@ -13,6 +15,12 @@ impl Resident {
         Self::default()
     }
 
+    pub fn set_keypair_from_file(self, path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let keypair_bytes = fs::read(path)?;
+        let keypair = Keypair::from_protobuf_encoding(&keypair_bytes)?;
+        Ok(self.set_keypair(keypair))
+    }
+
     pub fn set_keypair(mut self, keypair: Keypair) -> Self {
         self.keypair = Some(keypair);
         self
@@ -21,6 +29,10 @@ impl Resident {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+
     use super::*;
 
     #[test]
@@ -34,11 +46,56 @@ mod tests {
     }
 
     #[test]
-    fn test_resident_set_keypair() {
-        let keypair = Keypair::generate_ed25519();
+    fn test_set_keypair_from_file_success() {
+        let (keypair, temp_file) = generate_keypair_and_write_to_file();
 
         let resident = Resident::new()
-            .set_keypair(keypair);
+            .set_keypair_from_file(temp_file.path().to_str().unwrap())
+            .unwrap();
+
+        assert!(resident.keypair.is_some());
+        assert_eq!(resident.keypair.unwrap().public(), keypair.public());
+    }
+
+    fn generate_keypair_and_write_to_file() -> (Keypair, NamedTempFile) {
+        let keypair = Keypair::generate_ed25519();
+        let keypair_bytes = keypair.to_protobuf_encoding().unwrap();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&keypair_bytes).unwrap();
+
+        (keypair, temp_file)
+    }
+
+    #[test]
+    fn test_set_keypair_from_file_file_not_found() {
+        let path = "nonexistent_file.keypair";
+
+        let result = Resident::new().set_keypair_from_file(path);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_keypair_from_file_invalid_keypair() {
+        let temp_file = write_invalid_keypair_to_file();
+
+        let result = Resident::new().set_keypair_from_file(temp_file.path().to_str().unwrap());
+
+        assert!(result.is_err());
+    }
+
+    fn write_invalid_keypair_to_file() -> NamedTempFile {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"invalid keypair data").unwrap();
+
+        temp_file
+    }
+
+    #[test]
+    fn test_resident_set_keypair() {
+        let keypair = Keypair::generate_ed25519();
+        let resident = Resident::new().set_keypair(keypair);
 
         assert!(resident.keypair.is_some());
     }
