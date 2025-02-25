@@ -22,9 +22,7 @@ pub struct ResidentNetwork {
 }
 
 impl ResidentNetwork {
-    pub fn new(keypair: &Keypair, multiaddr: Multiaddr) -> Self {
-        let peer_id = PeerId::from_public_key(&keypair.public());
-
+    pub fn new(peer_id: PeerId, keypair: &Keypair, multiaddr: Multiaddr) -> Self {
         let transport = tcp::tokio::Transport::default()
             .upgrade(Version::V1)
             .authenticate(noise::Config::new(keypair).unwrap())
@@ -107,7 +105,7 @@ mod tests {
             let peer_id = PeerId::from_public_key(&keypair.public());
             let multiaddr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
 
-            let mut network = ResidentNetwork::new(&keypair, multiaddr);
+            let mut network = ResidentNetwork::new(peer_id, &keypair, multiaddr);
 
             let listen_addr = timeout(TIMEOUT_DURATION, async {
                 while let Some(event) = network.swarm.next().await {
