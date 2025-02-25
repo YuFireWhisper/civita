@@ -177,13 +177,15 @@ mod tests {
     use crate::core::resident::Resident;
 
     #[test]
-    fn test_resident_new() {
+    fn test_new_with_no_fields_set() {
         let resident = Resident::new();
 
-        assert!(resident.keypair.is_none());
+        assert!(resident.peer_id.is_none());
         assert!(resident.multiaddr.is_none());
+        assert!(resident.keypair.is_none());
         assert!(resident.bootstrap_peer_id.is_none());
         assert!(resident.bootstrap_multiaddr.is_none());
+        assert!(resident.swarm.is_none());
     }
 
     #[test]
