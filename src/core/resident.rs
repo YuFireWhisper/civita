@@ -1,6 +1,11 @@
 use std::{fs, io};
 
-use libp2p::{identity::Keypair, kad::{self, store::MemoryStore}, swarm::NetworkBehaviour, Multiaddr, PeerId, Swarm};
+use libp2p::{
+    identity::Keypair,
+    kad::{self, store::MemoryStore},
+    swarm::NetworkBehaviour,
+    Multiaddr, PeerId,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,7 +20,7 @@ type ResidentResult<T> = Result<T, ResidentError>;
 
 #[derive(Debug, Default, Clone)]
 struct Resident {
-        addr: Option<Multiaddr>,
+    multiaddr: Option<Multiaddr>,
     keypair: Option<Keypair>,
     bootstrap_peer_id: Option<PeerId>,
     bootstrap_addr: Option<Multiaddr>,
@@ -26,8 +31,8 @@ impl Resident {
         Self::default()
     }
 
-    pub fn set_addr(mut self, addr: Multiaddr) -> Self {
-        self.addr = Some(addr);
+    pub fn set_multiaddr(mut self, addr: Multiaddr) -> Self {
+        self.multiaddr = Some(addr);
         self
     }
 
@@ -88,19 +93,19 @@ mod tests {
         let resident = Resident::new();
 
         assert!(resident.keypair.is_none());
-        assert!(resident.addr.is_none());
+        assert!(resident.multiaddr.is_none());
         assert!(resident.bootstrap_peer_id.is_none());
         assert!(resident.bootstrap_addr.is_none());
     }
 
     #[test]
-    fn test_resident_set_addr() {
-        let addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+    fn test_resident_set_multiaddr() {
+        let multiaddr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
 
-        let resident = Resident::new().set_addr(addr.clone());
+        let resident = Resident::new().set_multiaddr(multiaddr.clone());
 
-        assert!(resident.addr.is_some());
-        assert_eq!(resident.addr.unwrap(), addr);
+        assert!(resident.multiaddr.is_some());
+        assert_eq!(resident.multiaddr.unwrap(), multiaddr);
     }
 
     #[test]
