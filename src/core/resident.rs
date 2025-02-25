@@ -13,7 +13,7 @@ pub enum ResidentError {
 
 type ResidentResult<T> = Result<T, ResidentError>;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Resident {
     keypair: Option<Keypair>,
     addr: Option<Multiaddr>,
@@ -40,6 +40,11 @@ impl Resident {
     pub fn set_addr(mut self, addr: Multiaddr) -> Self {
         self.addr = Some(addr);
         self
+    }
+
+    pub fn set_bootstrap_from_other_resident(self, other: Resident) -> Self {
+        self.set_bootstrap_peer_id(other.bootstrap_peer_id.unwrap())
+            .set_bootstrap_addr(other.bootstrap_addr.unwrap())
     }
 
     pub fn set_bootstrap_peer_id(mut self, peer_id: PeerId) -> Self {
@@ -135,6 +140,27 @@ mod tests {
 
         assert!(resident.addr.is_some());
         assert_eq!(resident.addr.unwrap(), addr);
+    }
+
+    #[test]
+    fn test_resident_set_bootstrap_from_other_resident() {
+        let other = Resident::new()
+            .set_bootstrap_peer_id(PeerId::random())
+            .set_bootstrap_addr("/ip4/0.0.0.0/tcp/0".parse().unwrap());
+
+        let resident = Resident::new().set_bootstrap_from_other_resident(other.clone());
+
+        assert!(resident.bootstrap_peer_id.is_some());
+        assert_eq!(
+            resident.bootstrap_peer_id.unwrap(),
+            other.bootstrap_peer_id.unwrap()
+        );
+
+        assert!(resident.bootstrap_addr.is_some());
+        assert_eq!(
+            resident.bootstrap_addr.unwrap(),
+            other.bootstrap_addr.unwrap()
+        );
     }
 
     #[test]
