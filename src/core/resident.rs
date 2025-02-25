@@ -1,6 +1,15 @@
 use std::fs;
 
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ResidentError {
+    #[error("Failed to read keypair from file: {0}")]
+    ReadKeypairFromFileError(#[from] std::io::Error),
+}
+
+type ResidentResult<T> = Result<T, ResidentError>;
 
 #[derive(Debug, Default)]
 struct Resident {
