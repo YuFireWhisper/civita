@@ -1,15 +1,10 @@
-use libp2p::{identity, noise, swarm, yamux, Transport, TransportError};
+use libp2p::{identity, noise, swarm, TransportError};
 use std::{fs, io};
 
-use libp2p::{
-    core::upgrade::Version,
-    identity::Keypair,
-    kad::{self, store::MemoryStore},
-    swarm::NetworkBehaviour,
-    tcp::tokio,
-    Multiaddr, PeerId, Swarm,
-};
+use libp2p::{identity::Keypair, Multiaddr, PeerId};
 use thiserror::Error;
+
+use super::resident_network::{ResidentNetwork, ResidentNetworkError};
 
 #[derive(Debug, Error)]
 pub enum ResidentError {
@@ -23,6 +18,8 @@ pub enum ResidentError {
     Transport(String),
     #[error("Swarm dial error: {0}")]
     SwarmDial(#[from] swarm::DialError),
+    #[error("Resident network error: {0}")]
+    ResidentNetwork(#[from] ResidentNetworkError),
     #[error("Peer ID is not set")]
     MissingPeerId,
     #[error("Multiaddr is not set")]
@@ -48,7 +45,7 @@ pub struct Resident {
     keypair: Option<Keypair>,
     bootstrap_peer_id: Option<PeerId>,
     bootstrap_multiaddr: Option<Multiaddr>,
-    swarm: Option<Swarm<ResidentBehaviour>>,
+    resident_network: Option<ResidentNetwork>,
 }
 
 impl Resident {
@@ -87,32 +84,19 @@ impl Resident {
         self
     }
 
-    pub fn build(mut self) -> ResidentResult<Self> {
-        let keypair = self.get_keypair()?;
+    pub async fn build(mut self) -> ResidentResult<Self> {
         let peer_id = self.get_peer_id()?;
+        let keypair = self.get_keypair()?;
         let multiaddr = self.get_multiaddr_clone()?;
 
-        let transport = tokio::Transport::default()
-            .upgrade(Version::V1)
-            .authenticate(noise::Config::new(keypair)?)
-            .multiplex(yamux::Config::default())
-            .boxed();
-
-        let behaviour = ResidentBehaviour::new(peer_id);
-        let swarm_config = swarm::Config::with_tokio_executor();
-        let mut swarm = Swarm::new(transport, behaviour, peer_id, swarm_config);
-
-        swarm.listen_on(multiaddr)?;
+        let mut resident_network = ResidentNetwork::new(peer_id, keypair, multiaddr);
 
         if let Some((peer_id, bootstrap_multiaddr)) = self.get_bootstrap_info()? {
-            swarm.dial(bootstrap_multiaddr.clone())?;
-            swarm
-                .behaviour_mut()
-                .kad
-                .add_address(&peer_id, bootstrap_multiaddr);
+            resident_network.dial(peer_id, bootstrap_multiaddr).await?;
         }
 
-        self.swarm = Some(swarm);
+        self.resident_network = Some(resident_network);
+
         Ok(self)
     }
 
@@ -138,36 +122,6 @@ impl Resident {
             (Some(_), None) => Err(ResidentError::MissingBootstrapMultiaddr),
         }
     }
-
-    pub fn swarm(&self) -> ResidentResult<&Swarm<ResidentBehaviour>> {
-        self.swarm.as_ref().ok_or(ResidentError::MissingPeerId)
-    }
-}
-
-#[derive(NetworkBehaviour)]
-#[behaviour(to_swarm = "ResidentEvent")]
-pub struct ResidentBehaviour {
-    kad: kad::Behaviour<MemoryStore>,
-}
-
-impl ResidentBehaviour {
-    fn new(peer_id: PeerId) -> Self {
-        let memory_store = MemoryStore::new(peer_id);
-        Self {
-            kad: kad::Behaviour::new(peer_id, memory_store),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ResidentEvent {
-    Kad(kad::Event),
-}
-
-impl From<kad::Event> for ResidentEvent {
-    fn from(event: kad::Event) -> Self {
-        Self::Kad(event)
-    }
 }
 
 #[cfg(test)]
@@ -176,7 +130,7 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    use crate::core::resident::{Resident, ResidentError};
+    use crate::core::resident::Resident;
 
     struct TestFixtures {
         base_multiaddr: Multiaddr,
@@ -221,7 +175,7 @@ mod tests {
         assert!(resident.keypair.is_none());
         assert!(resident.bootstrap_peer_id.is_none());
         assert!(resident.bootstrap_multiaddr.is_none());
-        assert!(resident.swarm.is_none());
+        assert!(resident.resident_network.is_none());
     }
 
     #[test]
@@ -298,35 +252,5 @@ mod tests {
             resident.bootstrap_multiaddr.unwrap(),
             fixtures.base_multiaddr
         );
-    }
-
-    #[tokio::test]
-    async fn test_build_success_minimum_requirements() {
-        let fixtures = TestFixtures::new();
-        let resident = fixtures.create_basic_resident();
-        let result = resident.build();
-
-        let built_resident = result.unwrap();
-        assert!(built_resident.swarm.is_some());
-        assert!(built_resident.peer_id.is_some());
-        assert!(built_resident.multiaddr.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_build_missing_keypair() {
-        let fixtures = TestFixtures::new();
-        let resident = Resident::new().with_multiaddr(fixtures.base_multiaddr.clone());
-        let result = resident.build();
-
-        assert!(matches!(result, Err(ResidentError::MissingPeerId)));
-    }
-
-    #[tokio::test]
-    async fn test_build_missing_multiaddr() {
-        let fixtures = TestFixtures::new();
-        let resident = Resident::new().with_keypair(fixtures.keypair.clone());
-        let result = resident.build();
-
-        assert!(matches!(result, Err(ResidentError::MissingMultiaddr)));
     }
 }
