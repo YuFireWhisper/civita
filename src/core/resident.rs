@@ -14,6 +14,10 @@ pub enum ResidentError {
     Io(#[from] io::Error),
     #[error("Keypair decoding error: {0}")]
     KeypairDecodingError(#[from] libp2p::identity::DecodingError),
+    #[error("Peer ID is not set")]
+    PeerIdNotSet,
+    #[error("Multiaddr is not set")]
+    MultiaddrNotSet,
 }
 
 type ResidentResult<T> = Result<T, ResidentError>;
@@ -24,7 +28,7 @@ struct Resident {
     multiaddr: Option<Multiaddr>,
     keypair: Option<Keypair>,
     bootstrap_peer_id: Option<PeerId>,
-    bootstrap_addr: Option<Multiaddr>,
+    bootstrap_multiaddr: Option<Multiaddr>,
 }
 
 impl Resident {
@@ -51,9 +55,13 @@ impl Resident {
         self
     }
 
-    pub fn set_bootstrap_from_other_resident(self, other: Resident) -> Self {
-        self.set_bootstrap_peer_id(other.bootstrap_peer_id.unwrap())
-            .set_bootstrap_addr(other.bootstrap_addr.unwrap())
+    pub fn set_bootstrap_from_other_resident(self, other: Resident) -> ResidentResult<Self> {
+        let bootstrap_peer_id = other.peer_id.ok_or(ResidentError::PeerIdNotSet)?;
+        let bootstrap_multiaddr = other.multiaddr.ok_or(ResidentError::MultiaddrNotSet)?;
+
+        Ok(self
+            .set_bootstrap_peer_id(bootstrap_peer_id)
+            .set_bootstrap_multiaddr(bootstrap_multiaddr))
     }
 
     pub fn set_bootstrap_peer_id(mut self, peer_id: PeerId) -> Self {
@@ -61,8 +69,8 @@ impl Resident {
         self
     }
 
-    pub fn set_bootstrap_addr(mut self, addr: Multiaddr) -> Self {
-        self.bootstrap_addr = Some(addr);
+    pub fn set_bootstrap_multiaddr(mut self, multiaddr: Multiaddr) -> Self {
+        self.bootstrap_multiaddr = Some(multiaddr);
         self
     }
 }
@@ -99,7 +107,7 @@ mod tests {
         assert!(resident.keypair.is_none());
         assert!(resident.multiaddr.is_none());
         assert!(resident.bootstrap_peer_id.is_none());
-        assert!(resident.bootstrap_addr.is_none());
+        assert!(resident.bootstrap_multiaddr.is_none());
     }
 
     #[test]
@@ -121,7 +129,10 @@ mod tests {
             .unwrap();
 
         assert!(resident.peer_id.is_some());
-        assert_eq!(resident.peer_id.unwrap(), PeerId::from_public_key(&keypair.public()));
+        assert_eq!(
+            resident.peer_id.unwrap(),
+            PeerId::from_public_key(&keypair.public())
+        );
 
         assert!(resident.keypair.is_some());
         assert_eq!(resident.keypair.unwrap().public(), keypair.public());
@@ -150,7 +161,8 @@ mod tests {
     fn test_set_keypair_and_peer_id_from_file_invalid_keypair() {
         let temp_file = write_invalid_keypair_to_file();
 
-        let result = Resident::new().set_keypair_and_peer_id_from_file(temp_file.path().to_str().unwrap());
+        let result =
+            Resident::new().set_keypair_and_peer_id_from_file(temp_file.path().to_str().unwrap());
 
         assert!(result.is_err());
     }
@@ -176,20 +188,21 @@ mod tests {
     fn test_resident_set_bootstrap_from_other_resident() {
         let other = Resident::new()
             .set_bootstrap_peer_id(PeerId::random())
-            .set_bootstrap_addr("/ip4/0.0.0.0/tcp/0".parse().unwrap());
+            .set_bootstrap_multiaddr("/ip4/0.0.0.0/tcp/0".parse().unwrap());
 
         let resident = Resident::new().set_bootstrap_from_other_resident(other.clone());
 
-        assert!(resident.bootstrap_peer_id.is_some());
+        assert!(resident.is_ok());
+        assert!(resident.as_ref().unwrap().bootstrap_peer_id.is_some());
         assert_eq!(
-            resident.bootstrap_peer_id.unwrap(),
+            resident.as_ref().unwrap().bootstrap_peer_id.unwrap(),
             other.bootstrap_peer_id.unwrap()
         );
 
-        assert!(resident.bootstrap_addr.is_some());
+        assert!(resident.as_ref().unwrap().bootstrap_multiaddr.is_some());
         assert_eq!(
-            resident.bootstrap_addr.unwrap(),
-            other.bootstrap_addr.unwrap()
+            resident.unwrap().bootstrap_multiaddr.unwrap(),
+            other.bootstrap_multiaddr.unwrap()
         );
     }
 
@@ -207,9 +220,9 @@ mod tests {
     fn test_resident_set_bootstrap_addr() {
         let addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
 
-        let resident = Resident::new().set_bootstrap_addr(addr.clone());
+        let resident = Resident::new().set_bootstrap_multiaddr(addr.clone());
 
-        assert!(resident.bootstrap_addr.is_some());
-        assert_eq!(resident.bootstrap_addr.unwrap(), addr);
+        assert!(resident.bootstrap_multiaddr.is_some());
+        assert_eq!(resident.bootstrap_multiaddr.unwrap(), addr);
     }
 }
