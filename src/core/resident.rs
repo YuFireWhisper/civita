@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resident_with_bootstrap_from_resident() {
+    fn test_with_bootstrap_from_resident() {
         let fixtures = TestFixtures::new();
         let other = fixtures.create_basic_resident();
         let resident = Resident::new().with_bootstrap_from_resident(other);
