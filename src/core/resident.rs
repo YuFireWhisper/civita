@@ -36,6 +36,11 @@ impl Resident {
         self.keypair = Some(keypair);
         self
     }
+
+    pub fn set_addr(mut self, addr: Multiaddr) -> Self {
+        self.addr = Some(addr);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -110,5 +115,15 @@ mod tests {
         let resident = Resident::new().set_keypair(keypair);
 
         assert!(resident.keypair.is_some());
+    }
+
+    #[test]
+    fn test_resident_set_addr() {
+        let addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+
+        let resident = Resident::new().set_addr(addr.clone());
+
+        assert!(resident.addr.is_some());
+        assert_eq!(resident.addr.unwrap(), addr);
     }
 }
