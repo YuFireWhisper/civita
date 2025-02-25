@@ -176,6 +176,40 @@ mod tests {
 
     use crate::core::resident::Resident;
 
+    struct TestFixtures {
+        base_multiaddr: Multiaddr,
+        keypair: Keypair,
+    }
+
+    impl TestFixtures {
+        fn new() -> Self {
+            Self {
+                base_multiaddr: "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+                keypair: Keypair::generate_ed25519(),
+            }
+        }
+
+        fn create_basic_resident(&self) -> Resident {
+            Resident::new()
+                .with_keypair(self.keypair.clone())
+                .with_multiaddr(self.base_multiaddr.clone())
+        }
+
+        fn generate_keypair_file(&self) -> (Keypair, NamedTempFile) {
+            let keypair = self.keypair.clone();
+            let mut temp_file = NamedTempFile::new().unwrap();
+            let keypair_bytes = keypair.to_protobuf_encoding().unwrap();
+            temp_file.write_all(&keypair_bytes).unwrap();
+            (keypair, temp_file)
+        }
+
+        fn generate_invalid_keypair_file(&self) -> NamedTempFile {
+            let mut temp_file = NamedTempFile::new().unwrap();
+            temp_file.write_all(b"invalid keypair data").unwrap();
+            temp_file
+        }
+    }
+
     #[test]
     fn test_new_with_no_fields_set() {
         let resident = Resident::new();
@@ -190,76 +224,51 @@ mod tests {
 
     #[test]
     fn test_with_multiaddr() {
-        let multiaddr = generate_base_multiaddr();
+        let fixtures = TestFixtures::new();
 
-        let resident = Resident::new().with_multiaddr(multiaddr.clone());
+        let resident = Resident::new().with_multiaddr(fixtures.base_multiaddr.clone());
 
-        assert!(resident.multiaddr.is_some());
-        assert_eq!(resident.multiaddr.unwrap(), multiaddr);
-    }
-
-    fn generate_base_multiaddr() -> Multiaddr {
-        "/ip4/0.0.0.0/tcp/0".parse().unwrap()
+        assert_eq!(resident.multiaddr.unwrap(), fixtures.base_multiaddr);
     }
 
     #[test]
     fn test_with_keypair_from_file_success() {
-        let (keypair, temp_file) = generate_keypair_and_write_to_file();
+        let fixtures = TestFixtures::new();
+        let (keypair, temp_file) = fixtures.generate_keypair_file();
 
         let resident = Resident::new()
             .with_keypair_from_file(temp_file.path().to_str().unwrap())
             .unwrap();
 
-        assert!(resident.peer_id.is_some());
         assert_eq!(
             resident.peer_id.unwrap(),
             PeerId::from_public_key(&keypair.public())
         );
-
-        assert!(resident.keypair.is_some());
         assert_eq!(resident.keypair.unwrap().public(), keypair.public());
-    }
-
-    fn generate_keypair_and_write_to_file() -> (Keypair, NamedTempFile) {
-        let keypair = Keypair::generate_ed25519();
-        let keypair_bytes = keypair.to_protobuf_encoding().unwrap();
-
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&keypair_bytes).unwrap();
-
-        (keypair, temp_file)
     }
 
     #[test]
     fn test_with_keypair_from_file_file_not_found() {
-        let path = "nonexistent_file.keypair";
-
-        let result = Resident::new().with_keypair_from_file(path);
+        let result = Resident::new().with_keypair_from_file("nonexistent_file.keypair");
 
         assert!(result.is_err());
     }
 
     #[test]
     fn test_with_keypair_from_file_invalid_keypair() {
-        let temp_file = write_invalid_keypair_to_file();
+        let fixtures = TestFixtures::new();
+        let temp_file = fixtures.generate_invalid_keypair_file();
 
         let result = Resident::new().with_keypair_from_file(temp_file.path().to_str().unwrap());
 
         assert!(result.is_err());
     }
 
-    fn write_invalid_keypair_to_file() -> NamedTempFile {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(b"invalid keypair data").unwrap();
-
-        temp_file
-    }
-
     #[test]
     fn test_with_keypair() {
-        let keypair = Keypair::generate_ed25519();
+        let fixtures = TestFixtures::new();
 
-        let resident = Resident::new().with_keypair(keypair);
+        let resident = Resident::new().with_keypair(fixtures.keypair.clone());
 
         assert!(resident.peer_id.is_some());
         assert!(resident.keypair.is_some());
@@ -267,52 +276,37 @@ mod tests {
 
     #[test]
     fn test_resident_with_bootstrap_from_resident() {
-        let keypair = Keypair::generate_ed25519();
-        let multiaddr = generate_base_multiaddr();
-
-        let other = Resident::new()
-            .with_keypair(keypair)
-            .with_multiaddr(multiaddr);
-
+        let fixtures = TestFixtures::new();
+        let other = fixtures.create_basic_resident();
         let resident = Resident::new().with_bootstrap_from_resident(other);
 
-        assert!(resident.is_ok());
-        assert!(resident.as_ref().unwrap().bootstrap_peer_id.is_some());
-        assert!(resident.as_ref().unwrap().bootstrap_multiaddr.is_some());
+        let resident = resident.unwrap();
+        assert!(resident.bootstrap_peer_id.is_some());
+        assert!(resident.bootstrap_multiaddr.is_some());
     }
 
     #[test]
     fn test_with_bootstrap() {
+        let fixtures = TestFixtures::new();
         let peer_id = PeerId::random();
-        let multiaddr = generate_base_multiaddr();
+        let resident = Resident::new().with_bootstrap(peer_id, fixtures.base_multiaddr.clone());
 
-        let resident = Resident::new().with_bootstrap(peer_id, multiaddr.clone());
-
-        assert!(resident.bootstrap_peer_id.is_some());
         assert_eq!(resident.bootstrap_peer_id.unwrap(), peer_id);
-        assert!(resident.bootstrap_multiaddr.is_some());
-        assert_eq!(resident.bootstrap_multiaddr.unwrap(), multiaddr);
+        assert_eq!(
+            resident.bootstrap_multiaddr.unwrap(),
+            fixtures.base_multiaddr
+        );
     }
 
     #[tokio::test]
     async fn test_build_success_minimum_requirements() {
-        let resident = create_basic_resident();
-
+        let fixtures = TestFixtures::new();
+        let resident = fixtures.create_basic_resident();
         let result = resident.build();
 
-        assert!(result.is_ok());
         let built_resident = result.unwrap();
         assert!(built_resident.swarm.is_some());
         assert!(built_resident.peer_id.is_some());
         assert!(built_resident.multiaddr.is_some());
-    }
-
-    fn create_basic_resident() -> Resident {
-        let keypair = Keypair::generate_ed25519();
-        let multiaddr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
-
-        Resident::new()
-            .with_keypair(keypair)
-            .with_multiaddr(multiaddr)
     }
 }
