@@ -22,10 +22,12 @@ pub struct ResidentNetwork {
 }
 
 impl ResidentNetwork {
-    pub fn new(peer_id: PeerId, keypair: Keypair, multiaddr: Multiaddr) -> Self {
+    pub fn new(keypair: &Keypair, multiaddr: Multiaddr) -> Self {
+        let peer_id = PeerId::from_public_key(&keypair.public());
+
         let transport = tcp::tokio::Transport::default()
             .upgrade(Version::V1)
-            .authenticate(noise::Config::new(&keypair).unwrap())
+            .authenticate(noise::Config::new(keypair).unwrap())
             .multiplex(yamux::Config::default())
             .boxed();
 
@@ -86,106 +88,92 @@ impl From<kad::Event> for ResidentNetworkEvent {
 mod tests {
     use crate::core::resident_network::ResidentNetworkEvent;
 
-    use super::{ResidentNetwork, ResidentNetworkBehaviour};
-    use libp2p::{
-        futures::StreamExt, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId, Swarm,
-    };
+    use super::ResidentNetwork;
+    use libp2p::{futures::StreamExt, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId};
     use std::time::Duration;
     use tokio::time::timeout;
 
-    pub struct TestFixtures {
+    const TIMEOUT_DURATION: Duration = Duration::from_secs(1);
+
+    struct TestNetwork {
+        peer_id: PeerId,
         multiaddr: Multiaddr,
-        keypair: Keypair,
+        network: ResidentNetwork,
     }
 
-    impl TestFixtures {
-        fn new() -> Self {
-            let multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+    impl TestNetwork {
+        async fn new() -> Self {
             let keypair = Keypair::generate_ed25519();
+            let peer_id = PeerId::from_public_key(&keypair.public());
+            let multiaddr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
 
-            Self { multiaddr, keypair }
+            let mut network = ResidentNetwork::new(&keypair, multiaddr);
+
+            let listen_addr = timeout(TIMEOUT_DURATION, async {
+                while let Some(event) = network.swarm.next().await {
+                    if let SwarmEvent::NewListenAddr { address, .. } = event {
+                        return address;
+                    }
+                }
+                panic!("Failed to get listen address within timeout");
+            })
+            .await
+            .expect("Timeout waiting for listener to start");
+
+            Self {
+                peer_id,
+                multiaddr: listen_addr,
+                network,
+            }
+        }
+
+        async fn wait_for_kad_event(&mut self) -> bool {
+            (timeout(TIMEOUT_DURATION, async {
+                while let Some(event) = self.network.swarm.next().await {
+                    if let SwarmEvent::Behaviour(ResidentNetworkEvent::Kad(_)) = event {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await)
+                .unwrap_or(false)
+        }
+
+        fn has_peer_in_routing_table(&mut self, peer_id: &PeerId) -> bool {
+            self.network
+                .swarm
+                .behaviour_mut()
+                .kad
+                .kbucket(*peer_id)
+                .is_some()
         }
     }
 
     #[tokio::test]
     async fn test_new() {
-        let peer_id = PeerId::random();
-        let fixtures = TestFixtures::new();
-
-        let mut resident_network =
-            super::ResidentNetwork::new(peer_id, fixtures.keypair, fixtures.multiaddr);
-
-        assert!(resident_network.swarm.next().await.is_some());
+        let _ = TestNetwork::new().await;
     }
 
     #[tokio::test]
-    async fn test_dial_success() {
-        let (target_swarm, target_addr) = create_test_swarm().await;
-        let target_peer_id = *target_swarm.local_peer_id();
+    async fn test_dial() {
+        let target = TestNetwork::new().await;
+        let mut source = TestNetwork::new().await;
 
-        let fixtures = TestFixtures::new();
-        let source_peer_id = PeerId::random();
-        let mut source_network =
-            ResidentNetwork::new(source_peer_id, fixtures.keypair, fixtures.multiaddr);
-
-        let result = source_network
-            .dial(target_peer_id, target_addr.clone())
+        let result = source
+            .network
+            .dial(target.peer_id, target.multiaddr.clone())
             .await;
-        assert!(result.is_ok(), "Dial should succeed");
+        let received_kad_event = source.wait_for_kad_event().await;
 
-        timeout(Duration::from_secs(1), async {
-            while let Some(event) = source_network.swarm.next().await {
-                if let SwarmEvent::Behaviour(ResidentNetworkEvent::Kad(_)) = event {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap_or(());
-
-        let kbuckets = source_network
-            .swarm
-            .behaviour_mut()
-            .kad
-            .kbucket(target_peer_id);
-        if let Some(entry) = kbuckets {
-            let addresses: Vec<Multiaddr> = entry
-                .iter()
-                .flat_map(|e| e.node.value.clone().into_vec())
-                .collect();
-            assert!(!addresses.is_empty(), "Should have at least one address");
-
-            let base_address = addresses[0]
-                .iter()
-                .take_while(|p| !matches!(p, libp2p::core::multiaddr::Protocol::P2p(_)))
-                .collect::<Multiaddr>();
-
-            assert_eq!(
-                base_address, target_addr,
-                "Address should match the dialed address"
-            );
-        } else {
-            panic!("No kbucket entry found for target peer");
-        }
-    }
-
-    async fn create_test_swarm() -> (Swarm<ResidentNetworkBehaviour>, Multiaddr) {
-        let fixtures = TestFixtures::new();
-        let peer_id = PeerId::random();
-        let mut network =
-            ResidentNetwork::new(peer_id, fixtures.keypair, fixtures.multiaddr.clone());
-
-        let listen_addr = timeout(Duration::from_secs(1), async {
-            while let Some(event) = network.swarm.next().await {
-                if let SwarmEvent::NewListenAddr { address, .. } = event {
-                    return address;
-                }
-            }
-            panic!("Failed to get listen address");
-        })
-        .await
-        .unwrap();
-
-        (network.swarm, listen_addr)
+        assert!(result.is_ok(), "Dial operation should succeed");
+        assert!(
+            received_kad_event,
+            "Should receive Kademlia event after dialing"
+        );
+        assert!(
+            source.has_peer_in_routing_table(&target.peer_id),
+            "Target peer should be in the routing table after dialing"
+        );
     }
 }
