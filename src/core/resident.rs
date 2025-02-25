@@ -16,26 +16,26 @@ pub enum ResidentError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
     #[error("Keypair decoding error: {0}")]
-    KeypairDecodingError(#[from] identity::DecodingError),
+    KeypairDecoding(#[from] identity::DecodingError),
     #[error("Noise error: {0}")]
     NoiseError(#[from] noise::Error),
     #[error("Transport error: {0}")]
-    TransportError(String),
+    Transport(String),
     #[error("Swarm dial error: {0}")]
-    SwarmDialError(#[from] swarm::DialError),
+    SwarmDial(#[from] swarm::DialError),
     #[error("Peer ID is not set")]
-    PeerIdNotSet,
+    MissingPeerId,
     #[error("Multiaddr is not set")]
-    MultiaddrNotSet,
+    MissingMultiaddr,
     #[error("Bootstrap peer ID is not set but multiaddr is set")]
-    BootstrapPeerIdNotSet,
+    MissingBootstrapPeerId,
     #[error("Bootstrap multiaddr is not set but peer ID is set")]
-    BootstrapMultiaddrNotSet,
+    MissingBootstrapMultiaddr,
 }
 
 impl<T: std::fmt::Debug> From<TransportError<T>> for ResidentError {
     fn from(err: TransportError<T>) -> Self {
-        ResidentError::TransportError(format!("{:?}", err))
+        ResidentError::Transport(format!("{:?}", err))
     }
 }
 
@@ -76,8 +76,8 @@ impl Resident {
     }
 
     pub fn with_bootstrap_from_resident(self, other: Resident) -> ResidentResult<Self> {
-        let peer_id = other.peer_id.ok_or(ResidentError::PeerIdNotSet)?;
-        let multiaddr = other.multiaddr.ok_or(ResidentError::MultiaddrNotSet)?;
+        let peer_id = other.peer_id.ok_or(ResidentError::MissingPeerId)?;
+        let multiaddr = other.multiaddr.ok_or(ResidentError::MissingMultiaddr)?;
         Ok(self.with_bootstrap(peer_id, multiaddr))
     }
 
@@ -117,28 +117,28 @@ impl Resident {
     }
 
     fn get_peer_id(&self) -> ResidentResult<PeerId> {
-        self.peer_id.ok_or(ResidentError::PeerIdNotSet)
+        self.peer_id.ok_or(ResidentError::MissingPeerId)
     }
 
     fn get_keypair(&self) -> ResidentResult<&Keypair> {
-        self.keypair.as_ref().ok_or(ResidentError::PeerIdNotSet)
+        self.keypair.as_ref().ok_or(ResidentError::MissingPeerId)
     }
 
     fn get_multiaddr_clone(&self) -> ResidentResult<Multiaddr> {
-        self.multiaddr.clone().ok_or(ResidentError::MultiaddrNotSet)
+        self.multiaddr.clone().ok_or(ResidentError::MissingMultiaddr)
     }
 
     fn get_bootstrap_info(&self) -> ResidentResult<Option<(PeerId, Multiaddr)>> {
         match (self.bootstrap_peer_id, &self.bootstrap_multiaddr) {
             (None, None) => Ok(None),
             (Some(peer_id), Some(multiaddr)) => Ok(Some((peer_id, multiaddr.clone()))),
-            (None, Some(_)) => Err(ResidentError::BootstrapPeerIdNotSet),
-            (Some(_), None) => Err(ResidentError::BootstrapMultiaddrNotSet),
+            (None, Some(_)) => Err(ResidentError::MissingBootstrapPeerId),
+            (Some(_), None) => Err(ResidentError::MissingBootstrapMultiaddr),
         }
     }
 
     pub fn swarm(&self) -> ResidentResult<&Swarm<ResidentBehaviour>> {
-        self.swarm.as_ref().ok_or(ResidentError::PeerIdNotSet)
+        self.swarm.as_ref().ok_or(ResidentError::MissingPeerId)
     }
 }
 
