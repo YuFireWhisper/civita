@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libp2p = { version = "0.55", features = ["identify", "macros", "kad", "tcp", "tokio", "noise", "yamux"] }
+libp2p = { version = "0.55", features = ["identify", "macros", "kad", "tcp", "tokio", "noise", "yamux", "request-response"] }
 thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 tempfile = "3.17"
-tokio = { version = "1", features = ["full"] }
