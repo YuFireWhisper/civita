@@ -20,6 +20,7 @@ type ResidentResult<T> = Result<T, ResidentError>;
 
 #[derive(Debug, Default, Clone)]
 struct Resident {
+    peer_id: Option<PeerId>,
     multiaddr: Option<Multiaddr>,
     keypair: Option<Keypair>,
     bootstrap_peer_id: Option<PeerId>,
@@ -36,13 +37,16 @@ impl Resident {
         self
     }
 
-    pub fn set_keypair_from_file(self, path: &str) -> ResidentResult<Self> {
+    pub fn set_keypair_and_peer_id_from_file(self, path: &str) -> ResidentResult<Self> {
         let keypair_bytes = fs::read(path)?;
         let keypair = Keypair::from_protobuf_encoding(&keypair_bytes)?;
-        Ok(self.set_keypair(keypair))
+        Ok(self.set_keypair_and_peer_id(keypair))
     }
 
-    pub fn set_keypair(mut self, keypair: Keypair) -> Self {
+    pub fn set_keypair_and_peer_id(mut self, keypair: Keypair) -> Self {
+        let peer_id = PeerId::from_public_key(&keypair.public());
+
+        self.peer_id = Some(peer_id);
         self.keypair = Some(keypair);
         self
     }
@@ -109,12 +113,15 @@ mod tests {
     }
 
     #[test]
-    fn test_set_keypair_from_file_success() {
+    fn test_set_keypair_and_peer_id_from_file_success() {
         let (keypair, temp_file) = generate_keypair_and_write_to_file();
 
         let resident = Resident::new()
-            .set_keypair_from_file(temp_file.path().to_str().unwrap())
+            .set_keypair_and_peer_id_from_file(temp_file.path().to_str().unwrap())
             .unwrap();
+
+        assert!(resident.peer_id.is_some());
+        assert_eq!(resident.peer_id.unwrap(), PeerId::from_public_key(&keypair.public()));
 
         assert!(resident.keypair.is_some());
         assert_eq!(resident.keypair.unwrap().public(), keypair.public());
@@ -131,19 +138,19 @@ mod tests {
     }
 
     #[test]
-    fn test_set_keypair_from_file_file_not_found() {
+    fn test_set_keypair_and_peer_id_from_file_file_not_found() {
         let path = "nonexistent_file.keypair";
 
-        let result = Resident::new().set_keypair_from_file(path);
+        let result = Resident::new().set_keypair_and_peer_id_from_file(path);
 
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_set_keypair_from_file_invalid_keypair() {
+    fn test_set_keypair_and_peer_id_from_file_invalid_keypair() {
         let temp_file = write_invalid_keypair_to_file();
 
-        let result = Resident::new().set_keypair_from_file(temp_file.path().to_str().unwrap());
+        let result = Resident::new().set_keypair_and_peer_id_from_file(temp_file.path().to_str().unwrap());
 
         assert!(result.is_err());
     }
@@ -156,11 +163,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resident_set_keypair() {
+    fn test_set_keypair_and_peer_id() {
         let keypair = Keypair::generate_ed25519();
 
-        let resident = Resident::new().set_keypair(keypair);
+        let resident = Resident::new().set_keypair_and_peer_id(keypair);
 
+        assert!(resident.peer_id.is_some());
         assert!(resident.keypair.is_some());
     }
 
