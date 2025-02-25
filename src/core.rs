@@ -1,2 +1,2 @@
+pub mod resident_network;
 pub mod resident;
-pub mod network;

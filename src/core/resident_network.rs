@@ -84,8 +84,9 @@ impl From<kad::Event> for ResidentNetworkEvent {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::resident_network::ResidentNetworkEvent;
+
     use super::{ResidentNetwork, ResidentNetworkBehaviour};
-    use crate::core::network::ResidentNetworkEvent;
     use libp2p::{
         futures::StreamExt, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId, Swarm,
     };
