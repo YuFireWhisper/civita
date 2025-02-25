@@ -41,6 +41,11 @@ impl Resident {
         self.addr = Some(addr);
         self
     }
+
+    pub fn set_bootstrap_peer_id(mut self, peer_id: PeerId) -> Self {
+        self.bootstrap_peer_id = Some(peer_id);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +130,15 @@ mod tests {
 
         assert!(resident.addr.is_some());
         assert_eq!(resident.addr.unwrap(), addr);
+    }
+
+    #[test]
+    fn test_resident_set_bootstrap_peer_id() {
+        let peer_id = PeerId::random();
+
+        let resident = Resident::new().set_bootstrap_peer_id(peer_id);
+
+        assert!(resident.bootstrap_peer_id.is_some());
+        assert_eq!(resident.bootstrap_peer_id.unwrap(), peer_id);
     }
 }
