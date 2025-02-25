@@ -56,18 +56,18 @@ impl Resident {
         Self::default()
     }
 
-    pub fn set_multiaddr(mut self, addr: Multiaddr) -> Self {
+    pub fn with_multiaddr(mut self, addr: Multiaddr) -> Self {
         self.multiaddr = Some(addr);
         self
     }
 
-    pub fn set_keypair_and_peer_id_from_file(self, path: &str) -> ResidentResult<Self> {
+    pub fn with_keypair_from_file(self, path: &str) -> ResidentResult<Self> {
         let keypair_bytes = fs::read(path)?;
         let keypair = Keypair::from_protobuf_encoding(&keypair_bytes)?;
-        Ok(self.set_keypair_and_peer_id(keypair))
+        Ok(self.with_keypair(keypair))
     }
 
-    pub fn set_keypair_and_peer_id(mut self, keypair: Keypair) -> Self {
+    pub fn with_keypair(mut self, keypair: Keypair) -> Self {
         let peer_id = PeerId::from_public_key(&keypair.public());
 
         self.peer_id = Some(peer_id);
@@ -75,21 +75,21 @@ impl Resident {
         self
     }
 
-    pub fn set_bootstrap_from_other_resident(self, other: Resident) -> ResidentResult<Self> {
+    pub fn with_bootstrap_from_resident(self, other: Resident) -> ResidentResult<Self> {
         let bootstrap_peer_id = other.peer_id.ok_or(ResidentError::PeerIdNotSet)?;
         let bootstrap_multiaddr = other.multiaddr.ok_or(ResidentError::MultiaddrNotSet)?;
 
         Ok(self
-            .set_bootstrap_peer_id(bootstrap_peer_id)
-            .set_bootstrap_multiaddr(bootstrap_multiaddr))
+            .with_bootstrap_peer_id(bootstrap_peer_id)
+            .with_bootstrap_multiaddr(bootstrap_multiaddr))
     }
 
-    pub fn set_bootstrap_peer_id(mut self, peer_id: PeerId) -> Self {
+    pub fn with_bootstrap_peer_id(mut self, peer_id: PeerId) -> Self {
         self.bootstrap_peer_id = Some(peer_id);
         self
     }
 
-    pub fn set_bootstrap_multiaddr(mut self, multiaddr: Multiaddr) -> Self {
+    pub fn with_bootstrap_multiaddr(mut self, multiaddr: Multiaddr) -> Self {
         self.bootstrap_multiaddr = Some(multiaddr);
         self
     }
@@ -194,21 +194,21 @@ mod tests {
     }
 
     #[test]
-    fn test_resident_set_multiaddr() {
+    fn test_with_multiaddr() {
         let multiaddr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
 
-        let resident = Resident::new().set_multiaddr(multiaddr.clone());
+        let resident = Resident::new().with_multiaddr(multiaddr.clone());
 
         assert!(resident.multiaddr.is_some());
         assert_eq!(resident.multiaddr.unwrap(), multiaddr);
     }
 
     #[test]
-    fn test_set_keypair_and_peer_id_from_file_success() {
+    fn test_with_keypair_from_file_success() {
         let (keypair, temp_file) = generate_keypair_and_write_to_file();
 
         let resident = Resident::new()
-            .set_keypair_and_peer_id_from_file(temp_file.path().to_str().unwrap())
+            .with_keypair_from_file(temp_file.path().to_str().unwrap())
             .unwrap();
 
         assert!(resident.peer_id.is_some());
@@ -232,20 +232,19 @@ mod tests {
     }
 
     #[test]
-    fn test_set_keypair_and_peer_id_from_file_file_not_found() {
+    fn test_with_keypair_from_file_file_not_found() {
         let path = "nonexistent_file.keypair";
 
-        let result = Resident::new().set_keypair_and_peer_id_from_file(path);
+        let result = Resident::new().with_keypair_from_file(path);
 
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_set_keypair_and_peer_id_from_file_invalid_keypair() {
+    fn test_with_keypair_from_file_invalid_keypair() {
         let temp_file = write_invalid_keypair_to_file();
 
-        let result =
-            Resident::new().set_keypair_and_peer_id_from_file(temp_file.path().to_str().unwrap());
+        let result = Resident::new().with_keypair_from_file(temp_file.path().to_str().unwrap());
 
         assert!(result.is_err());
     }
@@ -258,23 +257,23 @@ mod tests {
     }
 
     #[test]
-    fn test_set_keypair_and_peer_id() {
+    fn test_with_keypair() {
         let keypair = Keypair::generate_ed25519();
 
-        let resident = Resident::new().set_keypair_and_peer_id(keypair);
+        let resident = Resident::new().with_keypair(keypair);
 
         assert!(resident.peer_id.is_some());
         assert!(resident.keypair.is_some());
     }
 
     #[test]
-    fn test_resident_set_bootstrap_from_other_resident() {
+    fn test_resident_with_bootstrap_from_resident() {
         let keypair = Keypair::generate_ed25519();
         let other = Resident::new()
-            .set_keypair_and_peer_id(keypair)
-            .set_multiaddr("/ip4/0.0.0.0/tcp/0".parse().unwrap());
+            .with_keypair(keypair)
+            .with_multiaddr("/ip4/0.0.0.0/tcp/0".parse().unwrap());
 
-        let resident = Resident::new().set_bootstrap_from_other_resident(other);
+        let resident = Resident::new().with_bootstrap_from_resident(other);
 
         assert!(resident.is_ok());
         assert!(resident.as_ref().unwrap().bootstrap_peer_id.is_some());
@@ -282,10 +281,10 @@ mod tests {
     }
 
     #[test]
-    fn test_resident_set_bootstrap_peer_id() {
+    fn test_resident_with_bootstrap_peer_id() {
         let peer_id = PeerId::random();
 
-        let resident = Resident::new().set_bootstrap_peer_id(peer_id);
+        let resident = Resident::new().with_bootstrap_peer_id(peer_id);
 
         assert!(resident.bootstrap_peer_id.is_some());
         assert_eq!(resident.bootstrap_peer_id.unwrap(), peer_id);
@@ -295,7 +294,7 @@ mod tests {
     fn test_resident_set_bootstrap_addr() {
         let addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
 
-        let resident = Resident::new().set_bootstrap_multiaddr(addr.clone());
+        let resident = Resident::new().with_bootstrap_multiaddr(addr.clone());
 
         assert!(resident.bootstrap_multiaddr.is_some());
         assert_eq!(resident.bootstrap_multiaddr.unwrap(), addr);
@@ -319,7 +318,7 @@ mod tests {
         let multiaddr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
 
         Resident::new()
-            .set_keypair_and_peer_id(keypair)
-            .set_multiaddr(multiaddr)
+            .with_keypair(keypair)
+            .with_multiaddr(multiaddr)
     }
 }
