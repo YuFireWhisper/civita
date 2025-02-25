@@ -42,7 +42,7 @@ impl<T: std::fmt::Debug> From<TransportError<T>> for ResidentError {
 type ResidentResult<T> = Result<T, ResidentError>;
 
 #[derive(Default)]
-struct Resident {
+pub struct Resident {
     peer_id: Option<PeerId>,
     multiaddr: Option<Multiaddr>,
     keypair: Option<Keypair>,
