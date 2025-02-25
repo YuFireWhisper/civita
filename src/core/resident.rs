@@ -190,12 +190,16 @@ mod tests {
 
     #[test]
     fn test_with_multiaddr() {
-        let multiaddr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+        let multiaddr = generate_base_multiaddr();
 
         let resident = Resident::new().with_multiaddr(multiaddr.clone());
 
         assert!(resident.multiaddr.is_some());
         assert_eq!(resident.multiaddr.unwrap(), multiaddr);
+    }
+
+    fn generate_base_multiaddr() -> Multiaddr {
+        "/ip4/0.0.0.0/tcp/0".parse().unwrap()
     }
 
     #[test]
@@ -264,9 +268,11 @@ mod tests {
     #[test]
     fn test_resident_with_bootstrap_from_resident() {
         let keypair = Keypair::generate_ed25519();
+        let multiaddr = generate_base_multiaddr();
+
         let other = Resident::new()
             .with_keypair(keypair)
-            .with_multiaddr("/ip4/0.0.0.0/tcp/0".parse().unwrap());
+            .with_multiaddr(multiaddr);
 
         let resident = Resident::new().with_bootstrap_from_resident(other);
 
@@ -278,7 +284,7 @@ mod tests {
     #[test]
     fn test_with_bootstrap() {
         let peer_id = PeerId::random();
-        let multiaddr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+        let multiaddr = generate_base_multiaddr();
 
         let resident = Resident::new().with_bootstrap(peer_id, multiaddr.clone());
 
