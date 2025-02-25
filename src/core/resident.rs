@@ -46,6 +46,11 @@ impl Resident {
         self.bootstrap_peer_id = Some(peer_id);
         self
     }
+
+    pub fn set_bootstrap_addr(mut self, addr: Multiaddr) -> Self {
+        self.bootstrap_addr = Some(addr);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +145,15 @@ mod tests {
 
         assert!(resident.bootstrap_peer_id.is_some());
         assert_eq!(resident.bootstrap_peer_id.unwrap(), peer_id);
+    }
+
+    #[test]
+    fn test_resident_set_bootstrap_addr() {
+        let addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+
+        let resident = Resident::new().set_bootstrap_addr(addr.clone());
+
+        assert!(resident.bootstrap_addr.is_some());
+        assert_eq!(resident.bootstrap_addr.unwrap(), addr);
     }
 }
