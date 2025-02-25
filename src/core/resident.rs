@@ -120,10 +120,6 @@ impl Resident {
         self.peer_id.ok_or(ResidentError::PeerIdNotSet)
     }
 
-    fn get_keypair_cloned(&self) -> ResidentResult<Keypair> {
-        self.keypair.clone().ok_or(ResidentError::PeerIdNotSet)
-    }
-
     fn get_keypair(&self) -> ResidentResult<&Keypair> {
         self.keypair.as_ref().ok_or(ResidentError::PeerIdNotSet)
     }
@@ -148,7 +144,7 @@ impl Resident {
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "ResidentEvent")]
-struct ResidentBehaviour {
+pub struct ResidentBehaviour {
     kad: kad::Behaviour<MemoryStore>,
 }
 
@@ -162,7 +158,7 @@ impl ResidentBehaviour {
 }
 
 #[derive(Debug)]
-enum ResidentEvent {
+pub enum ResidentEvent {
     Kad(kad::Event),
 }
 
