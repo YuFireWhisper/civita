@@ -1,6 +1,6 @@
 use std::{fs, io};
 
-use libp2p::{identity::Keypair, Multiaddr, PeerId};
+use libp2p::{identity::Keypair, kad::{self, store::MemoryStore}, swarm::NetworkBehaviour, Multiaddr, PeerId, Swarm};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -55,6 +55,23 @@ impl Resident {
     pub fn set_bootstrap_addr(mut self, addr: Multiaddr) -> Self {
         self.bootstrap_addr = Some(addr);
         self
+    }
+}
+
+#[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "ResidentEvent")]
+struct ResidentBehaviour {
+    kad: kad::Behaviour<MemoryStore>,
+}
+
+#[derive(Debug)]
+enum ResidentEvent {
+    Kad(kad::Event),
+}
+
+impl From<kad::Event> for ResidentEvent {
+    fn from(event: kad::Event) -> Self {
+        Self::Kad(event)
     }
 }
 
