@@ -1,12 +1,14 @@
-use std::fs;
+use std::{fs, io};
 
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ResidentError {
-    #[error("Failed to read keypair from file: {0}")]
-    ReadKeypairFromFileError(#[from] std::io::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Keypair decoding error: {0}")]
+    KeypairDecodingError(#[from] libp2p::identity::DecodingError),
 }
 
 type ResidentResult<T> = Result<T, ResidentError>;
@@ -24,7 +26,7 @@ impl Resident {
         Self::default()
     }
 
-    pub fn set_keypair_from_file(self, path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn set_keypair_from_file(self, path: &str) -> ResidentResult<Self> {
         let keypair_bytes = fs::read(path)?;
         let keypair = Keypair::from_protobuf_encoding(&keypair_bytes)?;
         Ok(self.set_keypair(keypair))
@@ -104,6 +106,7 @@ mod tests {
     #[test]
     fn test_resident_set_keypair() {
         let keypair = Keypair::generate_ed25519();
+
         let resident = Resident::new().set_keypair(keypair);
 
         assert!(resident.keypair.is_some());
