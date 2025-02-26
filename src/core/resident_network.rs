@@ -373,7 +373,6 @@ mod tests {
         let mut sender_network = TestNetwork::new().await;
         let mut receiver_network = TestNetwork::new().await;
 
-        // Setup: connect networks and subscribe to topic
         receiver_network
             .network
             .subscribe(TEST_TOPIC)
@@ -390,7 +389,6 @@ mod tests {
             .await
             .expect("Dial operation should succeed");
 
-        // Wait for mesh to establish
         let timeout_duration = Duration::from_secs(10);
         let start = tokio::time::Instant::now();
         while tokio::time::Instant::now().duration_since(start) < timeout_duration {
@@ -418,7 +416,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Test message sending and receiving
         let test_message = "Test message for receive";
         sender_network
             .network
