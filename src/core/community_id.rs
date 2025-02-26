@@ -2,6 +2,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use libp2p::PeerId;
 
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct CommunityId(pub [u8; 32]);
 
 impl CommunityId {
