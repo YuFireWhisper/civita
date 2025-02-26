@@ -19,10 +19,10 @@ impl Vrf {
         Self { keypair }
     }
 
-    pub fn compute(&self, input: &[u8]) -> VrfResult<(Vec<u8>, Vec<u8>)> {
-        let signature = self.generate_signature(input)?;
-        let output = self.compute_hash(&signature);
-        Ok((output, signature.to_vec()))
+    pub fn prove(&self, input: &[u8]) -> VrfResult<(Vec<u8>, Vec<u8>)> {
+        let proof = self.generate_signature(input)?;
+        let output = self.compute_hash(&proof);
+        Ok((output, proof.to_vec()))
     }
 
     fn generate_signature(&self, input: &[u8]) -> VrfResult<Vec<u8>> {
@@ -85,7 +85,7 @@ mod tests {
         let vrf = Vrf::new(keypair);
 
         let input = b"input";
-        let (output, signature) = vrf.compute(input).unwrap();
+        let (output, signature) = vrf.prove(input).unwrap();
 
         assert_eq!(output.len(), 32, "Vrf output should be 32 bytes long");
         assert_eq!(signature.len(), 64, "Vrf signature should be 64 bytes long");
@@ -97,7 +97,7 @@ mod tests {
         let vrf = Vrf::new(keypair.clone());
 
         let input = b"input";
-        let (output, proof) = vrf.compute(input).unwrap();
+        let (output, proof) = vrf.prove(input).unwrap();
 
         let is_valid = Vrf::verify(&keypair.public(), input, &output, &proof).unwrap();
 
@@ -110,7 +110,7 @@ mod tests {
         let vrf = Vrf::new(keypair.clone());
 
         let input = b"input";
-        let (output, _) = vrf.compute(input).unwrap();
+        let (output, _) = vrf.prove(input).unwrap();
 
         let is_valid = Vrf::verify(&keypair.public(), input, &output, &[0; 64]).unwrap();
 
