@@ -9,6 +9,8 @@ use super::community_id::CommunityId;
 pub enum CommunityError {
     #[error("Resident already exists in the community")]
     ResidentAlreadyExists,
+    #[error("Resident not found in the community")]
+    ResidentNotFound,
 }
 
 type CommunityResult<T> = Result<T, CommunityError>;
@@ -43,6 +45,19 @@ impl Community {
         self.members.insert(peer_id);
         self.reputation
             .insert(peer_id, Self::RESIDENT_DEFAULT_REPUTATION);
+        Ok(())
+    }
+
+    pub fn remove_member(&mut self, peer_id: &PeerId) -> CommunityResult<()> {
+        if !self.members.contains(peer_id) {
+            return Err(CommunityError::ResidentNotFound);
+        }
+
+        self.members.remove(peer_id);
+        self.committee_members.remove(peer_id);
+        self.chairpersons.retain(|id| id != peer_id);
+        self.reputation.remove(peer_id);
+
         Ok(())
     }
 }
@@ -93,6 +108,26 @@ mod tests {
             *community.reputation.get(&peer_id).unwrap(),
             Community::RESIDENT_DEFAULT_REPUTATION,
             "Community should store the member's reputation"
+        );
+    }
+
+    #[test]
+    fn test_remove_member() {
+        let id = CommunityId::new([1; 32]);
+        let mut community = Community::new(id);
+
+        let peer_id = PeerId::random();
+        community.add_member(peer_id).unwrap();
+
+        community.remove_member(&peer_id).unwrap();
+
+        assert!(
+            !community.members.contains(&peer_id),
+            "Community should remove the member"
+        );
+        assert!(
+            !community.reputation.contains_key(&peer_id),
+            "Community should remove the member's reputation"
         );
     }
 }
