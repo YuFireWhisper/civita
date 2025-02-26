@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum VrfError {
     #[error("Signature error: {0}")]
     Signature(String),
+    #[error("Bytes too short")]
+    BytesTooShort,
 }
 
 type VrfResult<T> = Result<T, VrfError>;
@@ -57,6 +59,24 @@ impl Vrf {
         let mut hasher = Sha256::new();
         hasher.update(proof);
         hasher.finalize().to_vec()
+    }
+
+    pub fn random_value(&self, seed: u64) -> VrfResult<f64> {
+        let input = seed.to_le_bytes();
+        let (output, _) = self.prove(&input)?;
+        let value = Self::u64_from_bytes(&output)?;
+        Ok(Self::normalize(value))
+    }
+
+    fn u64_from_bytes(bytes: &[u8]) -> VrfResult<u64> {
+        if bytes.len() < 8 {
+            return Err(VrfError::BytesTooShort);
+        }
+        Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+    }
+
+    fn normalize(value: u64) -> f64 {
+        value as f64 / u64::MAX as f64
     }
 }
 
@@ -115,5 +135,64 @@ mod tests {
         let is_valid = Vrf::verify(&keypair.public(), input, &output, &[0; 64]).unwrap();
 
         assert!(!is_valid, "Vrf should not verify the output and proof");
+    }
+
+    #[test]
+    fn test_random_value() {
+        let keypair = Keypair::generate_ed25519();
+        let vrf = Vrf::new(keypair);
+
+        const ITERATIONS: u64 = 1000;
+        let mut previous_value = None;
+        let mut values = Vec::new();
+
+        for seed in 0..ITERATIONS {
+            let result = vrf.random_value(seed).unwrap();
+
+            assert!(
+                (0.0..=1.0).contains(&result),
+                "Value {} for seed {} should be between 0.0 and 1.0",
+                result,
+                seed
+            );
+
+            assert!(
+                result.is_finite(),
+                "Result should be finite for seed {}",
+                seed
+            );
+            assert!(
+                !result.is_nan(),
+                "Result should not be NaN for seed {}",
+                seed
+            );
+
+            values.push(result);
+
+            if let Some(prev) = previous_value {
+                assert_ne!(
+                    result,
+                    prev,
+                    "Values should differ between seeds {} and {}",
+                    seed - 1,
+                    seed
+                );
+            }
+            previous_value = Some(result);
+
+            let result_again = vrf.random_value(seed).unwrap();
+            assert_eq!(
+                result, result_again,
+                "Same seed {} should produce same value",
+                seed
+            );
+        }
+
+        let mean = values.iter().sum::<f64>() / ITERATIONS as f64;
+        assert!(
+            mean > 0.3 && mean < 0.7,
+            "Mean value {} should be roughly centered (0.3-0.7)",
+            mean
+        );
     }
 }
