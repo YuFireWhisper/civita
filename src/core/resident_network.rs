@@ -1,4 +1,4 @@
-use libp2p::gossipsub::{self, MessageAuthenticity};
+use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity};
 use libp2p::{noise, swarm, yamux, Transport};
 
 use libp2p::{
@@ -14,6 +14,8 @@ use thiserror::Error;
 pub enum ResidentNetworkError {
     #[error("Failed to dial peer: {0}")]
     DialError(#[from] swarm::DialError),
+    #[error("Gossipsub error: {0}")]
+    GossipsubError(String),
 }
 
 type ResidentNetworkResult<T> = Result<T, ResidentNetworkError>;
@@ -53,6 +55,16 @@ impl ResidentNetwork {
             .dial(multiaddr)
             .map_err(ResidentNetworkError::DialError)?;
 
+        Ok(())
+    }
+
+    pub fn subscribe(&mut self, topic: &str) -> ResidentNetworkResult<()> {
+        let topic = IdentTopic::new(topic);
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&topic)
+            .map_err(|e| ResidentNetworkError::GossipsubError(e.to_string()))?;
         Ok(())
     }
 }
@@ -112,6 +124,7 @@ mod tests {
     use tokio::time::timeout;
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(1);
+    const TEST_TOPIC: &str = "test-topic";
 
     struct TestNetwork {
         peer_id: PeerId,
@@ -193,5 +206,25 @@ mod tests {
             source.has_peer_in_routing_table(&target.peer_id),
             "Target peer should be in the routing table after dialing"
         );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe() {
+        let mut network1 = TestNetwork::new().await;
+        let network2 = TestNetwork::new().await;
+
+        network1
+            .network
+            .dial(network2.peer_id, network2.multiaddr.clone())
+            .await
+            .expect("Dial operation should succeed");
+
+        network1.wait_for_kad_event().await;
+
+        network1
+            .network
+            .subscribe(TEST_TOPIC)
+            // should not fail
+            .expect("Subscribe operation should succeed");
     }
 }
