@@ -1,8 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
 use libp2p::PeerId;
+use thiserror::Error;
 
 use super::community_id::CommunityId;
+
+#[derive(Debug, Error)]
+pub enum CommunityError {
+    #[error("Resident already exists in the community")]
+    ResidentAlreadyExists,
+}
+
+type CommunityResult<T> = Result<T, CommunityError>;
 
 #[derive(Debug)]
 pub struct Community {
