@@ -23,6 +23,8 @@ pub struct Community {
 }
 
 impl Community {
+    const RESIDENT_DEFAULT_REPUTATION: u64 = 0;
+
     pub fn new(id: CommunityId) -> Self {
         Self {
             id,
@@ -32,10 +34,23 @@ impl Community {
             reputation: HashMap::new(),
         }
     }
+
+    pub fn add_member(&mut self, peer_id: PeerId) -> CommunityResult<()> {
+        if self.members.contains(&peer_id) {
+            return Err(CommunityError::ResidentAlreadyExists);
+        }
+
+        self.members.insert(peer_id);
+        self.reputation
+            .insert(peer_id, Self::RESIDENT_DEFAULT_REPUTATION);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use libp2p::PeerId;
+
     use crate::core::community::Community;
     use crate::core::community_id::CommunityId;
 
@@ -59,6 +74,25 @@ mod tests {
         assert!(
             community.reputation.is_empty(),
             "Community should start with no reputation"
+        );
+    }
+
+    #[test]
+    fn test_add_member() {
+        let id = CommunityId::new([1; 32]);
+        let mut community = Community::new(id);
+
+        let peer_id = PeerId::random();
+        community.add_member(peer_id).unwrap();
+
+        assert!(
+            community.members.contains(&peer_id),
+            "Community should store the member"
+        );
+        assert_eq!(
+            *community.reputation.get(&peer_id).unwrap(),
+            Community::RESIDENT_DEFAULT_REPUTATION,
+            "Community should store the member's reputation"
         );
     }
 }
