@@ -1,3 +1,4 @@
+use libp2p::gossipsub::{self, MessageAuthenticity};
 use libp2p::{noise, swarm, yamux, Transport};
 
 use libp2p::{
@@ -29,7 +30,7 @@ impl ResidentNetwork {
             .multiplex(yamux::Config::default())
             .boxed();
 
-        let behaviour = ResidentNetworkBehaviour::new(peer_id);
+        let behaviour = ResidentNetworkBehaviour::new(peer_id, keypair);
         let swarm_config = swarm::Config::with_tokio_executor();
         let mut swarm = Swarm::new(transport, behaviour, peer_id, swarm_config);
 
@@ -60,13 +61,25 @@ impl ResidentNetwork {
 #[behaviour(to_swarm = "ResidentNetworkEvent")]
 pub struct ResidentNetworkBehaviour {
     kad: kad::Behaviour<MemoryStore>,
+    gossipsub: gossipsub::Behaviour,
 }
 
 impl ResidentNetworkBehaviour {
-    fn new(peer_id: PeerId) -> Self {
+    fn new(peer_id: PeerId, keypair: &Keypair) -> Self {
         let memory_store = MemoryStore::new(peer_id);
+        let gossipsub_config = gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(std::time::Duration::from_secs(1))
+            .build()
+            .expect("Valid Gossipsub config");
+        let gossipsub = gossipsub::Behaviour::new(
+            MessageAuthenticity::Signed(keypair.clone()),
+            gossipsub_config,
+        )
+        .expect("Gossipsub initialization should succeed");
+
         Self {
             kad: kad::Behaviour::new(peer_id, memory_store),
+            gossipsub,
         }
     }
 }
@@ -74,11 +87,18 @@ impl ResidentNetworkBehaviour {
 #[derive(Debug)]
 pub enum ResidentNetworkEvent {
     Kad(kad::Event),
+    Gossipsub(Box<gossipsub::Event>),
 }
 
 impl From<kad::Event> for ResidentNetworkEvent {
     fn from(event: kad::Event) -> Self {
         Self::Kad(event)
+    }
+}
+
+impl From<gossipsub::Event> for ResidentNetworkEvent {
+    fn from(event: gossipsub::Event) -> Self {
+        Self::Gossipsub(Box::new(event))
     }
 }
 

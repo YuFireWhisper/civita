@@ -4,7 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libp2p = { version = "0.55", features = ["identify", "macros", "kad", "tcp", "tokio", "noise", "yamux", "request-response"] }
+libp2p = { version = "0.55", features = [
+  "identify",
+  "macros",
+  "kad",
+  "tcp",
+  "tokio",
+  "noise",
+  "yamux",
+  "request-response",
+  "gossipsub",
+] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 
