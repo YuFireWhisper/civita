@@ -1,4 +1,10 @@
 use libp2p::identity::Keypair;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum VrfError {}
+
+type VrfResult<T> = Result<T, VrfError>;
 
 pub struct Vrf {
     keypair: Keypair,
