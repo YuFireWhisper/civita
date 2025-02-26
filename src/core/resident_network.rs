@@ -1,4 +1,6 @@
+use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity, MessageId};
+use libp2p::swarm::SwarmEvent;
 use libp2p::{noise, swarm, yamux, Transport};
 
 use libp2p::{
@@ -82,6 +84,26 @@ impl ResidentNetwork {
             .publish(topic, data)
             .map_err(|e| ResidentNetworkError::PublishError(e.to_string()))
     }
+
+    pub async fn receive_message(&mut self) -> Option<ReceivedMessage> {
+        while let Some(event) = self.swarm.next().await {
+            if let SwarmEvent::Behaviour(ResidentNetworkEvent::Gossipsub(event)) = event {
+                if let gossipsub::Event::Message {
+                    propagation_source,
+                    message_id,
+                    message,
+                } = *event
+                {
+                    return Some(ReceivedMessage {
+                        source: propagation_source,
+                        message_id,
+                        data: message.data,
+                    });
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(NetworkBehaviour)]
@@ -127,6 +149,13 @@ impl From<gossipsub::Event> for ResidentNetworkEvent {
     fn from(event: gossipsub::Event) -> Self {
         Self::Gossipsub(Box::new(event))
     }
+}
+
+#[derive(Debug)]
+pub struct ReceivedMessage {
+    pub source: PeerId,
+    pub message_id: MessageId,
+    pub data: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -336,6 +365,81 @@ mod tests {
         assert_eq!(
             propagation_source, network.peer_id,
             "Message should originate from network_a"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_message() {
+        let mut sender_network = TestNetwork::new().await;
+        let mut receiver_network = TestNetwork::new().await;
+
+        // Setup: connect networks and subscribe to topic
+        receiver_network
+            .network
+            .subscribe(TEST_TOPIC)
+            .expect("Subscribe operation should succeed");
+
+        sender_network
+            .network
+            .subscribe(TEST_TOPIC)
+            .expect("Subscribe operation should succeed");
+
+        sender_network
+            .network
+            .dial(receiver_network.peer_id, receiver_network.multiaddr.clone())
+            .await
+            .expect("Dial operation should succeed");
+
+        // Wait for mesh to establish
+        let timeout_duration = Duration::from_secs(10);
+        let start = tokio::time::Instant::now();
+        while tokio::time::Instant::now().duration_since(start) < timeout_duration {
+            let _ = timeout(
+                Duration::from_millis(50),
+                sender_network.network.swarm.next(),
+            )
+            .await;
+            let _ = timeout(
+                Duration::from_millis(50),
+                receiver_network.network.swarm.next(),
+            )
+            .await;
+
+            let peers_in_mesh = sender_network
+                .network
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .mesh_peers(&TopicHash::from_raw(TEST_TOPIC))
+                .count();
+            if peers_in_mesh > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Test message sending and receiving
+        let test_message = "Test message for receive";
+        sender_network
+            .network
+            .publish(TEST_TOPIC, test_message.as_bytes())
+            .expect("Publish should succeed");
+
+        let received = timeout(TIMEOUT_DURATION, async {
+            receiver_network.network.receive_message().await
+        })
+        .await
+        .expect("Timeout waiting for message")
+        .expect("Should receive a message");
+
+        assert_eq!(
+            String::from_utf8(received.data).unwrap(),
+            test_message,
+            "Received message should match sent message"
+        );
+        assert_eq!(
+            received.source, sender_network.peer_id,
+            "Source peer ID should match sender"
         );
     }
 }
