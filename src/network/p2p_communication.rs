@@ -1,5 +1,6 @@
 use std::io;
 
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     gossipsub::{self, IdentTopic},
@@ -24,13 +25,15 @@ pub enum P2PCommunicationError {
     #[error("Subscribe Error: {0}")]
     Subscribe(#[from] gossipsub::SubscriptionError),
     #[error("Publish Error: {0}")]
-    Publish(#[from] gossipsub::PublishError)
+    Publish(#[from] gossipsub::PublishError),
 }
 
 type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
 
 pub struct P2PCommunication {
     swarm: Swarm<P2PBehaviour>,
+    message_sender: Sender<P2PMessage>,
+    message_receiver: Receiver<P2PMessage>,
 }
 
 impl P2PCommunication {
@@ -46,7 +49,13 @@ impl P2PCommunication {
         );
         swarm.listen_on(listen_addr)?;
 
-        Ok(Self { swarm })
+        let (message_sender, message_receiver) = unbounded();
+
+        Ok(Self {
+            swarm,
+            message_sender,
+            message_receiver,
+        })
     }
 
     fn create_transport(keypair: Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
@@ -84,6 +93,14 @@ impl P2PCommunication {
             .publish(topic, data)?;
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub struct P2PMessage {
+    pub source: PeerId,
+    pub topic: String,
+    pub data: Vec<u8>,
+    pub timestamp: u64,
 }
 
 #[cfg(test)]
