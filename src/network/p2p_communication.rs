@@ -21,8 +21,10 @@ pub enum P2PCommunicationError {
     Dial(#[from] swarm::DialError),
     #[error("Gossipsub Error: {0}")]
     Gossipsub(String),
+    #[error("Subscribe Error: {0}")]
+    Subscribe(#[from] gossipsub::SubscriptionError),
     #[error("Publish Error: {0}")]
-    Publish(#[from] gossipsub::PublishError),
+    Publish(#[from] gossipsub::PublishError)
 }
 
 type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
@@ -70,8 +72,7 @@ impl P2PCommunication {
         self.swarm
             .behaviour_mut()
             .gossipsub_mut()
-            .subscribe(&topic)
-            .map_err(|e| P2PCommunicationError::Gossipsub(e.to_string()))?;
+            .subscribe(&topic)?;
         Ok(())
     }
 
