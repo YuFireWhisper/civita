@@ -8,7 +8,7 @@ use libp2p::{
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "P2PEvent")]
-struct P2PBehaviour {
+pub struct P2PBehaviour {
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
 }
