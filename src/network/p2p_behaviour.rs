@@ -57,7 +57,7 @@ impl P2PBehaviour {
     }
 }
 
-enum P2PEvent {
+pub enum P2PEvent {
     Gossipsub(gossipsub::Event),
     Kad(kad::Event),
 }
