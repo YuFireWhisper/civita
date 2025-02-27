@@ -39,6 +39,22 @@ impl P2PBehaviour {
     fn create_kad(peer_id: PeerId) -> kad::Behaviour<MemoryStore> {
         kad::Behaviour::new(peer_id, MemoryStore::new(peer_id))
     }
+
+    pub fn gossipsub(&self) -> &gossipsub::Behaviour {
+        &self.gossipsub
+    }
+
+    pub fn kad(&self) -> &kad::Behaviour<MemoryStore> {
+        &self.kad
+    }
+
+    pub fn gossipsub_mut(&mut self) -> &mut gossipsub::Behaviour {
+        &mut self.gossipsub
+    }
+
+    pub fn kad_mut(&mut self) -> &mut kad::Behaviour<MemoryStore> {
+        &mut self.kad
+    }
 }
 
 enum P2PEvent {
