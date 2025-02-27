@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use libp2p::{
     gossipsub::{self, MessageAuthenticity},
     identity::Keypair,
@@ -14,6 +16,8 @@ pub struct P2PBehaviour {
 }
 
 impl P2PBehaviour {
+    const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+
     pub fn new(keypair: Keypair) -> Self {
         let peer_id = Self::create_peer_id(&keypair);
 
@@ -29,7 +33,10 @@ impl P2PBehaviour {
     }
 
     fn create_gossipsub_config() -> gossipsub::Config {
-        gossipsub::ConfigBuilder::default().build().unwrap()
+        gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(Self::HEARTBEAT_INTERVAL)
+            .build()
+            .unwrap()
     }
 
     fn create_peer_id(keypair: &Keypair) -> PeerId {
