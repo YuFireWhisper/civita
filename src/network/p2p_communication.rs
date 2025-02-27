@@ -72,17 +72,31 @@ impl P2PCommunication {
             .map_err(|e| P2PCommunicationError::Gossipsub(e.to_string()))?;
         Ok(())
     }
+
+    pub fn publish(&mut self, topic: &str, data: impl Into<Vec<u8>>) -> P2PCommunicationResult<()> {
+        let topic = IdentTopic::new(topic);
+        self.swarm
+            .behaviour_mut()
+            .gossipsub_mut()
+            .publish(topic, data)
+            .map_err(|e| P2PCommunicationError::Gossipsub(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use libp2p::{
-        futures::StreamExt, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId, Swarm,
+        futures::StreamExt, gossipsub, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId,
+        Swarm,
     };
     use std::time::Duration;
     use tokio::time::timeout;
 
-    use crate::network::{p2p_behaviour::P2PBehaviour, p2p_communication::P2PCommunication};
+    use crate::network::{
+        p2p_behaviour::{P2PBehaviour, P2PEvent},
+        p2p_communication::P2PCommunication,
+    };
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
     const TEST_TOPIC: &str = "test_topic";
@@ -96,7 +110,7 @@ mod tests {
     impl TestCommunication {
         pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
             let keypair = Keypair::generate_ed25519();
-            let listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
+            let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
 
             let mut p2p = P2PCommunication::new(keypair.clone(), listen_addr.clone())?;
             Self::wait_for_listen_addr(&mut p2p.swarm).await?;
@@ -105,8 +119,14 @@ mod tests {
 
             Ok(Self {
                 peer_id,
-                listen_addr,
+                listen_addr: Self::get_actual_listen_addr(&p2p.swarm),
                 p2p,
+            })
+        }
+
+        fn get_actual_listen_addr(swarm: &Swarm<P2PBehaviour>) -> Multiaddr {
+            swarm.listeners().next().cloned().unwrap_or_else(|| {
+                panic!("No listen address available");
             })
         }
 
@@ -130,6 +150,86 @@ mod tests {
                 .kad_mut()
                 .kbucket(*peer_id)
                 .is_some()
+        }
+
+        pub async fn process_events(&mut self, duration: Duration) {
+            let start = std::time::Instant::now();
+            while start.elapsed() < duration {
+                tokio::select! {
+                    _ = self.p2p.swarm.select_next_some() => {
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                }
+            }
+        }
+
+        pub async fn establish_gossipsub_connection(
+            &mut self,
+            other: &mut Self,
+        ) -> Result<(), &'static str> {
+            self.p2p
+                .dial(other.peer_id, other.listen_addr.clone())
+                .await
+                .map_err(|_| "Failed to dial")?;
+
+            self.p2p
+                .subscribe(TEST_TOPIC)
+                .map_err(|_| "Failed to subscribe self")?;
+            other
+                .p2p
+                .subscribe(TEST_TOPIC)
+                .map_err(|_| "Failed to subscribe other")?;
+
+            self.process_events(Duration::from_secs(3)).await;
+            other.process_events(Duration::from_secs(3)).await;
+
+            let connection_established = self.check_gossipsub_connection(other);
+
+            if !connection_established {
+                self.process_events(Duration::from_secs(3)).await;
+                other.process_events(Duration::from_secs(3)).await;
+
+                if !self.check_gossipsub_connection(other) {
+                    return Err("Failed to establish Gossipsub connection");
+                }
+            }
+
+            Ok(())
+        }
+
+        fn check_gossipsub_connection(&mut self, other: &mut Self) -> bool {
+            let peers_in_mesh1 = self
+                .p2p
+                .swarm
+                .behaviour_mut()
+                .gossipsub_mut()
+                .all_peers()
+                .count();
+
+            let peers_in_mesh2 = other
+                .p2p
+                .swarm
+                .behaviour_mut()
+                .gossipsub_mut()
+                .all_peers()
+                .count();
+
+            peers_in_mesh1 > 0 && peers_in_mesh2 > 0
+        }
+
+        pub async fn wait_for_gossipsub_message(&mut self) -> Option<Vec<u8>> {
+            timeout(TIMEOUT_DURATION, async {
+                while let Some(event) = self.p2p.swarm.next().await {
+                    if let SwarmEvent::Behaviour(P2PEvent::Gossipsub(gossipsub_event)) = event {
+                        if let gossipsub::Event::Message { message, .. } = *gossipsub_event {
+                            return Some(message.data);
+                        }
+                    }
+                }
+                None
+            })
+            .await
+            .unwrap_or(None)
         }
 
         pub async fn wait_for_kad_event(&mut self) -> bool {
@@ -197,6 +297,41 @@ mod tests {
         assert!(
             subscriptions.contains(&TEST_TOPIC.to_string()),
             "Should be subscribed to topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_publish() {
+        let mut node1 = TestCommunication::new().await.unwrap();
+        let mut node2 = TestCommunication::new().await.unwrap();
+
+        let connection_result = node1.establish_gossipsub_connection(&mut node2).await;
+        assert!(
+            connection_result.is_ok(),
+            "Gossipsub connection should be established: {:?}",
+            connection_result.err()
+        );
+
+        let test_message = b"hello world";
+        let publish_result = node1.p2p.publish(TEST_TOPIC, test_message);
+
+        assert!(
+            publish_result.is_ok(),
+            "Should publish message successfully, got error: {:?}",
+            publish_result.err()
+        );
+
+        let received_message = node2.wait_for_gossipsub_message().await;
+
+        assert!(
+            received_message.is_some(),
+            "Should receive the published message"
+        );
+
+        assert_eq!(
+            received_message.unwrap(),
+            test_message.to_vec(),
+            "Received message should match published message"
         );
     }
 }
