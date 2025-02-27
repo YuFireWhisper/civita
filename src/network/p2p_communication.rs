@@ -97,6 +97,10 @@ impl P2PCommunication {
     pub fn message_receiver(&self) -> Arc<Receiver<P2PMessage>> {
         self.message_receiver.clone()
     }
+
+    pub fn swarm(&self) -> &Swarm<P2PBehaviour> {
+        &self.swarm
+    }
 }
 
 #[derive(Debug)]
