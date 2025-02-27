@@ -93,6 +93,10 @@ impl P2PCommunication {
             .publish(topic, data)?;
         Ok(())
     }
+
+    pub fn message_receiver(&self) -> Arc<Receiver<P2PMessage>> {
+        self.message_receiver.clone()
+    }
 }
 
 #[derive(Debug)]
