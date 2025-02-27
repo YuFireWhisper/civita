@@ -2,6 +2,7 @@ use std::io;
 
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
+    gossipsub::IdentTopic,
     identity::Keypair,
     noise,
     swarm::{self},
@@ -18,6 +19,8 @@ pub enum P2PCommunicationError {
     Transport(#[from] libp2p::TransportError<io::Error>),
     #[error("Dial Error: {0}")]
     Dial(#[from] swarm::DialError),
+    #[error("Gossipsub Error: {0}")]
+    Gossipsub(String),
 }
 
 type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
@@ -59,6 +62,16 @@ impl P2PCommunication {
 
         Ok(())
     }
+
+    pub fn subscribe(&mut self, topic: &str) -> P2PCommunicationResult<()> {
+        let topic = IdentTopic::new(topic);
+        self.swarm
+            .behaviour_mut()
+            .gossipsub_mut()
+            .subscribe(&topic)
+            .map_err(|e| P2PCommunicationError::Gossipsub(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +85,7 @@ mod tests {
     use crate::network::{p2p_behaviour::P2PBehaviour, p2p_communication::P2PCommunication};
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+    const TEST_TOPIC: &str = "test_topic";
 
     struct TestCommunication {
         peer_id: PeerId,
@@ -161,6 +175,28 @@ mod tests {
         assert!(
             source.has_peer_in_routing_table(&target.peer_id),
             "Target peer should be in the routing table after dialing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe() {
+        let mut comm = TestCommunication::new()
+            .await
+            .expect("Failed to create P2PCommunication");
+
+        let subscribe_result = comm.p2p.subscribe(TEST_TOPIC);
+        assert!(
+            subscribe_result.is_ok(),
+            "Failed to subscribe to topic: {:?}",
+            subscribe_result.err()
+        );
+
+        let gossipsub = comm.p2p.swarm.behaviour_mut().gossipsub_mut();
+        let subscriptions: Vec<String> =
+            gossipsub.topics().map(|t| t.as_str().to_string()).collect();
+        assert!(
+            subscriptions.contains(&TEST_TOPIC.to_string()),
+            "Should be subscribed to topic"
         );
     }
 }
