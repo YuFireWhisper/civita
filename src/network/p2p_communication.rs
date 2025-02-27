@@ -2,7 +2,7 @@ use std::io;
 
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
-    gossipsub::IdentTopic,
+    gossipsub::{self, IdentTopic},
     identity::Keypair,
     noise,
     swarm::{self},
@@ -21,6 +21,8 @@ pub enum P2PCommunicationError {
     Dial(#[from] swarm::DialError),
     #[error("Gossipsub Error: {0}")]
     Gossipsub(String),
+    #[error("Publish Error: {0}")]
+    Publish(#[from] gossipsub::PublishError),
 }
 
 type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
@@ -78,8 +80,7 @@ impl P2PCommunication {
         self.swarm
             .behaviour_mut()
             .gossipsub_mut()
-            .publish(topic, data)
-            .map_err(|e| P2PCommunicationError::Gossipsub(e.to_string()))?;
+            .publish(topic, data)?;
         Ok(())
     }
 }
