@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, sync::Arc};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
@@ -33,7 +33,7 @@ type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
 pub struct P2PCommunication {
     swarm: Swarm<P2PBehaviour>,
     message_sender: Sender<P2PMessage>,
-    message_receiver: Receiver<P2PMessage>,
+    message_receiver: Arc<Receiver<P2PMessage>>,
 }
 
 impl P2PCommunication {
@@ -54,7 +54,7 @@ impl P2PCommunication {
         Ok(Self {
             swarm,
             message_sender,
-            message_receiver,
+            message_receiver: Arc::new(message_receiver),
         })
     }
 
