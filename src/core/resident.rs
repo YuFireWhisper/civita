@@ -4,7 +4,7 @@ use std::{fs, io};
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
 use thiserror::Error;
 
-use super::resident_network::{ResidentNetwork, ResidentNetworkError};
+use crate::network::resident_network::{ResidentNetwork, ResidentNetworkError};
 
 #[derive(Debug, Error)]
 pub enum ResidentError {

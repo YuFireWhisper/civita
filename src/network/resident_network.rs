@@ -160,9 +160,7 @@ pub struct ReceivedMessage {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::resident_network::ResidentNetworkEvent;
-
-    use super::ResidentNetwork;
+    use super::{ResidentNetwork, ResidentNetworkEvent};
     use libp2p::{
         futures::StreamExt,
         gossipsub::{self, TopicHash},
