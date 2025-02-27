@@ -58,13 +58,13 @@ impl P2PBehaviour {
 }
 
 pub enum P2PEvent {
-    Gossipsub(gossipsub::Event),
+    Gossipsub(Box<gossipsub::Event>),
     Kad(kad::Event),
 }
 
 impl From<gossipsub::Event> for P2PEvent {
     fn from(event: gossipsub::Event) -> Self {
-        P2PEvent::Gossipsub(event)
+        P2PEvent::Gossipsub(Box::new(event))
     }
 }
 
