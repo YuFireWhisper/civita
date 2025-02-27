@@ -14,8 +14,10 @@ use super::p2p_behaviour::P2PBehaviour;
 
 #[derive(Debug, Error)]
 pub enum P2PCommunicationError {
-    #[error("Swarm Transport Error: {0}")]
-    SwarmTransport(#[from] libp2p::TransportError<io::Error>),
+    #[error("Transport Error: {0}")]
+    Transport(#[from] libp2p::TransportError<io::Error>),
+    #[error("Dial Error: {0}")]
+    Dial(#[from] swarm::DialError),
 }
 
 type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
@@ -47,11 +49,23 @@ impl P2PCommunication {
             .multiplex(yamux::Config::default())
             .boxed()
     }
+
+    pub async fn dial(&mut self, peer_id: PeerId, addr: Multiaddr) -> P2PCommunicationResult<()> {
+        self.swarm
+            .behaviour_mut()
+            .kad_mut()
+            .add_address(&peer_id, addr.clone());
+        self.swarm.dial(addr)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use libp2p::{futures::StreamExt, identity::Keypair, swarm::SwarmEvent, Multiaddr, Swarm};
+    use libp2p::{
+        futures::StreamExt, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId, Swarm,
+    };
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -60,18 +74,26 @@ mod tests {
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
     struct TestCommunication {
+        peer_id: PeerId,
+        listen_addr: Multiaddr,
         p2p: P2PCommunication,
     }
 
     impl TestCommunication {
-        async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
             let keypair = Keypair::generate_ed25519();
             let listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
 
-            let mut p2p = P2PCommunication::new(keypair, listen_addr)?;
+            let mut p2p = P2PCommunication::new(keypair.clone(), listen_addr.clone())?;
             Self::wait_for_listen_addr(&mut p2p.swarm).await?;
 
-            Ok(Self { p2p })
+            let peer_id = PeerId::from_public_key(&keypair.public());
+
+            Ok(Self {
+                peer_id,
+                listen_addr,
+                p2p,
+            })
         }
 
         async fn wait_for_listen_addr(swarm: &mut Swarm<P2PBehaviour>) -> Result<(), &'static str> {
@@ -86,15 +108,59 @@ mod tests {
             .await
             .map_err(|_| "Timeout waiting for listen address")?
         }
+
+        pub fn has_peer_in_routing_table(&mut self, peer_id: &PeerId) -> bool {
+            self.p2p
+                .swarm
+                .behaviour_mut()
+                .kad_mut()
+                .kbucket(*peer_id)
+                .is_some()
+        }
+
+        pub async fn wait_for_kad_event(&mut self) -> bool {
+            timeout(TIMEOUT_DURATION, async {
+                while let Some(event) = self.p2p.swarm.next().await {
+                    if let SwarmEvent::Behaviour(_) = event {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        }
     }
 
     #[tokio::test]
-    async fn test_p2p_communication_creation() {
+    async fn test_new() {
         let result = TestCommunication::new().await;
         assert!(
             result.is_ok(),
             "Failed to create P2PCommunication: {:?}",
             result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dial() {
+        let target = TestCommunication::new().await.unwrap();
+        let mut source = TestCommunication::new().await.unwrap();
+
+        let result = source
+            .p2p
+            .dial(target.peer_id, target.listen_addr.clone())
+            .await;
+        let received_kad_event = source.wait_for_kad_event().await;
+
+        assert!(result.is_ok(), "Dial operation should succeed");
+        assert!(
+            received_kad_event,
+            "Should receive Kademlia event after dialing"
+        );
+        assert!(
+            source.has_peer_in_routing_table(&target.peer_id),
+            "Target peer should be in the routing table after dialing"
         );
     }
 }
