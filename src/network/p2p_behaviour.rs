@@ -7,6 +7,15 @@ use libp2p::{
     swarm::NetworkBehaviour,
     PeerId,
 };
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum P2PBehaviourError {
+    #[error("Failed to create gossipsub behaviour: {0}")]
+    Gossipsub(String),
+}
+
+type P2PBehaviourResult<T> = std::result::Result<T, P2PBehaviourError>;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "P2PEvent")]
