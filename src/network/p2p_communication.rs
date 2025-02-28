@@ -152,6 +152,10 @@ impl P2PCommunication {
         Ok(())
     }
 
+    pub fn stop_receive(&mut self) {
+        self.is_receiving_messages.store(false, Ordering::SeqCst);
+    }
+
     pub fn message_receiver(&self) -> Arc<Receiver<P2PMessage>> {
         self.message_receiver.clone()
     }
@@ -477,6 +481,25 @@ mod tests {
         assert_eq!(
             received_message.topic, TEST_TOPIC,
             "Received message topic should match published topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_receive() {
+        let mut node = TestCommunication::new().await.unwrap();
+
+        assert!(
+            !node.p2p.is_receiving_messages.load(Ordering::SeqCst),
+            "is_receiving_messages should be false initially"
+        );
+
+        node.p2p.is_receiving_messages.store(true, Ordering::SeqCst);
+
+        node.p2p.stop_receive();
+
+        assert!(
+            !node.p2p.is_receiving_messages.load(Ordering::SeqCst),
+            "is_receiving_messages should be false after calling stop_receive"
         );
     }
 }
