@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
-    gossipsub::{self, IdentTopic},
+    gossipsub::{self, IdentTopic, MessageId},
     identity::Keypair,
     noise,
     swarm::{self},
@@ -105,6 +105,7 @@ impl P2PCommunication {
 
 #[derive(Debug)]
 pub struct P2PMessage {
+    pub message_id: MessageId,
     pub source: PeerId,
     pub topic: String,
     pub data: Vec<u8>,
