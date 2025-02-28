@@ -1,18 +1,26 @@
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time,
+};
 
+use ::tokio::select;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
+    futures::StreamExt,
     gossipsub::{self, IdentTopic, MessageId},
     identity::Keypair,
     noise,
-    swarm::{self},
-    tcp::tokio,
-    yamux, Multiaddr, PeerId, Swarm, Transport,
+    swarm::{self, SwarmEvent},
+    tcp, yamux, Multiaddr, PeerId, Swarm, Transport,
 };
 use thiserror::Error;
 
-use super::p2p_behaviour::P2PBehaviour;
+use super::p2p_behaviour::{P2PBehaviour, P2PEvent};
 
 #[derive(Debug, Error)]
 pub enum P2PCommunicationError {
@@ -26,6 +34,16 @@ pub enum P2PCommunicationError {
     Subscribe(#[from] gossipsub::SubscriptionError),
     #[error("Publish Error: {0}")]
     Publish(#[from] gossipsub::PublishError),
+    #[error("System Time Error: {0}")]
+    SystemTime(#[from] std::time::SystemTimeError),
+    #[error("Crossbeam Channel Error: {0}")]
+    CrossbeamChannel(String),
+}
+
+impl From<crossbeam_channel::SendError<P2PMessage>> for P2PCommunicationError {
+    fn from(err: crossbeam_channel::SendError<P2PMessage>) -> Self {
+        P2PCommunicationError::CrossbeamChannel(err.to_string())
+    }
 }
 
 type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
@@ -34,6 +52,7 @@ pub struct P2PCommunication {
     swarm: Swarm<P2PBehaviour>,
     message_sender: Sender<P2PMessage>,
     message_receiver: Arc<Receiver<P2PMessage>>,
+    is_receiving_messages: Arc<AtomicBool>,
 }
 
 impl P2PCommunication {
@@ -55,11 +74,12 @@ impl P2PCommunication {
             swarm,
             message_sender,
             message_receiver: Arc::new(message_receiver),
+            is_receiving_messages: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn create_transport(keypair: Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
-        tokio::Transport::default()
+        tcp::tokio::Transport::default()
             .upgrade(Version::V1)
             .authenticate(noise::Config::new(&keypair).unwrap())
             .multiplex(yamux::Config::default())
@@ -94,6 +114,44 @@ impl P2PCommunication {
         Ok(())
     }
 
+    pub async fn start_receive(
+        &mut self,
+        sleep_duration: tokio::time::Duration,
+    ) -> P2PCommunicationResult<()> {
+        self.is_receiving_messages.store(true, Ordering::SeqCst);
+
+        while self.is_receiving_messages.load(Ordering::SeqCst) {
+            select! {
+                event = self.swarm.select_next_some() => {
+                    if let SwarmEvent::Behaviour(P2PEvent::Gossipsub(event)) = event {
+                        if let gossipsub::Event::Message {
+                            message_id,
+                            propagation_source,
+                            message,
+                        } = *event {
+                            let timestamp = time::SystemTime::now()
+                                .duration_since(time::UNIX_EPOCH)?
+                                .as_secs();
+
+                            let p2p_message = P2PMessage {
+                                message_id,
+                                source: propagation_source,
+                                topic: message.topic.into_string(),
+                                data: message.data,
+                                timestamp,
+                            };
+
+                            self.message_sender.send(p2p_message)?;
+                        }
+                    }
+                },
+                _ = tokio::time::sleep(sleep_duration) => {},
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn message_receiver(&self) -> Arc<Receiver<P2PMessage>> {
         self.message_receiver.clone()
     }
@@ -118,7 +176,7 @@ mod tests {
         futures::StreamExt, gossipsub, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId,
         Swarm,
     };
-    use std::time::Duration;
+    use std::{sync::atomic::Ordering, time::Duration};
     use tokio::time::timeout;
 
     use crate::network::{
@@ -360,6 +418,65 @@ mod tests {
             received_message.unwrap(),
             test_message.to_vec(),
             "Received message should match published message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_receive() {
+        let mut node1 = TestCommunication::new().await.unwrap();
+        let mut node2 = TestCommunication::new().await.unwrap();
+
+        let connection_result = node1.establish_gossipsub_connection(&mut node2).await;
+        assert!(
+            connection_result.is_ok(),
+            "Gossipsub connection should be established: {:?}",
+            connection_result.err()
+        );
+
+        let is_receiving = node2.p2p.is_receiving_messages.clone();
+        let receiver = node2.p2p.message_receiver();
+
+        let receive_handle = tokio::spawn(async move {
+            let result = node2
+                .p2p
+                .start_receive(tokio::time::Duration::from_millis(10))
+                .await;
+            assert!(result.is_ok(), "start_receive should not return error");
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let test_message = b"test receive functionality";
+        let publish_result = node1.p2p.publish(TEST_TOPIC, test_message);
+        assert!(
+            publish_result.is_ok(),
+            "Should publish message successfully: {:?}",
+            publish_result.err()
+        );
+
+        let received_message = tokio::task::spawn_blocking(move || {
+            receiver
+                .recv_timeout(TIMEOUT_DURATION)
+                .expect("Failed to receive message or timeout")
+        })
+        .await
+        .expect("Failed to join the receive task");
+
+        is_receiving.store(false, Ordering::SeqCst);
+
+        timeout(Duration::from_secs(1), receive_handle)
+            .await
+            .expect("Timeout waiting for receive task to end")
+            .expect("Receive task panicked");
+
+        assert_eq!(
+            received_message.data,
+            test_message.to_vec(),
+            "Received message data should match published message"
+        );
+        assert_eq!(
+            received_message.topic, TEST_TOPIC,
+            "Received message topic should match published topic"
         );
     }
 }
