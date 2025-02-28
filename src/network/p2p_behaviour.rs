@@ -27,18 +27,19 @@ pub struct P2PBehaviour {
 impl P2PBehaviour {
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
-    pub fn new(keypair: Keypair) -> Self {
+    pub fn new(keypair: Keypair) -> P2PBehaviourResult<Self> {
         let peer_id = Self::create_peer_id(&keypair);
 
-        let gossipsub = Self::create_gossipsub(keypair.clone());
+        let gossipsub = Self::create_gossipsub(keypair.clone())?;
         let kad = Self::create_kad(peer_id);
 
-        Self { gossipsub, kad }
+        Ok(Self { gossipsub, kad })
     }
 
-    fn create_gossipsub(keypair: Keypair) -> gossipsub::Behaviour {
+    fn create_gossipsub(keypair: Keypair) -> P2PBehaviourResult<gossipsub::Behaviour> {
         let config = Self::create_gossipsub_config();
-        gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), config).unwrap()
+        gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), config)
+            .map_err(|e| P2PBehaviourError::Gossipsub(e.to_string()))
     }
 
     fn create_gossipsub_config() -> gossipsub::Config {

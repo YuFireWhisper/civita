@@ -38,6 +38,8 @@ pub enum P2PCommunicationError {
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("Crossbeam Channel Error: {0}")]
     CrossbeamChannel(String),
+    #[error("P2P Behaviour Error: {0}")]
+    P2PBehaviour(#[from] super::p2p_behaviour::P2PBehaviourError),
 }
 
 impl From<crossbeam_channel::SendError<P2PMessage>> for P2PCommunicationError {
@@ -58,7 +60,7 @@ pub struct P2PCommunication {
 impl P2PCommunication {
     pub fn new(keypair: Keypair, listen_addr: Multiaddr) -> P2PCommunicationResult<Self> {
         let transport = Self::create_transport(keypair.clone());
-        let behaviour = P2PBehaviour::new(keypair.clone());
+        let behaviour = P2PBehaviour::new(keypair.clone())?;
 
         let mut swarm = Swarm::new(
             transport,
