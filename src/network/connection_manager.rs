@@ -70,6 +70,13 @@ impl ConnectionManager {
             connection.status = ConnectionStatus::Banned;
         }
     }
+
+    pub fn unban_peer(&mut self, peer_id: &PeerId) {
+        self.banned_peers.remove(peer_id);
+        if let Some(connection) = self.connections.get_mut(peer_id) {
+            connection.status = ConnectionStatus::Disconnected;
+        }
+    }
 }
 
 pub struct Connection {
@@ -223,6 +230,32 @@ mod tests {
         assert_eq!(
             connection_manager.connections[&peer_id].status,
             ConnectionStatus::Banned
+        );
+    }
+
+    #[test]
+    fn test_unban_peer() {
+        let bootstrap_peers = vec![];
+        let connection_timeout = Duration::from_secs(10);
+        let mut connection_manager = ConnectionManager::new(bootstrap_peers, connection_timeout);
+
+        let peer_id = PeerId::random();
+        let addr: Multiaddr = PEER_ADDR.parse().unwrap();
+        let connected_point = ConnectedPoint::Dialer {
+            address: addr.clone(),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        connection_manager.add_peer(peer_id, addr.clone());
+        connection_manager.on_peer_connected(&peer_id, connected_point.clone());
+        connection_manager.ban_peer(peer_id);
+        connection_manager.unban_peer(&peer_id);
+
+        assert_eq!(connection_manager.connections.len(), 1);
+        assert_eq!(connection_manager.banned_peers.len(), 0);
+        assert_eq!(
+            connection_manager.connections[&peer_id].status,
+            ConnectionStatus::Disconnected
         );
     }
 }
