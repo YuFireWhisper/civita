@@ -178,167 +178,13 @@ pub struct P2PMessage {
 
 #[cfg(test)]
 mod tests {
-    use libp2p::{
-        futures::StreamExt, gossipsub, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId,
-        Swarm,
-    };
     use std::{sync::atomic::Ordering, time::Duration};
     use tokio::time::timeout;
 
-    use crate::network::{
-        p2p_behaviour::{P2PBehaviour, P2PEvent},
-        p2p_communication::P2PCommunication,
-    };
+    use crate::network::p2p_communication::test_communication::TestCommunication;
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
     const TEST_TOPIC: &str = "test_topic";
-
-    pub struct TestCommunication {
-        pub peer_id: PeerId,
-        pub keypair: Keypair,
-        pub listen_addr: Multiaddr,
-        pub p2p: P2PCommunication,
-    }
-
-    impl TestCommunication {
-        pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-            let keypair = Keypair::generate_ed25519();
-            let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
-
-            let mut p2p = P2PCommunication::new(keypair.clone(), listen_addr.clone())?;
-            Self::wait_for_listen_addr(&mut p2p.swarm).await?;
-
-            let peer_id = PeerId::from_public_key(&keypair.public());
-
-            Ok(Self {
-                peer_id,
-                keypair,
-                listen_addr: Self::get_actual_listen_addr(&p2p.swarm),
-                p2p,
-            })
-        }
-
-        fn get_actual_listen_addr(swarm: &Swarm<P2PBehaviour>) -> Multiaddr {
-            swarm.listeners().next().cloned().unwrap_or_else(|| {
-                panic!("No listen address available");
-            })
-        }
-
-        async fn wait_for_listen_addr(swarm: &mut Swarm<P2PBehaviour>) -> Result<(), &'static str> {
-            timeout(TIMEOUT_DURATION, async {
-                while let Some(event) = swarm.next().await {
-                    if let SwarmEvent::NewListenAddr { .. } = event {
-                        return Ok(());
-                    }
-                }
-                Err("Timeout waiting for listen address")
-            })
-            .await
-            .map_err(|_| "Timeout waiting for listen address")?
-        }
-
-        pub fn has_peer_in_routing_table(&mut self, peer_id: &PeerId) -> bool {
-            self.p2p
-                .swarm
-                .behaviour_mut()
-                .kad_mut()
-                .kbucket(*peer_id)
-                .is_some()
-        }
-
-        pub async fn process_events(&mut self, duration: Duration) {
-            let start = std::time::Instant::now();
-            while start.elapsed() < duration {
-                tokio::select! {
-                    _ = self.p2p.swarm.select_next_some() => {
-                    },
-                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
-                }
-            }
-        }
-
-        pub async fn establish_gossipsub_connection(
-            &mut self,
-            other: &mut Self,
-        ) -> Result<(), &'static str> {
-            self.p2p
-                .dial(other.peer_id, other.listen_addr.clone())
-                .await
-                .map_err(|_| "Failed to dial")?;
-
-            self.p2p
-                .subscribe(TEST_TOPIC)
-                .map_err(|_| "Failed to subscribe self")?;
-            other
-                .p2p
-                .subscribe(TEST_TOPIC)
-                .map_err(|_| "Failed to subscribe other")?;
-
-            self.process_events(Duration::from_secs(3)).await;
-            other.process_events(Duration::from_secs(3)).await;
-
-            let connection_established = self.check_gossipsub_connection(other);
-
-            if !connection_established {
-                self.process_events(Duration::from_secs(3)).await;
-                other.process_events(Duration::from_secs(3)).await;
-
-                if !self.check_gossipsub_connection(other) {
-                    return Err("Failed to establish Gossipsub connection");
-                }
-            }
-
-            Ok(())
-        }
-
-        fn check_gossipsub_connection(&mut self, other: &mut Self) -> bool {
-            let peers_in_mesh1 = self
-                .p2p
-                .swarm
-                .behaviour_mut()
-                .gossipsub_mut()
-                .all_peers()
-                .count();
-
-            let peers_in_mesh2 = other
-                .p2p
-                .swarm
-                .behaviour_mut()
-                .gossipsub_mut()
-                .all_peers()
-                .count();
-
-            peers_in_mesh1 > 0 && peers_in_mesh2 > 0
-        }
-
-        pub async fn wait_for_gossipsub_message(&mut self) -> Option<Vec<u8>> {
-            timeout(TIMEOUT_DURATION, async {
-                while let Some(event) = self.p2p.swarm.next().await {
-                    if let SwarmEvent::Behaviour(P2PEvent::Gossipsub(gossipsub_event)) = event {
-                        if let gossipsub::Event::Message { message, .. } = *gossipsub_event {
-                            return Some(message.data);
-                        }
-                    }
-                }
-                None
-            })
-            .await
-            .unwrap_or(None)
-        }
-
-        pub async fn wait_for_kad_event(&mut self) -> bool {
-            timeout(TIMEOUT_DURATION, async {
-                while let Some(event) = self.p2p.swarm.next().await {
-                    if let SwarmEvent::Behaviour(_) = event {
-                        return true;
-                    }
-                }
-                false
-            })
-            .await
-            .unwrap_or(false)
-        }
-    }
 
     #[tokio::test]
     async fn test_new() {
@@ -505,5 +351,170 @@ mod tests {
             !node.p2p.is_receiving_messages.load(Ordering::SeqCst),
             "is_receiving_messages should be false after calling stop_receive"
         );
+    }
+}
+
+#[cfg(test)]
+pub mod test_communication {
+    use std::time::Duration;
+
+    use libp2p::{
+        futures::StreamExt, gossipsub, identity::Keypair, swarm::SwarmEvent, Multiaddr, PeerId,
+        Swarm,
+    };
+    use tokio::time::timeout;
+
+    use crate::network::p2p_behaviour::{P2PBehaviour, P2PEvent};
+
+    use super::P2PCommunication;
+
+    const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+    const TEST_TOPIC: &str = "test_topic";
+
+    pub struct TestCommunication {
+        pub peer_id: PeerId,
+        pub keypair: Keypair,
+        pub listen_addr: Multiaddr,
+        pub p2p: P2PCommunication,
+    }
+
+    impl TestCommunication {
+        pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let keypair = Keypair::generate_ed25519();
+            let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
+
+            let mut p2p = P2PCommunication::new(keypair.clone(), listen_addr.clone())?;
+            Self::wait_for_listen_addr(&mut p2p.swarm).await?;
+
+            let peer_id = PeerId::from_public_key(&keypair.public());
+
+            Ok(Self {
+                peer_id,
+                keypair,
+                listen_addr: Self::get_actual_listen_addr(&p2p.swarm),
+                p2p,
+            })
+        }
+
+        fn get_actual_listen_addr(swarm: &Swarm<P2PBehaviour>) -> Multiaddr {
+            swarm.listeners().next().cloned().unwrap_or_else(|| {
+                panic!("No listen address available");
+            })
+        }
+
+        async fn wait_for_listen_addr(swarm: &mut Swarm<P2PBehaviour>) -> Result<(), &'static str> {
+            timeout(TIMEOUT_DURATION, async {
+                while let Some(event) = swarm.next().await {
+                    if let SwarmEvent::NewListenAddr { .. } = event {
+                        return Ok(());
+                    }
+                }
+                Err("Timeout waiting for listen address")
+            })
+            .await
+            .map_err(|_| "Timeout waiting for listen address")?
+        }
+
+        pub fn has_peer_in_routing_table(&mut self, peer_id: &PeerId) -> bool {
+            self.p2p
+                .swarm
+                .behaviour_mut()
+                .kad_mut()
+                .kbucket(*peer_id)
+                .is_some()
+        }
+
+        pub async fn process_events(&mut self, duration: Duration) {
+            let start = std::time::Instant::now();
+            while start.elapsed() < duration {
+                tokio::select! {
+                    _ = self.p2p.swarm.select_next_some() => {
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                }
+            }
+        }
+
+        pub async fn establish_gossipsub_connection(
+            &mut self,
+            other: &mut Self,
+        ) -> Result<(), &'static str> {
+            self.p2p
+                .dial(other.peer_id, other.listen_addr.clone())
+                .await
+                .map_err(|_| "Failed to dial")?;
+
+            self.p2p
+                .subscribe(TEST_TOPIC)
+                .map_err(|_| "Failed to subscribe self")?;
+            other
+                .p2p
+                .subscribe(TEST_TOPIC)
+                .map_err(|_| "Failed to subscribe other")?;
+
+            self.process_events(Duration::from_secs(3)).await;
+            other.process_events(Duration::from_secs(3)).await;
+
+            let connection_established = self.check_gossipsub_connection(other);
+
+            if !connection_established {
+                self.process_events(Duration::from_secs(3)).await;
+                other.process_events(Duration::from_secs(3)).await;
+
+                if !self.check_gossipsub_connection(other) {
+                    return Err("Failed to establish Gossipsub connection");
+                }
+            }
+
+            Ok(())
+        }
+
+        fn check_gossipsub_connection(&mut self, other: &mut Self) -> bool {
+            let peers_in_mesh1 = self
+                .p2p
+                .swarm
+                .behaviour_mut()
+                .gossipsub_mut()
+                .all_peers()
+                .count();
+
+            let peers_in_mesh2 = other
+                .p2p
+                .swarm
+                .behaviour_mut()
+                .gossipsub_mut()
+                .all_peers()
+                .count();
+
+            peers_in_mesh1 > 0 && peers_in_mesh2 > 0
+        }
+
+        pub async fn wait_for_gossipsub_message(&mut self) -> Option<Vec<u8>> {
+            timeout(TIMEOUT_DURATION, async {
+                while let Some(event) = self.p2p.swarm.next().await {
+                    if let SwarmEvent::Behaviour(P2PEvent::Gossipsub(gossipsub_event)) = event {
+                        if let gossipsub::Event::Message { message, .. } = *gossipsub_event {
+                            return Some(message.data);
+                        }
+                    }
+                }
+                None
+            })
+            .await
+            .unwrap_or(None)
+        }
+
+        pub async fn wait_for_kad_event(&mut self) -> bool {
+            timeout(TIMEOUT_DURATION, async {
+                while let Some(event) = self.p2p.swarm.next().await {
+                    if let SwarmEvent::Behaviour(_) = event {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        }
     }
 }
