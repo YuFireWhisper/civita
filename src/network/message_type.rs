@@ -2,13 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::resident::{
     malicious_behaviour::MaliciousBehavior, requation_action::ReputationAction,
-    resident_status::ResidentStatus,
+    resident_id::ResidentId, resident_status::ResidentStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageType {
     JoinRequest {
-        resident_id: String,
+        resident_id: ResidentId,
         public_key: Vec<u8>,
     },
     JoinResponse {
@@ -17,7 +17,7 @@ pub enum MessageType {
         chairpersons: Vec<String>,
     },
     Heartbeat {
-        resident_id: String,
+        resident_id: ResidentId,
         timestamp: u64,
         status: ResidentStatus,
     },
@@ -36,7 +36,7 @@ pub enum MessageType {
         approve: bool,
     },
     ReputationUpdate {
-        resident_id: String,
+        resident_id: ResidentId,
         reputation: u64,
         action: ReputationAction,
     },
