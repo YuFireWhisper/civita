@@ -1,13 +1,24 @@
 use std::sync::Arc;
 
-use libp2p::{gossipsub::MessageId, identity::Keypair, PeerId};
+use libp2p::{
+    gossipsub::MessageId,
+    identity::{self, Keypair},
+    PeerId,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::p2p_communication::P2PCommunication;
+use super::p2p_communication::{self, P2PCommunication};
 
 #[derive(Debug, Error)]
-pub enum MessageLayerError {}
+pub enum MessageLayerError {
+    #[error("Failed to serialize message: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("Failed to sign message: {0}")]
+    Signing(#[from] identity::SigningError),
+    #[error("Failed to publish message: {0}")]
+    Publishing(#[from] p2p_communication::P2PCommunicationError),
+}
 
 type MessageLayerResult<T> = std::result::Result<T, MessageLayerError>;
 
@@ -27,6 +38,27 @@ impl<T: Serialize> MessageLayer<T> {
             peer_id,
             handler,
         }
+    }
+
+    pub fn send(&mut self, content: T, topic: &str) -> MessageLayerResult<()> {
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+
+        let mut message = SentMessage {
+            content,
+            timestamp,
+            signature: Vec::new(),
+        };
+
+        let serialized_message = serde_json::to_vec(&message)?;
+        let signature = self.keypair.sign(&serialized_message)?;
+
+        message.signature = signature.to_vec();
+
+        let data = serde_json::to_vec(&message)?;
+
+        self.p2p.publish(topic, data)?;
+
+        Ok(())
     }
 }
 
@@ -51,22 +83,38 @@ pub struct ReceivedMessage<T> {
 
 #[cfg(test)]
 mod tests {
+    use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TOPIC};
+
     use super::*;
     use std::collections::HashMap;
 
-    const PEER_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
-
     #[tokio::test]
     async fn test_new() {
-        let keypair = Keypair::generate_ed25519();
-        let p2p = P2PCommunication::new(keypair.clone(), PEER_ADDR.parse().unwrap()).unwrap();
+        let communication = TestCommunication::new().await.unwrap();
+        let handler = Arc::new(|_: ReceivedMessage<HashMap<String, String>>| {});
+
+        let message_layer = MessageLayer::new(communication.p2p, communication.keypair, handler);
+
+        assert_eq!(message_layer.peer_id, communication.peer_id);
+    }
+
+    #[tokio::test]
+    async fn test_send() {
+        let mut node1 = TestCommunication::new().await.unwrap();
+        let mut node2 = TestCommunication::new().await.unwrap();
+
+        node1
+            .establish_gossipsub_connection(&mut node2)
+            .await
+            .unwrap();
 
         let handler = Arc::new(|_: ReceivedMessage<HashMap<String, String>>| {});
-        let message_layer = MessageLayer::new(p2p, keypair.clone(), handler);
+        let mut message_layer = MessageLayer::new(node1.p2p, node1.keypair, handler);
 
-        assert_eq!(
-            message_layer.peer_id,
-            PeerId::from_public_key(&keypair.public())
-        );
+        let content = HashMap::new();
+
+        let result = message_layer.send(content, TEST_TOPIC);
+
+        assert!(result.is_ok(), "Failed to send message: {:?}", result);
     }
 }
