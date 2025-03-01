@@ -97,6 +97,14 @@ impl ConnectionManager {
     pub fn get_bootstrap_peers(&self) -> &[(PeerId, Multiaddr)] {
         &self.bootstrap_peers
     }
+
+    pub fn get_connected_peers(&self) -> Vec<PeerId> {
+        self.connections
+            .iter()
+            .filter(|(_, conn)| conn.status == ConnectionStatus::Connected)
+            .map(|(peer_id, _)| *peer_id)
+            .collect()
+    }
 }
 
 pub struct Connection {
@@ -335,5 +343,26 @@ mod tests {
             ConnectionManager::new(bootstrap_peers.clone(), connection_timeout);
 
         assert_eq!(connection_manager.get_bootstrap_peers(), &bootstrap_peers);
+    }
+
+    #[test]
+    fn test_get_connected_peers() {
+        let bootstrap_peers = vec![];
+        let connection_timeout = Duration::from_secs(10);
+        let mut connection_manager = ConnectionManager::new(bootstrap_peers, connection_timeout);
+
+        let peer_id = PeerId::random();
+        let addr: Multiaddr = PEER_ADDR.parse().unwrap();
+        let connected_point = ConnectedPoint::Dialer {
+            address: addr.clone(),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        connection_manager.add_peer(peer_id, addr.clone());
+        connection_manager.on_peer_connected(&peer_id, connected_point.clone());
+
+        let connected_peers = connection_manager.get_connected_peers();
+        assert_eq!(connected_peers.len(), 1);
+        assert_eq!(connected_peers[0], peer_id);
     }
 }
