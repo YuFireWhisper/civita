@@ -77,6 +77,10 @@ impl ConnectionManager {
             connection.status = ConnectionStatus::Disconnected;
         }
     }
+
+    pub fn is_banned(&self, peer_id: &PeerId) -> bool {
+        self.banned_peers.contains(peer_id)
+    }
 }
 
 pub struct Connection {
@@ -257,5 +261,25 @@ mod tests {
             connection_manager.connections[&peer_id].status,
             ConnectionStatus::Disconnected
         );
+    }
+
+    #[test]
+    fn test_is_banned() {
+        let bootstrap_peers = vec![];
+        let connection_timeout = Duration::from_secs(10);
+        let mut connection_manager = ConnectionManager::new(bootstrap_peers, connection_timeout);
+
+        let peer_id = PeerId::random();
+        let addr: Multiaddr = PEER_ADDR.parse().unwrap();
+        let connected_point = ConnectedPoint::Dialer {
+            address: addr.clone(),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        connection_manager.add_peer(peer_id, addr.clone());
+        connection_manager.on_peer_connected(&peer_id, connected_point.clone());
+        connection_manager.ban_peer(peer_id);
+
+        assert!(connection_manager.is_banned(&peer_id));
     }
 }
