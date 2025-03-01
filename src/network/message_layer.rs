@@ -2,8 +2,14 @@ use std::sync::Arc;
 
 use libp2p::{gossipsub::MessageId, identity::Keypair, PeerId};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::p2p_communication::P2PCommunication;
+
+#[derive(Debug, Error)]
+pub enum MessageLayerError {}
+
+type MessageLayerResult<T> = std::result::Result<T, MessageLayerError>;
 
 pub struct MessageLayer<T: Serialize> {
     p2p: P2PCommunication,
