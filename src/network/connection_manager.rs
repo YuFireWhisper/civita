@@ -93,6 +93,10 @@ impl ConnectionManager {
             .map(|(peer_id, _)| *peer_id)
             .collect()
     }
+
+    pub fn get_bootstrap_peers(&self) -> &[(PeerId, Multiaddr)] {
+        &self.bootstrap_peers
+    }
 }
 
 pub struct Connection {
@@ -321,5 +325,15 @@ mod tests {
         let inactive_peers = connection_manager.get_inactive_peers(Duration::from_secs(5));
         assert_eq!(inactive_peers.len(), 1);
         assert_eq!(inactive_peers[0], peer_id);
+    }
+
+    #[test]
+    fn test_get_bootstrap_peers() {
+        let bootstrap_peers = vec![(PeerId::random(), PEER_ADDR.parse().unwrap())];
+        let connection_timeout = Duration::from_secs(10);
+        let connection_manager =
+            ConnectionManager::new(bootstrap_peers.clone(), connection_timeout);
+
+        assert_eq!(connection_manager.get_bootstrap_peers(), &bootstrap_peers);
     }
 }
