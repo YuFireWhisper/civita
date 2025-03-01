@@ -193,10 +193,11 @@ mod tests {
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
     const TEST_TOPIC: &str = "test_topic";
 
-    struct TestCommunication {
-        peer_id: PeerId,
-        listen_addr: Multiaddr,
-        p2p: P2PCommunication,
+    pub struct TestCommunication {
+        pub peer_id: PeerId,
+        pub keypair: Keypair,
+        pub listen_addr: Multiaddr,
+        pub p2p: P2PCommunication,
     }
 
     impl TestCommunication {
@@ -211,6 +212,7 @@ mod tests {
 
             Ok(Self {
                 peer_id,
+                keypair,
                 listen_addr: Self::get_actual_listen_addr(&p2p.swarm),
                 p2p,
             })
