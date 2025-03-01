@@ -181,10 +181,9 @@ mod tests {
     use std::{sync::atomic::Ordering, time::Duration};
     use tokio::time::timeout;
 
-    use crate::network::p2p_communication::test_communication::TestCommunication;
+    use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TOPIC};
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
-    const TEST_TOPIC: &str = "test_topic";
 
     #[tokio::test]
     async fn test_new() {
@@ -369,7 +368,7 @@ pub mod test_communication {
     use super::P2PCommunication;
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
-    const TEST_TOPIC: &str = "test_topic";
+    pub const TEST_TOPIC: &str = "test_topic";
 
     pub struct TestCommunication {
         pub peer_id: PeerId,
