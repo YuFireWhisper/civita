@@ -25,6 +25,10 @@ impl DiscoveryService {
             addresses.push(addr);
         }
     }
+
+    pub fn get_peer_addresses(&self, peer_id: &PeerId) -> Option<&Vec<Multiaddr>> {
+        self.peer_addresses.get(peer_id)
+    }
 }
 
 #[cfg(test)]
@@ -63,5 +67,19 @@ mod tests {
             discovery_service.peer_addresses.get(&peer_id).unwrap()[0],
             addr
         );
+    }
+
+    #[test]
+    fn test_get_peer_addresses() {
+        let mut discovery_service = DiscoveryService::new();
+        let peer_id = PeerId::random();
+        let addr: Multiaddr = PEER_ADDR.parse().unwrap();
+
+        discovery_service.add_peer_address(peer_id, addr.clone());
+
+        let addresses = discovery_service.get_peer_addresses(&peer_id).unwrap();
+
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0], addr);
     }
 }
