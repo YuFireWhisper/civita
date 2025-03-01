@@ -31,7 +31,7 @@ mod tests {
 
     use libp2p::PeerId;
 
-    use crate::core::community_id::CommunityId;
+    use crate::community::community_id::CommunityId;
 
     #[test]
     fn test_new() {

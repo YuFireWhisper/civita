@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use libp2p::PeerId;
 use thiserror::Error;
 
-use super::community_id::CommunityId;
+use crate::community::community_id::CommunityId;
 
 #[derive(Debug, Error)]
 pub enum CommunityError {
@@ -66,8 +66,8 @@ impl Community {
 mod tests {
     use libp2p::PeerId;
 
+    use crate::community::community_id::CommunityId;
     use crate::core::community::Community;
-    use crate::core::community_id::CommunityId;
 
     #[test]
     fn test_new() {
