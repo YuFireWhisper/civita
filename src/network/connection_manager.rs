@@ -81,6 +81,18 @@ impl ConnectionManager {
     pub fn is_banned(&self, peer_id: &PeerId) -> bool {
         self.banned_peers.contains(peer_id)
     }
+
+    pub fn get_inactive_peers(&self, timeout: Duration) -> Vec<PeerId> {
+        let now = Instant::now();
+        self.connections
+            .iter()
+            .filter(|(_, conn)| {
+                conn.status == ConnectionStatus::Connected
+                    && now.duration_since(conn.last_seen) > timeout
+            })
+            .map(|(peer_id, _)| *peer_id)
+            .collect()
+    }
 }
 
 pub struct Connection {
@@ -281,5 +293,33 @@ mod tests {
         connection_manager.ban_peer(peer_id);
 
         assert!(connection_manager.is_banned(&peer_id));
+    }
+
+    #[test]
+    fn test_get_inactive_peers() {
+        let bootstrap_peers = vec![];
+        let connection_timeout = Duration::from_secs(10);
+        let mut connection_manager = ConnectionManager::new(bootstrap_peers, connection_timeout);
+
+        let peer_id = PeerId::random();
+        let addr: Multiaddr = PEER_ADDR.parse().unwrap();
+        let connected_point = ConnectedPoint::Dialer {
+            address: addr.clone(),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        connection_manager.add_peer(peer_id, addr.clone());
+        connection_manager.on_peer_connected(&peer_id, connected_point.clone());
+
+        let inactive_peers = connection_manager.get_inactive_peers(Duration::from_secs(20));
+        assert_eq!(inactive_peers.len(), 0);
+
+        let inactive_peers = connection_manager.get_inactive_peers(Duration::from_secs(5));
+        assert_eq!(inactive_peers.len(), 0);
+
+        std::thread::sleep(Duration::from_secs(10));
+        let inactive_peers = connection_manager.get_inactive_peers(Duration::from_secs(5));
+        assert_eq!(inactive_peers.len(), 1);
+        assert_eq!(inactive_peers[0], peer_id);
     }
 }
