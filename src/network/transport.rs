@@ -1,6 +1,5 @@
 use std::{io, sync::Arc};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     futures::StreamExt,
@@ -54,8 +53,6 @@ type TransportResult<T> = Result<T, Error>;
 
 pub struct Transport {
     swarm: Arc<tokio::sync::Mutex<Swarm<P2PBehaviour>>>,
-    message_sender: Sender<Message>,
-    message_receiver: Arc<Receiver<Message>>,
     receive_task: Option<JoinHandle<TransportResult<()>>>,
     keypair: Keypair,
 }
@@ -63,8 +60,6 @@ pub struct Transport {
 impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2PCommunication")
-            .field("message_sender", &self.message_sender)
-            .field("message_receiver", &self.message_receiver)
             .field("receive_task", &self.receive_task.is_some())
             .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>") // We just want to show that the field exists, not its value
             .finish()
@@ -100,12 +95,8 @@ impl Transport {
         );
         swarm.listen_on(listen_addr)?;
 
-        let (message_sender, message_receiver) = unbounded();
-
         Ok(Self {
             swarm: Arc::new(tokio::sync::Mutex::new(swarm)),
-            message_sender,
-            message_receiver: Arc::new(message_receiver),
             receive_task: None,
             keypair,
         })
@@ -200,10 +191,6 @@ impl Transport {
         Ok(())
     }
 
-    pub fn message_receiver(&self) -> Arc<Receiver<Message>> {
-        self.message_receiver.clone()
-    }
-
     pub async fn swarm(&self) -> MutexGuard<'_, Swarm<P2PBehaviour>> {
         self.swarm.lock().await
     }
@@ -217,14 +204,10 @@ impl Transport {
         T: Fn(Message) + Send + Sync + 'static,
     {
         let swarm = Arc::clone(&self.swarm);
-        let (message_sender, message_receiver) = unbounded();
-        let message_receiver = Arc::new(message_receiver);
         let keypair = self.keypair.clone();
 
         let mut cloned = Self {
             swarm,
-            message_sender,
-            message_receiver,
             receive_task: None,
             keypair,
         };
