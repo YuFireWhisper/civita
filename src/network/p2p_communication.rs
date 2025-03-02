@@ -373,7 +373,7 @@ mod tests {
 
         node.p2p.is_receiving_messages.store(true, Ordering::SeqCst);
 
-        node.p2p.stop_receive();
+        node.p2p.stop_receive().expect("Failed to stop receiving messages");
 
         assert!(
             !node.p2p.is_receiving_messages.load(Ordering::SeqCst),
