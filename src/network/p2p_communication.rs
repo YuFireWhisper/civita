@@ -66,6 +66,34 @@ pub struct P2PCommunication {
     receive_task: Option<JoinHandle<P2PCommunicationResult<()>>>,
 }
 
+impl std::fmt::Debug for P2PCommunication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("P2PCommunication")
+            .field("message_sender", &self.message_sender)
+            .field("message_receiver", &self.message_receiver)
+            .field("is_receiving_messages", &self.is_receiving_messages)
+            .field("receive_task", &self.receive_task.is_some())
+            .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>") // We just want to show that the field exists, not its value
+            .finish()
+    }
+}
+
+impl PartialEq for P2PCommunication {
+    fn eq(&self, other: &Self) -> bool {
+        let self_peer_id = match self.swarm.try_lock() {
+            Ok(swarm) => *swarm.local_peer_id(),
+            Err(_) => return false, // If we can't lock, consider them not equal
+        };
+        
+        let other_peer_id = match other.swarm.try_lock() {
+            Ok(swarm) => *swarm.local_peer_id(),
+            Err(_) => return false, // If we can't lock, consider them
+        };
+        
+        self_peer_id == other_peer_id
+    }
+}
+
 impl P2PCommunication {
     pub fn new(keypair: Keypair, listen_addr: Multiaddr) -> P2PCommunicationResult<Self> {
         let transport = Self::create_transport(keypair.clone());
