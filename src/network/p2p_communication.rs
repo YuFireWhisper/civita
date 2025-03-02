@@ -1,11 +1,4 @@
-use std::{
-    io,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time,
-};
+use std::{io, sync::Arc, time};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
@@ -62,7 +55,6 @@ pub struct P2PCommunication {
     swarm: Arc<tokio::sync::Mutex<Swarm<P2PBehaviour>>>,
     message_sender: Sender<P2PMessage>,
     message_receiver: Arc<Receiver<P2PMessage>>,
-    is_receiving_messages: Arc<AtomicBool>,
     receive_task: Option<JoinHandle<P2PCommunicationResult<()>>>,
 }
 
@@ -71,7 +63,6 @@ impl std::fmt::Debug for P2PCommunication {
         f.debug_struct("P2PCommunication")
             .field("message_sender", &self.message_sender)
             .field("message_receiver", &self.message_receiver)
-            .field("is_receiving_messages", &self.is_receiving_messages)
             .field("receive_task", &self.receive_task.is_some())
             .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>") // We just want to show that the field exists, not its value
             .finish()
@@ -84,12 +75,12 @@ impl PartialEq for P2PCommunication {
             Ok(swarm) => *swarm.local_peer_id(),
             Err(_) => return false, // If we can't lock, consider them not equal
         };
-        
+
         let other_peer_id = match other.swarm.try_lock() {
             Ok(swarm) => *swarm.local_peer_id(),
             Err(_) => return false, // If we can't lock, consider them
         };
-        
+
         self_peer_id == other_peer_id
     }
 }
@@ -113,7 +104,6 @@ impl P2PCommunication {
             swarm: Arc::new(tokio::sync::Mutex::new(swarm)),
             message_sender,
             message_receiver: Arc::new(message_receiver),
-            is_receiving_messages: Arc::new(AtomicBool::new(false)),
             receive_task: None,
         })
     }
@@ -156,18 +146,15 @@ impl P2PCommunication {
     }
 
     pub async fn start_receive(&mut self, sleep_duration: tokio::time::Duration) {
-        if self.is_receiving_messages.load(Ordering::SeqCst) {
+        if self.receive_task.is_some() {
             return;
         }
 
-        self.is_receiving_messages.store(true, Ordering::SeqCst);
-
         let swarm = self.swarm.clone();
         let message_sender = self.message_sender.clone();
-        let is_receiving_messages = self.is_receiving_messages.clone();
 
         let task = tokio::spawn(async move {
-            while is_receiving_messages.load(Ordering::SeqCst) {
+            loop {
                 let event = {
                     let mut swarm_lock = swarm.lock().await;
                     tokio::select! {
@@ -199,17 +186,14 @@ impl P2PCommunication {
                     }
                 }
             }
-            Ok(())
         });
 
         self.receive_task = Some(task);
     }
 
     pub fn stop_receive(&mut self) -> P2PCommunicationResult<()> {
-        self.is_receiving_messages.store(false, Ordering::SeqCst);
-
         if let Some(task) = self.receive_task.take() {
-            let _ = tokio::runtime::Handle::current().block_on(task)?;
+            task.abort();
         }
 
         Ok(())
@@ -221,6 +205,10 @@ impl P2PCommunication {
 
     pub async fn swarm(&self) -> MutexGuard<'_, Swarm<P2PBehaviour>> {
         self.swarm.lock().await
+    }
+
+    pub fn is_receiving(&self) -> bool {
+        self.receive_task.is_some()
     }
 }
 
@@ -235,7 +223,7 @@ pub struct P2PMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::atomic::Ordering, time::Duration};
+    use std::time::Duration;
     use tokio::time::timeout;
 
     use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TOPIC};
@@ -344,7 +332,6 @@ mod tests {
             connection_result.err()
         );
 
-        let is_receiving = node2.p2p.is_receiving_messages.clone();
         let receiver = node2.p2p.message_receiver();
 
         let receive_handle = tokio::spawn(async move {
@@ -372,8 +359,6 @@ mod tests {
         .await
         .expect("Failed to join the receive task");
 
-        is_receiving.store(false, Ordering::SeqCst);
-
         timeout(Duration::from_secs(1), receive_handle)
             .await
             .expect("Timeout waiting for receive task to end")
@@ -395,19 +380,23 @@ mod tests {
         let mut node = TestCommunication::new().await.unwrap();
 
         assert!(
-            !node.p2p.is_receiving_messages.load(Ordering::SeqCst),
-            "is_receiving_messages should be false initially"
+            !node.p2p.is_receiving(),
+            "receive_task should be None initially"
         );
 
-        node.p2p.is_receiving_messages.store(true, Ordering::SeqCst);
-
         node.p2p
-            .stop_receive()
-            .expect("Failed to stop receiving messages");
-
+            .start_receive(tokio::time::Duration::from_millis(10))
+            .await;
         assert!(
-            !node.p2p.is_receiving_messages.load(Ordering::SeqCst),
-            "is_receiving_messages should be false after calling stop_receive"
+            node.p2p.is_receiving(),
+            "receive_task should be Some after calling start_receive"
+        );
+
+        let stop_result = node.p2p.stop_receive();
+        assert!(
+            stop_result.is_ok(),
+            "Should stop receiving messages: {:?}",
+            stop_result.err()
         );
     }
 }
