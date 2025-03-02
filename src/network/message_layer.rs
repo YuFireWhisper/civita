@@ -21,7 +21,7 @@ pub enum MessageLayerError {
     #[error("Failed to sign message: {0}")]
     Signing(#[from] identity::SigningError),
     #[error("Failed to publish message: {0}")]
-    Publishing(#[from] transport::TransportError),
+    Publishing(#[from] transport::Error),
     #[error("Failed to lock mutex: {0}")]
     Mutex(String),
     #[error("Failed to receive message: {0}")]

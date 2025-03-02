@@ -16,7 +16,7 @@ use tokio::{sync::MutexGuard, task::JoinHandle};
 use super::p2p_behaviour::{self, P2PBehaviour, P2PEvent};
 
 #[derive(Debug, Error)]
-pub enum TransportError {
+pub enum Error {
     #[error("Transport Error: {0}")]
     Transport(#[from] libp2p::TransportError<io::Error>),
     #[error("Dial Error: {0}")]
@@ -37,19 +37,19 @@ pub enum TransportError {
     TaskJoin(String),
 }
 
-impl From<crossbeam_channel::SendError<P2PMessage>> for TransportError {
+impl From<crossbeam_channel::SendError<P2PMessage>> for Error {
     fn from(err: crossbeam_channel::SendError<P2PMessage>) -> Self {
-        TransportError::CrossbeamChannel(err.to_string())
+        Error::CrossbeamChannel(err.to_string())
     }
 }
 
-impl From<tokio::task::JoinError> for TransportError {
+impl From<tokio::task::JoinError> for Error {
     fn from(err: tokio::task::JoinError) -> Self {
-        TransportError::TaskJoin(err.to_string())
+        Error::TaskJoin(err.to_string())
     }
 }
 
-type TransportResult<T> = Result<T, TransportError>;
+type TransportResult<T> = Result<T, Error>;
 
 pub struct Transport {
     swarm: Arc<tokio::sync::Mutex<Swarm<P2PBehaviour>>>,
