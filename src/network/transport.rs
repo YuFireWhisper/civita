@@ -37,8 +37,8 @@ pub enum Error {
     TaskJoin(String),
 }
 
-impl From<crossbeam_channel::SendError<P2PMessage>> for Error {
-    fn from(err: crossbeam_channel::SendError<P2PMessage>) -> Self {
+impl From<crossbeam_channel::SendError<Message>> for Error {
+    fn from(err: crossbeam_channel::SendError<Message>) -> Self {
         Error::CrossbeamChannel(err.to_string())
     }
 }
@@ -53,8 +53,8 @@ type TransportResult<T> = Result<T, Error>;
 
 pub struct Transport {
     swarm: Arc<tokio::sync::Mutex<Swarm<P2PBehaviour>>>,
-    message_sender: Sender<P2PMessage>,
-    message_receiver: Arc<Receiver<P2PMessage>>,
+    message_sender: Sender<Message>,
+    message_receiver: Arc<Receiver<Message>>,
     receive_task: Option<JoinHandle<TransportResult<()>>>,
 }
 
@@ -174,7 +174,7 @@ impl Transport {
                     {
                         let timestamp = chrono::Utc::now().timestamp() as u64;
 
-                        let p2p_message = P2PMessage {
+                        let p2p_message = Message {
                             message_id,
                             source: propagation_source,
                             topic: message.topic.into_string(),
@@ -199,7 +199,7 @@ impl Transport {
         Ok(())
     }
 
-    pub fn message_receiver(&self) -> Arc<Receiver<P2PMessage>> {
+    pub fn message_receiver(&self) -> Arc<Receiver<Message>> {
         self.message_receiver.clone()
     }
 
@@ -232,7 +232,7 @@ impl Transport {
 }
 
 #[derive(Debug)]
-pub struct P2PMessage {
+pub struct Message {
     pub message_id: MessageId,
     pub source: PeerId,
     pub topic: String,
