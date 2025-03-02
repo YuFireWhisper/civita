@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::sync::PoisonError;
 
+use crossbeam_channel::Receiver;
 use libp2p::{
     gossipsub::MessageId,
     identity::{self, Keypair},
@@ -8,6 +10,7 @@ use libp2p::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::p2p_communication::P2PMessage;
 use super::p2p_communication::{self, P2PCommunication};
 
 #[derive(Debug, Error)]
@@ -18,18 +21,34 @@ pub enum MessageLayerError {
     Signing(#[from] identity::SigningError),
     #[error("Failed to publish message: {0}")]
     Publishing(#[from] p2p_communication::P2PCommunicationError),
+    #[error("Failed to lock mutex: {0}")]
+    Mutex(String),
+    #[error("Failed to receive message: {0}")]
+    Receive(#[from] crossbeam_channel::RecvError),
+}
+
+impl<T> From<PoisonError<T>> for MessageLayerError {
+    fn from(error: PoisonError<T>) -> Self {
+        MessageLayerError::Mutex(error.to_string())
+    }
 }
 
 type MessageLayerResult<T> = std::result::Result<T, MessageLayerError>;
 
-pub struct MessageLayer<T: Serialize> {
+pub struct MessageLayer<T>
+where
+    T: Serialize + for<'de> Deserialize<'de>,
+{
     p2p: P2PCommunication,
     keypair: Keypair,
     peer_id: PeerId,
     handler: Arc<MessageHandler<T>>,
 }
 
-impl<T: Serialize> MessageLayer<T> {
+impl<T> MessageLayer<T>
+where
+    T: Serialize + for<'de> Deserialize<'de> + 'static,
+{
     pub fn new(p2p: P2PCommunication, keypair: Keypair, handler: Arc<MessageHandler<T>>) -> Self {
         let peer_id = PeerId::from_public_key(&keypair.public());
         Self {
@@ -40,7 +59,7 @@ impl<T: Serialize> MessageLayer<T> {
         }
     }
 
-    pub fn send(&mut self, content: T, topic: &str) -> MessageLayerResult<()> {
+    pub async fn send(&mut self, content: T, topic: &str) -> MessageLayerResult<()> {
         let timestamp = chrono::Utc::now().timestamp() as u64;
 
         let mut message = SentMessage {
@@ -56,8 +75,57 @@ impl<T: Serialize> MessageLayer<T> {
 
         let data = serde_json::to_vec(&message)?;
 
-        self.p2p.publish(topic, data)?;
+        self.p2p
+            .publish(topic, data)
+            .await
+            .map_err(MessageLayerError::Publishing)?;
 
+        Ok(())
+    }
+
+    pub async fn start(&mut self, sleep_duration: tokio::time::Duration) -> MessageLayerResult<()> {
+        self.p2p.start_receive(sleep_duration).await;
+        self.spawn_message_handler();
+        Ok(())
+    }
+
+    fn spawn_message_handler(&self) {
+        let message_receiver = self.p2p.message_receiver();
+        let handler = self.handler.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let message = match Self::blocking_receive(message_receiver.clone()).await {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        eprintln!("Failed to receive message: {:?}", e);
+                        continue;
+                    }
+                };
+
+                if let Err(e) = Self::process_received_message(message, handler.clone()) {
+                    eprintln!("Message processing failed: {:?}", e);
+                }
+            }
+        });
+    }
+
+    async fn blocking_receive(
+        receiver: Arc<Receiver<P2PMessage>>,
+    ) -> MessageLayerResult<P2PMessage> {
+        let recv_result = tokio::task::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|e| MessageLayerError::Mutex(e.to_string()))?;
+        recv_result.map_err(MessageLayerError::from)
+    }
+
+    fn process_received_message(
+        message: P2PMessage,
+        handler: Arc<MessageHandler<T>>,
+    ) -> MessageLayerResult<()> {
+        let received_message: ReceivedMessage<T> =
+            message.try_into().map_err(MessageLayerError::from)?;
+        handler(received_message);
         Ok(())
     }
 }
@@ -65,14 +133,20 @@ impl<T: Serialize> MessageLayer<T> {
 type MessageHandler<T> = dyn Fn(ReceivedMessage<T>) + Send + Sync;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SentMessage<T: Serialize> {
+pub struct SentMessage<T>
+where
+    T: Serialize,
+{
     pub content: T,
     pub timestamp: u64,
     pub signature: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ReceivedMessage<T> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivedMessage<T>
+where
+    T: Serialize,
+{
     pub content: T,
     pub timestamp: u64,
     pub signature: Vec<u8>,
@@ -81,12 +155,34 @@ pub struct ReceivedMessage<T> {
     pub topic: String,
 }
 
+impl<T> TryFrom<P2PMessage> for ReceivedMessage<T>
+where
+    T: Serialize + for<'de> Deserialize<'de>,
+{
+    type Error = serde_json::Error;
+
+    fn try_from(p2p_message: P2PMessage) -> Result<Self, Self::Error> {
+        let sent_message: SentMessage<T> = serde_json::from_slice(&p2p_message.data)?;
+        Ok(ReceivedMessage {
+            content: sent_message.content,
+            timestamp: p2p_message.timestamp,
+            signature: sent_message.signature,
+            message_id: p2p_message.message_id,
+            source: p2p_message.source,
+            topic: p2p_message.topic,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use libp2p::futures::channel::oneshot;
+    use tokio::time::timeout;
+
     use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TOPIC};
 
     use super::*;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, time::Duration};
 
     #[tokio::test]
     async fn test_new() {
@@ -113,8 +209,55 @@ mod tests {
 
         let content = HashMap::new();
 
-        let result = message_layer.send(content, TEST_TOPIC);
+        let result = message_layer.send(content, TEST_TOPIC).await;
 
         assert!(result.is_ok(), "Failed to send message: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_start() {
+        let mut node1 = TestCommunication::new().await.unwrap();
+        let mut node2 = TestCommunication::new().await.unwrap();
+
+        node1
+            .establish_gossipsub_connection(&mut node2)
+            .await
+            .unwrap();
+
+        let (tx, rx) = oneshot::channel::<ReceivedMessage<HashMap<String, String>>>();
+        let tx = std::sync::Mutex::new(Some(tx));
+
+        let handler = Arc::new(move |msg: ReceivedMessage<HashMap<String, String>>| {
+            let mut tx_guard = tx.lock().unwrap();
+            if let Some(tx) = tx_guard.take() {
+                let _ = tx.send(msg);
+            }
+        });
+
+        let mut message_layer2 = MessageLayer::new(node2.p2p, node2.keypair, handler);
+        message_layer2
+            .start(Duration::from_millis(100))
+            .await
+            .unwrap();
+
+        let handler_noop = Arc::new(|_: ReceivedMessage<HashMap<String, String>>| {});
+        let mut message_layer1 = MessageLayer::new(node1.p2p, node1.keypair, handler_noop);
+
+        let mut content = HashMap::new();
+        content.insert("test".to_string(), "value".to_string());
+
+        message_layer1
+            .send(content.clone(), TEST_TOPIC)
+            .await
+            .unwrap();
+
+        match timeout(Duration::from_secs(3), rx).await {
+            Ok(Ok(received_msg)) => {
+                assert_eq!(received_msg.content.get("test"), Some(&"value".to_string()));
+                assert_eq!(received_msg.topic, TEST_TOPIC.to_string());
+            }
+            Ok(Err(e)) => panic!("Channel error: {:?}", e),
+            Err(_) => panic!("Timed out waiting for message"),
+        }
     }
 }
