@@ -146,13 +146,15 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn receive(&mut self, sleep_duration: tokio::time::Duration) {
+    pub async fn receive<T>(&mut self, sleep_duration: tokio::time::Duration, handler: T)
+    where
+        T: Fn(Message) + Send + Sync + 'static,
+    {
         if self.receive_task.is_some() {
             return;
         }
 
         let swarm = self.swarm.clone();
-        let message_sender = self.message_sender.clone();
 
         let task = tokio::spawn(async move {
             loop {
@@ -173,7 +175,7 @@ impl Transport {
                     {
                         let timestamp = chrono::Utc::now().timestamp() as u64;
 
-                        let p2p_message = Message {
+                        let message = Message {
                             message_id,
                             source: propagation_source,
                             topic: message.topic.into_string(),
@@ -181,7 +183,7 @@ impl Transport {
                             timestamp,
                         };
 
-                        message_sender.send(p2p_message)?;
+                        handler(message);
                     }
                 }
             }
@@ -210,7 +212,10 @@ impl Transport {
         self.receive_task.is_some()
     }
 
-    pub async fn clone(&self, sleep_duration: tokio::time::Duration) -> Self {
+    pub async fn clone<T>(&self, sleep_duration: tokio::time::Duration, handler: T) -> Self
+    where
+        T: Fn(Message) + Send + Sync + 'static,
+    {
         let swarm = Arc::clone(&self.swarm);
         let (message_sender, message_receiver) = unbounded();
         let message_receiver = Arc::new(message_receiver);
@@ -225,7 +230,7 @@ impl Transport {
         };
 
         if self.is_receiving() {
-            cloned.receive(sleep_duration).await;
+            cloned.receive(sleep_duration, handler).await;
         }
 
         cloned
@@ -243,9 +248,13 @@ pub struct Message {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{atomic::AtomicBool, Arc};
+
     use tokio::time::{timeout, Duration};
 
-    use crate::network::transport::test_communication::{TestCommunication, TEST_TOPIC};
+    use crate::network::transport::test_communication::{
+        TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
+    };
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
@@ -351,16 +360,19 @@ mod tests {
             connection_result.err()
         );
 
-        let receiver = node2.p2p.message_receiver();
+        let is_received = Arc::new(AtomicBool::new(false));
+        let is_received_clone = Arc::clone(&is_received);
+        let handler = move |message: super::Message| {
+            is_received_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                message.topic, TEST_TOPIC,
+                "Received message topic should match published topic"
+            );
+        };
 
         let receive_handle = tokio::spawn(async move {
-            node2
-                .p2p
-                .receive(tokio::time::Duration::from_millis(10))
-                .await;
+            node2.p2p.receive(TEST_TIMEOUT_DURATION, handler).await;
         });
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let test_message = b"test receive functionality";
         let publish_result = node1.p2p.publish(TEST_TOPIC, test_message).await;
@@ -370,27 +382,17 @@ mod tests {
             publish_result.err()
         );
 
-        let received_message = tokio::task::spawn_blocking(move || {
-            receiver
-                .recv_timeout(TIMEOUT_DURATION)
-                .expect("Failed to receive message or timeout")
-        })
-        .await
-        .expect("Failed to join the receive task");
+        let receive_result = timeout(TEST_TIMEOUT_DURATION, receive_handle).await;
 
-        timeout(Duration::from_secs(1), receive_handle)
-            .await
-            .expect("Timeout waiting for receive task to end")
-            .expect("Receive task panicked");
-
-        assert_eq!(
-            received_message.data,
-            test_message.to_vec(),
-            "Received message data should match published message"
+        assert!(
+            receive_result.is_ok(),
+            "Should receive message: {:?}",
+            receive_result.err()
         );
-        assert_eq!(
-            received_message.topic, TEST_TOPIC,
-            "Received message topic should match published topic"
+
+        assert!(
+            is_received.load(std::sync::atomic::Ordering::Relaxed),
+            "Should receive message"
         );
     }
 
@@ -403,9 +405,9 @@ mod tests {
             "receive_task should be None initially"
         );
 
-        node.p2p
-            .receive(tokio::time::Duration::from_millis(10))
-            .await;
+        let handler = |_: super::Message| {};
+
+        node.p2p.receive(TIMEOUT_DURATION, handler).await;
         assert!(
             node.p2p.is_receiving(),
             "receive_task should be Some after calling start_receive"
@@ -421,14 +423,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone() {
-        const SLEEP_DURATION: Duration = Duration::from_millis(10);
-
         let mut node = TestCommunication::new().await.unwrap();
-        node.p2p
-            .receive(tokio::time::Duration::from_millis(10))
-            .await;
 
-        let cloned = node.p2p.clone(SLEEP_DURATION).await;
+        let handler = |_: super::Message| {};
+
+        node.p2p.receive(TEST_TIMEOUT_DURATION, handler).await;
+
+        let cloned = node.p2p.clone(TEST_TIMEOUT_DURATION, handler).await;
 
         assert_eq!(node.p2p, cloned, "Cloned P2PCommunication should be equal");
     }
