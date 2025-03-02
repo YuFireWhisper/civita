@@ -139,18 +139,14 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn publish(
-        &self,
-        topic: &str,
-        data: impl Into<Vec<u8>>,
-    ) -> TransportResult<()> {
+    pub async fn publish(&self, topic: &str, data: impl Into<Vec<u8>>) -> TransportResult<()> {
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
         swarm.behaviour_mut().gossipsub_mut().publish(topic, data)?;
         Ok(())
     }
 
-    pub async fn start_receive(&mut self, sleep_duration: tokio::time::Duration) {
+    pub async fn receive(&mut self, sleep_duration: tokio::time::Duration) {
         if self.receive_task.is_some() {
             return;
         }
@@ -229,7 +225,7 @@ impl Transport {
         };
 
         if self.is_receiving() {
-            cloned.start_receive(sleep_duration).await;
+            cloned.receive(sleep_duration).await;
         }
 
         cloned
@@ -344,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_receive() {
+    async fn test_receive() {
         let mut node1 = TestCommunication::new().await.unwrap();
         let mut node2 = TestCommunication::new().await.unwrap();
 
@@ -360,7 +356,7 @@ mod tests {
         let receive_handle = tokio::spawn(async move {
             node2
                 .p2p
-                .start_receive(tokio::time::Duration::from_millis(10))
+                .receive(tokio::time::Duration::from_millis(10))
                 .await;
         });
 
@@ -408,7 +404,7 @@ mod tests {
         );
 
         node.p2p
-            .start_receive(tokio::time::Duration::from_millis(10))
+            .receive(tokio::time::Duration::from_millis(10))
             .await;
         assert!(
             node.p2p.is_receiving(),
@@ -429,7 +425,7 @@ mod tests {
 
         let mut node = TestCommunication::new().await.unwrap();
         node.p2p
-            .start_receive(tokio::time::Duration::from_millis(10))
+            .receive(tokio::time::Duration::from_millis(10))
             .await;
 
         let cloned = node.p2p.clone(SLEEP_DURATION).await;

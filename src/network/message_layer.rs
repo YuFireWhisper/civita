@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::transport;
-use super::transport::P2PMessage;
+use super::transport::Message;
 use super::transport::Transport;
 
 #[derive(Debug, Error)]
@@ -82,7 +82,7 @@ where
     }
 
     pub async fn start(&mut self, sleep_duration: tokio::time::Duration) -> MessageLayerResult<()> {
-        self.p2p.start_receive(sleep_duration).await;
+        self.p2p.receive(sleep_duration).await;
         self.spawn_message_handler();
         Ok(())
     }
@@ -109,8 +109,8 @@ where
     }
 
     async fn blocking_receive(
-        receiver: Arc<Receiver<P2PMessage>>,
-    ) -> MessageLayerResult<P2PMessage> {
+        receiver: Arc<Receiver<Message>>,
+    ) -> MessageLayerResult<Message> {
         let recv_result = tokio::task::spawn_blocking(move || receiver.recv())
             .await
             .map_err(|e| MessageLayerError::Mutex(e.to_string()))?;
@@ -118,7 +118,7 @@ where
     }
 
     fn process_received_message(
-        message: P2PMessage,
+        message: Message,
         handler: Arc<MessageHandler<T>>,
     ) -> MessageLayerResult<()> {
         let received_message: ReceivedMessage<T> =
@@ -153,13 +153,13 @@ where
     pub topic: String,
 }
 
-impl<T> TryFrom<P2PMessage> for ReceivedMessage<T>
+impl<T> TryFrom<Message> for ReceivedMessage<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
 {
     type Error = serde_json::Error;
 
-    fn try_from(p2p_message: P2PMessage) -> Result<Self, Self::Error> {
+    fn try_from(p2p_message: Message) -> Result<Self, Self::Error> {
         let sent_message: SentMessage<T> = serde_json::from_slice(&p2p_message.data)?;
         Ok(ReceivedMessage {
             content: sent_message.content,
