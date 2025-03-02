@@ -448,7 +448,7 @@ pub mod test_communication {
 
     use super::P2PCommunication;
 
-    const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+    pub const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
     pub const TEST_TOPIC: &str = "test_topic";
 
     pub struct TestCommunication {
