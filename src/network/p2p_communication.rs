@@ -181,7 +181,7 @@ impl P2PCommunication {
         self.is_receiving_messages.store(false, Ordering::SeqCst);
 
         if let Some(task) = self.receive_task.take() {
-            tokio::runtime::Handle::current().block_on(task)?;
+            let _ = tokio::runtime::Handle::current().block_on(task)?;
         }
 
         Ok(())
