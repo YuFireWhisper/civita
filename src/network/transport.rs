@@ -1,4 +1,4 @@
-use std::{io, sync::Arc, time};
+use std::{io, sync::Arc};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
@@ -10,6 +10,7 @@ use libp2p::{
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{sync::MutexGuard, task::JoinHandle};
 
@@ -56,6 +57,7 @@ pub struct Transport {
     message_sender: Sender<Message>,
     message_receiver: Arc<Receiver<Message>>,
     receive_task: Option<JoinHandle<TransportResult<()>>>,
+    keypair: Keypair,
 }
 
 impl std::fmt::Debug for Transport {
@@ -105,6 +107,7 @@ impl Transport {
             message_sender,
             message_receiver: Arc::new(message_receiver),
             receive_task: None,
+            keypair,
         })
     }
 
@@ -215,12 +218,14 @@ impl Transport {
         let swarm = Arc::clone(&self.swarm);
         let (message_sender, message_receiver) = unbounded();
         let message_receiver = Arc::new(message_receiver);
+        let keypair = self.keypair.clone();
 
         let mut cloned = Self {
             swarm,
             message_sender,
             message_receiver,
             receive_task: None,
+            keypair,
         };
 
         if self.is_receiving() {
@@ -231,7 +236,7 @@ impl Transport {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     pub message_id: MessageId,
     pub source: PeerId,
