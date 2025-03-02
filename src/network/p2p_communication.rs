@@ -448,7 +448,7 @@ pub mod test_communication {
 
     use super::P2PCommunication;
 
-    pub const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+    pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
     pub const TEST_TOPIC: &str = "test_topic";
 
     pub struct TestCommunication {
@@ -492,7 +492,7 @@ pub mod test_communication {
         }
 
         async fn wait_for_listen_addr(swarm: &mut Swarm<P2PBehaviour>) -> Result<(), &'static str> {
-            timeout(TIMEOUT_DURATION, async {
+            timeout(TEST_TIMEOUT_DURATION, async {
                 while let Some(event) = swarm.next().await {
                     if let SwarmEvent::NewListenAddr { .. } = event {
                         return Ok(());
@@ -576,7 +576,7 @@ pub mod test_communication {
         }
 
         pub async fn wait_for_gossipsub_message(&mut self) -> Option<Vec<u8>> {
-            timeout(TIMEOUT_DURATION, async {
+            timeout(TEST_TIMEOUT_DURATION, async {
                 let mut swarm = self.p2p.swarm.lock().await;
                 while let Some(event) = swarm.next().await {
                     if let SwarmEvent::Behaviour(P2PEvent::Gossipsub(gossipsub_event)) = event {
@@ -592,7 +592,7 @@ pub mod test_communication {
         }
 
         pub async fn wait_for_kad_event(&mut self) -> bool {
-            timeout(TIMEOUT_DURATION, async {
+            timeout(TEST_TIMEOUT_DURATION, async {
                 let mut swarm = self.p2p.swarm.lock().await;
                 while let Some(event) = swarm.next().await {
                     if let SwarmEvent::Behaviour(_) = event {
