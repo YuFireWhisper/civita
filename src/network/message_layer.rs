@@ -10,8 +10,9 @@ use libp2p::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::p2p_communication::P2PMessage;
-use super::p2p_communication::{self, P2PCommunication};
+use super::transport;
+use super::transport::P2PMessage;
+use super::transport::Transport;
 
 #[derive(Debug, Error)]
 pub enum MessageLayerError {
@@ -20,7 +21,7 @@ pub enum MessageLayerError {
     #[error("Failed to sign message: {0}")]
     Signing(#[from] identity::SigningError),
     #[error("Failed to publish message: {0}")]
-    Publishing(#[from] p2p_communication::P2PCommunicationError),
+    Publishing(#[from] transport::TransportError),
     #[error("Failed to lock mutex: {0}")]
     Mutex(String),
     #[error("Failed to receive message: {0}")]
@@ -39,7 +40,7 @@ pub struct MessageLayer<T>
 where
     T: Serialize + for<'de> Deserialize<'de>,
 {
-    p2p: P2PCommunication,
+    p2p: Transport,
     keypair: Keypair,
     handler: Arc<MessageHandler<T>>,
 }
@@ -48,7 +49,7 @@ impl<T> MessageLayer<T>
 where
     T: Serialize + for<'de> Deserialize<'de> + 'static,
 {
-    pub fn new(p2p: P2PCommunication, keypair: Keypair, handler: Arc<MessageHandler<T>>) -> Self {
+    pub fn new(p2p: Transport, keypair: Keypair, handler: Arc<MessageHandler<T>>) -> Self {
         Self {
             p2p,
             keypair,
@@ -176,7 +177,7 @@ mod tests {
     use libp2p::futures::channel::oneshot;
     use tokio::time::timeout;
 
-    use crate::network::p2p_communication::test_communication::{
+    use crate::network::transport::test_communication::{
         TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
     };
 

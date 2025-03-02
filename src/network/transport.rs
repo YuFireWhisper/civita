@@ -8,7 +8,7 @@ use libp2p::{
     identity::Keypair,
     noise,
     swarm::{self, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, Swarm, Transport,
+    tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use thiserror::Error;
 use tokio::{sync::MutexGuard, task::JoinHandle};
@@ -16,7 +16,7 @@ use tokio::{sync::MutexGuard, task::JoinHandle};
 use super::p2p_behaviour::{self, P2PBehaviour, P2PEvent};
 
 #[derive(Debug, Error)]
-pub enum P2PCommunicationError {
+pub enum TransportError {
     #[error("Transport Error: {0}")]
     Transport(#[from] libp2p::TransportError<io::Error>),
     #[error("Dial Error: {0}")]
@@ -37,28 +37,28 @@ pub enum P2PCommunicationError {
     TaskJoin(String),
 }
 
-impl From<crossbeam_channel::SendError<P2PMessage>> for P2PCommunicationError {
+impl From<crossbeam_channel::SendError<P2PMessage>> for TransportError {
     fn from(err: crossbeam_channel::SendError<P2PMessage>) -> Self {
-        P2PCommunicationError::CrossbeamChannel(err.to_string())
+        TransportError::CrossbeamChannel(err.to_string())
     }
 }
 
-impl From<tokio::task::JoinError> for P2PCommunicationError {
+impl From<tokio::task::JoinError> for TransportError {
     fn from(err: tokio::task::JoinError) -> Self {
-        P2PCommunicationError::TaskJoin(err.to_string())
+        TransportError::TaskJoin(err.to_string())
     }
 }
 
-type P2PCommunicationResult<T> = Result<T, P2PCommunicationError>;
+type TransportResult<T> = Result<T, TransportError>;
 
-pub struct P2PCommunication {
+pub struct Transport {
     swarm: Arc<tokio::sync::Mutex<Swarm<P2PBehaviour>>>,
     message_sender: Sender<P2PMessage>,
     message_receiver: Arc<Receiver<P2PMessage>>,
-    receive_task: Option<JoinHandle<P2PCommunicationResult<()>>>,
+    receive_task: Option<JoinHandle<TransportResult<()>>>,
 }
 
-impl std::fmt::Debug for P2PCommunication {
+impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2PCommunication")
             .field("message_sender", &self.message_sender)
@@ -69,7 +69,7 @@ impl std::fmt::Debug for P2PCommunication {
     }
 }
 
-impl PartialEq for P2PCommunication {
+impl PartialEq for Transport {
     fn eq(&self, other: &Self) -> bool {
         let self_peer_id = match self.swarm.try_lock() {
             Ok(swarm) => *swarm.local_peer_id(),
@@ -85,8 +85,8 @@ impl PartialEq for P2PCommunication {
     }
 }
 
-impl P2PCommunication {
-    pub fn new(keypair: Keypair, listen_addr: Multiaddr) -> P2PCommunicationResult<Self> {
+impl Transport {
+    pub fn new(keypair: Keypair, listen_addr: Multiaddr) -> TransportResult<Self> {
         let transport = Self::create_transport(keypair.clone());
         let behaviour = P2PBehaviour::new(keypair.clone())?;
 
@@ -109,6 +109,8 @@ impl P2PCommunication {
     }
 
     fn create_transport(keypair: Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
+        use libp2p::Transport; // If import at the top, it will conflict with Self
+
         tcp::tokio::Transport::default()
             .upgrade(Version::V1)
             .authenticate(noise::Config::new(&keypair).unwrap())
@@ -116,7 +118,7 @@ impl P2PCommunication {
             .boxed()
     }
 
-    pub async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> P2PCommunicationResult<()> {
+    pub async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> TransportResult<()> {
         let mut swarm = self.swarm.lock().await;
         swarm
             .behaviour_mut()
@@ -127,7 +129,7 @@ impl P2PCommunication {
         Ok(())
     }
 
-    pub async fn subscribe(&self, topic: &str) -> P2PCommunicationResult<()> {
+    pub async fn subscribe(&self, topic: &str) -> TransportResult<()> {
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
         swarm.behaviour_mut().gossipsub_mut().subscribe(&topic)?;
@@ -138,7 +140,7 @@ impl P2PCommunication {
         &self,
         topic: &str,
         data: impl Into<Vec<u8>>,
-    ) -> P2PCommunicationResult<()> {
+    ) -> TransportResult<()> {
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
         swarm.behaviour_mut().gossipsub_mut().publish(topic, data)?;
@@ -191,7 +193,7 @@ impl P2PCommunication {
         self.receive_task = Some(task);
     }
 
-    pub fn stop_receive(&mut self) -> P2PCommunicationResult<()> {
+    pub fn stop_receive(&mut self) -> TransportResult<()> {
         if let Some(task) = self.receive_task.take() {
             task.abort();
         }
@@ -245,7 +247,7 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TOPIC};
+    use crate::network::transport::test_communication::{TestCommunication, TEST_TOPIC};
 
     const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
@@ -446,7 +448,7 @@ pub mod test_communication {
 
     use crate::network::p2p_behaviour::{P2PBehaviour, P2PEvent};
 
-    use super::P2PCommunication;
+    use super::Transport;
 
     pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
     pub const TEST_TOPIC: &str = "test_topic";
@@ -455,7 +457,7 @@ pub mod test_communication {
         pub peer_id: PeerId,
         pub keypair: Keypair,
         pub listen_addr: Multiaddr,
-        pub p2p: P2PCommunication,
+        pub p2p: Transport,
     }
 
     impl TestCommunication {
@@ -463,7 +465,7 @@ pub mod test_communication {
             let keypair = Keypair::generate_ed25519();
             let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
 
-            let p2p = P2PCommunication::new(keypair.clone(), listen_addr.clone())?;
+            let p2p = Transport::new(keypair.clone(), listen_addr.clone())?;
 
             {
                 let mut swarm = p2p.swarm.lock().await;
