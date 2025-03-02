@@ -210,6 +210,25 @@ impl P2PCommunication {
     pub fn is_receiving(&self) -> bool {
         self.receive_task.is_some()
     }
+
+    pub async fn clone(&self, sleep_duration: tokio::time::Duration) -> Self {
+        let swarm = Arc::clone(&self.swarm);
+        let (message_sender, message_receiver) = unbounded();
+        let message_receiver = Arc::new(message_receiver);
+
+        let mut cloned = Self {
+            swarm,
+            message_sender,
+            message_receiver,
+            receive_task: None,
+        };
+
+        if self.is_receiving() {
+            cloned.start_receive(sleep_duration).await;
+        }
+
+        cloned
+    }
 }
 
 #[derive(Debug)]
@@ -398,6 +417,20 @@ mod tests {
             "Should stop receiving messages: {:?}",
             stop_result.err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_clone() {
+        const SLEEP_DURATION: Duration = Duration::from_millis(10);
+
+        let mut node = TestCommunication::new().await.unwrap();
+        node.p2p
+            .start_receive(tokio::time::Duration::from_millis(10))
+            .await;
+
+        let cloned = node.p2p.clone(SLEEP_DURATION).await;
+
+        assert_eq!(node.p2p, cloned, "Cloned P2PCommunication should be equal");
     }
 }
 
