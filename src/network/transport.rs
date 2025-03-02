@@ -172,9 +172,7 @@ impl Transport {
                         message,
                     } = *event
                     {
-                        let timestamp = time::SystemTime::now()
-                            .duration_since(time::UNIX_EPOCH)?
-                            .as_secs();
+                        let timestamp = chrono::Utc::now().timestamp() as u64;
 
                         let p2p_message = P2PMessage {
                             message_id,
@@ -244,8 +242,7 @@ pub struct P2PMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use tokio::time::timeout;
+    use tokio::time::{timeout, Duration};
 
     use crate::network::transport::test_communication::{TestCommunication, TEST_TOPIC};
 
