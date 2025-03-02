@@ -176,7 +176,9 @@ mod tests {
     use libp2p::futures::channel::oneshot;
     use tokio::time::timeout;
 
-    use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC};
+    use crate::network::p2p_communication::test_communication::{
+        TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
+    };
 
     use super::*;
     use std::{collections::HashMap, time::Duration};
@@ -186,8 +188,12 @@ mod tests {
         let communication = TestCommunication::new().await.unwrap();
         let handler = Arc::new(|_: ReceivedMessage<HashMap<String, String>>| {});
 
-        let message_layer = MessageLayer::new(communication.p2p.clone(TEST_TIMEOUT_DURATION).await, communication.keypair, handler);
-    
+        let message_layer = MessageLayer::new(
+            communication.p2p.clone(TEST_TIMEOUT_DURATION).await,
+            communication.keypair,
+            handler,
+        );
+
         assert_eq!(message_layer.p2p, communication.p2p);
     }
 
