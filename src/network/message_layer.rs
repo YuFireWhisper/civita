@@ -41,7 +41,6 @@ where
 {
     p2p: P2PCommunication,
     keypair: Keypair,
-    peer_id: PeerId,
     handler: Arc<MessageHandler<T>>,
 }
 
@@ -50,11 +49,9 @@ where
     T: Serialize + for<'de> Deserialize<'de> + 'static,
 {
     pub fn new(p2p: P2PCommunication, keypair: Keypair, handler: Arc<MessageHandler<T>>) -> Self {
-        let peer_id = PeerId::from_public_key(&keypair.public());
         Self {
             p2p,
             keypair,
-            peer_id,
             handler,
         }
     }
@@ -179,7 +176,7 @@ mod tests {
     use libp2p::futures::channel::oneshot;
     use tokio::time::timeout;
 
-    use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TOPIC};
+    use crate::network::p2p_communication::test_communication::{TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC};
 
     use super::*;
     use std::{collections::HashMap, time::Duration};
@@ -189,9 +186,9 @@ mod tests {
         let communication = TestCommunication::new().await.unwrap();
         let handler = Arc::new(|_: ReceivedMessage<HashMap<String, String>>| {});
 
-        let message_layer = MessageLayer::new(communication.p2p, communication.keypair, handler);
-
-        assert_eq!(message_layer.peer_id, communication.peer_id);
+        let message_layer = MessageLayer::new(communication.p2p.clone(TEST_TIMEOUT_DURATION).await, communication.keypair, handler);
+    
+        assert_eq!(message_layer.p2p, communication.p2p);
     }
 
     #[tokio::test]
