@@ -7,7 +7,6 @@ use std::{
     time,
 };
 
-use ::tokio::select;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
@@ -19,9 +18,9 @@ use libp2p::{
     tcp, yamux, Multiaddr, PeerId, Swarm, Transport,
 };
 use thiserror::Error;
-use tokio::sync::MutexGuard;
+use tokio::{sync::MutexGuard, task::JoinHandle};
 
-use super::p2p_behaviour::{P2PBehaviour, P2PEvent};
+use super::p2p_behaviour::{self, P2PBehaviour, P2PEvent};
 
 #[derive(Debug, Error)]
 pub enum P2PCommunicationError {
@@ -40,12 +39,20 @@ pub enum P2PCommunicationError {
     #[error("Crossbeam Channel Error: {0}")]
     CrossbeamChannel(String),
     #[error("P2P Behaviour Error: {0}")]
-    P2PBehaviour(#[from] super::p2p_behaviour::P2PBehaviourError),
+    P2PBehaviour(#[from] p2p_behaviour::P2PBehaviourError),
+    #[error("Task Join Error: {0}")]
+    TaskJoin(String),
 }
 
 impl From<crossbeam_channel::SendError<P2PMessage>> for P2PCommunicationError {
     fn from(err: crossbeam_channel::SendError<P2PMessage>) -> Self {
         P2PCommunicationError::CrossbeamChannel(err.to_string())
+    }
+}
+
+impl From<tokio::task::JoinError> for P2PCommunicationError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        P2PCommunicationError::TaskJoin(err.to_string())
     }
 }
 
@@ -56,6 +63,7 @@ pub struct P2PCommunication {
     message_sender: Sender<P2PMessage>,
     message_receiver: Arc<Receiver<P2PMessage>>,
     is_receiving_messages: Arc<AtomicBool>,
+    receive_task: Option<JoinHandle<P2PCommunicationResult<()>>>,
 }
 
 impl P2PCommunication {
@@ -78,6 +86,7 @@ impl P2PCommunication {
             message_sender,
             message_receiver: Arc::new(message_receiver),
             is_receiving_messages: Arc::new(AtomicBool::new(false)),
+            receive_task: None,
         })
     }
 
@@ -118,48 +127,64 @@ impl P2PCommunication {
         Ok(())
     }
 
-    pub async fn start_receive(
-        &mut self,
-        sleep_duration: tokio::time::Duration,
-    ) -> P2PCommunicationResult<()> {
+    pub async fn start_receive(&mut self, sleep_duration: tokio::time::Duration) {
+        if self.is_receiving_messages.load(Ordering::SeqCst) {
+            return;
+        }
+
         self.is_receiving_messages.store(true, Ordering::SeqCst);
 
-        let mut swarm = self.swarm.lock().await;
+        let swarm = self.swarm.clone();
+        let message_sender = self.message_sender.clone();
+        let is_receiving_messages = self.is_receiving_messages.clone();
 
-        while self.is_receiving_messages.load(Ordering::SeqCst) {
-            select! {
-                event = swarm.select_next_some() => {
-                    if let SwarmEvent::Behaviour(P2PEvent::Gossipsub(event)) = event {
-                        if let gossipsub::Event::Message {
-                            message_id,
-                            propagation_source,
-                            message,
-                        } = *event {
-                            let timestamp = time::SystemTime::now()
-                                .duration_since(time::UNIX_EPOCH)?
-                                .as_secs();
-
-                            let p2p_message = P2PMessage {
-                                message_id,
-                                source: propagation_source,
-                                topic: message.topic.into_string(),
-                                data: message.data,
-                                timestamp,
-                            };
-
-                            self.message_sender.send(p2p_message)?;
-                        }
+        let task = tokio::spawn(async move {
+            while is_receiving_messages.load(Ordering::SeqCst) {
+                let event = {
+                    let mut swarm_lock = swarm.lock().await;
+                    tokio::select! {
+                        event = swarm_lock.select_next_some() => Some(event),
+                        _ = tokio::time::sleep(sleep_duration) => None,
                     }
-                },
-                _ = tokio::time::sleep(sleep_duration) => {},
+                };
+
+                if let Some(SwarmEvent::Behaviour(P2PEvent::Gossipsub(event))) = event {
+                    if let gossipsub::Event::Message {
+                        message_id,
+                        propagation_source,
+                        message,
+                    } = *event
+                    {
+                        let timestamp = time::SystemTime::now()
+                            .duration_since(time::UNIX_EPOCH)?
+                            .as_secs();
+
+                        let p2p_message = P2PMessage {
+                            message_id,
+                            source: propagation_source,
+                            topic: message.topic.into_string(),
+                            data: message.data,
+                            timestamp,
+                        };
+
+                        message_sender.send(p2p_message)?;
+                    }
+                }
             }
+            Ok(())
+        });
+
+        self.receive_task = Some(task);
+    }
+
+    pub fn stop_receive(&mut self) -> P2PCommunicationResult<()> {
+        self.is_receiving_messages.store(false, Ordering::SeqCst);
+
+        if let Some(task) = self.receive_task.take() {
+            tokio::runtime::Handle::current().block_on(task)?;
         }
 
         Ok(())
-    }
-
-    pub fn stop_receive(&mut self) {
-        self.is_receiving_messages.store(false, Ordering::SeqCst);
     }
 
     pub fn message_receiver(&self) -> Arc<Receiver<P2PMessage>> {
@@ -295,11 +320,10 @@ mod tests {
         let receiver = node2.p2p.message_receiver();
 
         let receive_handle = tokio::spawn(async move {
-            let result = node2
+            node2
                 .p2p
                 .start_receive(tokio::time::Duration::from_millis(10))
                 .await;
-            assert!(result.is_ok(), "start_receive should not return error");
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
