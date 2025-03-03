@@ -2,20 +2,10 @@ use libp2p::gossipsub::{self, MessageId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::crypto::signature::{self};
-
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
-    Signature(#[from] signature::Error),
-    #[error("{0}")]
     Serde(#[from] serde_json::Error),
-    #[error("Invalid signature")]
-    InvalidSignature,
-    #[error("Invalid source")]
-    InvalidSource,
-    #[error("Invalid topic")]
-    InvalidTopic,
     #[error("Invalid timestamp")]
     InvalidTimestamp,
 }
