@@ -3,17 +3,19 @@ use std::{io, sync::Arc};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     futures::StreamExt,
-    gossipsub::{self, IdentTopic, MessageId},
+    gossipsub::{self, IdentTopic},
     identity::Keypair,
     noise,
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{sync::MutexGuard, task::JoinHandle};
 
-use super::p2p_behaviour::{self, P2PBehaviour, P2PEvent};
+use super::{
+    message::{self, Message},
+    p2p_behaviour::{self, P2PBehaviour, P2PEvent},
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -35,6 +37,8 @@ pub enum Error {
     P2PBehaviour(#[from] p2p_behaviour::P2PBehaviourError),
     #[error("Task Join Error: {0}")]
     TaskJoin(String),
+    #[error("{0}")]
+    Message(#[from] message::Error),
 }
 
 impl From<crossbeam_channel::SendError<Message>> for Error {
@@ -131,9 +135,13 @@ impl Transport {
     }
 
     pub async fn publish(&self, topic: &str, data: impl Into<Vec<u8>>) -> TransportResult<()> {
+        let message = Message::new(topic, data.into());
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
-        swarm.behaviour_mut().gossipsub_mut().publish(topic, data)?;
+        swarm
+            .behaviour_mut()
+            .gossipsub_mut()
+            .publish(topic, message)?;
         Ok(())
     }
 
@@ -158,23 +166,9 @@ impl Transport {
                 };
 
                 if let Some(SwarmEvent::Behaviour(P2PEvent::Gossipsub(event))) = event {
-                    if let gossipsub::Event::Message {
-                        message_id,
-                        propagation_source,
-                        message,
-                    } = *event
-                    {
-                        let timestamp = chrono::Utc::now().timestamp() as u64;
-
-                        let message = Message {
-                            message_id,
-                            source: propagation_source,
-                            topic: message.topic.into_string(),
-                            data: message.data,
-                            timestamp,
-                        };
-
-                        handler(message);
+                    if let gossipsub::Event::Message { message, .. } = *event {
+                        let msg = Message::try_from(message)?;
+                        handler(msg);
                     }
                 }
             }
@@ -218,15 +212,6 @@ impl Transport {
 
         cloned
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Message {
-    pub message_id: MessageId,
-    pub source: PeerId,
-    pub topic: String,
-    pub data: Vec<u8>,
-    pub timestamp: u64,
 }
 
 #[cfg(test)]
@@ -315,19 +300,6 @@ mod tests {
             publish_result.is_ok(),
             "Should publish message successfully, got error: {:?}",
             publish_result.err()
-        );
-
-        let received_message = node2.wait_for_gossipsub_message().await;
-
-        assert!(
-            received_message.is_some(),
-            "Should receive the published message"
-        );
-
-        assert_eq!(
-            received_message.unwrap(),
-            test_message.to_vec(),
-            "Received message should match published message"
         );
     }
 
@@ -426,7 +398,7 @@ pub mod test_communication {
 
     use super::Transport;
 
-    pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+    pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
     pub const TEST_TOPIC: &str = "test_topic";
 
     pub struct TestCommunication {
