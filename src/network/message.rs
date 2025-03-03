@@ -145,6 +145,12 @@ impl<'a> From<&'a Message> for SignableMessage<'a> {
     }
 }
 
+impl From<Message> for Vec<u8> {
+    fn from(message: Message) -> Self {
+        serde_json::to_vec(&message).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
