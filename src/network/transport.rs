@@ -54,7 +54,7 @@ type TransportResult<T> = Result<T, Error>;
 pub struct Transport {
     swarm: Arc<tokio::sync::Mutex<Swarm<P2PBehaviour>>>,
     receive_task: Option<JoinHandle<TransportResult<()>>>,
-    keypair: Keypair,
+    keypair: Arc<Keypair>,
 }
 
 impl std::fmt::Debug for Transport {
@@ -98,7 +98,7 @@ impl Transport {
         Ok(Self {
             swarm: Arc::new(tokio::sync::Mutex::new(swarm)),
             receive_task: None,
-            keypair,
+            keypair: Arc::new(keypair),
         })
     }
 
