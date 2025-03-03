@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use libp2p::identity::Keypair;
 use thiserror::Error;
 
@@ -11,11 +13,11 @@ type SignatureResult<T> = Result<T, Error>;
 
 #[derive(Debug)]
 pub struct Signature {
-    keypair: Keypair,
+    keypair: Arc<Keypair>,
 }
 
 impl Signature {
-    pub fn new(keypair: Keypair) -> Self {
+    pub fn new(keypair: Arc<Keypair>) -> Self {
         Self { keypair }
     }
 
@@ -33,6 +35,8 @@ impl Signature {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use libp2p::identity::Keypair;
 
     use super::Signature;
@@ -41,7 +45,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = Arc::new(Keypair::generate_ed25519());
 
         let signature = Signature::new(keypair.clone());
 
@@ -54,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_sign() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = Arc::new(Keypair::generate_ed25519());
         let signature = Signature::new(keypair.clone());
 
         let input = b"input";
@@ -68,7 +72,7 @@ mod tests {
 
     #[test]
     fn test_verify_valid() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = Arc::new(Keypair::generate_ed25519());
         let signature = Signature::new(keypair.clone());
         let signature_bytes = signature.sign(TEST_INPUT).unwrap();
 
