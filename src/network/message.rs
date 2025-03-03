@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use libp2p::{gossipsub::MessageId, identity::Keypair, PeerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,7 +25,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new(keypair: Keypair, topic: &str, content: Vec<u8>) -> MessageResult<Self> {
+    pub fn new(keypair: Arc<Keypair>, topic: &str, content: Vec<u8>) -> MessageResult<Self> {
         let source = PeerId::from_public_key(&keypair.public());
         let timestamp = chrono::Utc::now().timestamp() as u64;
 
@@ -45,6 +47,8 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use libp2p::{identity::Keypair, PeerId};
 
     use crate::network::transport::test_communication::TEST_TOPIC;
@@ -55,7 +59,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = Arc::new(Keypair::generate_ed25519());
 
         let message = Message::new(keypair.clone(), TEST_TOPIC, TEST_CONTENT.to_vec()).unwrap();
 
