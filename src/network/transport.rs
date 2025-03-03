@@ -18,7 +18,7 @@ use tokio::{
 
 use super::{
     behaviour::{self, Behaviour, P2PEvent},
-    message::{self, Message},
+    message::{self, Message, MessagePayload},
 };
 
 #[derive(Debug, Error)]
@@ -123,8 +123,8 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn publish(&self, topic: &str, data: impl Into<Vec<u8>>) -> TransportResult<()> {
-        let message = Message::new(topic, data.into());
+    pub async fn publish(&self, topic: &str, payload: MessagePayload) -> TransportResult<()> {
+        let message = Message::new(topic, payload);
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
         swarm
@@ -260,7 +260,7 @@ mod tests {
     use tokio::time::Duration;
 
     use crate::network::transport::test_communication::{
-        TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
+        create_test_payload, TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
     };
 
     #[tokio::test]
@@ -330,8 +330,8 @@ mod tests {
             connection_result.err()
         );
 
-        let test_message = b"hello world";
-        let publish_result = node1.p2p.publish(TEST_TOPIC, test_message).await;
+        let test_payload = create_test_payload();
+        let publish_result = node1.p2p.publish(TEST_TOPIC, test_payload).await;
 
         assert!(
             publish_result.is_ok(),
@@ -364,8 +364,8 @@ mod tests {
 
         node2.p2p.receive(handler).await;
 
-        let test_message = b"test receive functionality";
-        let publish_result = node1.p2p.publish(TEST_TOPIC, test_message).await;
+        let test_payload = create_test_payload();
+        let publish_result = node1.p2p.publish(TEST_TOPIC, test_payload).await;
         assert!(
             publish_result.is_ok(),
             "Should publish message successfully: {:?}",
@@ -429,12 +429,21 @@ pub mod test_communication {
     };
     use tokio::time::timeout;
 
-    use crate::network::behaviour::{Behaviour, P2PEvent};
+    use crate::network::{
+        behaviour::{Behaviour, P2PEvent},
+        message::MessagePayload,
+    };
 
     use super::Transport;
 
     pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
     pub const TEST_TOPIC: &str = "test_topic";
+
+    pub fn create_test_payload() -> MessagePayload {
+        MessagePayload::RawData {
+            data: b"test".to_vec(),
+        }
+    }
 
     pub struct TestCommunication {
         pub peer_id: PeerId,
