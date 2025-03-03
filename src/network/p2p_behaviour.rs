@@ -13,7 +13,7 @@ use thiserror::Error;
 pub enum Error {
     #[error("Failed to create gossipsub behaviour: {0}")]
     Gossipsub(String),
-    #[error("Gossipsub config builder error: {0}")]
+    #[error("{0}")]
     GossipsubConfigBuilder(#[from] gossipsub::ConfigBuilderError),
 }
 
@@ -40,15 +40,15 @@ impl P2PBehaviour {
 
     fn create_gossipsub(keypair: Keypair) -> P2PBehaviourResult<gossipsub::Behaviour> {
         let config = Self::create_gossipsub_config()?;
-        gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), config)
-            .map_err(|e| Error::Gossipsub(e.to_string()))
+        let behaviour = gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), config)?;
+        Ok(behaviour)
     }
 
     fn create_gossipsub_config() -> P2PBehaviourResult<gossipsub::Config> {
-        gossipsub::ConfigBuilder::default()
+        let config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Self::HEARTBEAT_INTERVAL)
-            .build()
-            .map_err(Error::GossipsubConfigBuilder)
+            .build()?;
+        Ok(config)
     }
 
     fn create_peer_id(keypair: &Keypair) -> PeerId {
@@ -79,6 +79,12 @@ impl P2PBehaviour {
 pub enum P2PEvent {
     Gossipsub(Box<gossipsub::Event>),
     Kad(kad::Event),
+}
+
+impl From<&str> for Error {
+    fn from(err: &str) -> Self {
+        Error::Gossipsub(err.to_string())
+    }
 }
 
 impl From<gossipsub::Event> for P2PEvent {
