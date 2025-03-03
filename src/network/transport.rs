@@ -19,15 +19,15 @@ use super::{
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Transport Error: {0}")]
+    #[error("{0}")]
     Transport(#[from] libp2p::TransportError<io::Error>),
-    #[error("Dial Error: {0}")]
+    #[error("{0}")]
     Dial(#[from] swarm::DialError),
-    #[error("Subscribe Error: {0}")]
+    #[error("{0}")]
     Subscribe(#[from] gossipsub::SubscriptionError),
-    #[error("Publish Error: {0}")]
+    #[error("{0}")]
     Publish(#[from] gossipsub::PublishError),
-    #[error("P2P Behaviour Error: {0}")]
+    #[error("{0}")]
     P2PBehaviour(#[from] p2p_behaviour::P2PBehaviourError),
     #[error("{0}")]
     Message(#[from] message::Error),
