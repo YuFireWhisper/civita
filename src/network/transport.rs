@@ -10,7 +10,11 @@ use libp2p::{
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use thiserror::Error;
-use tokio::{sync::MutexGuard, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, MutexGuard},
+    task::JoinHandle,
+    time::{self, sleep, Duration},
+};
 
 use super::{
     message::{self, Message},
@@ -31,18 +35,44 @@ pub enum Error {
     P2PBehaviour(#[from] p2p_behaviour::P2PBehaviourError),
     #[error("{0}")]
     Message(#[from] message::Error),
+    #[error("Failed to lock")]
+    LockError,
 }
 
 type TransportResult<T> = Result<T, Error>;
 
+enum ReceiveTaskState {
+    Running(JoinHandle<TransportResult<()>>),
+    Stopped,
+}
+
+impl ReceiveTaskState {
+    fn is_running(&self) -> bool {
+        matches!(self, ReceiveTaskState::Running(_))
+    }
+
+    fn stop(&mut self) {
+        if let ReceiveTaskState::Running(handle) =
+            std::mem::replace(self, ReceiveTaskState::Stopped)
+        {
+            handle.abort();
+        }
+    }
+}
+
 pub struct Transport {
-    swarm: Arc<tokio::sync::Mutex<Swarm<P2PBehaviour>>>,
-    receive_task: Option<JoinHandle<TransportResult<()>>>,
+    swarm: Arc<Mutex<Swarm<P2PBehaviour>>>,
+    receive_task: Arc<Mutex<ReceiveTaskState>>,
     keypair: Arc<Keypair>,
+    receive_timeout: Duration,
 }
 
 impl Transport {
-    pub fn new(keypair: Keypair, listen_addr: Multiaddr) -> TransportResult<Self> {
+    pub fn new(
+        keypair: Keypair,
+        listen_addr: Multiaddr,
+        receive_timeout: Duration,
+    ) -> TransportResult<Self> {
         let transport = Self::create_transport(keypair.clone());
         let behaviour = P2PBehaviour::new(keypair.clone())?;
 
@@ -54,10 +84,15 @@ impl Transport {
         );
         swarm.listen_on(listen_addr)?;
 
+        let swarm = Mutex::new(swarm);
+        let receive_task = Arc::new(Mutex::new(ReceiveTaskState::Stopped));
+        let keypair = Arc::new(keypair);
+
         Ok(Self {
-            swarm: Arc::new(tokio::sync::Mutex::new(swarm)),
-            receive_task: None,
-            keypair: Arc::new(keypair),
+            swarm: Arc::new(swarm),
+            receive_task,
+            keypair,
+            receive_timeout,
         })
     }
 
@@ -78,7 +113,6 @@ impl Transport {
             .kad_mut()
             .add_address(&peer_id, addr.clone());
         swarm.dial(addr)?;
-
         Ok(())
     }
 
@@ -100,69 +134,95 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn receive<T>(&mut self, sleep_duration: tokio::time::Duration, handler: T)
+    pub async fn receive<T>(&mut self, handler: T)
     where
         T: Fn(Message) + Send + Sync + 'static,
     {
-        if self.receive_task.is_some() {
+        let mut task_state = self.receive_task.lock().await;
+        if task_state.is_running() {
             return;
         }
 
         let swarm = self.swarm.clone();
+        let receive_timeout = self.receive_timeout;
+        let receive_task = Arc::clone(&self.receive_task);
 
         let task = tokio::spawn(async move {
+            let handler = Arc::new(handler);
+
             loop {
+                if let Ok(state) = receive_task.try_lock() {
+                    if !state.is_running() {
+                        break Ok(());
+                    }
+                }
+
                 let event = {
                     let mut swarm_lock = swarm.lock().await;
                     tokio::select! {
                         event = swarm_lock.select_next_some() => Some(event),
-                        _ = tokio::time::sleep(sleep_duration) => None,
+                        _ = sleep(receive_timeout) => None,
                     }
                 };
 
                 if let Some(SwarmEvent::Behaviour(P2PEvent::Gossipsub(event))) = event {
                     if let gossipsub::Event::Message { message, .. } = *event {
-                        let msg = Message::try_from(message)?;
-                        handler(msg);
+                        match Message::try_from(message) {
+                            Ok(msg) => {
+                                let handler = Arc::clone(&handler);
+                                tokio::spawn(async move {
+                                    handler(msg);
+                                });
+                            }
+                            Err(e) => eprintln!("Error converting message: {}", e),
+                        }
                     }
                 }
             }
         });
 
-        self.receive_task = Some(task);
+        *task_state = ReceiveTaskState::Running(task);
     }
 
-    pub fn stop_receive(&mut self) -> TransportResult<()> {
-        if let Some(task) = self.receive_task.take() {
-            task.abort();
+    pub fn stop_receive(&self) -> TransportResult<()> {
+        if let Ok(mut task_state) = self.receive_task.try_lock() {
+            task_state.stop();
         }
-
         Ok(())
     }
 
-    pub async fn swarm(&self) -> MutexGuard<'_, Swarm<P2PBehaviour>> {
-        self.swarm.lock().await
+    pub async fn swarm(&self) -> TransportResult<MutexGuard<'_, Swarm<P2PBehaviour>>> {
+        self.get_swarm_lock().await
     }
 
-    pub fn is_receiving(&self) -> bool {
-        self.receive_task.is_some()
+    async fn get_swarm_lock(&self) -> TransportResult<MutexGuard<'_, Swarm<P2PBehaviour>>> {
+        match time::timeout(Duration::from_secs(5), self.swarm.lock()).await {
+            Ok(guard) => Ok(guard),
+            Err(_) => Err(Error::LockError),
+        }
     }
 
-    pub async fn clone<T>(&self, sleep_duration: tokio::time::Duration, handler: T) -> Self
+    pub async fn is_receiving(&self) -> bool {
+        self.receive_task.lock().await.is_running()
+    }
+
+    pub async fn clone<T>(&self, handler: T) -> Self
     where
         T: Fn(Message) + Send + Sync + 'static,
     {
         let swarm = Arc::clone(&self.swarm);
         let keypair = self.keypair.clone();
+        let receive_timeout = self.receive_timeout;
 
         let mut cloned = Self {
             swarm,
-            receive_task: None,
+            receive_task: Arc::new(Mutex::new(ReceiveTaskState::Stopped)),
             keypair,
+            receive_timeout,
         };
 
-        if self.is_receiving() {
-            cloned.receive(sleep_duration, handler).await;
+        if self.is_receiving().await {
+            cloned.receive(handler).await;
         }
 
         cloned
@@ -172,25 +232,24 @@ impl Transport {
 impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2PCommunication")
-            .field("receive_task", &self.receive_task.is_some())
-            .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>") // We just want to show that the field exists, not its value
+            .field(
+                "receive_task",
+                &format!(
+                    "{}",
+                    self.receive_task
+                        .try_lock()
+                        .map(|s| s.is_running())
+                        .unwrap_or(false)
+                ),
+            )
+            .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>")
             .finish()
     }
 }
 
 impl PartialEq for Transport {
     fn eq(&self, other: &Self) -> bool {
-        let self_peer_id = match self.swarm.try_lock() {
-            Ok(swarm) => *swarm.local_peer_id(),
-            Err(_) => return false, // If we can't lock, consider them not equal
-        };
-
-        let other_peer_id = match other.swarm.try_lock() {
-            Ok(swarm) => *swarm.local_peer_id(),
-            Err(_) => return false, // If we can't lock, consider them
-        };
-
-        self_peer_id == other_peer_id
+        self.keypair.public() == other.keypair.public()
     }
 }
 
@@ -203,8 +262,6 @@ mod tests {
     use crate::network::transport::test_communication::{
         TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
     };
-
-    const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
     #[tokio::test]
     async fn test_new() {
@@ -305,7 +362,7 @@ mod tests {
             );
         };
 
-        node2.p2p.receive(TEST_TIMEOUT_DURATION, handler).await;
+        node2.p2p.receive(handler).await;
 
         let test_message = b"test receive functionality";
         let publish_result = node1.p2p.publish(TEST_TOPIC, test_message).await;
@@ -330,15 +387,15 @@ mod tests {
         let mut node = TestCommunication::new().await.unwrap();
 
         assert!(
-            !node.p2p.is_receiving(),
+            !node.p2p.is_receiving().await,
             "receive_task should be None initially"
         );
 
         let handler = |_: super::Message| {};
 
-        node.p2p.receive(TIMEOUT_DURATION, handler).await;
+        node.p2p.receive(handler).await;
         assert!(
-            node.p2p.is_receiving(),
+            node.p2p.is_receiving().await,
             "receive_task should be Some after calling start_receive"
         );
 
@@ -353,13 +410,11 @@ mod tests {
     #[tokio::test]
     async fn test_clone() {
         let mut node = TestCommunication::new().await.unwrap();
-
         let handler = |_: super::Message| {};
 
-        node.p2p.receive(TEST_TIMEOUT_DURATION, handler).await;
+        node.p2p.receive(handler).await;
 
-        let cloned = node.p2p.clone(TEST_TIMEOUT_DURATION, handler).await;
-
+        let cloned = node.p2p.clone(handler).await;
         assert_eq!(node.p2p, cloned, "Cloned P2PCommunication should be equal");
     }
 }
@@ -393,17 +448,23 @@ pub mod test_communication {
             let keypair = Keypair::generate_ed25519();
             let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
 
-            let p2p = Transport::new(keypair.clone(), listen_addr.clone())?;
+            let p2p = Transport::new(keypair.clone(), listen_addr.clone(), TEST_TIMEOUT_DURATION)?;
 
             {
-                let mut swarm = p2p.swarm.lock().await;
+                let mut swarm = p2p
+                    .swarm()
+                    .await
+                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
                 Self::wait_for_listen_addr(&mut swarm).await?;
             }
 
             let peer_id = PeerId::from_public_key(&keypair.public());
 
             let listen_addr = {
-                let swarm = p2p.swarm.lock().await;
+                let swarm = p2p
+                    .swarm()
+                    .await
+                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
                 Self::get_actual_listen_addr(&swarm)
             };
 
