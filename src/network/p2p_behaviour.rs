@@ -10,14 +10,14 @@ use libp2p::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum P2PBehaviourError {
+pub enum Error {
     #[error("Failed to create gossipsub behaviour: {0}")]
     Gossipsub(String),
     #[error("Gossipsub config builder error: {0}")]
     GossipsubConfigBuilder(#[from] gossipsub::ConfigBuilderError),
 }
 
-type P2PBehaviourResult<T> = std::result::Result<T, P2PBehaviourError>;
+type P2PBehaviourResult<T> = std::result::Result<T, Error>;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "P2PEvent")]
@@ -41,14 +41,14 @@ impl P2PBehaviour {
     fn create_gossipsub(keypair: Keypair) -> P2PBehaviourResult<gossipsub::Behaviour> {
         let config = Self::create_gossipsub_config()?;
         gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), config)
-            .map_err(|e| P2PBehaviourError::Gossipsub(e.to_string()))
+            .map_err(|e| Error::Gossipsub(e.to_string()))
     }
 
     fn create_gossipsub_config() -> P2PBehaviourResult<gossipsub::Config> {
         gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Self::HEARTBEAT_INTERVAL)
             .build()
-            .map_err(P2PBehaviourError::GossipsubConfigBuilder)
+            .map_err(Error::GossipsubConfigBuilder)
     }
 
     fn create_peer_id(keypair: &Keypair) -> PeerId {

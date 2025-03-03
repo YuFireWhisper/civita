@@ -32,7 +32,7 @@ pub enum Error {
     #[error("{0}")]
     Publish(#[from] gossipsub::PublishError),
     #[error("{0}")]
-    P2PBehaviour(#[from] p2p_behaviour::P2PBehaviourError),
+    P2PBehaviour(#[from] p2p_behaviour::Error),
     #[error("{0}")]
     Message(#[from] message::Error),
     #[error("Failed to lock")]
