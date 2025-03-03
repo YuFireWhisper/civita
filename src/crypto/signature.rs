@@ -1,4 +1,13 @@
 use libp2p::identity::Keypair;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("{0}")]
+    Signature(String),
+}
+
+type SignatureResult<T> = Result<T, Error>;
 
 #[derive(Debug)]
 pub struct Signature {
@@ -10,11 +19,11 @@ impl Signature {
         Self { keypair }
     }
 
-    pub fn sign(&self, input: &[u8]) -> Result<Vec<u8>, String> {
-        self.keypair
-            .sign(input)
-            .map(|sig| sig.to_vec())
-            .map_err(|e| e.to_string())
+    pub fn sign(&self, input: &[u8]) -> SignatureResult<Vec<u8>> {
+        match self.keypair.sign(input) {
+            Ok(sig) => Ok(sig.to_vec()),
+            Err(e) => Err(Error::Signature(e.to_string())),
+        }
     }
 
     pub fn verify(&self, input: &[u8], signature: &[u8]) -> bool {
