@@ -17,7 +17,7 @@ pub enum Error {
     GossipsubConfigBuilder(#[from] gossipsub::ConfigBuilderError),
 }
 
-type P2PBehaviourResult<T> = std::result::Result<T, Error>;
+type BehaviourResult<T> = std::result::Result<T, Error>;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "P2PEvent")]
@@ -29,7 +29,7 @@ pub struct P2PBehaviour {
 impl P2PBehaviour {
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
-    pub fn new(keypair: Keypair) -> P2PBehaviourResult<Self> {
+    pub fn new(keypair: Keypair) -> BehaviourResult<Self> {
         let peer_id = Self::create_peer_id(&keypair);
 
         let gossipsub = Self::create_gossipsub(keypair.clone())?;
@@ -38,13 +38,13 @@ impl P2PBehaviour {
         Ok(Self { gossipsub, kad })
     }
 
-    fn create_gossipsub(keypair: Keypair) -> P2PBehaviourResult<gossipsub::Behaviour> {
+    fn create_gossipsub(keypair: Keypair) -> BehaviourResult<gossipsub::Behaviour> {
         let config = Self::create_gossipsub_config()?;
         let behaviour = gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), config)?;
         Ok(behaviour)
     }
 
-    fn create_gossipsub_config() -> P2PBehaviourResult<gossipsub::Config> {
+    fn create_gossipsub_config() -> BehaviourResult<gossipsub::Config> {
         let config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Self::HEARTBEAT_INTERVAL)
             .build()?;
