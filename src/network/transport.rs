@@ -17,8 +17,8 @@ use tokio::{
 };
 
 use super::{
+    behaviour::{self, Behaviour, P2PEvent},
     message::{self, Message},
-    p2p_behaviour::{self, P2PBehaviour, P2PEvent},
 };
 
 #[derive(Debug, Error)]
@@ -32,7 +32,7 @@ pub enum Error {
     #[error("{0}")]
     Publish(#[from] gossipsub::PublishError),
     #[error("{0}")]
-    P2PBehaviour(#[from] p2p_behaviour::Error),
+    P2PBehaviour(#[from] behaviour::Error),
     #[error("{0}")]
     Message(#[from] message::Error),
     #[error("Failed to lock")]
@@ -61,7 +61,7 @@ impl ReceiveTaskState {
 }
 
 pub struct Transport {
-    swarm: Arc<Mutex<Swarm<P2PBehaviour>>>,
+    swarm: Arc<Mutex<Swarm<Behaviour>>>,
     receive_task: Arc<Mutex<ReceiveTaskState>>,
     keypair: Arc<Keypair>,
     receive_timeout: Duration,
@@ -74,7 +74,7 @@ impl Transport {
         receive_timeout: Duration,
     ) -> TransportResult<Self> {
         let transport = Self::create_transport(keypair.clone());
-        let behaviour = P2PBehaviour::new(keypair.clone())?;
+        let behaviour = Behaviour::new(keypair.clone())?;
 
         let mut swarm = Swarm::new(
             transport,
@@ -191,11 +191,11 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn swarm(&self) -> TransportResult<MutexGuard<'_, Swarm<P2PBehaviour>>> {
+    pub async fn swarm(&self) -> TransportResult<MutexGuard<'_, Swarm<Behaviour>>> {
         self.get_swarm_lock().await
     }
 
-    async fn get_swarm_lock(&self) -> TransportResult<MutexGuard<'_, Swarm<P2PBehaviour>>> {
+    async fn get_swarm_lock(&self) -> TransportResult<MutexGuard<'_, Swarm<Behaviour>>> {
         match time::timeout(Duration::from_secs(5), self.swarm.lock()).await {
             Ok(guard) => Ok(guard),
             Err(_) => Err(Error::LockError),
@@ -429,7 +429,7 @@ pub mod test_communication {
     };
     use tokio::time::timeout;
 
-    use crate::network::p2p_behaviour::{P2PBehaviour, P2PEvent};
+    use crate::network::behaviour::{Behaviour, P2PEvent};
 
     use super::Transport;
 
@@ -476,13 +476,13 @@ pub mod test_communication {
             })
         }
 
-        fn get_actual_listen_addr(swarm: &Swarm<P2PBehaviour>) -> Multiaddr {
+        fn get_actual_listen_addr(swarm: &Swarm<Behaviour>) -> Multiaddr {
             swarm.listeners().next().cloned().unwrap_or_else(|| {
                 panic!("No listen address available");
             })
         }
 
-        async fn wait_for_listen_addr(swarm: &mut Swarm<P2PBehaviour>) -> Result<(), &'static str> {
+        async fn wait_for_listen_addr(swarm: &mut Swarm<Behaviour>) -> Result<(), &'static str> {
             timeout(TEST_TIMEOUT_DURATION, async {
                 while let Some(event) = swarm.next().await {
                     if let SwarmEvent::NewListenAddr { .. } = event {

@@ -21,12 +21,12 @@ type BehaviourResult<T> = std::result::Result<T, Error>;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "P2PEvent")]
-pub struct P2PBehaviour {
+pub struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
 }
 
-impl P2PBehaviour {
+impl Behaviour {
     const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
     pub fn new(keypair: Keypair) -> BehaviourResult<Self> {
