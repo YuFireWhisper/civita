@@ -1,7 +1,16 @@
 use libp2p::{gossipsub::MessageId, identity::Keypair, PeerId};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use crate::crypto::signature::Signature;
+use crate::crypto::signature::{self, Signature};
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("{0}")]
+    Signature(#[from] signature::Error),
+}
+
+type MessageResult<T> = Result<T, Error>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
@@ -14,7 +23,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new(keypair: Keypair, topic: &str, content: Vec<u8>) -> Result<Self, String> {
+    pub fn new(keypair: Keypair, topic: &str, content: Vec<u8>) -> MessageResult<Self> {
         let source = PeerId::from_public_key(&keypair.public());
         let timestamp = chrono::Utc::now().timestamp() as u64;
 
