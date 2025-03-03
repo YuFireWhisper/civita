@@ -233,7 +233,7 @@ pub struct Message {
 mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
 
-    use tokio::time::{timeout, Duration};
+    use tokio::time::Duration;
 
     use crate::network::transport::test_communication::{
         TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
@@ -353,9 +353,7 @@ mod tests {
             );
         };
 
-        let receive_handle = tokio::spawn(async move {
-            node2.p2p.receive(TEST_TIMEOUT_DURATION, handler).await;
-        });
+        node2.p2p.receive(TEST_TIMEOUT_DURATION, handler).await;
 
         let test_message = b"test receive functionality";
         let publish_result = node1.p2p.publish(TEST_TOPIC, test_message).await;
@@ -365,13 +363,9 @@ mod tests {
             publish_result.err()
         );
 
-        let receive_result = timeout(TEST_TIMEOUT_DURATION, receive_handle).await;
+        tokio::time::sleep(TEST_TIMEOUT_DURATION).await;
 
-        assert!(
-            receive_result.is_ok(),
-            "Should receive message: {:?}",
-            receive_result.err()
-        );
+        node2.process_events(Duration::from_secs(3)).await;
 
         assert!(
             is_received.load(std::sync::atomic::Ordering::Relaxed),
