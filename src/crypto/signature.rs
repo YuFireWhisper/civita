@@ -1,5 +1,6 @@
 use libp2p::identity::Keypair;
 
+#[derive(Debug)]
 pub struct Signature {
     keypair: Keypair,
 }
