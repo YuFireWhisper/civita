@@ -132,6 +132,10 @@ impl Message {
             Err(Error::InvalidSignature)
         }
     }
+
+    pub fn set_message_id(&mut self, message_id: MessageId) {
+        self.message_id = Some(message_id);
+    }
 }
 
 impl<'a> From<&'a Message> for SignableMessage<'a> {
@@ -157,7 +161,7 @@ mod tests {
 
     use chrono::Utc;
     use libp2p::{
-        gossipsub::{self, TopicHash},
+        gossipsub::{self, MessageId, TopicHash},
         identity::Keypair,
         PeerId,
     };
@@ -307,5 +311,15 @@ mod tests {
 
         let result = Message::from_gossipsub_message(gossip_message, keypair);
         assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn test_set_message_id() {
+        let keypair = create_test_keypair();
+        let mut message = create_test_message(keypair.clone());
+        let message_id = MessageId::from([0; 32]);
+        message.set_message_id(message_id.clone());
+
+        assert_eq!(message.message_id, Some(message_id));
     }
 }
