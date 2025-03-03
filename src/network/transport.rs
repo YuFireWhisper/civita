@@ -23,34 +23,14 @@ pub enum Error {
     Transport(#[from] libp2p::TransportError<io::Error>),
     #[error("Dial Error: {0}")]
     Dial(#[from] swarm::DialError),
-    #[error("Gossipsub Error: {0}")]
-    Gossipsub(String),
     #[error("Subscribe Error: {0}")]
     Subscribe(#[from] gossipsub::SubscriptionError),
     #[error("Publish Error: {0}")]
     Publish(#[from] gossipsub::PublishError),
-    #[error("System Time Error: {0}")]
-    SystemTime(#[from] std::time::SystemTimeError),
-    #[error("Crossbeam Channel Error: {0}")]
-    CrossbeamChannel(String),
     #[error("P2P Behaviour Error: {0}")]
     P2PBehaviour(#[from] p2p_behaviour::P2PBehaviourError),
-    #[error("Task Join Error: {0}")]
-    TaskJoin(String),
     #[error("{0}")]
     Message(#[from] message::Error),
-}
-
-impl From<crossbeam_channel::SendError<Message>> for Error {
-    fn from(err: crossbeam_channel::SendError<Message>) -> Self {
-        Error::CrossbeamChannel(err.to_string())
-    }
-}
-
-impl From<tokio::task::JoinError> for Error {
-    fn from(err: tokio::task::JoinError) -> Self {
-        Error::TaskJoin(err.to_string())
-    }
 }
 
 type TransportResult<T> = Result<T, Error>;
