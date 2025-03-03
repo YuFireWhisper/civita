@@ -70,6 +70,15 @@ impl Message {
         })
     }
 
+    pub fn from_gossipsub_message(
+        gossipsub_message: gossipsub::Message,
+        keypair: Arc<Keypair>,
+    ) -> MessageResult<Self> {
+        let message: Self = serde_json::from_slice(&gossipsub_message.data)?;
+        message.validate(&gossipsub_message, keypair)?;
+        Ok(message)
+    }
+
     pub fn validate(
         &self,
         gossipsub_message: &gossipsub::Message,
@@ -185,8 +194,11 @@ mod tests {
     fn test_validate_success() {
         let keypair = create_test_keypair();
         let message = create_test_message(keypair.clone());
-        let gossip_message =
-            create_gossipsub_message(message.source, &message.topic, message.content.clone());
+        let gossip_message = create_gossipsub_message(
+            message.source,
+            &message.topic,
+            serde_json::to_vec(&message).unwrap(),
+        );
 
         let result = message.validate(&gossip_message, keypair);
         assert!(result.is_ok(), "{:?}", result);
@@ -275,5 +287,19 @@ mod tests {
 
         let result = message.validate(&gossip_message, different_keypair);
         assert!(matches!(result, Err(Error::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_from_gossipsub_message() {
+        let keypair = create_test_keypair();
+        let message = create_test_message(keypair.clone());
+        let gossip_message = create_gossipsub_message(
+            message.source,
+            &message.topic,
+            serde_json::to_vec(&message).unwrap(),
+        );
+
+        let result = Message::from_gossipsub_message(gossip_message, keypair);
+        assert!(result.is_ok(), "{:?}", result);
     }
 }
