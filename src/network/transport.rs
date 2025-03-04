@@ -138,7 +138,7 @@ impl Transport {
             .map_err(Error::Publish)
     }
 
-    pub async fn receive<T>(&mut self, handler: T)
+    pub async fn receive<T>(&self, handler: T)
     where
         T: Fn(Message) + Send + Sync + 'static,
     {
@@ -224,7 +224,7 @@ impl Transport {
         let keypair = self.keypair.clone();
         let receive_timeout = self.receive_timeout;
 
-        let mut cloned = Self {
+        let cloned = Self {
             swarm,
             receive_task: Arc::new(Mutex::new(ReceiveTaskState::Stopped)),
             keypair,
@@ -394,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_receive() {
-        let mut node = TestCommunication::new().await.unwrap();
+        let node = TestCommunication::new().await.unwrap();
 
         assert!(
             !node.p2p.is_receiving().await,
@@ -419,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone() {
-        let mut node = TestCommunication::new().await.unwrap();
+        let node = TestCommunication::new().await.unwrap();
         let handler = |_: super::Message| {};
 
         node.p2p.receive(handler).await;
