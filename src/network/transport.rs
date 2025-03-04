@@ -123,7 +123,11 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn publish(&self, topic: &str, payload: MessagePayload) -> TransportResult<MessageId> {
+    pub async fn publish(
+        &self,
+        topic: &str,
+        payload: MessagePayload,
+    ) -> TransportResult<MessageId> {
         let message = Message::new(topic, payload);
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
@@ -166,7 +170,12 @@ impl Transport {
                 };
 
                 if let Some(SwarmEvent::Behaviour(P2PEvent::Gossipsub(event))) = event {
-                    if let gossipsub::Event::Message { propagation_source, message, .. } = *event {
+                    if let gossipsub::Event::Message {
+                        propagation_source,
+                        message,
+                        ..
+                    } = *event
+                    {
                         match Message::try_from(message) {
                             Ok(mut msg) => {
                                 msg.source = Some(propagation_source);
