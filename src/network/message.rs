@@ -1,4 +1,4 @@
-use libp2p::gossipsub::{self, MessageId};
+use libp2p::{gossipsub::{self, MessageId}, PeerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -20,6 +20,7 @@ pub enum MessagePayload {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     pub message_id: Option<MessageId>,
+    pub source: Option<PeerId>,
     pub topic: String,
     pub payload: MessagePayload,
     pub timestamp: u64,
@@ -28,11 +29,13 @@ pub struct Message {
 impl Message {
     pub fn new(topic: &str, payload: MessagePayload) -> Self {
         let message_id = None;
+        let source = None;
         let topic = topic.to_string();
         let timestamp = chrono::Utc::now().timestamp() as u64;
 
         Self {
             message_id,
+            source,
             topic,
             payload,
             timestamp,

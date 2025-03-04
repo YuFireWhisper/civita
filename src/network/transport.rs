@@ -166,9 +166,10 @@ impl Transport {
                 };
 
                 if let Some(SwarmEvent::Behaviour(P2PEvent::Gossipsub(event))) = event {
-                    if let gossipsub::Event::Message { message, .. } = *event {
+                    if let gossipsub::Event::Message { propagation_source, message, .. } = *event {
                         match Message::try_from(message) {
-                            Ok(msg) => {
+                            Ok(mut msg) => {
+                                msg.source = Some(propagation_source);
                                 let handler = Arc::clone(&handler);
                                 tokio::spawn(async move {
                                     handler(msg);
