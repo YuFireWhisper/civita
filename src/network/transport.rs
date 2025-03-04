@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     futures::StreamExt,
-    gossipsub::{self, IdentTopic},
+    gossipsub::{self, IdentTopic, MessageId},
     identity::Keypair,
     noise,
     swarm::{self, SwarmEvent},
@@ -123,15 +123,15 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn publish(&self, topic: &str, payload: MessagePayload) -> TransportResult<()> {
+    pub async fn publish(&self, topic: &str, payload: MessagePayload) -> TransportResult<MessageId> {
         let message = Message::new(topic, payload);
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
         swarm
             .behaviour_mut()
             .gossipsub_mut()
-            .publish(topic, message)?;
-        Ok(())
+            .publish(topic, message)
+            .map_err(Error::Publish)
     }
 
     pub async fn receive<T>(&mut self, handler: T)
