@@ -14,6 +14,19 @@ type MessageResult<T> = Result<T, Error>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessagePayload {
+    InitRandom {
+        threshold: usize,
+        total_residents: usize,
+    },
+    PartialRandom {
+        response_for: MessageId,
+        share: Vec<u8>,
+    },
+    RandomValue {
+        response_for: MessageId,
+        value: Vec<u8>,
+        signature: Vec<u8>,
+    },
     RawData { data: Vec<u8> },
 }
 
