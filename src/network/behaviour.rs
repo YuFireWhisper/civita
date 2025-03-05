@@ -99,6 +99,10 @@ impl Behaviour {
     pub fn request_response(&self) -> &request_response::Behaviour<Codec> {
         &self.request_response
     }
+
+    pub fn request_response_mut(&mut self) -> &mut request_response::Behaviour<Codec> {
+        &mut self.request_response
+    }
 }
 
 pub enum P2PEvent {
