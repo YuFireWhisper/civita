@@ -19,6 +19,7 @@ use tokio::{
 use super::{
     behaviour::{self, Behaviour, P2PEvent},
     message::{self, Message, MessagePayload},
+    request_response::Request,
 };
 
 #[derive(Debug, Error)]
@@ -136,6 +137,15 @@ impl Transport {
             .gossipsub_mut()
             .publish(topic, message)
             .map_err(Error::Publish)
+    }
+
+    pub async fn send_request(&self, peer_id: PeerId, request: Request) -> TransportResult<()> {
+        let mut swarm = self.swarm.lock().await;
+        swarm
+            .behaviour_mut()
+            .request_response_mut()
+            .send_request(&peer_id, request);
+        Ok(())
     }
 
     pub async fn receive<T>(&self, handler: T)
@@ -348,6 +358,32 @@ mod tests {
             "Should publish message successfully, got error: {:?}",
             publish_result.err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_request() {
+        let mut node1 = TestCommunication::new().await.unwrap();
+        let node2 = TestCommunication::new().await.unwrap();
+
+        let dial_result = node1.p2p.dial(node2.peer_id, node2.listen_addr.clone()).await;
+        assert!(
+            dial_result.is_ok(),
+            "Dial operation should succeed: {:?}",
+            dial_result.err()
+        );
+
+        node1.process_events(Duration::from_secs(3)).await;
+
+        let test_request = super::Request {
+            request_id: "test_id".to_string(),
+            payload: super::MessagePayload::RawData {
+                data: b"test_data".to_vec(),
+            },
+        };
+        let target_peer_id = node2.peer_id;
+
+        let send_result = node1.p2p.send_request(target_peer_id, test_request.clone()).await;
+        assert!(send_result.is_ok(), "Failed to send request: {:?}", send_result.err()); 
     }
 
     #[tokio::test]
