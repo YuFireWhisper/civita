@@ -4,13 +4,11 @@ use libp2p::{
     gossipsub::{self, MessageAuthenticity},
     identity::Keypair,
     kad::{self, store::MemoryStore},
-    request_response,
+    request_response::{self, cbor},
     swarm::NetworkBehaviour,
-    PeerId,
+    PeerId, StreamProtocol,
 };
 use thiserror::Error;
-
-use super::request_response::{Codec, Request, Response};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -27,7 +25,10 @@ type BehaviourResult<T> = std::result::Result<T, Error>;
 pub struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
-    request_response: request_response::Behaviour<Codec>,
+    request_response: cbor::Behaviour<
+        super::message::request_response::Message,
+        super::message::request_response::Message,
+    >,
 }
 
 impl Behaviour {
@@ -69,10 +70,16 @@ impl Behaviour {
         kad::Behaviour::new(peer_id, MemoryStore::new(peer_id))
     }
 
-    fn create_request_response() -> request_response::Behaviour<Codec> {
-        request_response::Behaviour::new(
-            std::iter::once((Self::PROTOCOL_NAME, request_response::ProtocolSupport::Full)),
-            Self::create_request_response_config(),
+    fn create_request_response() -> cbor::Behaviour<
+        super::message::request_response::Message,
+        super::message::request_response::Message,
+    > {
+        cbor::Behaviour::new(
+            std::iter::once((
+                StreamProtocol::new(Self::PROTOCOL_NAME),
+                request_response::ProtocolSupport::Full,
+            )),
+            request_response::Config::default(),
         )
     }
 
@@ -96,11 +103,21 @@ impl Behaviour {
         &mut self.kad
     }
 
-    pub fn request_response(&self) -> &request_response::Behaviour<Codec> {
+    pub fn request_response(
+        &self,
+    ) -> &cbor::Behaviour<
+        super::message::request_response::Message,
+        super::message::request_response::Message,
+    > {
         &self.request_response
     }
 
-    pub fn request_response_mut(&mut self) -> &mut request_response::Behaviour<Codec> {
+    pub fn request_response_mut(
+        &mut self,
+    ) -> &mut cbor::Behaviour<
+        super::message::request_response::Message,
+        super::message::request_response::Message,
+    > {
         &mut self.request_response
     }
 }
@@ -108,7 +125,12 @@ impl Behaviour {
 pub enum P2PEvent {
     Gossipsub(Box<gossipsub::Event>),
     Kad(kad::Event),
-    RequestResponse(request_response::Event<Request, Response>),
+    RequestResponse(
+        request_response::Event<
+            super::message::request_response::Message,
+            super::message::request_response::Message,
+        >,
+    ),
 }
 
 impl From<&str> for Error {
@@ -129,8 +151,20 @@ impl From<kad::Event> for P2PEvent {
     }
 }
 
-impl From<request_response::Event<Request, Response>> for P2PEvent {
-    fn from(event: request_response::Event<Request, Response>) -> Self {
+impl
+    From<
+        request_response::Event<
+            super::message::request_response::Message,
+            super::message::request_response::Message,
+        >,
+    > for P2PEvent
+{
+    fn from(
+        event: request_response::Event<
+            super::message::request_response::Message,
+            super::message::request_response::Message,
+        >,
+    ) -> Self {
         P2PEvent::RequestResponse(event)
     }
 }

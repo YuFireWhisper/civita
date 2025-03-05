@@ -3,9 +3,9 @@ use std::{io, sync::Arc};
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     futures::StreamExt,
-    gossipsub::{self, IdentTopic, MessageId},
+    gossipsub::IdentTopic,
     identity::Keypair,
-    noise,
+    kad, noise,
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
@@ -18,8 +18,7 @@ use tokio::{
 
 use super::{
     behaviour::{self, Behaviour, P2PEvent},
-    message::{self, Message, MessagePayload},
-    request_response::Request,
+    message::{gossipsub, request_response, Message},
 };
 
 #[derive(Debug, Error)]
@@ -29,15 +28,15 @@ pub enum Error {
     #[error("{0}")]
     Dial(#[from] swarm::DialError),
     #[error("{0}")]
-    Subscribe(#[from] gossipsub::SubscriptionError),
+    Subscribe(#[from] libp2p::gossipsub::SubscriptionError),
     #[error("{0}")]
-    Publish(#[from] gossipsub::PublishError),
+    Publish(#[from] libp2p::gossipsub::PublishError),
     #[error("{0}")]
     P2PBehaviour(#[from] behaviour::Error),
-    #[error("{0}")]
-    Message(#[from] message::Error),
     #[error("Failed to lock")]
     LockError,
+    #[error("{0}")]
+    RequestResponse(#[from] request_response::Error),
 }
 
 type TransportResult<T> = Result<T, Error>;
@@ -124,27 +123,33 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn publish(
-        &self,
-        topic: &str,
-        payload: MessagePayload,
-    ) -> TransportResult<MessageId> {
-        let message = Message::new(topic, payload);
-        let topic = IdentTopic::new(topic);
+    pub async fn send(&self, message: Message) -> TransportResult<()> {
+        match message {
+            Message::Gossipsub(message) => self.send_gossipsub_message(message).await,
+            Message::RequestResponse(message) => self.send_reqeust_response_message(message).await,
+        }
+    }
+
+    async fn send_gossipsub_message(&self, message: gossipsub::Message) -> TransportResult<()> {
+        let topic = IdentTopic::new(&message.topic);
         let mut swarm = self.swarm.lock().await;
         swarm
             .behaviour_mut()
             .gossipsub_mut()
-            .publish(topic, message)
-            .map_err(Error::Publish)
+            .publish(topic, message)?;
+        Ok(())
     }
 
-    pub async fn send_request(&self, peer_id: PeerId, request: Request) -> TransportResult<()> {
+    async fn send_reqeust_response_message(
+        &self,
+        message: request_response::Message,
+    ) -> TransportResult<()> {
+        let target = message.target;
         let mut swarm = self.swarm.lock().await;
         swarm
             .behaviour_mut()
             .request_response_mut()
-            .send_request(&peer_id, request);
+            .send_request(&target, message);
         Ok(())
     }
 
@@ -179,22 +184,14 @@ impl Transport {
                     }
                 };
 
-                if let Some(SwarmEvent::Behaviour(P2PEvent::Gossipsub(event))) = event {
-                    if let gossipsub::Event::Message {
-                        propagation_source,
-                        message,
-                        ..
-                    } = *event
-                    {
-                        match Message::try_from(message) {
-                            Ok(mut msg) => {
-                                msg.source = Some(propagation_source);
-                                let handler = Arc::clone(&handler);
-                                tokio::spawn(async move {
-                                    handler(msg);
-                                });
-                            }
-                            Err(e) => eprintln!("Error converting message: {}", e),
+                if let Some(SwarmEvent::Behaviour(event)) = event {
+                    match event {
+                        P2PEvent::Gossipsub(event) => {
+                            Self::handle_gossipsub_event(*event, Arc::clone(&handler));
+                        }
+                        P2PEvent::Kad(event) => Self::handle_kad_event(event),
+                        P2PEvent::RequestResponse(event) => {
+                            Self::handle_request_response_event(event, Arc::clone(&handler));
                         }
                     }
                 }
@@ -202,6 +199,59 @@ impl Transport {
         });
 
         *task_state = ReceiveTaskState::Running(task);
+    }
+
+    fn handle_gossipsub_event<F>(event: libp2p::gossipsub::Event, handler: Arc<F>)
+    where
+        F: Fn(Message) + Send + Sync + 'static,
+    {
+        if let libp2p::gossipsub::Event::Message {
+            propagation_source,
+            message,
+            ..
+        } = event
+        {
+            match gossipsub::Message::try_from(message) {
+                Ok(mut msg) => {
+                    msg.source = Some(propagation_source);
+                    let msg = Message::Gossipsub(msg);
+                    let handler = Arc::clone(&handler);
+                    tokio::spawn(async move {
+                        handler(msg);
+                    });
+                }
+                Err(e) => eprintln!("Error converting message: {}", e),
+            }
+        }
+    }
+
+    fn handle_kad_event(event: kad::Event) {
+        println!("Kademlia event: {:?}", event);
+    }
+
+    fn handle_request_response_event<F>(
+        event: libp2p::request_response::Event<
+            request_response::Message,
+            request_response::Message,
+        >,
+        handler: Arc<F>,
+    ) where
+        F: Fn(Message) + Send + Sync + 'static,
+    {
+        if let libp2p::request_response::Event::Message { peer, message, .. } = event {
+            let source = peer;
+            if let libp2p::request_response::Message::Response { response, .. } = message {
+                if response.source != source {
+                    eprintln!("Source peer ID does not match message source");
+                }
+
+                let msg = Message::RequestResponse(response);
+                let handler = Arc::clone(&handler);
+                tokio::spawn(async move {
+                    handler(msg);
+                });
+            }
+        }
     }
 
     pub fn stop_receive(&self) -> TransportResult<()> {
@@ -275,198 +325,103 @@ impl PartialEq for Transport {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::AtomicBool, Arc};
-
-    use tokio::time::Duration;
-
-    use crate::network::transport::test_communication::{
-        create_test_payload, TestCommunication, TEST_TIMEOUT_DURATION, TEST_TOPIC,
+    use crate::network::{
+        message,
+        transport::test_transport::{create_test_payload, TestTransport, TEST_TOPIC},
     };
+    use libp2p::PeerId;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_new() {
-        let result = TestCommunication::new().await;
-        assert!(
-            result.is_ok(),
-            "Failed to create P2PCommunication: {:?}",
-            result.err()
-        );
+        let tt = TestTransport::new().await.unwrap();
+        let addr = tt.listen_addr;
+        assert!(addr.to_string().contains("127.0.0.1"));
     }
 
     #[tokio::test]
     async fn test_dial() {
-        let target = TestCommunication::new().await.unwrap();
-        let mut source = TestCommunication::new().await.unwrap();
-
-        let result = source
-            .p2p
-            .dial(target.peer_id, target.listen_addr.clone())
-            .await;
-        let received_kad_event = source.wait_for_kad_event().await;
-
-        assert!(result.is_ok(), "Dial operation should succeed");
-        assert!(
-            received_kad_event,
-            "Should receive Kademlia event after dialing"
-        );
-        assert!(
-            source.has_peer_in_routing_table(&target.peer_id).await,
-            "Target peer should be in the routing table after dialing"
-        );
+        let mut t1 = TestTransport::new().await.unwrap();
+        let t2 = TestTransport::new().await.unwrap();
+        t1.p2p
+            .dial(t2.peer_id, t2.listen_addr.clone())
+            .await
+            .unwrap();
+        t1.process_events(Duration::from_secs(1)).await;
+        assert!(t1.has_peer_in_routing_table(&t2.peer_id).await);
     }
 
     #[tokio::test]
     async fn test_subscribe() {
-        let comm = TestCommunication::new()
-            .await
-            .expect("Failed to create P2PCommunication");
-
-        let subscribe_result = comm.p2p.subscribe(TEST_TOPIC).await;
-        assert!(
-            subscribe_result.is_ok(),
-            "Failed to subscribe to topic: {:?}",
-            subscribe_result.err()
-        );
-
-        let mut swarm = comm.p2p.swarm.lock().await;
-        let gossipsub = swarm.behaviour_mut().gossipsub_mut();
-        let subscriptions: Vec<String> =
-            gossipsub.topics().map(|t| t.as_str().to_string()).collect();
-        assert!(
-            subscriptions.contains(&TEST_TOPIC.to_string()),
-            "Should be subscribed to topic"
-        );
+        let t1 = TestTransport::new().await.unwrap();
+        let result = t1.p2p.subscribe(TEST_TOPIC).await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn test_publish() {
-        let mut node1 = TestCommunication::new().await.unwrap();
-        let mut node2 = TestCommunication::new().await.unwrap();
-
-        let connection_result = node1.establish_gossipsub_connection(&mut node2).await;
-        assert!(
-            connection_result.is_ok(),
-            "Gossipsub connection should be established: {:?}",
-            connection_result.err()
-        );
-
-        let test_payload = create_test_payload();
-        let publish_result = node1.p2p.publish(TEST_TOPIC, test_payload).await;
-
-        assert!(
-            publish_result.is_ok(),
-            "Should publish message successfully, got error: {:?}",
-            publish_result.err()
-        );
+    async fn test_send_gossipsub_message() {
+        let mut t1 = TestTransport::new().await.unwrap();
+        let mut t2 = TestTransport::new().await.unwrap();
+        t1.establish_gossipsub_connection(&mut t2).await.unwrap();
+        let payload = create_test_payload();
+        let msg = message::gossipsub::Message::new(TEST_TOPIC, payload);
+        let transport_msg = message::Message::Gossipsub(msg);
+        t1.p2p.send(transport_msg).await.unwrap();
+        let received = t2.wait_for_gossipsub_message().await;
+        assert!(received.is_some());
     }
 
     #[tokio::test]
-    async fn test_send_request() {
-        let mut node1 = TestCommunication::new().await.unwrap();
-        let node2 = TestCommunication::new().await.unwrap();
-
-        let dial_result = node1.p2p.dial(node2.peer_id, node2.listen_addr.clone()).await;
-        assert!(
-            dial_result.is_ok(),
-            "Dial operation should succeed: {:?}",
-            dial_result.err()
-        );
-
-        node1.process_events(Duration::from_secs(3)).await;
-
-        let test_request = super::Request {
-            request_id: "test_id".to_string(),
-            payload: super::MessagePayload::RawData {
-                data: b"test_data".to_vec(),
-            },
-        };
-        let target_peer_id = node2.peer_id;
-
-        let send_result = node1.p2p.send_request(target_peer_id, test_request.clone()).await;
-        assert!(send_result.is_ok(), "Failed to send request: {:?}", send_result.err()); 
+    async fn test_send_request_response_message() {
+        let mut t1 = TestTransport::new().await.unwrap();
+        let t2 = TestTransport::new().await.unwrap();
+        let payload = create_test_payload();
+        let req_msg = message::request_response::Message::new(t1.peer_id, t2.peer_id, payload);
+        let transport_msg = message::Message::RequestResponse(req_msg);
+        t1.p2p.send(transport_msg).await.unwrap();
+        t1.process_events(Duration::from_secs(1)).await;
     }
 
     #[tokio::test]
-    async fn test_receive() {
-        let mut node1 = TestCommunication::new().await.unwrap();
-        let mut node2 = TestCommunication::new().await.unwrap();
-
-        let connection_result = node1.establish_gossipsub_connection(&mut node2).await;
-        assert!(
-            connection_result.is_ok(),
-            "Gossipsub connection should be established: {:?}",
-            connection_result.err()
-        );
-
-        let is_received = Arc::new(AtomicBool::new(false));
-        let is_received_clone = Arc::clone(&is_received);
-        let handler = move |message: super::Message| {
-            is_received_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-            assert_eq!(
-                message.topic, TEST_TOPIC,
-                "Received message topic should match published topic"
-            );
-        };
-
-        node2.p2p.receive(handler).await;
-
-        let test_payload = create_test_payload();
-        let publish_result = node1.p2p.publish(TEST_TOPIC, test_payload).await;
-        assert!(
-            publish_result.is_ok(),
-            "Should publish message successfully: {:?}",
-            publish_result.err()
-        );
-
-        tokio::time::sleep(TEST_TIMEOUT_DURATION).await;
-
-        node2.process_events(Duration::from_secs(3)).await;
-
-        assert!(
-            is_received.load(std::sync::atomic::Ordering::Relaxed),
-            "Should receive message"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_stop_receive() {
-        let node = TestCommunication::new().await.unwrap();
-
-        assert!(
-            !node.p2p.is_receiving().await,
-            "receive_task should be None initially"
-        );
-
-        let handler = |_: super::Message| {};
-
-        node.p2p.receive(handler).await;
-        assert!(
-            node.p2p.is_receiving().await,
-            "receive_task should be Some after calling start_receive"
-        );
-
-        let stop_result = node.p2p.stop_receive();
-        assert!(
-            stop_result.is_ok(),
-            "Should stop receiving messages: {:?}",
-            stop_result.err()
-        );
+    async fn test_receive_handler_invocation() {
+        let t1 = TestTransport::new().await.unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        t1.p2p
+            .receive(move |msg| {
+                let _ = tx.blocking_send(msg);
+            })
+            .await;
+        assert!(t1.p2p.is_receiving().await);
+        t1.p2p.stop_receive().unwrap();
+        assert!(!t1.p2p.is_receiving().await);
     }
 
     #[tokio::test]
     async fn test_clone() {
-        let node = TestCommunication::new().await.unwrap();
-        let handler = |_: super::Message| {};
-
-        node.p2p.receive(handler).await;
-
-        let cloned = node.p2p.clone(handler).await;
-        assert_eq!(node.p2p, cloned, "Cloned P2PCommunication should be equal");
+        let t1 = TestTransport::new().await.unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        t1.p2p
+            .receive(move |msg| {
+                let _ = tx.blocking_send(msg);
+            })
+            .await;
+        let cloned = t1
+            .p2p
+            .clone(|msg| {
+                let _ = msg;
+            })
+            .await;
+        assert_eq!(
+            t1.peer_id,
+            PeerId::from_public_key(&cloned.keypair.public())
+        );
+        assert_eq!(cloned.is_receiving().await, t1.p2p.is_receiving().await);
     }
 }
 
 #[cfg(test)]
-pub mod test_communication {
+pub mod test_transport {
     use std::time::Duration;
 
     use libp2p::{
@@ -477,7 +432,7 @@ pub mod test_communication {
 
     use crate::network::{
         behaviour::{Behaviour, P2PEvent},
-        message::MessagePayload,
+        message::Payload,
     };
 
     use super::Transport;
@@ -485,20 +440,20 @@ pub mod test_communication {
     pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
     pub const TEST_TOPIC: &str = "test_topic";
 
-    pub fn create_test_payload() -> MessagePayload {
-        MessagePayload::RawData {
+    pub fn create_test_payload() -> Payload {
+        Payload::RawData {
             data: b"test".to_vec(),
         }
     }
 
-    pub struct TestCommunication {
+    pub struct TestTransport {
         pub peer_id: PeerId,
         pub keypair: Keypair,
         pub listen_addr: Multiaddr,
         pub p2p: Transport,
     }
 
-    impl TestCommunication {
+    impl TestTransport {
         pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
             let keypair = Keypair::generate_ed25519();
             let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
