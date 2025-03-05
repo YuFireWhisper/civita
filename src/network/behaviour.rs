@@ -95,6 +95,10 @@ impl Behaviour {
     pub fn kad_mut(&mut self) -> &mut kad::Behaviour<MemoryStore> {
         &mut self.kad
     }
+
+    pub fn request_response(&self) -> &request_response::Behaviour<Codec> {
+        &self.request_response
+    }
 }
 
 pub enum P2PEvent {
