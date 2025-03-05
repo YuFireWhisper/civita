@@ -28,6 +28,7 @@ pub struct Response {
     pub result: Vec<u8>,
 }
 
+#[derive(Default, Debug, Clone)]
 pub struct Codec;
 
 impl Codec {
