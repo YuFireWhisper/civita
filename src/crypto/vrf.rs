@@ -14,6 +14,11 @@ pub enum Error {
 
 type VrfResult<T> = Result<T, Error>;
 
+pub struct VrfProof {
+    pub output: Vec<u8>,
+    pub proof: Vec<u8>,
+}
+
 pub struct Vrf {
     keypair: Arc<Keypair>,
 }
@@ -23,10 +28,10 @@ impl Vrf {
         Self { keypair }
     }
 
-    pub fn prove(&self, input: &[u8]) -> VrfResult<(Vec<u8>, Vec<u8>)> {
+    pub fn prove(&self, input: &[u8]) -> VrfResult<VrfProof> {
         let proof = self.generate_signature(input)?;
         let output = self.compute_hash(&proof);
-        Ok((output, proof.to_vec()))
+        Ok(VrfProof { output, proof })
     }
 
     fn generate_signature(&self, input: &[u8]) -> VrfResult<Vec<u8>> {
@@ -62,24 +67,6 @@ impl Vrf {
         hasher.update(proof);
         hasher.finalize().to_vec()
     }
-
-    pub fn random_value(&self, seed: u64) -> VrfResult<f64> {
-        let input = seed.to_le_bytes();
-        let (output, _) = self.prove(&input)?;
-        let value = Self::u64_from_bytes(&output)?;
-        Ok(Self::normalize(value))
-    }
-
-    fn u64_from_bytes(bytes: &[u8]) -> VrfResult<u64> {
-        if bytes.len() < 8 {
-            return Err(Error::BytesTooShort);
-        }
-        Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
-    }
-
-    fn normalize(value: u64) -> f64 {
-        value as f64 / u64::MAX as f64
-    }
 }
 
 #[cfg(test)]
@@ -108,22 +95,27 @@ mod tests {
     }
 
     #[test]
-    fn test_compute() {
+    fn test_prove() {
         let keypair = generate_keypair();
         let vrf = Vrf::new(keypair);
 
-        let (output, signature) = vrf.prove(TEST_INPUT).unwrap();
+        let vrf_proof = vrf.prove(TEST_INPUT);
 
-        assert_eq!(output.len(), 32, "Vrf output should be 32 bytes long");
-        assert_eq!(signature.len(), 64, "Vrf signature should be 64 bytes long");
+        assert!(vrf_proof.is_ok(), "Vrf should prove the input");
     }
 
     #[test]
     fn test_verify_valid() {
         let keypair = generate_keypair();
         let vrf = Vrf::new(keypair.clone());
-        let (output, proof) = vrf.prove(TEST_INPUT).unwrap();
-        let is_valid = Vrf::verify(&keypair.public(), TEST_INPUT, &output, &proof).unwrap();
+        let vrf_proof = vrf.prove(TEST_INPUT).unwrap();
+        let is_valid = Vrf::verify(
+            &keypair.public(),
+            TEST_INPUT,
+            &vrf_proof.output,
+            &vrf_proof.proof,
+        )
+        .unwrap();
         assert!(is_valid, "Vrf should verify the output and proof");
     }
 
@@ -131,67 +123,9 @@ mod tests {
     fn test_verify_invalid() {
         let keypair = generate_keypair();
         let vrf = Vrf::new(keypair.clone());
-        let (output, _) = vrf.prove(TEST_INPUT).unwrap();
-        let is_valid = Vrf::verify(&keypair.public(), TEST_INPUT, &output, &[0; 64]).unwrap();
-        assert!(!is_valid, "Vrf should not verify the output and proof");
-    }
-
-    #[test]
-    fn test_random_value() {
-        let keypair = generate_keypair();
-        let vrf = Vrf::new(keypair);
-
-        const ITERATIONS: u64 = 1000;
-        let mut previous_value = None;
-        let mut values = Vec::new();
-
-        for seed in 0..ITERATIONS {
-            let result = vrf.random_value(seed).unwrap();
-
-            assert!(
-                (0.0..=1.0).contains(&result),
-                "Value {} for seed {} should be between 0.0 and 1.0",
-                result,
-                seed
-            );
-
-            assert!(
-                result.is_finite(),
-                "Result should be finite for seed {}",
-                seed
-            );
-            assert!(
-                !result.is_nan(),
-                "Result should not be NaN for seed {}",
-                seed
-            );
-
-            values.push(result);
-
-            if let Some(prev) = previous_value {
-                assert_ne!(
-                    result,
-                    prev,
-                    "Values should differ between seeds {} and {}",
-                    seed - 1,
-                    seed
-                );
-            }
-            previous_value = Some(result);
-
-            let result_again = vrf.random_value(seed).unwrap();
-            assert_eq!(
-                result, result_again,
-                "Same seed {} should produce same value",
-                seed
-            );
-        }
-
-        let mean = values.iter().sum::<f64>() / ITERATIONS as f64;
-        assert!(
-            mean > 0.3 && mean < 0.7,
-            "Mean value {} should be roughly centered (0.3-0.7)",
-            mean
-        );
+        let vrf_proof = vrf.prove(TEST_INPUT).unwrap();
+        let is_valid =
+            Vrf::verify(&keypair.public(), TEST_INPUT, &[0; 32], &vrf_proof.proof).unwrap();
+        assert!(!is_valid, "Vrf should not verify invalid output");
     }
 }
