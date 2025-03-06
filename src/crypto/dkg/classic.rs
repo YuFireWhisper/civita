@@ -3,10 +3,14 @@ use std::sync::Arc;
 use ark_bls12_381::Fr;
 use ark_std::{rand, UniformRand};
 use libp2p::PeerId;
+use thiserror::Error;
 
 use crate::network::transport::Transport;
 
 use super::Dkg;
+
+#[derive(Debug, Error)]
+pub enum Error {}
 
 pub struct DkgClassic {
     transport: Arc<Transport>,
@@ -31,9 +35,15 @@ impl DkgClassic {
 
         coefficients
     }
+
+    fn send_secret_shares(&self) {
+        todo!()
+    }
 }
 
 impl Dkg for DkgClassic {
+    type Error = Error;
+
     fn new(transport: Arc<Transport>, peer_ids: Vec<PeerId>, threshold_ratio: usize) -> Self {
         let threshold = Self::calculate_threshold(threshold_ratio, peer_ids.len());
         let poly = Self::generate_poly(threshold);
@@ -44,6 +54,10 @@ impl Dkg for DkgClassic {
             threshold,
             poly,
         }
+    }
+
+    fn init(&self) -> Result<(), Self::Error> {
+        todo!()
     }
 
     fn sign(&self, message: Vec<u8>) -> Vec<u8> {

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use libp2p::identity::{Keypair, PublicKey};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -13,11 +15,11 @@ pub enum VrfError {
 type VrfResult<T> = Result<T, VrfError>;
 
 pub struct Vrf {
-    keypair: Keypair,
+    keypair: Arc<Keypair>,
 }
 
 impl Vrf {
-    pub fn new(keypair: Keypair) -> Self {
+    pub fn new(keypair: Arc<Keypair>) -> Self {
         Self { keypair }
     }
 
@@ -82,16 +84,22 @@ impl Vrf {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use libp2p::identity::Keypair;
 
     use super::Vrf;
 
+    const TEST_INPUT: &[u8] = b"input";
+
+    fn generate_keypair() -> Arc<Keypair> {
+        Arc::new(Keypair::generate_ed25519())
+    }
+
     #[test]
     fn test_new() {
-        let keypair = Keypair::generate_ed25519();
-
+        let keypair = generate_keypair();
         let vrf = Vrf::new(keypair.clone());
-
         assert_eq!(
             vrf.keypair.public(),
             keypair.public(),
@@ -101,11 +109,10 @@ mod tests {
 
     #[test]
     fn test_compute() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = generate_keypair();
         let vrf = Vrf::new(keypair);
 
-        let input = b"input";
-        let (output, signature) = vrf.prove(input).unwrap();
+        let (output, signature) = vrf.prove(TEST_INPUT).unwrap();
 
         assert_eq!(output.len(), 32, "Vrf output should be 32 bytes long");
         assert_eq!(signature.len(), 64, "Vrf signature should be 64 bytes long");
@@ -113,33 +120,25 @@ mod tests {
 
     #[test]
     fn test_verify_valid() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = generate_keypair();
         let vrf = Vrf::new(keypair.clone());
-
-        let input = b"input";
-        let (output, proof) = vrf.prove(input).unwrap();
-
-        let is_valid = Vrf::verify(&keypair.public(), input, &output, &proof).unwrap();
-
+        let (output, proof) = vrf.prove(TEST_INPUT).unwrap();
+        let is_valid = Vrf::verify(&keypair.public(), TEST_INPUT, &output, &proof).unwrap();
         assert!(is_valid, "Vrf should verify the output and proof");
     }
 
     #[test]
     fn test_verify_invalid() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = generate_keypair();
         let vrf = Vrf::new(keypair.clone());
-
-        let input = b"input";
-        let (output, _) = vrf.prove(input).unwrap();
-
-        let is_valid = Vrf::verify(&keypair.public(), input, &output, &[0; 64]).unwrap();
-
+        let (output, _) = vrf.prove(TEST_INPUT).unwrap();
+        let is_valid = Vrf::verify(&keypair.public(), TEST_INPUT, &output, &[0; 64]).unwrap();
         assert!(!is_valid, "Vrf should not verify the output and proof");
     }
 
     #[test]
     fn test_random_value() {
-        let keypair = Keypair::generate_ed25519();
+        let keypair = generate_keypair();
         let vrf = Vrf::new(keypair);
 
         const ITERATIONS: u64 = 1000;

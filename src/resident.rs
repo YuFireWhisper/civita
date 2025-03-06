@@ -29,7 +29,6 @@ impl Resident {
 
     pub async fn new(keypair: Keypair, listen_addr: Multiaddr) -> ResidentResult<Self> {
         let transport = Transport::new(keypair, listen_addr, Self::DEFAULT_RECEIVE_TIMEOUT)?;
-        transport.receive(Self::handle_received_message).await;
         Ok(Self { transport })
     }
 

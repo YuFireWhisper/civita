@@ -1,14 +1,17 @@
 pub mod gossipsub;
 pub mod request_response;
 
-use libp2p::gossipsub::MessageId;
+use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {
     InitRandom {
-        threshold: usize,
-        total_residents: usize,
+        threshold_ratio: usize,
+        peer_ids: Vec<PeerId>,
+    },
+    SecretShare {
+        share: u64,
     },
     PartialRandom {
         response_for: MessageId,
