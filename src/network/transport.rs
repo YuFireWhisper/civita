@@ -1,5 +1,6 @@
 use std::{io, sync::Arc};
 
+use dashmap::DashMap;
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     futures::StreamExt,
@@ -11,7 +12,7 @@ use libp2p::{
 };
 use thiserror::Error;
 use tokio::{
-    sync::{Mutex, MutexGuard},
+    sync::{mpsc, Mutex, MutexGuard},
     task::JoinHandle,
     time::{self, sleep, Duration},
 };
@@ -41,6 +42,12 @@ pub enum Error {
 
 type TransportResult<T> = Result<T, Error>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SubscriptionFilter {
+    Topic(String),
+    Peer(Vec<PeerId>),
+}
+
 enum ReceiveTaskState {
     Running(JoinHandle<TransportResult<()>>),
     Stopped,
@@ -60,11 +67,13 @@ impl ReceiveTaskState {
     }
 }
 
+#[derive(Clone)]
 pub struct Transport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     receive_task: Arc<Mutex<ReceiveTaskState>>,
     keypair: Arc<Keypair>,
     receive_timeout: Duration,
+    receivers: Arc<DashMap<SubscriptionFilter, mpsc::Sender<Message>>>,
 }
 
 impl Transport {
@@ -93,6 +102,7 @@ impl Transport {
             receive_task,
             keypair,
             receive_timeout,
+            receivers: Arc::new(DashMap::new()),
         })
     }
 
@@ -116,7 +126,17 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn subscribe(&self, topic: &str) -> TransportResult<()> {
+    pub async fn subscribe(&self, filter: SubscriptionFilter) -> mpsc::Receiver<Message> {
+        if let SubscriptionFilter::Topic(topic) = &filter {
+            self.subscribe_with_topic(topic).await.unwrap();
+        }
+
+        let (tx, rx) = mpsc::channel(32);
+        self.receivers.insert(filter, tx);
+        rx
+    }
+
+    async fn subscribe_with_topic(&self, topic: &str) -> TransportResult<()> {
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
         swarm.behaviour_mut().gossipsub_mut().subscribe(&topic)?;
@@ -153,10 +173,7 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn receive<T>(&self, handler: T)
-    where
-        T: Fn(Message) + Send + Sync + 'static,
-    {
+    pub async fn receive(&self) {
         let mut task_state = self.receive_task.lock().await;
         if task_state.is_running() {
             return;
@@ -165,10 +182,9 @@ impl Transport {
         let swarm = self.swarm.clone();
         let receive_timeout = self.receive_timeout;
         let receive_task = Arc::clone(&self.receive_task);
+        let receivers = Arc::clone(&self.receivers);
 
         let task = tokio::spawn(async move {
-            let handler = Arc::new(handler);
-
             loop {
                 if let Ok(state) = receive_task.try_lock() {
                     if !state.is_running() {
@@ -187,11 +203,11 @@ impl Transport {
                 if let Some(SwarmEvent::Behaviour(event)) = event {
                     match event {
                         P2PEvent::Gossipsub(event) => {
-                            Self::handle_gossipsub_event(*event, Arc::clone(&handler));
+                            Self::handle_gossipsub_event(*event, Arc::clone(&receivers));
                         }
                         P2PEvent::Kad(event) => Self::handle_kad_event(event),
                         P2PEvent::RequestResponse(event) => {
-                            Self::handle_request_response_event(event, Arc::clone(&handler));
+                            Self::handle_request_response_event(event, Arc::clone(&receivers));
                         }
                     }
                 }
@@ -201,10 +217,10 @@ impl Transport {
         *task_state = ReceiveTaskState::Running(task);
     }
 
-    fn handle_gossipsub_event<F>(event: libp2p::gossipsub::Event, handler: Arc<F>)
-    where
-        F: Fn(Message) + Send + Sync + 'static,
-    {
+    fn handle_gossipsub_event(
+        event: libp2p::gossipsub::Event,
+        receivers: Arc<DashMap<SubscriptionFilter, mpsc::Sender<Message>>>,
+    ) {
         if let libp2p::gossipsub::Event::Message {
             propagation_source,
             message,
@@ -214,11 +230,14 @@ impl Transport {
             match gossipsub::Message::try_from(message) {
                 Ok(mut msg) => {
                     msg.source = Some(propagation_source);
+                    let topic = &msg.topic;
+                    let topic_filter = SubscriptionFilter::Topic(topic.clone());
+
                     let msg = Message::Gossipsub(msg);
-                    let handler = Arc::clone(&handler);
-                    tokio::spawn(async move {
-                        handler(msg);
-                    });
+
+                    if let Some(sender) = receivers.get(&topic_filter) {
+                        let _ = sender.try_send(msg);
+                    }
                 }
                 Err(e) => eprintln!("Error converting message: {}", e),
             }
@@ -229,27 +248,29 @@ impl Transport {
         println!("Kademlia event: {:?}", event);
     }
 
-    fn handle_request_response_event<F>(
+    fn handle_request_response_event(
         event: libp2p::request_response::Event<
             request_response::Message,
             request_response::Message,
         >,
-        handler: Arc<F>,
-    ) where
-        F: Fn(Message) + Send + Sync + 'static,
-    {
+        receivers: Arc<DashMap<SubscriptionFilter, mpsc::Sender<Message>>>,
+    ) {
         if let libp2p::request_response::Event::Message { peer, message, .. } = event {
             let source = peer;
             if let libp2p::request_response::Message::Response { response, .. } = message {
                 if response.source != source {
                     eprintln!("Source peer ID does not match message source");
+                    return;
                 }
 
-                let msg = Message::RequestResponse(response);
-                let handler = Arc::clone(&handler);
-                tokio::spawn(async move {
-                    handler(msg);
-                });
+                let msg = Message::RequestResponse(response.clone());
+
+                let peer_vec = vec![source];
+                let peer_filter = SubscriptionFilter::Peer(peer_vec);
+
+                if let Some(sender) = receivers.get(&peer_filter) {
+                    let _ = sender.try_send(msg);
+                }
             }
         }
     }
@@ -274,28 +295,6 @@ impl Transport {
 
     pub async fn is_receiving(&self) -> bool {
         self.receive_task.lock().await.is_running()
-    }
-
-    pub async fn clone<T>(&self, handler: T) -> Self
-    where
-        T: Fn(Message) + Send + Sync + 'static,
-    {
-        let swarm = Arc::clone(&self.swarm);
-        let keypair = self.keypair.clone();
-        let receive_timeout = self.receive_timeout;
-
-        let cloned = Self {
-            swarm,
-            receive_task: Arc::new(Mutex::new(ReceiveTaskState::Stopped)),
-            keypair,
-            receive_timeout,
-        };
-
-        if self.is_receiving().await {
-            cloned.receive(handler).await;
-        }
-
-        cloned
     }
 }
 
@@ -327,11 +326,12 @@ impl PartialEq for Transport {
 mod tests {
     use crate::network::{
         message,
-        transport::test_transport::{create_test_payload, TestTransport, TEST_TOPIC},
+        transport::{
+            test_transport::{create_test_payload, TestTransport, TEST_TOPIC},
+            SubscriptionFilter,
+        },
     };
-    use libp2p::PeerId;
     use std::time::Duration;
-    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_new() {
@@ -355,8 +355,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe() {
         let t1 = TestTransport::new().await.unwrap();
-        let result = t1.p2p.subscribe(TEST_TOPIC).await;
-        assert!(result.is_ok());
+        let filter = SubscriptionFilter::Topic(TEST_TOPIC.to_string());
+        let rx = t1.p2p.subscribe(filter).await;
+        assert!(rx.capacity() == 32);
     }
 
     #[tokio::test]
@@ -384,39 +385,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_receive_handler_invocation() {
+    async fn test_receive() {
         let t1 = TestTransport::new().await.unwrap();
-        let (tx, _rx) = mpsc::channel(1);
-        t1.p2p
-            .receive(move |msg| {
-                let _ = tx.blocking_send(msg);
-            })
-            .await;
+        t1.p2p.receive().await;
         assert!(t1.p2p.is_receiving().await);
-        t1.p2p.stop_receive().unwrap();
-        assert!(!t1.p2p.is_receiving().await);
     }
 
     #[tokio::test]
     async fn test_clone() {
         let t1 = TestTransport::new().await.unwrap();
-        let (tx, _rx) = mpsc::channel(1);
-        t1.p2p
-            .receive(move |msg| {
-                let _ = tx.blocking_send(msg);
-            })
-            .await;
-        let cloned = t1
-            .p2p
-            .clone(|msg| {
-                let _ = msg;
-            })
-            .await;
-        assert_eq!(
-            t1.peer_id,
-            PeerId::from_public_key(&cloned.keypair.public())
-        );
-        assert_eq!(cloned.is_receiving().await, t1.p2p.is_receiving().await);
+        let t2 = t1.p2p.clone();
+
+        assert_eq!(t1.p2p, t2);
     }
 }
 
@@ -532,12 +512,12 @@ pub mod test_transport {
                 .map_err(|_| "Failed to dial")?;
 
             self.p2p
-                .subscribe(TEST_TOPIC)
+                .subscribe_with_topic(TEST_TOPIC)
                 .await
                 .map_err(|_| "Failed to subscribe self")?;
             other
                 .p2p
-                .subscribe(TEST_TOPIC)
+                .subscribe_with_topic(TEST_TOPIC)
                 .await
                 .map_err(|_| "Failed to subscribe other")?;
 
