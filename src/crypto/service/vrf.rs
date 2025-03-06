@@ -1,137 +1,123 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use libp2p::identity::Keypair;
+use libp2p::PeerId;
+use p256::ecdsa::{SigningKey, VerifyingKey};
+use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{
-    sync::{mpsc::Receiver, Mutex},
-    task::JoinHandle,
-};
+use tokio::sync::Mutex;
+use vrf::openssl::{CipherSuite, ECVRF};
 
-use crate::network::{
-    message::Message,
-    transport::{SubscriptionFilter, Transport},
-};
+use crate::network::transport::Transport;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("{0}")]
-    ReceiveError(String),
+    #[error("VRF error: {0}")]
+    Vrf(String),
+}
+
+impl From<vrf::openssl::Error> for Error {
+    fn from(err: vrf::openssl::Error) -> Self {
+        Self::Vrf(format!("{}", err))
+    }
 }
 
 type VrfResult<T> = Result<T, Error>;
 
-enum State {
-    Running(JoinHandle<()>),
-    Stopped,
-}
-
-impl State {
-    fn is_running(&self) -> bool {
-        matches!(self, Self::Running(_))
-    }
-
-    fn stop(&mut self) {
-        if let Self::Running(handle) = std::mem::replace(self, Self::Stopped) {
-            handle.abort();
-        }
-    }
-}
-
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
 pub struct VrfProof {
     pub output: Vec<u8>,
     pub proof: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct Config {
+    pub topic: String,
+    pub timeout_ms: u64,
+    pub threshold: f64, // 0.0 - 1.0
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            topic: "vrf".to_string(),
+            timeout_ms: 1000,
+            threshold: 0.67, // 2/3
+        }
+    }
+}
+
+#[derive(Debug)]
+struct State {
+    current_round: u64,
+    peer_public_keys: HashMap<PeerId, Vec<u8>>,
+    round_proofs: HashMap<u64, HashMap<PeerId, VrfProof>>,
+    completed_rounds: HashMap<u64, Vec<u8>>,
+}
+
+type OnVrfResult = Box<dyn Fn(u64, &[u8]) + Send + Sync>;
+
 pub struct Vrf {
-    keypair: Arc<Keypair>,
-    receiver: Arc<Mutex<Receiver<Message>>>,
+    transport: Arc<Transport>,
+    config: Config,
     state: Arc<Mutex<State>>,
+    vrf: ECVRF,
+    private_key: SigningKey,
+    public_key: VerifyingKey,
+    peer_id: PeerId,
+    on_vrf_result: Option<OnVrfResult>,
 }
 
 impl Vrf {
-    const VRF_TOPIC: &'static str = "vrf";
+    pub async fn new(
+        transport: Arc<Transport>,
+        config: Config,
+        peer_id: PeerId,
+    ) -> VrfResult<Self> {
+        let vrf = ECVRF::from_suite(CipherSuite::P256_SHA256_TAI)?;
+        let mut rng = OsRng;
+        let private_key = SigningKey::random(&mut rng);
+        let public_key = VerifyingKey::from(&private_key);
 
-    pub async fn new(transport: Arc<Transport>, keypair: Arc<Keypair>) -> Self {
-        let subscription_filter = Self::generate_vrf_filter();
-        let receiver = transport.subscribe(subscription_filter).await;
-        let receiver = Arc::new(Mutex::new(receiver));
-        let state = Arc::new(Mutex::new(State::Stopped));
+        let state = Arc::new(Mutex::new(State {
+            current_round: 0,
+            peer_public_keys: HashMap::new(),
+            round_proofs: HashMap::new(),
+            completed_rounds: HashMap::new(),
+        }));
+        let on_vrf_result = None;
 
-        Self {
-            keypair,
-            receiver,
+        let vrf = Self {
+            transport,
+            config,
             state,
-        }
-    }
+            vrf,
+            private_key,
+            public_key,
+            peer_id,
+            on_vrf_result,
+        };
 
-    fn generate_vrf_filter() -> SubscriptionFilter {
-        SubscriptionFilter::Topic(Self::VRF_TOPIC.to_string())
-    }
-
-    pub async fn start(self: Arc<Self>) -> VrfResult<()> {
-        if self.is_running().await {
-            return Ok(());
-        }
-
-        let self_clone = Arc::clone(&self);
-        let handle = tokio::spawn(async move {
-            while let Some(message) = self_clone.receiver.lock().await.recv().await {
-                self_clone.handle_message(&message);
-            }
-
-            let mut state = self_clone.state.lock().await;
-            *state = State::Stopped;
-        });
-
-        self.set_running(handle).await;
-        Ok(())
-    }
-
-    pub async fn is_running(&self) -> bool {
-        self.state.lock().await.is_running()
-    }
-
-    async fn set_running(self: Arc<Self>, handle: JoinHandle<()>) {
-        let mut state = self.state.lock().await;
-        *state = State::Running(handle);
-    }
-
-    fn handle_message(&self, _message: &Message) {
-        todo!()
-    }
-
-    pub async fn stop(self: Arc<Self>) {
-        self.state.lock().await.stop();
+        Ok(vrf)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use libp2p::identity::Keypair;
-
     use crate::network::transport::test_transport::TestTransport;
 
-    use super::Vrf;
-
-    async fn generate_new_vrf() -> Arc<Vrf> {
-        let transport = TestTransport::new().await.unwrap();
-        let transport = Arc::new(transport.p2p);
-        let keypair = Arc::new(Keypair::generate_ed25519());
-
-        Arc::new(Vrf::new(transport, keypair).await)
-    }
+    use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
-    async fn test_start_and_stop() {
-        let vrf = generate_new_vrf().await;
-        assert!(!vrf.is_running().await, "Vrf should not be running");
+    async fn test_new() {
+        let node = TestTransport::new().await.unwrap();
+        let transport = Arc::new(node.p2p);
+        let peer_id = PeerId::random();
+        let config = Config::default();
 
-        vrf.clone().start().await.unwrap();
-        assert!(vrf.is_running().await, "Vrf should be running");
+        let vrf = Vrf::new(transport, config, peer_id).await;
 
-        vrf.clone().stop().await;
-        assert!(!vrf.is_running().await, "Vrf should not be running");
+        assert!(vrf.is_ok(), "Vrf should be created");
     }
 }
