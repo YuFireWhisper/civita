@@ -5,14 +5,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum VrfError {
+pub enum Error {
     #[error("Signature error: {0}")]
     Signature(String),
     #[error("Bytes too short")]
     BytesTooShort,
 }
 
-type VrfResult<T> = Result<T, VrfError>;
+type VrfResult<T> = Result<T, Error>;
 
 pub struct Vrf {
     keypair: Arc<Keypair>,
@@ -32,7 +32,7 @@ impl Vrf {
     fn generate_signature(&self, input: &[u8]) -> VrfResult<Vec<u8>> {
         match self.keypair.sign(input) {
             Ok(sig) => Ok(sig.to_vec()),
-            Err(e) => Err(VrfError::Signature(e.to_string())),
+            Err(e) => Err(Error::Signature(e.to_string())),
         }
     }
 
@@ -72,7 +72,7 @@ impl Vrf {
 
     fn u64_from_bytes(bytes: &[u8]) -> VrfResult<u64> {
         if bytes.len() < 8 {
-            return Err(VrfError::BytesTooShort);
+            return Err(Error::BytesTooShort);
         }
         Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
     }
