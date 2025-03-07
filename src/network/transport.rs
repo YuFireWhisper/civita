@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     futures::StreamExt,
-    gossipsub::IdentTopic,
+    gossipsub::{IdentTopic, MessageId},
     identity::Keypair,
     kad, noise,
     swarm::{self, SwarmEvent},
@@ -143,21 +143,20 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn send(&self, message: Message) -> TransportResult<()> {
+    pub async fn send(&self, message: Message) -> TransportResult<Option<MessageId>> {
         match message {
-            Message::Gossipsub(message) => self.send_gossipsub_message(message).await,
-            Message::RequestResponse(message) => self.send_reqeust_response_message(message).await,
+            Message::Gossipsub(message) => self.send_gossipsub_message(message).await.map(Some),
+            Message::RequestResponse(message) => self.send_reqeust_response_message(message).await.map(|_| None),
         }
     }
 
-    async fn send_gossipsub_message(&self, message: gossipsub::Message) -> TransportResult<()> {
+    async fn send_gossipsub_message(&self, message: gossipsub::Message) -> TransportResult<MessageId> {
         let topic = IdentTopic::new(&message.topic);
         let mut swarm = self.swarm.lock().await;
         swarm
             .behaviour_mut()
             .gossipsub_mut()
-            .publish(topic, message)?;
-        Ok(())
+            .publish(topic, message).map_err(|e| e.into())
     }
 
     async fn send_reqeust_response_message(
