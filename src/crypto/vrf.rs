@@ -184,9 +184,7 @@ impl VrfService {
     }
 
     fn handle_vrf_failure(&self, message_id: MessageId, source: PeerId) -> VrfResult<()> {
-        let should_fail = self
-            .processes
-            .insert_failure_vote(&message_id, source)?;
+        let should_fail = self.processes.insert_failure_vote(&message_id, source)?;
         if should_fail {
             self.notify_failure(message_id);
         }
@@ -261,8 +259,19 @@ impl VrfService {
     pub async fn new_random(self: Arc<Self>) -> VrfResult<[u8; 32]> {
         let message_id = self.messager.send_vrf_request().await?;
         self.handle_vrf_request(message_id.clone()).await?;
-        let deadline = self.processes.proof_deadline(&message_id)?;
-        sleep_until(deadline).await; 
+
+        sleep_until(self.processes.proof_deadline(&message_id)?).await;
+
+        if let Ok(consensus) = self.processes.calculate_consensus(&message_id) {
+            self.messager
+                .send_vrf_consensus(message_id.clone(), consensus)
+                .await?;
+        } else {
+            self.messager.send_vrf_failure(message_id.clone()).await?;
+        }
+
+        sleep_until(self.processes.vote_deadline(&message_id)?).await;
+
         match self.processes.status(&message_id)? {
             ProcessStatus::Completed(random) => Ok(random),
             ProcessStatus::Failed => Err(Error::ProcessFailed(message_id)),
