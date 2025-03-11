@@ -2,64 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use libp2p::PeerId;
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 use tokio::time::{Duration, Instant};
 
-use super::config::DEFAULT_THRESHOLD_PERCENTAGE;
+use crate::crypto::vrf::config::DEFAULT_THRESHOLD_PERCENTAGE;
 
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("Duplicate peer ID: {0}")]
-    DuplicatePeerId(PeerId),
-    #[error("Duplicate proof")]
-    DuplicateProof,
-    #[error("Timeout")]
-    Timeout,
-    #[error("Proof Deadline not yet reached")]
-    ProofDeadlineNotReached,
-    #[error("Vote Deadline has already been reached")]
-    VoteDeadlineReached,
-    #[error("Insufficient proofs collected")]
-    InsufficientProofs,
-    #[error("Peer ID not found")]
-    PeerIdNotFound,
-}
+use super::{ConsensusProcess, ConsensusProcessFactory, Error, ProcessStatus};
 
-type ProcessResult<T> = Result<T, Error>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
-pub enum ProcessStatus {
-    Completed([u8; 32]),
-    InProgress,
-    Failed,
-}
-
-pub trait ConsensusProcess: Send + Sync {
-    fn insert_voter(&mut self, peer_id: PeerId) -> ProcessResult<()>;
-    fn insert_proof(&mut self, proof: Vec<u8>) -> ProcessResult<()>;
-    fn calculate_consensus(&self) -> ProcessResult<[u8; 32]>;
-    fn insert_completion_vote(
-        &mut self,
-        peer_id: PeerId,
-        random: [u8; 32],
-    ) -> ProcessResult<Option<[u8; 32]>>;
-    fn insert_failure_vote(&mut self, peer_id: PeerId) -> ProcessResult<bool>;
-    fn is_proof_timeout(&self) -> bool;
-    fn is_vote_timeout(&self) -> bool;
-    fn status(&mut self) -> ProcessStatus;
-    fn update_status(&mut self) -> ProcessStatus;
-    fn proof_deadline(&self) -> &Instant;
-    fn vote_deadline(&self) -> &Instant;
-    fn random(&self) -> Option<&[u8; 32]>;
-}
-
-pub trait ConsensusProcessFactory: Send + Sync {
-    fn create(
-        &self,
-        proof_duration: Duration,
-        vote_duration: Duration,
-    ) -> Box<dyn ConsensusProcess>;
-}
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -130,7 +79,7 @@ impl Process {
 }
 
 impl ConsensusProcess for Process {
-    fn insert_voter(&mut self, peer_id: PeerId) -> ProcessResult<()> {
+    fn insert_voter(&mut self, peer_id: PeerId) -> Result<()> {
         if self.is_proof_timeout() {
             return Err(Error::ProofDeadlineNotReached);
         }
@@ -143,7 +92,7 @@ impl ConsensusProcess for Process {
         }
     }
 
-    fn insert_proof(&mut self, proof: Vec<u8>) -> ProcessResult<()> {
+    fn insert_proof(&mut self, proof: Vec<u8>) -> Result<()> {
         if self.is_proof_timeout() {
             return Err(Error::ProofDeadlineNotReached);
         }
@@ -156,7 +105,7 @@ impl ConsensusProcess for Process {
         Ok(())
     }
 
-    fn calculate_consensus(&self) -> ProcessResult<[u8; 32]> {
+    fn calculate_consensus(&self) -> Result<[u8; 32]> {
         if !self.is_proof_timeout() {
             return Err(Error::ProofDeadlineNotReached);
         }
@@ -174,7 +123,7 @@ impl ConsensusProcess for Process {
         &mut self,
         peer_id: PeerId,
         random: [u8; 32],
-    ) -> ProcessResult<Option<[u8; 32]>> {
+    ) -> Result<Option<[u8; 32]>> {
         if !self.is_proof_timeout() {
             return Err(Error::ProofDeadlineNotReached);
         }
@@ -197,7 +146,7 @@ impl ConsensusProcess for Process {
         }
     }
 
-    fn insert_failure_vote(&mut self, peer_id: PeerId) -> ProcessResult<bool> {
+    fn insert_failure_vote(&mut self, peer_id: PeerId) -> Result<bool> {
         if !self.is_proof_timeout() {
             return Err(Error::ProofDeadlineNotReached);
         }
