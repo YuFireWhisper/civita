@@ -58,6 +58,7 @@ pub trait ConsensusProcessFactory: Send + Sync {
         &self,
         proof_duration: Duration,
         vote_duration: Duration,
+        start_instant: Instant,
     ) -> Box<dyn ConsensusProcess>;
 }
 
@@ -73,16 +74,22 @@ pub struct Process {
 }
 
 impl Process {
-    fn new(proof_duration: Duration, vote_duration: Duration) -> Self {
-        let now = Instant::now();
+    fn new(proof_duration: Duration, vote_duration: Duration, start_instant: Instant) -> Self {
+        let proof_deadline = start_instant + proof_duration;
+        let vote_deadline = proof_deadline + vote_duration;
+        let voters = HashSet::new();
+        let voters_num = 0;
+        let proofs = Vec::new();
+        let votes = HashMap::new();
+        let status = ProcessStatus::InProgress;
         Self {
-            proof_deadline: now + proof_duration,
-            vote_deadline: now + proof_duration + vote_duration,
-            voters: HashSet::new(),
-            voters_num: 0,
-            proofs: Vec::new(),
-            votes: HashMap::new(),
-            status: ProcessStatus::InProgress,
+            proof_deadline,
+            vote_deadline,
+            voters,
+            voters_num,
+            proofs,
+            votes,
+            status,
         }
     }
 
@@ -258,8 +265,9 @@ impl ConsensusProcessFactory for ProcessFactory {
         &self,
         proof_duration: Duration,
         vote_duration: Duration,
+        start_instant: Instant,
     ) -> Box<dyn ConsensusProcess> {
-        Box::new(Process::new(proof_duration, vote_duration))
+        Box::new(Process::new(proof_duration, vote_duration, start_instant))
     }
 }
 
@@ -287,7 +295,7 @@ mod tests {
     }
 
     fn create_process() -> Process {
-        Process::new(PROOF_DURATION, VOTE_DURATION)
+        Process::new(PROOF_DURATION, VOTE_DURATION, Instant::now())
     }
 
     fn get_threshold() -> usize {
@@ -298,7 +306,7 @@ mod tests {
     fn test_new() {
         let duration = Duration::from_secs(5);
 
-        let process = Process::new(duration, duration);
+        let process = Process::new(duration, duration, Instant::now());
 
         assert_eq!(process.status, ProcessStatus::InProgress);
         assert_eq!(process.voters.len(), 0);
@@ -701,7 +709,7 @@ mod tests {
     fn test_create() {
         let factory = ProcessFactory;
 
-        let mut process = factory.create(PROOF_DURATION, VOTE_DURATION);
+        let mut process = factory.create(PROOF_DURATION, VOTE_DURATION, Instant::now());
 
         assert_eq!(process.status(), ProcessStatus::InProgress);
         assert!(process.proof_deadline() > &Instant::now());
