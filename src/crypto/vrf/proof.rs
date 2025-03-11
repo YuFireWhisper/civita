@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct VrfProof {
+pub struct Proof {
     output: Vec<u8>,
     proof: Vec<u8>,
 }
 
-impl VrfProof {
+impl Proof {
     pub fn new(output: Vec<u8>, proof: Vec<u8>) -> Self {
         Self { output, proof }
     }
@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let vrf_proof = VrfProof::new(OUTPUT.to_vec(), PROOF.to_vec());
+        let vrf_proof = Proof::new(OUTPUT.to_vec(), PROOF.to_vec());
         assert_eq!(vrf_proof.output(), OUTPUT);
         assert_eq!(vrf_proof.proof(), PROOF);
     }
