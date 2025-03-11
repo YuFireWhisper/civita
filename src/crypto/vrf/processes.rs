@@ -98,6 +98,13 @@ impl Processes {
             .map(|process| *process.proof_deadline())
     }
 
+    pub fn vote_deadline(&self, message_id: &MessageId) -> Result<Instant> {
+        self.processes
+            .get(message_id)
+            .ok_or(Error::ProcessNotFound)
+            .map(|process| *process.vote_deadline())
+    }
+
     pub fn random(&self, message_id: &MessageId) -> Result<Option<[u8; 32]>> {
         self.processes
             .get_mut(message_id)
