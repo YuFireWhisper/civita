@@ -58,7 +58,6 @@ pub trait ConsensusProcessFactory: Send + Sync {
         &self,
         proof_duration: Duration,
         vote_duration: Duration,
-        start_instant: Instant,
     ) -> Box<dyn ConsensusProcess>;
 }
 
@@ -74,8 +73,9 @@ pub struct Process {
 }
 
 impl Process {
-    fn new(proof_duration: Duration, vote_duration: Duration, start_instant: Instant) -> Self {
-        let proof_deadline = start_instant + proof_duration;
+    fn new(proof_duration: Duration, vote_duration: Duration) -> Self {
+        let now = Instant::now();
+        let proof_deadline = now + proof_duration;
         let vote_deadline = proof_deadline + vote_duration;
         let voters = HashSet::new();
         let voters_num = 0;
@@ -265,9 +265,8 @@ impl ConsensusProcessFactory for ProcessFactory {
         &self,
         proof_duration: Duration,
         vote_duration: Duration,
-        start_instant: Instant,
     ) -> Box<dyn ConsensusProcess> {
-        Box::new(Process::new(proof_duration, vote_duration, start_instant))
+        Box::new(Process::new(proof_duration, vote_duration))
     }
 }
 
@@ -295,7 +294,7 @@ mod tests {
     }
 
     fn create_process() -> Process {
-        Process::new(PROOF_DURATION, VOTE_DURATION, Instant::now())
+        Process::new(PROOF_DURATION, VOTE_DURATION)
     }
 
     fn get_threshold() -> usize {
@@ -306,7 +305,7 @@ mod tests {
     fn test_new() {
         let duration = Duration::from_secs(5);
 
-        let process = Process::new(duration, duration, Instant::now());
+        let process = Process::new(duration, duration);
 
         assert_eq!(process.status, ProcessStatus::InProgress);
         assert_eq!(process.voters.len(), 0);
@@ -709,7 +708,7 @@ mod tests {
     fn test_create() {
         let factory = ProcessFactory;
 
-        let mut process = factory.create(PROOF_DURATION, VOTE_DURATION, Instant::now());
+        let mut process = factory.create(PROOF_DURATION, VOTE_DURATION);
 
         assert_eq!(process.status(), ProcessStatus::InProgress);
         assert!(process.proof_deadline() > &Instant::now());
