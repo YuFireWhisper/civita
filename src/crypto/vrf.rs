@@ -1,7 +1,7 @@
 pub mod config;
 pub mod crypto;
 pub mod messager;
-pub mod process;
+pub mod consensus_process;
 pub mod processes;
 pub mod proof;
 
@@ -10,11 +10,12 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use config::Config;
+use consensus_process::process::ProcessFactory;
 use crypto::{CryptoEngine, EcvrfCrypto};
 use libp2p::identity;
 use libp2p::{gossipsub::MessageId, PeerId};
 use messager::{Messager, MessagerEngine};
-use process::{ConsensusProcessFactory, ProcessFactory, ProcessStatus};
+use consensus_process::{ConsensusProcessFactory, ProcessStatus};
 use processes::Processes;
 use thiserror::Error;
 use tokio::time::{sleep, sleep_until};
@@ -46,6 +47,8 @@ pub enum Error {
     MessageId,
     #[error("Failed to get source peer ID")]
     SourcePeerId,
+    #[error("Process error: {0}")]
+    Process(String),
 }
 
 type VrfResult<T> = Result<T, Error>;
@@ -355,7 +358,7 @@ impl VrfServiceFactory {
         if self.process_factory.is_none() {
             self.process_factory = Some(Arc::new(Self::DEFAULT_FACTORY));
         }
-        self.process_factory.clone().unwrap() // Safe to unwrap
+        self.process_factory.clone().unwrap()
     }
 }
 
