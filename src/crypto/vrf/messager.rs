@@ -9,7 +9,7 @@ use crate::network::{
     transport::{self, SubscriptionFilter, Transport},
 };
 
-use super::proof::VrfProof;
+use super::proof::Proof;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -28,7 +28,7 @@ pub trait MessagerEngine {
         &self,
         message_id: MessageId,
         public_key: Vec<u8>,
-        vrf_proof: VrfProof,
+        vrf_proof: Proof,
     ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>>;
     fn send_vrf_consensus(
         &self,
@@ -82,7 +82,7 @@ impl MessagerEngine for Messager {
         &self,
         message_id: MessageId,
         public_key: Vec<u8>,
-        vrf_proof: VrfProof,
+        vrf_proof: Proof,
     ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>> {
         Box::pin(async move {
             let payload = Payload::create_vrf_proof(message_id, public_key, vrf_proof);

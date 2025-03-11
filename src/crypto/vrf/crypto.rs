@@ -7,7 +7,7 @@ use vrf::{
     VRF,
 };
 
-use super::proof::VrfProof;
+use super::proof::Proof;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -32,7 +32,7 @@ impl From<PoisonError<MutexGuard<'_, ECVRF>>> for Error {
 type CryptoResult<T> = Result<T, Error>;
 
 pub trait CryptoEngine {
-    fn generate_proof(&self, seed: &[u8]) -> CryptoResult<VrfProof>;
+    fn generate_proof(&self, seed: &[u8]) -> CryptoResult<Proof>;
     fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> CryptoResult<()>;
     fn public_key(&self) -> &[u8];
 }
@@ -81,11 +81,11 @@ impl EcvrfCrypto {
 }
 
 impl CryptoEngine for EcvrfCrypto {
-    fn generate_proof(&self, seed: &[u8]) -> CryptoResult<VrfProof> {
+    fn generate_proof(&self, seed: &[u8]) -> CryptoResult<Proof> {
         let mut vrf = self.get_vrf()?;
         let proof = vrf.prove(self.private_key.as_slice(), seed)?;
         let output = vrf.proof_to_hash(&proof)?;
-        Ok(VrfProof::new(output, proof))
+        Ok(Proof::new(output, proof))
     }
 
     fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> CryptoResult<()> {
