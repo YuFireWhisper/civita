@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use libp2p::{
     gossipsub::{self, MessageId},
     PeerId,
@@ -6,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::Payload;
+
+pub const TIMESTAMP_TOLERANCE_SECONDS: u64 = 30;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -23,7 +26,7 @@ pub struct Message {
     pub source: Option<PeerId>,
     pub topic: String,
     pub payload: Payload,
-    pub timestamp: u64,
+    pub timestamp: i64,
 }
 
 impl Message {
@@ -31,7 +34,7 @@ impl Message {
         let message_id = None;
         let source = None;
         let topic = topic.to_string();
-        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let timestamp = chrono::Utc::now().timestamp();
 
         Self {
             message_id,
@@ -55,12 +58,15 @@ impl Message {
     }
 
     fn validate_timestamp(&self) -> MessageResult<()> {
-        let now = chrono::Utc::now().timestamp() as u64;
-        if self.timestamp <= now {
-            Ok(())
-        } else {
-            Err(Error::InvalidTimestamp)
+        let now = Utc::now();
+        let past_time = DateTime::from_timestamp(self.timestamp, 0).ok_or(Error::InvalidTimestamp)?;
+        let diff = now - past_time;
+        
+        if diff.num_seconds() > TIMESTAMP_TOLERANCE_SECONDS as i64 {
+            return Err(Error::InvalidTimestamp);
         }
+
+        Ok(())
     }
 
     pub fn set_message_id(&mut self, message_id: MessageId) {
