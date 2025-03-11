@@ -191,17 +191,17 @@ impl ConsensusProcess for Process {
         self.status
     }
 
-    fn proof_deadline(&self) -> &Instant {
-        &self.proof_deadline
+    fn proof_deadline(&self) -> Instant {
+        self.proof_deadline
     }
 
-    fn vote_deadline(&self) -> &Instant {
-        &self.vote_deadline
+    fn vote_deadline(&self) -> Instant {
+        self.vote_deadline
     }
 
-    fn random(&self) -> Option<&[u8; 32]> {
+    fn random(&self) -> Option<[u8; 32]> {
         match &self.status {
-            ProcessStatus::Completed(random) => Some(random),
+            ProcessStatus::Completed(random) => Some(*random),
             _ => None,
         }
     }
@@ -632,7 +632,7 @@ mod tests {
         let process = create_process();
         let expected_deadline = process.proof_deadline;
         let deadline = process.proof_deadline();
-        assert_eq!(*deadline, expected_deadline);
+        assert_eq!(deadline, expected_deadline);
     }
 
     #[test]
@@ -650,7 +650,7 @@ mod tests {
 
         let random = process.random();
 
-        assert_eq!(random, Some(&random_value));
+        assert_eq!(random, Some(random_value));
     }
 
     #[test]
@@ -660,6 +660,6 @@ mod tests {
         let mut process = factory.create(PROOF_DURATION, VOTE_DURATION);
 
         assert_eq!(process.status(), ProcessStatus::InProgress);
-        assert!(process.proof_deadline() > &Instant::now());
+        assert!(process.proof_deadline() > Instant::now());
     }
 }

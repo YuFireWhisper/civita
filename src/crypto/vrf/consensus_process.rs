@@ -43,9 +43,9 @@ pub trait ConsensusProcess: Send + Sync {
     fn is_vote_timeout(&self) -> bool;
     fn status(&mut self) -> ProcessStatus;
     fn update_status(&mut self) -> ProcessStatus;
-    fn proof_deadline(&self) -> &Instant;
-    fn vote_deadline(&self) -> &Instant;
-    fn random(&self) -> Option<&[u8; 32]>;
+    fn proof_deadline(&self) -> Instant;
+    fn vote_deadline(&self) -> Instant;
+    fn random(&self) -> Option<[u8; 32]>;
 }
 
 pub trait ConsensusProcessFactory: Send + Sync {
