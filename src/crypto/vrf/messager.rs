@@ -135,31 +135,37 @@ mod tests {
         assert_eq!(messager.topic, TEST_TOPIC);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_subscribe() {
         todo!("We will implement this after we define the Transport trait");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_send_vrf_request_success() {
         todo!("We will implement this after we define the Transport trait");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_send_vrf_request_no_message_id() {
         todo!("We will implement this after we define the Transport trait");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_send_vrf_proof_success() {
         todo!("We will implement this after we define the Transport trait");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_send_vrf_consensus_success() {
         todo!("We will implement this after we define the Transport trait");
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_send_vrf_failure_success() {
         todo!("We will implement this after we define the Transport trait");
