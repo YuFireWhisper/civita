@@ -10,8 +10,8 @@ use crate::{
 use super::{
     config::Config,
     consensus_process::{process::ProcessFactory, ConsensusProcessFactory},
-    crypto::Crypto,
-    DVrf,
+    crypto::{Crypto, EcvrfCrypto},
+    Components, DVrf,
 };
 
 pub struct Factory {
@@ -56,8 +56,17 @@ impl Factory {
     pub async fn create_service(&mut self) -> Result<Arc<DVrf>, Error> {
         let transport = Arc::clone(&self.transport);
         let config = self.get_config();
+        let peer_id = self.peer_id;
         let process_factory = self.get_process_factory();
-        DVrf::new(transport, config, self.peer_id, process_factory).await
+        let crypto = self.get_crypto();
+        let components = Components {
+            transport,
+            peer_id,
+            config,
+            process_factory,
+            crypto,
+        };
+        DVrf::new_with_components(components).await
     }
 
     fn get_config(&mut self) -> Config {
@@ -72,6 +81,17 @@ impl Factory {
             self.process_factory = Some(Arc::new(Self::DEFAULT_FACTORY));
         }
         self.process_factory.clone().unwrap()
+    }
+
+    fn get_crypto(&mut self) -> Arc<dyn Crypto> {
+        if self.crypto.is_none() {
+            self.crypto = Some(self.get_default_crypto().unwrap());
+        }
+        self.crypto.clone().unwrap() // Safe to unwrap, and clone is cheap
+    }
+
+    fn get_default_crypto(&mut self) -> Result<Arc<dyn Crypto>, Error> {
+        Ok(Arc::new(EcvrfCrypto::new()?))
     }
 }
 

@@ -31,6 +31,14 @@ type Result<T> = std::result::Result<T, Error>;
 type ResultCallback = Box<dyn Fn(MessageId, &[u8]) + Send + Sync + 'static>;
 type FailureCallback = Box<dyn Fn(MessageId) + Send + Sync + 'static>;
 
+pub struct Components {
+    pub transport: Arc<Transport>,
+    pub peer_id: PeerId,
+    pub config: Config,
+    pub process_factory: Arc<dyn ConsensusProcessFactory>,
+    pub crypto: Arc<dyn Crypto>,
+}
+
 pub struct DVrf {
     crypto: EcvrfCrypto,
     messager: Messager,
@@ -42,26 +50,21 @@ pub struct DVrf {
 }
 
 impl DVrf {
-    pub async fn new(
-        transport: Arc<Transport>,
-        config: Config,
-        peer_id: PeerId,
-        process_factory: Arc<dyn ConsensusProcessFactory>,
-    ) -> Result<Arc<Self>> {
+    pub(crate) async fn new_with_components(components: Components) -> Result<Arc<Self>> {
         let crypto = EcvrfCrypto::new()?;
-        let messager = Messager::new(Arc::clone(&transport), config.topic.clone());
+        let messager = Messager::new(Arc::clone(&components.transport), components.config.topic.clone());
         let processes = Processes::new(
-            config.vrf_proof_duration,
-            config.vrf_vote_duration,
-            process_factory,
+            components.config.vrf_proof_duration,
+            components.config.vrf_vote_duration,
+            components.process_factory,
         );
 
         let vrf_service = Arc::new(Self {
             crypto,
             messager,
             processes,
-            peer_id,
-            config,
+            peer_id: components.peer_id,
+            config: components.config,
             on_result: Mutex::new(None),
             on_failure: Mutex::new(None),
         });
