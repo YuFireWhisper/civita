@@ -25,11 +25,24 @@ impl Subscription {
             !senders.is_empty()
         });
     }
+
+    pub fn broadcast(&self, filter: &SubscriptionFilter, message: Message) {
+        if let Some(senders) = self.subscriptions.get(filter) {
+            for sender in senders {
+                let _ = sender.try_send(message.clone());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::mpsc::{channel, Receiver};
+    use tokio::{
+        sync::mpsc::{channel, Receiver},
+        time::timeout,
+    };
+
+    use crate::network::message::{gossipsub, Payload};
 
     use super::*;
 
@@ -46,6 +59,13 @@ mod tests {
     fn create_channel() -> (Sender<Message>, Receiver<Message>) {
         let (sender, receiver) = channel(1);
         (sender, receiver)
+    }
+
+    fn create_message() -> Message {
+        let payload = Payload::RawData {
+            data: vec![1, 2, 3],
+        };
+        Message::Gossipsub(gossipsub::Message::new(TEST_TOPIC, payload))
     }
 
     #[test]
@@ -72,6 +92,7 @@ mod tests {
         let filter = create_filter();
         let (sender1, receiver1) = create_channel();
         let (sender2, _receiver2) = create_channel();
+
         subscription.add_subscription(filter.clone(), sender1);
         subscription.add_subscription(filter.clone(), sender2);
         drop(receiver1);
@@ -80,5 +101,42 @@ mod tests {
 
         assert_eq!(subscription.subscriptions.len(), 1);
         assert_eq!(subscription.subscriptions.get(&filter).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_success() {
+        let mut subscription = create_subscription();
+        let filter = create_filter();
+        let (sender1, mut receiver1) = create_channel();
+        let (sender2, mut receiver2) = create_channel();
+
+        subscription.add_subscription(filter.clone(), sender1);
+        subscription.add_subscription(filter.clone(), sender2);
+
+        let message = create_message();
+        subscription.broadcast(&filter, message.clone());
+
+        let received1_message = receiver1.recv().await;
+        let received2_message = receiver2.recv().await;
+
+        assert!(received1_message.is_some());
+        assert!(received2_message.is_some());
+        assert_eq!(received1_message.unwrap(), message);
+        assert_eq!(received2_message.unwrap(), message);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_non_existent_filter() {
+        const SLEEP_TIME: std::time::Duration = std::time::Duration::from_millis(100);
+
+        let subscription = create_subscription();
+        let filter = create_filter();
+        let (_, mut receiver) = create_channel();
+
+        let message = create_message();
+        subscription.broadcast(&filter, message.clone());
+
+        let timeout = timeout(SLEEP_TIME, receiver.recv()).await;
+        assert!(timeout.is_err() || timeout.unwrap().is_none());
     }
 }
