@@ -18,6 +18,11 @@ impl<T> ReceiveTask<T> {
             handle.abort();
         }
     }
+
+    pub fn set_handle(&mut self, handle: JoinHandle<T>) {
+        self.stop(); // We don't use if judgement, which is faster
+        self.handle = Some(handle);
+    }
 }
 
 #[cfg(test)]
@@ -81,5 +86,23 @@ mod tests {
 
         assert!(is_running_before, "Task should be running before stop");
         assert!(!is_running_after, "Task should not be running after stop");
+    }
+
+    #[tokio::test]
+    async fn test_set_handle() {
+        let mut task = create_task();
+        task.handle = Some(spawn(async {
+            sleep(TEST_DURATION).await;
+            TEST_VALUE
+        }));
+        let is_running_before = task.is_running();
+        task.set_handle(spawn(async { TEST_VALUE }));
+        let is_running_after = task.is_running();
+
+        assert!(
+            is_running_before,
+            "Task should be running before set_handle"
+        );
+        assert!(is_running_after, "Task should be running after set_handle");
     }
 }
