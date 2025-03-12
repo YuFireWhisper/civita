@@ -31,7 +31,7 @@ impl From<PoisonError<MutexGuard<'_, ECVRF>>> for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub trait Crypto {
+pub trait Crypto: Send + Sync {
     fn generate_proof(&self, seed: &[u8]) -> Result<Proof>;
     fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<()>;
     fn public_key(&self) -> &[u8];
