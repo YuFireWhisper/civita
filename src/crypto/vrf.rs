@@ -48,3 +48,7 @@ pub trait VrfCallback: Send + Sync {
     where
         F: Fn(MessageId) + Send + Sync + 'static;
 }
+
+pub trait VrfFactory: Send + Sync {
+    fn create_vrf(&self) -> Arc<dyn Vrf>;
+}
