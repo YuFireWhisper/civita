@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use libp2p::PeerId;
 
-use crate::network::transport::Libp2pTransport;
+use crate::network::transport::libp2p_transport::Libp2pTransport;
 
 pub trait Dkg {
     type Error;

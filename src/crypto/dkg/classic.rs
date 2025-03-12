@@ -5,7 +5,7 @@ use ark_std::{rand, UniformRand};
 use libp2p::PeerId;
 use thiserror::Error;
 
-use crate::network::transport::Libp2pTransport;
+use crate::network::transport::libp2p_transport::Libp2pTransport;
 
 use super::Dkg;
 
@@ -71,7 +71,7 @@ impl Dkg for DkgClassic {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::transport::test_transport::TestTransport;
+    use crate::network::transport::libp2p_transport::test_transport::TestTransport;
 
     use super::*;
 

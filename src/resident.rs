@@ -2,10 +2,7 @@ use libp2p::{identity::Keypair, Multiaddr};
 use thiserror::Error;
 use tokio::time::Duration;
 
-use crate::network::{
-    message::Message,
-    transport::{self, Libp2pTransport},
-};
+use crate::network::{message::Message, transport::{self, libp2p_transport::Libp2pTransport}};
 
 pub mod malicious_behaviour;
 pub mod requation_action;

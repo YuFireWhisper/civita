@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::network::{
     message::{gossipsub, Message, Payload},
-    transport::{self, Libp2pTransport, SubscriptionFilter},
+    transport::{self, libp2p_transport::Libp2pTransport, SubscriptionFilter},
 };
 
 use super::proof::Proof;
@@ -116,11 +116,9 @@ impl MessagerEngine for Messager {
 mod tests {
     use std::sync::Arc;
 
+    use crate::network::transport::libp2p_transport::{test_transport::{TestTransport, TEST_TOPIC}, Libp2pTransport};
+
     use super::Messager;
-    use crate::network::transport::{
-        test_transport::{TestTransport, TEST_TOPIC},
-        Libp2pTransport,
-    };
 
     async fn create_arc_test_transport() -> Arc<Libp2pTransport> {
         Arc::new(TestTransport::new().await.unwrap().p2p)

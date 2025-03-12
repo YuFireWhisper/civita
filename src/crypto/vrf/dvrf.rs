@@ -21,8 +21,7 @@ use processes::Processes;
 use tokio::time::{sleep, sleep_until};
 
 use crate::network::{
-    message::{Message, Payload},
-    transport::Libp2pTransport,
+    message::{Message, Payload}, transport::libp2p_transport::Libp2pTransport,
 };
 
 use super::{Error, Vrf, VrfCallback};

@@ -3,8 +3,7 @@ use std::sync::Arc;
 use libp2p::PeerId;
 
 use crate::{
-    crypto::vrf::{Error, Vrf, VrfFactory},
-    network::transport::Libp2pTransport,
+    crypto::vrf::{Error, Vrf, VrfFactory}, network::transport::libp2p_transport::Libp2pTransport,
 };
 
 use super::{
