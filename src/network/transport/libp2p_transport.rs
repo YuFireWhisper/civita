@@ -3,7 +3,6 @@ pub mod subscription;
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use futures::StreamExt;
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
@@ -13,12 +12,13 @@ use libp2p::{
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
+use receive_task::ReceiveTask;
+use subscription::Subscription;
 use tokio::{
     sync::{
-        mpsc::{channel, Receiver, Sender},
-        Mutex, MutexGuard,
+        mpsc::{channel, Receiver},
+        Mutex, MutexGuard, RwLock,
     },
-    task::JoinHandle,
     time::{sleep, timeout, Duration},
 };
 
@@ -29,32 +29,13 @@ use crate::network::{
 
 use super::{Error, Result, SubscriptionFilter};
 
-enum ReceiveTaskState {
-    Running(JoinHandle<Result<()>>),
-    Stopped,
-}
-
-impl ReceiveTaskState {
-    fn is_running(&self) -> bool {
-        matches!(self, ReceiveTaskState::Running(_))
-    }
-
-    fn stop(&mut self) {
-        if let ReceiveTaskState::Running(handle) =
-            std::mem::replace(self, ReceiveTaskState::Stopped)
-        {
-            handle.abort();
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Libp2pTransport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
-    receive_task: Arc<Mutex<ReceiveTaskState>>,
+    receive_task: Arc<Mutex<ReceiveTask<Result<()>>>>,
     keypair: Arc<Keypair>,
     receive_timeout: Duration,
-    receivers: Arc<DashMap<SubscriptionFilter, Sender<Message>>>,
+    subscription: Arc<RwLock<Subscription>>,
 }
 
 impl Libp2pTransport {
@@ -74,16 +55,17 @@ impl Libp2pTransport {
         );
         swarm.listen_on(listen_addr)?;
 
-        let swarm = Mutex::new(swarm);
-        let receive_task = Arc::new(Mutex::new(ReceiveTaskState::Stopped));
+        let swarm = Arc::new(Mutex::new(swarm));
+        let receive_task = Arc::new(Mutex::new(ReceiveTask::new()));
         let keypair = Arc::new(keypair);
+        let subscription = Arc::new(RwLock::new(Subscription::new()));
 
         Ok(Self {
-            swarm: Arc::new(swarm),
+            swarm,
             receive_task,
             keypair,
             receive_timeout,
-            receivers: Arc::new(DashMap::new()),
+            subscription,
         })
     }
 
@@ -115,7 +97,7 @@ impl Libp2pTransport {
         }
 
         let (tx, rx) = channel(32);
-        self.receivers.insert(filter, tx);
+        self.subscription.write().await.add_subscription(filter, tx);
         rx
     }
 
@@ -160,6 +142,7 @@ impl Libp2pTransport {
     }
 
     pub async fn receive(&self) {
+        const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
         let mut task_state = self.receive_task.lock().await;
         if task_state.is_running() {
             return;
@@ -168,7 +151,18 @@ impl Libp2pTransport {
         let swarm = self.swarm.clone();
         let receive_timeout = self.receive_timeout;
         let receive_task = Arc::clone(&self.receive_task);
-        let receivers = Arc::clone(&self.receivers);
+        let subscription = Arc::clone(&self.subscription);
+
+        let cleanup_subscription = Arc::clone(&subscription);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
+            loop {
+                interval.tick().await;
+                if let Ok(mut subs) = cleanup_subscription.try_write() {
+                    subs.remove_dead_channels();
+                }
+            }
+        });
 
         let task = tokio::spawn(async move {
             loop {
@@ -187,25 +181,29 @@ impl Libp2pTransport {
                 };
 
                 if let Some(SwarmEvent::Behaviour(event)) = event {
-                    match event {
-                        P2PEvent::Gossipsub(event) => {
-                            Self::handle_gossipsub_event(*event, Arc::clone(&receivers));
-                        }
-                        P2PEvent::Kad(event) => Self::handle_kad_event(event),
-                        P2PEvent::RequestResponse(event) => {
-                            Self::handle_request_response_event(event, Arc::clone(&receivers));
-                        }
-                    }
+                    Self::process_event(event, Arc::clone(&subscription)).await;
                 }
             }
         });
 
-        *task_state = ReceiveTaskState::Running(task);
+        task_state.set_handle(task);
     }
 
-    fn handle_gossipsub_event(
+    async fn process_event(event: P2PEvent, subscribers: Arc<RwLock<Subscription>>) {
+        match event {
+            P2PEvent::Gossipsub(event) => {
+                Self::handle_gossipsub_event(*event, subscribers).await;
+            }
+            P2PEvent::Kad(event) => Self::handle_kad_event(event),
+            P2PEvent::RequestResponse(event) => {
+                Self::handle_request_response_event(event, subscribers).await;
+            }
+        }
+    }
+
+    async fn handle_gossipsub_event(
         event: libp2p::gossipsub::Event,
-        receivers: Arc<DashMap<SubscriptionFilter, Sender<Message>>>,
+        subscription: Arc<RwLock<Subscription>>,
     ) {
         if let libp2p::gossipsub::Event::Message {
             propagation_source,
@@ -221,9 +219,7 @@ impl Libp2pTransport {
 
                     let msg = Message::Gossipsub(msg);
 
-                    if let Some(sender) = receivers.get(&topic_filter) {
-                        let _ = sender.try_send(msg);
-                    }
+                    subscription.read().await.broadcast(&topic_filter, msg);
                 }
                 Err(e) => eprintln!("Error converting message: {}", e),
             }
@@ -234,12 +230,12 @@ impl Libp2pTransport {
         println!("Kademlia event: {:?}", event);
     }
 
-    fn handle_request_response_event(
+    async fn handle_request_response_event(
         event: libp2p::request_response::Event<
             request_response::Message,
             request_response::Message,
         >,
-        receivers: Arc<DashMap<SubscriptionFilter, Sender<Message>>>,
+        subscription: Arc<RwLock<Subscription>>,
     ) {
         if let libp2p::request_response::Event::Message { peer, message, .. } = event {
             let source = peer;
@@ -254,9 +250,7 @@ impl Libp2pTransport {
                 let peer_vec = vec![source];
                 let peer_filter = SubscriptionFilter::Peer(peer_vec);
 
-                if let Some(sender) = receivers.get(&peer_filter) {
-                    let _ = sender.try_send(msg);
-                }
+                subscription.read().await.broadcast(&peer_filter, msg);
             }
         }
     }
