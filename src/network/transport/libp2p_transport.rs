@@ -1,3 +1,5 @@
+pub mod receive_task;
+
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -24,9 +26,7 @@ use crate::network::{
     message::{gossipsub, request_response, Message},
 };
 
-use super::{Error, SubscriptionFilter};
-
-type Result<T> = std::result::Result<T, Error>;
+use super::{Error, Result, SubscriptionFilter};
 
 enum ReceiveTaskState {
     Running(JoinHandle<Result<()>>),
