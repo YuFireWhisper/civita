@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use libp2p::PeerId;
 
-use crate::{crypto::vrf::Error, network::transport::Transport};
+use crate::{
+    crypto::vrf::{Error, Vrf, VrfFactory},
+    network::transport::Transport,
+};
 
 use super::{
     config::Config,
@@ -69,5 +72,12 @@ impl Factory {
             self.process_factory = Some(Arc::new(Self::DEFAULT_FACTORY));
         }
         self.process_factory.clone().unwrap()
+    }
+}
+
+impl VrfFactory for Factory {
+    async fn create_vrf(&mut self) -> Result<Arc<dyn Vrf>, Error> {
+        let service = self.create_service().await?;
+        Ok(service as Arc<dyn Vrf>)
     }
 }
