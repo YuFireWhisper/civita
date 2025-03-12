@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use dvrf::{crypto, messager, processes};
 use libp2p::gossipsub::MessageId;
 use libp2p::identity;
@@ -49,6 +50,7 @@ pub trait VrfCallback: Send + Sync {
         F: Fn(MessageId) + Send + Sync + 'static;
 }
 
+#[async_trait]
 pub trait VrfFactory: Send + Sync {
-    fn create_vrf(&mut self) -> Result<Arc<dyn Vrf>, Error>;
+    async fn create_vrf(&mut self) -> Result<Arc<dyn Vrf>, Error>;
 }
