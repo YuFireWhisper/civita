@@ -50,5 +50,5 @@ pub trait VrfCallback: Send + Sync {
 }
 
 pub trait VrfFactory: Send + Sync {
-    fn create_vrf(&self) -> Arc<dyn Vrf>;
+    fn create_vrf(&mut self) -> Result<Arc<dyn Vrf>, Error>;
 }
