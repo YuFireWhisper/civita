@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod messager;
 pub mod processes;
 pub mod proof;
+pub mod factory;
 
 use std::{
     future::Future,
@@ -12,7 +13,7 @@ use std::{
 };
 
 use config::Config;
-use consensus_process::{process::ProcessFactory, ConsensusProcessFactory, ProcessStatus};
+use consensus_process::{ConsensusProcessFactory, ProcessStatus};
 use crypto::{Crypto, EcvrfCrypto};
 use libp2p::{gossipsub::MessageId, PeerId};
 use messager::{Messager, MessagerEngine};
@@ -273,65 +274,6 @@ impl Vrf for DVrf {
         if let Ok(mut guard) = self.on_failure.lock() {
             *guard = Some(Box::new(callback));
         }
-    }
-}
-
-pub struct DVrfFactory {
-    transport: Arc<Transport>,
-    config: Option<Config>,
-    process_factory: Option<Arc<dyn ConsensusProcessFactory>>,
-    crypto: Option<Arc<dyn Crypto>>,
-}
-
-impl DVrfFactory {
-    const DEFAULT_FACTORY: ProcessFactory = ProcessFactory;
-
-    pub fn new(transport: Arc<Transport>) -> Self {
-        Self {
-            transport,
-            config: None,
-            process_factory: None,
-            crypto: None,
-        }
-    }
-
-    pub fn with_config(mut self, config: Config) -> Self {
-        self.config = Some(config);
-        self
-    }
-
-    pub fn with_process_factory(
-        mut self,
-        process_factory: Arc<dyn ConsensusProcessFactory>,
-    ) -> Self {
-        self.process_factory = Some(process_factory);
-        self
-    }
-
-    pub fn with_crypto(mut self, crypto: Arc<dyn Crypto>) -> Self {
-        self.crypto = Some(crypto);
-        self
-    }
-
-    pub async fn create_service(&mut self, peer_id: PeerId) -> Result<Arc<DVrf>> {
-        let transport = Arc::clone(&self.transport);
-        let config = self.get_config();
-        let process_factory = self.get_process_factory();
-        DVrf::new(transport, config, peer_id, process_factory).await
-    }
-
-    fn get_config(&mut self) -> Config {
-        if self.config.is_none() {
-            self.config = Some(Config::default());
-        }
-        self.config.clone().unwrap() // Safe to unwrap, and clone is cheap
-    }
-
-    fn get_process_factory(&mut self) -> Arc<dyn ConsensusProcessFactory> {
-        if self.process_factory.is_none() {
-            self.process_factory = Some(Arc::new(Self::DEFAULT_FACTORY));
-        }
-        self.process_factory.clone().unwrap()
     }
 }
 
