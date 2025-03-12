@@ -68,7 +68,7 @@ impl ReceiveTaskState {
 }
 
 #[derive(Clone)]
-pub struct Transport {
+pub struct Libp2pTransport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     receive_task: Arc<Mutex<ReceiveTaskState>>,
     keypair: Arc<Keypair>,
@@ -76,7 +76,7 @@ pub struct Transport {
     receivers: Arc<DashMap<SubscriptionFilter, mpsc::Sender<Message>>>,
 }
 
-impl Transport {
+impl Libp2pTransport {
     pub fn new(
         keypair: Keypair,
         listen_addr: Multiaddr,
@@ -297,7 +297,7 @@ impl Transport {
     }
 }
 
-impl std::fmt::Debug for Transport {
+impl std::fmt::Debug for Libp2pTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2PCommunication")
             .field(
@@ -315,7 +315,7 @@ impl std::fmt::Debug for Transport {
     }
 }
 
-impl PartialEq for Transport {
+impl PartialEq for Libp2pTransport {
     fn eq(&self, other: &Self) -> bool {
         self.keypair.public() == other.keypair.public()
     }
@@ -414,7 +414,7 @@ pub mod test_transport {
         message::Payload,
     };
 
-    use super::Transport;
+    use super::Libp2pTransport;
 
     pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
     pub const TEST_TOPIC: &str = "test_topic";
@@ -429,7 +429,7 @@ pub mod test_transport {
         pub peer_id: PeerId,
         pub keypair: Keypair,
         pub listen_addr: Multiaddr,
-        pub p2p: Transport,
+        pub p2p: Libp2pTransport,
     }
 
     impl TestTransport {
@@ -437,7 +437,7 @@ pub mod test_transport {
             let keypair = Keypair::generate_ed25519();
             let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
 
-            let p2p = Transport::new(keypair.clone(), listen_addr.clone(), TEST_TIMEOUT_DURATION)?;
+            let p2p = Libp2pTransport::new(keypair.clone(), listen_addr.clone(), TEST_TIMEOUT_DURATION)?;
 
             {
                 let mut swarm = p2p

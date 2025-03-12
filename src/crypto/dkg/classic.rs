@@ -5,7 +5,7 @@ use ark_std::{rand, UniformRand};
 use libp2p::PeerId;
 use thiserror::Error;
 
-use crate::network::transport::Transport;
+use crate::network::transport::Libp2pTransport;
 
 use super::Dkg;
 
@@ -13,7 +13,7 @@ use super::Dkg;
 pub enum Error {}
 
 pub struct DkgClassic {
-    transport: Arc<Transport>,
+    transport: Arc<Libp2pTransport>,
     peer_ids: Vec<PeerId>,
     threshold: usize,
     poly: Vec<Fr>,
@@ -44,7 +44,7 @@ impl DkgClassic {
 impl Dkg for DkgClassic {
     type Error = Error;
 
-    fn new(transport: Arc<Transport>, peer_ids: Vec<PeerId>, threshold_ratio: usize) -> Self {
+    fn new(transport: Arc<Libp2pTransport>, peer_ids: Vec<PeerId>, threshold_ratio: usize) -> Self {
         let threshold = Self::calculate_threshold(threshold_ratio, peer_ids.len());
         let poly = Self::generate_poly(threshold);
 

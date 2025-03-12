@@ -4,7 +4,7 @@ use tokio::time::Duration;
 
 use crate::network::{
     message::Message,
-    transport::{self, Transport},
+    transport::{self, Libp2pTransport},
 };
 
 pub mod malicious_behaviour;
@@ -21,14 +21,14 @@ pub enum Error {
 type ResidentResult<T> = std::result::Result<T, Error>;
 
 pub struct Resident {
-    transport: Transport,
+    transport: Libp2pTransport,
 }
 
 impl Resident {
     const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
     pub async fn new(keypair: Keypair, listen_addr: Multiaddr) -> ResidentResult<Self> {
-        let transport = Transport::new(keypair, listen_addr, Self::DEFAULT_RECEIVE_TIMEOUT)?;
+        let transport = Libp2pTransport::new(keypair, listen_addr, Self::DEFAULT_RECEIVE_TIMEOUT)?;
         Ok(Self { transport })
     }
 

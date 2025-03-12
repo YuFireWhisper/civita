@@ -4,7 +4,7 @@ use libp2p::PeerId;
 
 use crate::{
     crypto::vrf::{Error, Vrf, VrfFactory},
-    network::transport::Transport,
+    network::transport::Libp2pTransport,
 };
 
 use super::{
@@ -15,7 +15,7 @@ use super::{
 };
 
 pub struct Factory {
-    transport: Arc<Transport>,
+    transport: Arc<Libp2pTransport>,
     config: Option<Config>,
     process_factory: Option<Arc<dyn ConsensusProcessFactory>>,
     crypto: Option<Arc<dyn Crypto>>,
@@ -25,7 +25,7 @@ pub struct Factory {
 impl Factory {
     const DEFAULT_FACTORY: ProcessFactory = ProcessFactory;
 
-    pub fn new(transport: Arc<Transport>, peer_id: PeerId) -> Self {
+    pub fn new(transport: Arc<Libp2pTransport>, peer_id: PeerId) -> Self {
         Self {
             transport,
             config: None,

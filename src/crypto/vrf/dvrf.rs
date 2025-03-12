@@ -22,7 +22,7 @@ use tokio::time::{sleep, sleep_until};
 
 use crate::network::{
     message::{Message, Payload},
-    transport::Transport,
+    transport::Libp2pTransport,
 };
 
 use super::{Error, Vrf, VrfCallback};
@@ -32,7 +32,7 @@ type ResultCallback = Box<dyn Fn(MessageId, &[u8]) + Send + Sync + 'static>;
 type FailureCallback = Box<dyn Fn(MessageId) + Send + Sync + 'static>;
 
 pub struct Components {
-    pub transport: Arc<Transport>,
+    pub transport: Arc<Libp2pTransport>,
     pub peer_id: PeerId,
     pub config: Config,
     pub process_factory: Arc<dyn ConsensusProcessFactory>,
