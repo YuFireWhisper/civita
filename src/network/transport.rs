@@ -44,7 +44,7 @@ pub trait Transport {
     fn subscribe(
         &self,
         filter: SubscriptionFilter,
-    ) -> Pin<Box<dyn Future<Output = Receiver<Message>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send>>;
     fn send(
         &self,
         message: Message,
