@@ -29,11 +29,11 @@ impl From<PoisonError<MutexGuard<'_, ECVRF>>> for Error {
     }
 }
 
-type CryptoResult<T> = Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 pub trait CryptoEngine {
-    fn generate_proof(&self, seed: &[u8]) -> CryptoResult<Proof>;
-    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> CryptoResult<()>;
+    fn generate_proof(&self, seed: &[u8]) -> Result<Proof>;
+    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<()>;
     fn public_key(&self) -> &[u8];
 }
 
@@ -44,7 +44,7 @@ pub struct EcvrfCrypto {
 }
 
 impl EcvrfCrypto {
-    pub fn new() -> CryptoResult<Self> {
+    pub fn new() -> Result<Self> {
         let vrf_instance = ECVRF::from_suite(CipherSuite::P256_SHA256_TAI)?;
         let (private_key, public_key) = Self::generate_keypair();
 
@@ -64,12 +64,12 @@ impl EcvrfCrypto {
         (private_key, public_key)
     }
 
-    fn get_vrf(&self) -> CryptoResult<MutexGuard<'_, ECVRF>> {
+    fn get_vrf(&self) -> Result<MutexGuard<'_, ECVRF>> {
         self.vrf.lock().map_err(Error::from)
     }
 
     #[cfg(test)]
-    pub fn with_keypair(private_key: Vec<u8>, public_key: Vec<u8>) -> CryptoResult<Self> {
+    pub fn with_keypair(private_key: Vec<u8>, public_key: Vec<u8>) -> Result<Self> {
         let vrf_instance = ECVRF::from_suite(CipherSuite::P256_SHA256_TAI)?;
 
         Ok(Self {
@@ -81,14 +81,14 @@ impl EcvrfCrypto {
 }
 
 impl CryptoEngine for EcvrfCrypto {
-    fn generate_proof(&self, seed: &[u8]) -> CryptoResult<Proof> {
+    fn generate_proof(&self, seed: &[u8]) -> Result<Proof> {
         let mut vrf = self.get_vrf()?;
         let proof = vrf.prove(self.private_key.as_slice(), seed)?;
         let output = vrf.proof_to_hash(&proof)?;
         Ok(Proof::new(output, proof))
     }
 
-    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> CryptoResult<()> {
+    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<()> {
         let mut vrf = self.get_vrf()?;
         vrf.verify(public_key, proof, seed)?;
         Ok(())
