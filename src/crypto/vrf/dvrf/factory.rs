@@ -11,7 +11,7 @@ use super::{
     DVrf,
 };
 
-pub struct DVrfFactory {
+pub struct Factory {
     transport: Arc<Transport>,
     config: Option<Config>,
     process_factory: Option<Arc<dyn ConsensusProcessFactory>>,
@@ -19,7 +19,7 @@ pub struct DVrfFactory {
     peer_id: PeerId,
 }
 
-impl DVrfFactory {
+impl Factory {
     const DEFAULT_FACTORY: ProcessFactory = ProcessFactory;
 
     pub fn new(transport: Arc<Transport>, peer_id: PeerId) -> Self {
