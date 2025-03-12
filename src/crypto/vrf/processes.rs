@@ -134,6 +134,7 @@ impl Processes {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fmt::Debug;
     use std::sync::Arc;
 
     use libp2p::gossipsub::MessageId;
@@ -183,450 +184,391 @@ mod tests {
         }
     }
 
-    fn create_processes() -> (MockConsensusProcessFactory, Duration, Duration) {
-        let factory = MockConsensusProcessFactory::new();
-        let proof_duration = Duration::from_secs(10);
-        let vote_duration = Duration::from_secs(20);
-        (factory, proof_duration, vote_duration)
+    struct TestFixture {
+        factory: MockConsensusProcessFactory,
+        proof_duration: Duration,
+        vote_duration: Duration,
+        message_id: MessageId,
+        peer_id: PeerId,
+    }
+
+    impl TestFixture {
+        const PROOF_DURATION: Duration = Duration::from_millis(10);
+        const VOTE_DURATION: Duration = Duration::from_millis(20);
+        const MESSAGE_ID_STR: &str = "message_id";
+
+        fn new() -> Self {
+            let factory = MockConsensusProcessFactory::new();
+            let proof_duration = Self::PROOF_DURATION;
+            let vote_duration = Self::VOTE_DURATION;
+            let message_id = MessageId::from(Self::MESSAGE_ID_STR);
+            let peer_id = PeerId::random();
+            Self {
+                factory,
+                proof_duration,
+                vote_duration,
+                message_id,
+                peer_id,
+            }
+        }
+
+        fn setup_mock_process(&mut self) -> MockConsensusProcess {
+            MockConsensusProcess::new()
+        }
+
+        fn expect_create_process(&mut self, mock_process: MockConsensusProcess) {
+            let mp_cell = RefCell::new(Some(mock_process));
+
+            self.factory
+                .expect_clone()
+                .returning(MockConsensusProcessFactory::default);
+
+            self.factory
+                .expect_create()
+                .with(
+                    mockall::predicate::eq(self.proof_duration),
+                    mockall::predicate::eq(self.vote_duration),
+                )
+                .times(1)
+                .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        }
+
+        fn create_processes_with_mock(&mut self, mock_process: MockConsensusProcess) -> Processes {
+            self.expect_create_process(mock_process);
+            let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(self.factory.clone());
+            let processes = Processes::new(
+                self.proof_duration,
+                self.vote_duration,
+                Arc::clone(&arc_factory),
+            );
+
+            processes.processes.insert(
+                self.message_id.clone(),
+                self.factory.create(self.proof_duration, self.vote_duration),
+            );
+
+            processes
+        }
+
+        fn create_empty_processes(&mut self) -> Processes {
+            self.factory
+                .expect_clone()
+                .returning(MockConsensusProcessFactory::default);
+
+            let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(self.factory.clone());
+            Processes::new(
+                self.proof_duration,
+                self.vote_duration,
+                Arc::clone(&arc_factory),
+            )
+        }
+
+        fn assert_process_not_found<T: Debug>(result: Result<T, super::Error>) {
+            match result {
+                Err(super::Error::ProcessNotFound) => (),
+                _ => panic!("Expected ProcessNotFound error, got: {:?}", result),
+            }
+        }
+
+        fn assert_process_error<T: Debug>(result: Result<T, super::Error>, expected_error: Error) {
+            match result {
+                Err(super::Error::Process(error)) => {
+                    assert!(
+                        std::mem::discriminant(&error) == std::mem::discriminant(&expected_error),
+                        "Expected {:?}, got {:?}",
+                        expected_error,
+                        error
+                    );
+                }
+                other => panic!("Expected Process error, got: {:?}", other),
+            }
+        }
     }
 
     #[test]
     fn test_new() {
-        let (factory, proof_duration, vote_duration) = create_processes();
-        // 不需要設定 factory.clone() 的期望
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
+        let mut fixture = TestFixture::new();
+        let processes = fixture.create_empty_processes();
         assert!(processes.processes.is_empty());
     }
 
     #[test]
     fn test_insert_peer_and_proof_success() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let peer_id = PeerId::random();
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_insert_voter()
-            .with(mockall::predicate::eq(peer_id))
+        mock_process
+            .expect_insert_voter()
+            .with(mockall::predicate::eq(fixture.peer_id))
             .times(1)
             .returning(|_| Ok(()));
-        mp.expect_insert_proof()
+        mock_process
+            .expect_insert_proof()
             .with(mockall::predicate::eq(vec![1, 2, 3]))
             .times(1)
             .returning(|_| Ok(()));
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        fixture.expect_create_process(mock_process);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-        let result = processes.insert_peer_and_proof(message_id, peer_id, vec![1, 2, 3]);
+        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(fixture.factory);
+        let processes = Processes::new(fixture.proof_duration, fixture.vote_duration, arc_factory);
+        let result =
+            processes.insert_peer_and_proof(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
+
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_insert_peer_and_proof_voter_error() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let peer_id = PeerId::random();
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_insert_voter()
-            .with(mockall::predicate::eq(peer_id))
+        mock_process
+            .expect_insert_voter()
+            .with(mockall::predicate::eq(fixture.peer_id))
             .times(1)
             .returning(|_| Err(Error::DuplicatePeerId(PeerId::random())));
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        fixture.expect_create_process(mock_process);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-        let result = processes.insert_peer_and_proof(message_id, peer_id, vec![1, 2, 3]);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            super::Error::Process(Error::DuplicatePeerId(_)) => (),
-            e => panic!("Unexpected error: {:?}", e),
-        }
+        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(fixture.factory);
+        let processes = Processes::new(fixture.proof_duration, fixture.vote_duration, arc_factory);
+        let result =
+            processes.insert_peer_and_proof(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
+
+        TestFixture::assert_process_error(result, Error::DuplicatePeerId(PeerId::random()));
     }
 
     #[test]
     fn test_insert_peer_and_proof_proof_error() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let peer_id = PeerId::random();
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_insert_voter()
-            .with(mockall::predicate::eq(peer_id))
+        mock_process
+            .expect_insert_voter()
+            .with(mockall::predicate::eq(fixture.peer_id))
             .times(1)
             .returning(|_| Ok(()));
-        mp.expect_insert_proof()
+        mock_process
+            .expect_insert_proof()
             .with(mockall::predicate::eq(vec![1, 2, 3]))
             .times(1)
-            .returning(|_| Err(Error::DuplicateProof));
+            .returning(|_| Err(Error::InsufficientProofs));
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        fixture.expect_create_process(mock_process);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-        let result = processes.insert_peer_and_proof(message_id, peer_id, vec![1, 2, 3]);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            super::Error::Process(Error::DuplicateProof) => (),
-            e => panic!("Unexpected error: {:?}", e),
-        }
+        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(fixture.factory);
+        let processes = Processes::new(fixture.proof_duration, fixture.vote_duration, arc_factory);
+        let result =
+            processes.insert_peer_and_proof(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
+
+        TestFixture::assert_process_error(result, Error::InsufficientProofs);
     }
 
     #[test]
     fn test_calculate_consensus_success() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
         let expected_result = [42u8; 32];
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_calculate_consensus()
+        mock_process
+            .expect_calculate_consensus()
             .times(1)
             .returning(move || Ok(expected_result));
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.calculate_consensus(&fixture.message_id);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.calculate_consensus(&message_id);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), expected_result);
     }
 
     #[test]
     fn test_calculate_consensus_process_error() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_calculate_consensus()
+        mock_process
+            .expect_calculate_consensus()
             .times(1)
             .returning(|| Err(Error::InsufficientProofs));
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.calculate_consensus(&fixture.message_id);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.calculate_consensus(&message_id);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            super::Error::Process(Error::InsufficientProofs) => (),
-            e => panic!("Unexpected error: {:?}", e),
-        }
+        TestFixture::assert_process_error(result, Error::InsufficientProofs);
     }
 
     #[test]
     fn test_calculate_consensus_not_found() {
-        let (factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-        let result = processes.calculate_consensus(&message_id);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            super::Error::ProcessNotFound => (),
-            e => panic!("Unexpected error: {:?}", e),
-        }
+        let mut fixture = TestFixture::new();
+        let processes = fixture.create_empty_processes();
+        let result = processes.calculate_consensus(&fixture.message_id);
+
+        TestFixture::assert_process_not_found(result);
     }
 
     #[test]
     fn test_insert_completion_vote_success() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let peer_id = PeerId::random();
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
         let random = [42u8; 32];
         let expected_result = Some([42u8; 32]);
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_insert_completion_vote()
+        mock_process
+            .expect_insert_completion_vote()
             .with(
-                mockall::predicate::eq(peer_id),
+                mockall::predicate::eq(fixture.peer_id),
                 mockall::predicate::eq(random),
             )
             .times(1)
             .returning(move |_, _| Ok(expected_result));
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.insert_completion_vote(&fixture.message_id, fixture.peer_id, random);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.insert_completion_vote(&message_id, peer_id, random);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), expected_result);
     }
 
     #[test]
     fn test_insert_completion_vote_not_found() {
-        let (factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let peer_id = PeerId::random();
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-        let result = processes.insert_completion_vote(&message_id, peer_id, [42u8; 32]);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            super::Error::ProcessNotFound => (),
-            e => panic!("Unexpected error: {:?}", e),
-        }
+        let mut fixture = TestFixture::new();
+        let processes = fixture.create_empty_processes();
+        let result =
+            processes.insert_completion_vote(&fixture.message_id, fixture.peer_id, [42u8; 32]);
+
+        TestFixture::assert_process_not_found(result);
     }
 
     #[test]
     fn test_insert_failure_vote_success() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let peer_id = PeerId::random();
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_insert_failure_vote()
-            .with(mockall::predicate::eq(peer_id))
+        mock_process
+            .expect_insert_failure_vote()
+            .with(mockall::predicate::eq(fixture.peer_id))
             .times(1)
             .returning(|_| Ok(true));
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.insert_failure_vote(&fixture.message_id, fixture.peer_id);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.insert_failure_vote(&message_id, peer_id);
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
 
     #[test]
     fn test_insert_failure_vote_not_found() {
-        let (factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
-        let peer_id = PeerId::random();
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-        let result = processes.insert_failure_vote(&message_id, peer_id);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            super::Error::ProcessNotFound => (),
-            e => panic!("Unexpected error: {:?}", e),
-        }
+        let mut fixture = TestFixture::new();
+        let processes = fixture.create_empty_processes();
+        let result = processes.insert_failure_vote(&fixture.message_id, fixture.peer_id);
+
+        TestFixture::assert_process_not_found(result);
     }
 
     #[test]
     fn test_status() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_status()
+        mock_process
+            .expect_status()
             .times(1)
             .returning(|| ProcessStatus::InProgress);
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.status(&fixture.message_id);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.status(&message_id);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), ProcessStatus::InProgress);
     }
 
     #[test]
     fn test_proof_deadline() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
         let now = Instant::now();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_proof_deadline().times(1).returning(move || now);
-
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
+        mock_process
+            .expect_proof_deadline()
             .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+            .returning(move || now);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.proof_deadline(&fixture.message_id);
 
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.proof_deadline(&message_id);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_vote_deadline() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
         let now = Instant::now();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_vote_deadline().times(1).returning(move || now);
-
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
+        mock_process
+            .expect_vote_deadline()
             .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+            .returning(move || now);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.vote_deadline(&fixture.message_id);
 
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.vote_deadline(&message_id);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_random() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
         let random_value = Some([42u8; 32]);
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_random().times(1).returning(move || random_value);
-
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
+        mock_process
+            .expect_random()
             .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
+            .returning(move || random_value);
 
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
+        let processes = fixture.create_processes_with_mock(mock_process);
+        let result = processes.random(&fixture.message_id);
 
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
-        let result = processes.random(&message_id);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), random_value);
     }
 
     #[test]
     fn test_update_all_status_none_failed() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_update_status()
+        mock_process
+            .expect_update_status()
             .times(1)
             .returning(|| ProcessStatus::InProgress);
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
-
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
+        let processes = fixture.create_processes_with_mock(mock_process);
         let failed = processes.update_all_status();
+
         assert!(failed.is_empty());
-        assert!(processes.processes.contains_key(&message_id));
+        assert!(processes.processes.contains_key(&fixture.message_id));
     }
 
     #[test]
     fn test_update_all_status_some_failed() {
-        let (mut factory, proof_duration, vote_duration) = create_processes();
-        let message_id = MessageId::new(b"test-message-id");
+        let mut fixture = TestFixture::new();
+        let mut mock_process = fixture.setup_mock_process();
 
-        let mut mp = MockConsensusProcess::new();
-        mp.expect_update_status()
+        mock_process
+            .expect_update_status()
             .times(1)
             .returning(|| ProcessStatus::Failed);
 
-        let mp_cell = RefCell::new(Some(mp));
-        factory
-            .expect_create()
-            .times(1)
-            .returning(move |_, _| Box::new(mp_cell.borrow_mut().take().unwrap()));
-
-        let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(factory);
-        let processes = Processes::new(proof_duration, vote_duration, Arc::clone(&arc_factory));
-
-        processes.processes.insert(
-            message_id.clone(),
-            arc_factory.create(Duration::from_secs(10), Duration::from_secs(20)),
-        );
-
+        let processes = fixture.create_processes_with_mock(mock_process);
         let failed = processes.update_all_status();
+
         assert_eq!(failed.len(), 1);
-        assert_eq!(failed[0], message_id);
-        assert!(!processes.processes.contains_key(&message_id));
+        assert_eq!(failed[0], fixture.message_id);
+        assert!(!processes.processes.contains_key(&fixture.message_id));
     }
 }
