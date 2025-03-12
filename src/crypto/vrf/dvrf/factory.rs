@@ -16,17 +16,19 @@ pub struct DVrfFactory {
     config: Option<Config>,
     process_factory: Option<Arc<dyn ConsensusProcessFactory>>,
     crypto: Option<Arc<dyn Crypto>>,
+    peer_id: PeerId,
 }
 
 impl DVrfFactory {
     const DEFAULT_FACTORY: ProcessFactory = ProcessFactory;
 
-    pub fn new(transport: Arc<Transport>) -> Self {
+    pub fn new(transport: Arc<Transport>, peer_id: PeerId) -> Self {
         Self {
             transport,
             config: None,
             process_factory: None,
             crypto: None,
+            peer_id,
         }
     }
 
@@ -48,11 +50,11 @@ impl DVrfFactory {
         self
     }
 
-    pub async fn create_service(&mut self, peer_id: PeerId) -> Result<Arc<DVrf>, Error> {
+    pub async fn create_service(&mut self) -> Result<Arc<DVrf>, Error> {
         let transport = Arc::clone(&self.transport);
         let config = self.get_config();
         let process_factory = self.get_process_factory();
-        DVrf::new(transport, config, peer_id, process_factory).await
+        DVrf::new(transport, config, self.peer_id, process_factory).await
     }
 
     fn get_config(&mut self) -> Config {
