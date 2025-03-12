@@ -1,7 +1,7 @@
 pub mod config;
+pub mod consensus_process;
 pub mod crypto;
 pub mod messager;
-pub mod consensus_process;
 pub mod processes;
 pub mod proof;
 
@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use config::Config;
 use consensus_process::process::ProcessFactory;
+use consensus_process::{ConsensusProcessFactory, ProcessStatus};
 use crypto::{CryptoEngine, EcvrfCrypto};
 use libp2p::identity;
 use libp2p::{gossipsub::MessageId, PeerId};
 use messager::{Messager, MessagerEngine};
-use consensus_process::{ConsensusProcessFactory, ProcessStatus};
 use processes::Processes;
 use thiserror::Error;
 use tokio::time::{sleep, sleep_until};
@@ -51,12 +51,12 @@ pub enum Error {
     Process(String),
 }
 
-type VrfResult<T> = Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 type ResultCallback = Box<dyn Fn(MessageId, &[u8]) + Send + Sync>;
 type FailureCallback = Box<dyn Fn(MessageId) + Send + Sync>;
 
 pub trait VrfEngine: Send + Sync {
-    fn new_random(self: Arc<Self>) -> Pin<Box<dyn Future<Output = VrfResult<[u8; 32]>> + Send>>;
+    fn new_random(self: Arc<Self>) -> Pin<Box<dyn Future<Output = Result<[u8; 32]>> + Send>>;
     fn set_result_callback(&self, callback: ResultCallback);
     fn set_failure_callback(&self, callback: FailureCallback);
 }
@@ -77,7 +77,7 @@ impl VrfService {
         config: Config,
         peer_id: PeerId,
         process_factory: Arc<dyn ConsensusProcessFactory>,
-    ) -> VrfResult<Arc<Self>> {
+    ) -> Result<Arc<Self>> {
         let crypto = EcvrfCrypto::new()?;
         let messager = Messager::new(Arc::clone(&transport), config.topic.clone());
         let processes = Processes::new(
@@ -102,7 +102,7 @@ impl VrfService {
         Ok(vrf_service)
     }
 
-    async fn start_message_handler(self: Arc<Self>) -> VrfResult<()> {
+    async fn start_message_handler(self: Arc<Self>) -> Result<()> {
         let mut rx = self.messager.subscribe().await;
 
         tokio::spawn(async move {
@@ -116,7 +116,7 @@ impl VrfService {
         Ok(())
     }
 
-    async fn handle_message(&self, message: Message) -> VrfResult<()> {
+    async fn handle_message(&self, message: Message) -> Result<()> {
         if let Message::Gossipsub(msg) = message {
             let source = msg.source.ok_or(Error::SourcePeerId)?;
             match msg.payload {
@@ -147,7 +147,7 @@ impl VrfService {
         Ok(())
     }
 
-    async fn handle_vrf_request(&self, message_id: MessageId) -> VrfResult<()> {
+    async fn handle_vrf_request(&self, message_id: MessageId) -> Result<()> {
         let message_id_bytes = message_id_to_bytes(&message_id);
         let proof = self.crypto.generate_proof(&message_id_bytes)?;
         let public_key = self.crypto.public_key().to_vec();
@@ -169,7 +169,7 @@ impl VrfService {
         public_key: &[u8],
         proof: &[u8],
         message_id: MessageId,
-    ) -> VrfResult<()> {
+    ) -> Result<()> {
         let peer_id = PeerId::from_bytes(public_key).map_err(Error::from)?;
         let message_id_bytes = message_id_to_bytes(&message_id);
         let verify_result = self
@@ -186,7 +186,7 @@ impl VrfService {
         Ok(())
     }
 
-    fn handle_vrf_failure(&self, message_id: MessageId, source: PeerId) -> VrfResult<()> {
+    fn handle_vrf_failure(&self, message_id: MessageId, source: PeerId) -> Result<()> {
         let should_fail = self.processes.insert_failure_vote(&message_id, source)?;
         if should_fail {
             self.notify_failure(message_id);
@@ -200,7 +200,7 @@ impl VrfService {
         source: PeerId,
         message_id: MessageId,
         random: &[u8; 32],
-    ) -> VrfResult<()> {
+    ) -> Result<()> {
         let result = self
             .processes
             .insert_completion_vote(&message_id, source, *random)?;
@@ -228,7 +228,7 @@ impl VrfService {
         }
     }
 
-    async fn start_periodic_check(self: Arc<Self>) -> VrfResult<()> {
+    async fn start_periodic_check(self: Arc<Self>) -> Result<()> {
         let self_clone = self.clone();
         tokio::spawn(async move {
             let check_interval = self.config.check_interval;
@@ -252,14 +252,14 @@ impl VrfService {
         }
     }
 
-    async fn send_failure_and_notify(&self, message_id: MessageId) -> VrfResult<()> {
+    async fn send_failure_and_notify(&self, message_id: MessageId) -> Result<()> {
         self.messager.send_vrf_failure(message_id.clone()).await?;
         self.notify_failure(message_id);
 
         Ok(())
     }
 
-    pub async fn new_random(self: Arc<Self>) -> VrfResult<[u8; 32]> {
+    pub async fn new_random(self: Arc<Self>) -> Result<[u8; 32]> {
         let message_id = self.messager.send_vrf_request().await?;
         self.handle_vrf_request(message_id.clone()).await?;
 
@@ -284,7 +284,7 @@ impl VrfService {
 }
 
 impl VrfEngine for VrfService {
-    fn new_random(self: Arc<Self>) -> Pin<Box<dyn Future<Output = VrfResult<[u8; 32]>> + Send>> {
+    fn new_random(self: Arc<Self>) -> Pin<Box<dyn Future<Output = Result<[u8; 32]>> + Send>> {
         Box::pin(self.new_random())
     }
 
@@ -338,7 +338,7 @@ impl VrfServiceFactory {
         self
     }
 
-    pub async fn create_service(&mut self, peer_id: PeerId) -> VrfResult<Arc<dyn VrfEngine>> {
+    pub async fn create_service(&mut self, peer_id: PeerId) -> Result<Arc<dyn VrfEngine>> {
         let transport = Arc::clone(&self.transport);
         let config = self.get_config();
         let process_factory = self.get_process_factory();
