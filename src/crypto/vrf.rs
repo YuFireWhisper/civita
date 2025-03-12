@@ -50,7 +50,8 @@ pub trait VrfCallback: Send + Sync {
         F: Fn(MessageId) + Send + Sync + 'static;
 }
 
-#[async_trait]
 pub trait VrfFactory: Send + Sync {
-    async fn create_vrf(&mut self) -> Result<Arc<dyn Vrf>, Error>;
+    fn create_vrf(
+        &mut self,
+    ) -> impl Future<Output = Result<Arc<dyn Vrf>, Error>> + Send;
 }
