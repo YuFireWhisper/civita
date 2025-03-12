@@ -31,7 +31,7 @@ impl From<PoisonError<MutexGuard<'_, ECVRF>>> for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub trait CryptoEngine {
+pub trait Crypto {
     fn generate_proof(&self, seed: &[u8]) -> Result<Proof>;
     fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<()>;
     fn public_key(&self) -> &[u8];
@@ -80,7 +80,7 @@ impl EcvrfCrypto {
     }
 }
 
-impl CryptoEngine for EcvrfCrypto {
+impl Crypto for EcvrfCrypto {
     fn generate_proof(&self, seed: &[u8]) -> Result<Proof> {
         let mut vrf = self.get_vrf()?;
         let proof = vrf.prove(self.private_key.as_slice(), seed)?;

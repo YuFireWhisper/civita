@@ -13,7 +13,7 @@ use std::{
 
 use config::Config;
 use consensus_process::{process::ProcessFactory, ConsensusProcessFactory, ProcessStatus};
-use crypto::{CryptoEngine, EcvrfCrypto};
+use crypto::{Crypto, EcvrfCrypto};
 use libp2p::{gossipsub::MessageId, PeerId};
 use messager::{Messager, MessagerEngine};
 use processes::Processes;
@@ -280,7 +280,7 @@ pub struct DVrfFactory {
     transport: Arc<Transport>,
     config: Option<Config>,
     process_factory: Option<Arc<dyn ConsensusProcessFactory>>,
-    crypto: Option<Arc<dyn CryptoEngine>>,
+    crypto: Option<Arc<dyn Crypto>>,
 }
 
 impl DVrfFactory {
@@ -308,7 +308,7 @@ impl DVrfFactory {
         self
     }
 
-    pub fn with_crypto(mut self, crypto: Arc<dyn CryptoEngine>) -> Self {
+    pub fn with_crypto(mut self, crypto: Arc<dyn Crypto>) -> Self {
         self.crypto = Some(crypto);
         self
     }
