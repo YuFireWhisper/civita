@@ -20,7 +20,7 @@ pub enum Error {
 
 type MessageResult<T> = Result<T, Error>;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
 pub struct Message {
     pub message_id: Option<MessageId>,
     pub source: Option<PeerId>,
@@ -59,9 +59,10 @@ impl Message {
 
     fn validate_timestamp(&self) -> MessageResult<()> {
         let now = Utc::now();
-        let past_time = DateTime::from_timestamp(self.timestamp, 0).ok_or(Error::InvalidTimestamp)?;
+        let past_time =
+            DateTime::from_timestamp(self.timestamp, 0).ok_or(Error::InvalidTimestamp)?;
         let diff = now - past_time;
-        
+
         if diff.num_seconds() > TIMESTAMP_TOLERANCE_SECONDS as i64 {
             return Err(Error::InvalidTimestamp);
         }

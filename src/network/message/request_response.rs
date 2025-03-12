@@ -10,8 +10,7 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Message {
     pub request_id: Option<String>,
     pub source: PeerId,
@@ -35,18 +34,17 @@ impl TryFrom<request_response::Message<Message, Message>> for Message {
 
     fn try_from(message: request_response::Message<Message, Message>) -> Result<Self, Self::Error> {
         match message {
-            request_response::Message::Request { request_id, request, .. } => {
-                Ok(Message {
-                    request_id: Some(request_id.to_string()),
-                    source: request.source,
-                    target: request.target,
-                    payload: request.payload,
-                })
-            }
-            request_response::Message::Response { response, .. } => {
-                Ok(response)
-            }
+            request_response::Message::Request {
+                request_id,
+                request,
+                ..
+            } => Ok(Message {
+                request_id: Some(request_id.to_string()),
+                source: request.source,
+                target: request.target,
+                payload: request.payload,
+            }),
+            request_response::Message::Response { response, .. } => Ok(response),
         }
     }
 }
-

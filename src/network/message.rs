@@ -56,7 +56,7 @@ impl Payload {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Message {
     Gossipsub(gossipsub::Message),
     RequestResponse(request_response::Message),
