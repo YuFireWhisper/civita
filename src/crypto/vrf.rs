@@ -38,6 +38,9 @@ pub enum Error {
 pub trait Vrf: Send + Sync {
     fn new_random(self: Arc<Self>)
         -> Pin<Box<dyn Future<Output = Result<[u8; 32], Error>> + Send>>;
+}
+
+pub trait VrfCallback: Send + Sync {
     fn set_result_callback<F>(&self, callback: F)
     where
         F: Fn(MessageId, &[u8]) + Send + Sync + 'static;

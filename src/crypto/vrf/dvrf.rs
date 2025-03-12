@@ -1,10 +1,10 @@
 pub mod config;
 pub mod consensus_process;
 pub mod crypto;
+pub mod factory;
 pub mod messager;
 pub mod processes;
 pub mod proof;
-pub mod factory;
 
 use std::{
     future::Future,
@@ -25,7 +25,7 @@ use crate::network::{
     transport::Transport,
 };
 
-use super::{Error, Vrf};
+use super::{Error, Vrf, VrfCallback};
 
 type Result<T> = std::result::Result<T, Error>;
 type ResultCallback = Box<dyn Fn(MessageId, &[u8]) + Send + Sync + 'static>;
@@ -257,7 +257,9 @@ impl Vrf for DVrf {
     fn new_random(self: Arc<Self>) -> Pin<Box<dyn Future<Output = Result<[u8; 32]>> + Send>> {
         Box::pin(self.new_random())
     }
+}
 
+impl VrfCallback for DVrf {
     fn set_result_callback<F>(&self, callback: F)
     where
         F: Fn(MessageId, &[u8]) + Send + Sync + 'static,
