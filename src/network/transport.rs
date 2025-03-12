@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{future::Future, io, pin::Pin, sync::Arc};
 
 use dashmap::DashMap;
 use libp2p::{
@@ -12,7 +12,7 @@ use libp2p::{
 };
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, Mutex, MutexGuard},
+    sync::{mpsc::{self, Receiver}, Mutex, MutexGuard},
     task::JoinHandle,
     time::{self, sleep, Duration},
 };
@@ -65,6 +65,14 @@ impl ReceiveTaskState {
             handle.abort();
         }
     }
+}
+
+pub trait Transport {
+    fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+    fn subscribe(&self, filter: SubscriptionFilter) -> Pin<Box<dyn Future<Output = Receiver<Message>> + Send>>;
+    fn send(&self, message: Message) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>, Error>> + Send>>;
+    fn receive(&self) -> Pin<Box<dyn Future<Output = ()>>>;
+    fn stop_receive(&self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 }
 
 #[derive(Clone)]
