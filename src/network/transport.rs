@@ -29,7 +29,7 @@ pub enum Error {
     RequestResponse(#[from] request_response::Error),
 }
 
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SubscriptionFilter {
