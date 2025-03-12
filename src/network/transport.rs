@@ -29,6 +29,8 @@ pub enum Error {
     RequestResponse(#[from] request_response::Error),
 }
 
+pub(crate) type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SubscriptionFilter {
     Topic(String),
@@ -40,15 +42,15 @@ pub trait Transport {
         &self,
         peer_id: PeerId,
         addr: Multiaddr,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
     fn subscribe(
         &self,
         filter: SubscriptionFilter,
-    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send>>;
     fn send(
         &self,
         message: Message,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>, Error>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send>>;
     fn receive(&self) -> Pin<Box<dyn Future<Output = ()>>>;
-    fn stop_receive(&self) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+    fn stop_receive(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 }
