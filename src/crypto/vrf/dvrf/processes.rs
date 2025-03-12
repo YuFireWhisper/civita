@@ -142,9 +142,8 @@ mod tests {
     use mockall::mock;
     use tokio::time::{Duration, Instant};
 
-    use crate::crypto::vrf::consensus_process::Error;
-    use crate::crypto::vrf::consensus_process::{
-        ConsensusProcess, ConsensusProcessFactory, ProcessStatus,
+    use crate::crypto::vrf::dvrf::consensus_process::{
+        ConsensusProcess, ConsensusProcessFactory, Error, ProcessStatus,
     };
 
     use super::Processes;

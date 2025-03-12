@@ -4,7 +4,7 @@ pub mod request_response;
 use libp2p::gossipsub::MessageId;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::vrf::proof::Proof;
+use crate::crypto::vrf::dvrf::proof::Proof;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {

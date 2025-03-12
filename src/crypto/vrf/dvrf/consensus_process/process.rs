@@ -4,7 +4,7 @@ use libp2p::PeerId;
 use sha2::{Digest, Sha256};
 use tokio::time::{Duration, Instant};
 
-use crate::crypto::vrf::config::DEFAULT_THRESHOLD_PERCENTAGE;
+use crate::crypto::vrf::dvrf::config::DEFAULT_THRESHOLD_PERCENTAGE;
 
 use super::{ConsensusProcess, ConsensusProcessFactory, Error, ProcessStatus};
 
