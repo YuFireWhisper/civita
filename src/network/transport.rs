@@ -2,7 +2,11 @@ pub mod libp2p_transport;
 
 use std::{future::Future, io, pin::Pin};
 
-use libp2p::{gossipsub::MessageId, swarm, Multiaddr, PeerId};
+use libp2p::{
+    gossipsub::{MessageId, PublishError, SubscriptionError},
+    swarm::DialError,
+    Multiaddr, PeerId, TransportError,
+};
 use libp2p_transport::behaviour;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
@@ -12,13 +16,13 @@ use super::message::Message;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
-    Transport(#[from] libp2p::TransportError<io::Error>),
+    Transport(#[from] TransportError<io::Error>),
     #[error("{0}")]
-    Dial(#[from] swarm::DialError),
+    Dial(#[from] DialError),
     #[error("{0}")]
-    Subscribe(#[from] libp2p::gossipsub::SubscriptionError),
+    Subscribe(#[from] SubscriptionError),
     #[error("{0}")]
-    Publish(#[from] libp2p::gossipsub::PublishError),
+    Publish(#[from] PublishError),
     #[error("{0}")]
     Behaviour(#[from] behaviour::Error),
     #[error("Failed to lock")]
