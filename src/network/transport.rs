@@ -1,6 +1,6 @@
 pub mod libp2p_transport;
 
-use std::{future::Future, io, pin::Pin};
+use std::{future::Future, io};
 
 use libp2p::{
     gossipsub::{MessageId, PublishError, SubscriptionError},
