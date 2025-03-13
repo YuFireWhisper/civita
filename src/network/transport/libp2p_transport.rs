@@ -14,6 +14,7 @@ use libp2p::{
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
+use log::warn;
 use receive_task::ReceiveTask;
 use subscription::Subscription;
 use tokio::{
@@ -220,7 +221,7 @@ impl Libp2pTransport {
 
                     subscription.read().await.broadcast(&topic_filter, msg);
                 }
-                Err(e) => eprintln!("Error converting message: {}", e),
+                Err(e) => warn!("Failed to parse gossipsub message: {:?}", e),
             }
         }
     }
@@ -240,7 +241,7 @@ impl Libp2pTransport {
             let source = peer;
             if let libp2p::request_response::Message::Response { response, .. } = message {
                 if response.source != source {
-                    eprintln!("Source peer ID does not match message source");
+                    warn!("Source peer ID does not match message source");
                     return;
                 }
 

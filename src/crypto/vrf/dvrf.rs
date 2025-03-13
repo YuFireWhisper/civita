@@ -16,12 +16,14 @@ use config::Config;
 use consensus_process::{ConsensusProcessFactory, ProcessStatus};
 use crypto::{Crypto, EcvrfCrypto};
 use libp2p::{gossipsub::MessageId, PeerId};
+use log::error;
 use messager::{Messager, MessagerEngine};
 use processes::Processes;
 use tokio::time::{sleep, sleep_until};
 
 use crate::network::{
-    message::{Message, Payload}, transport::libp2p_transport::Libp2pTransport,
+    message::{Message, Payload},
+    transport::libp2p_transport::Libp2pTransport,
 };
 
 use super::{Error, Vrf, VrfCallback};
@@ -51,7 +53,10 @@ pub struct DVrf {
 impl DVrf {
     pub(crate) async fn new_with_components(components: Components) -> Result<Arc<Self>> {
         let crypto = EcvrfCrypto::new()?;
-        let messager = Messager::new(Arc::clone(&components.transport), components.config.topic.clone());
+        let messager = Messager::new(
+            Arc::clone(&components.transport),
+            components.config.topic.clone(),
+        );
         let processes = Processes::new(
             components.config.vrf_proof_duration,
             components.config.vrf_vote_duration,
@@ -80,7 +85,7 @@ impl DVrf {
         tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 if let Err(e) = self.handle_message(message).await {
-                    eprintln!("Error handling message: {:?}", e);
+                    error!("Error handling message: {:?}", e);
                 }
             }
         });
@@ -112,7 +117,7 @@ impl DVrf {
                     self.handle_vrf_failure(message_id, source)?;
                 }
                 _ => {
-                    eprintln!("Unsupported payload type");
+                    error!("Received unknown message type");
                 }
             }
         }
@@ -149,7 +154,7 @@ impl DVrf {
             .verify_proof(public_key, proof, &message_id_bytes);
 
         if verify_result.is_err() {
-            eprintln!("Failed to verify VRF proof for message: {:?}", message_id);
+            error!("Failed to verify VRF proof for message: {:?}", message_id);
             return Err(Error::VerifyVrfProof);
         }
 
