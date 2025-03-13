@@ -1,4 +1,5 @@
 pub mod behaviour;
+pub mod config;
 pub mod receive_task;
 pub mod subscription;
 
