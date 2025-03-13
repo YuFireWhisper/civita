@@ -23,9 +23,17 @@ pub enum Error {
 type BehaviourResult<T> = std::result::Result<T, Error>;
 type CborBehaviour =
     cbor::Behaviour<CivitaRequestResponse::Message, CivitaRequestResponse::Message>;
+type RequestResponseEvent =
+    request_response::Event<CivitaRequestResponse::Message, CivitaRequestResponse::Message>;
+
+pub enum Event {
+    Gossipsub(Box<gossipsub::Event>),
+    Kad(kad::Event),
+    RequestResponse(RequestResponseEvent),
+}
 
 #[derive(NetworkBehaviour)]
-#[behaviour(to_swarm = "P2PEvent")]
+#[behaviour(to_swarm = "Event")]
 pub struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
@@ -109,35 +117,27 @@ impl Behaviour {
     }
 }
 
-type RequestResponseEvent =
-    request_response::Event<CivitaRequestResponse::Message, CivitaRequestResponse::Message>;
-pub enum P2PEvent {
-    Gossipsub(Box<gossipsub::Event>),
-    Kad(kad::Event),
-    RequestResponse(RequestResponseEvent),
-}
-
 impl From<&str> for Error {
     fn from(err: &str) -> Self {
         Error::Gossipsub(err.to_string())
     }
 }
 
-impl From<gossipsub::Event> for P2PEvent {
+impl From<gossipsub::Event> for Event {
     fn from(event: gossipsub::Event) -> Self {
-        P2PEvent::Gossipsub(Box::new(event))
+        Event::Gossipsub(Box::new(event))
     }
 }
 
-impl From<kad::Event> for P2PEvent {
+impl From<kad::Event> for Event {
     fn from(event: kad::Event) -> Self {
-        P2PEvent::Kad(event)
+        Event::Kad(event)
     }
 }
 
-impl From<RequestResponseEvent> for P2PEvent {
+impl From<RequestResponseEvent> for Event {
     fn from(event: RequestResponseEvent) -> Self {
-        P2PEvent::RequestResponse(event)
+        Event::RequestResponse(event)
     }
 }
 
