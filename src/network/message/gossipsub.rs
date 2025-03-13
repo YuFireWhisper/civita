@@ -18,7 +18,7 @@ pub enum Error {
     InvalidTimestamp,
 }
 
-type MessageResult<T> = Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
 pub struct Message {
@@ -45,19 +45,19 @@ impl Message {
         }
     }
 
-    fn from_gossipsub_message(gossipsub_message: gossipsub::Message) -> MessageResult<Self> {
+    fn from_gossipsub_message(gossipsub_message: gossipsub::Message) -> Result<Self> {
         let message: Self = serde_json::from_slice(&gossipsub_message.data)?;
         message.validate()?;
         Ok(message)
     }
 
-    fn validate(&self) -> MessageResult<()> {
+    fn validate(&self) -> Result<()> {
         self.validate_timestamp()?;
 
         Ok(())
     }
 
-    fn validate_timestamp(&self) -> MessageResult<()> {
+    fn validate_timestamp(&self) -> Result<()> {
         let now = Utc::now();
         let past_time =
             DateTime::from_timestamp(self.timestamp, 0).ok_or(Error::InvalidTimestamp)?;
@@ -84,7 +84,7 @@ impl From<Message> for Vec<u8> {
 impl TryFrom<gossipsub::Message> for Message {
     type Error = Error;
 
-    fn try_from(gossipsub_message: gossipsub::Message) -> MessageResult<Self> {
+    fn try_from(gossipsub_message: gossipsub::Message) -> Result<Self> {
         Self::from_gossipsub_message(gossipsub_message)
     }
 }
