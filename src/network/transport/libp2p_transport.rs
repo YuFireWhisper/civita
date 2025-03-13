@@ -27,7 +27,7 @@ use tokio::{
 
 use crate::network::message::{gossipsub, request_response, Message};
 
-use super::{Error, Result, SubscriptionFilter};
+use super::{Error, Result, SubscriptionFilter, Transport};
 
 #[derive(Clone)]
 pub struct Libp2pTransport {
@@ -79,28 +79,6 @@ impl Libp2pTransport {
             .boxed()
     }
 
-    pub async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> Result<()> {
-        let mut swarm = self.swarm.lock().await;
-        swarm
-            .behaviour_mut()
-            .kad_mut()
-            .add_address(&peer_id, addr.clone());
-        swarm.dial(addr)?;
-        Ok(())
-    }
-
-    pub async fn subscribe(&self, filter: SubscriptionFilter) -> Receiver<Message> {
-        if let SubscriptionFilter::Topic(topic) = &filter {
-            // We need to handle error, but for
-            // now we just unwrap
-            self.subscribe_with_topic(topic).await.unwrap();
-        }
-
-        let (tx, rx) = channel(32);
-        self.subscription.write().await.add_subscription(filter, tx);
-        rx
-    }
-
     async fn subscribe_with_topic(&self, topic: &str) -> Result<()> {
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
@@ -139,54 +117,6 @@ impl Libp2pTransport {
             .request_response_mut()
             .send_request(&target, message);
         Ok(())
-    }
-
-    pub async fn receive(&self) {
-        const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
-        let mut task_state = self.receive_task.lock().await;
-        if task_state.is_running() {
-            return;
-        }
-
-        let swarm = self.swarm.clone();
-        let receive_timeout = self.receive_timeout;
-        let receive_task = Arc::clone(&self.receive_task);
-        let subscription = Arc::clone(&self.subscription);
-
-        let cleanup_subscription = Arc::clone(&subscription);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
-            loop {
-                interval.tick().await;
-                if let Ok(mut subs) = cleanup_subscription.try_write() {
-                    subs.remove_dead_channels();
-                }
-            }
-        });
-
-        let task = tokio::spawn(async move {
-            loop {
-                if let Ok(state) = receive_task.try_lock() {
-                    if !state.is_running() {
-                        break Ok(());
-                    }
-                }
-
-                let event = {
-                    let mut swarm_lock = swarm.lock().await;
-                    tokio::select! {
-                        event = swarm_lock.select_next_some() => Some(event),
-                        _ = sleep(receive_timeout) => None,
-                    }
-                };
-
-                if let Some(SwarmEvent::Behaviour(event)) = event {
-                    Self::process_event(event, Arc::clone(&subscription)).await;
-                }
-            }
-        });
-
-        task_state.set_handle(task);
     }
 
     async fn process_event(event: Event, subscribers: Arc<RwLock<Subscription>>) {
@@ -278,6 +208,93 @@ impl Libp2pTransport {
     }
 }
 
+impl Transport for Libp2pTransport {
+    async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> Result<()> {
+        let mut swarm = self.swarm.lock().await;
+        swarm
+            .behaviour_mut()
+            .kad_mut()
+            .add_address(&peer_id, addr.clone());
+        swarm.dial(addr)?;
+        Ok(())
+    }
+
+    async fn subscribe(&self, filter: SubscriptionFilter) -> Result<Receiver<Message>> {
+        if let SubscriptionFilter::Topic(topic) = &filter {
+            self.subscribe_with_topic(topic).await?;
+        }
+
+        let (tx, rx) = channel(32);
+        self.subscription.write().await.add_subscription(filter, tx);
+        Ok(rx)
+    }
+
+    async fn send(&self, message: Message) -> Result<Option<MessageId>> {
+        match message {
+            Message::Gossipsub(message) => self.send_gossipsub_message(message).await.map(Some),
+            Message::RequestResponse(message) => self
+                .send_reqeust_response_message(message)
+                .await
+                .map(|_| None),
+        }
+    }
+
+    async fn receive(&self) {
+        const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+        let mut task_state = self.receive_task.lock().await;
+        if task_state.is_running() {
+            return;
+        }
+
+        let swarm = self.swarm.clone();
+        let receive_timeout = self.receive_timeout;
+        let receive_task = Arc::clone(&self.receive_task);
+        let subscription = Arc::clone(&self.subscription);
+
+        let cleanup_subscription = Arc::clone(&subscription);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
+            loop {
+                interval.tick().await;
+                if let Ok(mut subs) = cleanup_subscription.try_write() {
+                    subs.remove_dead_channels();
+                }
+            }
+        });
+
+        let task = tokio::spawn(async move {
+            loop {
+                if let Ok(state) = receive_task.try_lock() {
+                    if !state.is_running() {
+                        break Ok(());
+                    }
+                }
+
+                let event = {
+                    let mut swarm_lock = swarm.lock().await;
+                    tokio::select! {
+                        event = swarm_lock.select_next_some() => Some(event),
+                        _ = sleep(receive_timeout) => None,
+                    }
+                };
+
+                if let Some(SwarmEvent::Behaviour(event)) = event {
+                    Self::process_event(event, Arc::clone(&subscription)).await;
+                }
+            }
+        });
+
+        task_state.set_handle(task);
+    }
+
+    fn stop_receive(&self) -> Result<()> {
+        if let Ok(mut task_state) = self.receive_task.try_lock() {
+            task_state.stop();
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for Libp2pTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2PCommunication")
@@ -308,7 +325,7 @@ mod tests {
         message,
         transport::{
             libp2p_transport::test_transport::{create_test_payload, TestTransport, TEST_TOPIC},
-            SubscriptionFilter,
+            SubscriptionFilter, Transport,
         },
     };
     use std::time::Duration;
@@ -337,7 +354,8 @@ mod tests {
         let t1 = TestTransport::new().await.unwrap();
         let filter = SubscriptionFilter::Topic(TEST_TOPIC.to_string());
         let rx = t1.p2p.subscribe(filter).await;
-        assert!(rx.capacity() == 32);
+        assert!(rx.is_ok());
+        assert!(rx.unwrap().capacity() == 32);
     }
 
     #[tokio::test]
@@ -390,7 +408,7 @@ pub mod test_transport {
     };
     use tokio::time::timeout;
 
-    use crate::network::message::Payload;
+    use crate::network::{message::Payload, transport::Transport};
 
     use super::{
         behaviour::{Behaviour, Event},

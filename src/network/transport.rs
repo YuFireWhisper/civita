@@ -37,20 +37,20 @@ pub enum SubscriptionFilter {
     Peer(Vec<PeerId>),
 }
 
-pub trait Transport {
+pub trait Transport: Send + Sync {
     fn dial(
         &self,
         peer_id: PeerId,
         addr: Multiaddr,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+    ) -> impl Future<Output = Result<()>> + Send;
     fn subscribe(
         &self,
         filter: SubscriptionFilter,
-    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send>>;
+    ) -> impl Future<Output = Result<Receiver<Message>>> + Send;
     fn send(
         &self,
         message: Message,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send>>;
-    fn receive(&self) -> Pin<Box<dyn Future<Output = ()>>>;
-    fn stop_receive(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+    ) -> impl Future<Output = Result<Option<MessageId>>> + Send;
+    fn receive(&self) -> impl Future<Output = ()>;
+    fn stop_receive(&self) -> Result<()>;
 }

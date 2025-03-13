@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, sync::Arc};
 
 use libp2p::gossipsub::MessageId;
 use thiserror::Error;
@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::network::{
     message::{gossipsub, Message, Payload},
-    transport::{self, libp2p_transport::Libp2pTransport, SubscriptionFilter},
+    transport::{self, libp2p_transport::Libp2pTransport, SubscriptionFilter, Transport},
 };
 
 use super::proof::Proof;
@@ -21,24 +21,24 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub trait MessagerEngine {
-    fn subscribe(&self) -> Pin<Box<dyn Future<Output = Receiver<Message>> + Send + '_>>;
-    fn send_vrf_request(&self) -> Pin<Box<dyn Future<Output = Result<MessageId>> + Send + '_>>;
+pub trait MessagerEngine: Send + Sync {
+    fn subscribe(&self) -> impl Future<Output = Result<Receiver<Message>>>;
+    fn send_vrf_request(&self) -> impl Future<Output = Result<MessageId>>;
     fn send_vrf_proof(
         &self,
         message_id: MessageId,
         public_key: Vec<u8>,
         vrf_proof: Proof,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>>;
+    ) -> impl Future<Output = Result<MessageId>>;
     fn send_vrf_consensus(
         &self,
         message_id: MessageId,
         random: [u8; 32],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>>;
+    ) -> impl Future<Output = Result<MessageId>>;
     fn send_vrf_failure(
         &self,
         message_id: MessageId,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>>;
+    ) -> impl Future<Output = Result<MessageId>>;
 }
 
 pub struct Messager {
@@ -51,64 +51,51 @@ impl Messager {
         Self { transport, topic }
     }
 
-    async fn send(&self, payload: Payload) -> Result<Option<MessageId>> {
-        let msg = self.create_message(payload);
-        let message_id = self.transport.send(msg).await?;
+    async fn send(&self, payload: Payload) -> Result<MessageId> {
+        let msg = self.create_gossipsub_message(payload);
+        let message_id = self.transport.send(msg).await?.ok_or(Error::MessageId)?;
         Ok(message_id)
     }
 
-    fn create_message(&self, payload: Payload) -> Message {
+    fn create_gossipsub_message(&self, payload: Payload) -> Message {
         let gossip_msg = gossipsub::Message::new(&self.topic, payload);
         Message::Gossipsub(gossip_msg)
     }
 }
 
 impl MessagerEngine for Messager {
-    fn subscribe(&self) -> Pin<Box<dyn Future<Output = Receiver<Message>> + Send + '_>> {
-        Box::pin(async move {
-            let filter = SubscriptionFilter::Topic(self.topic.clone());
-            self.transport.subscribe(filter).await
-        })
+    async fn subscribe(&self) -> Result<Receiver<Message>> {
+        let filter = SubscriptionFilter::Topic(self.topic.clone());
+        self.transport.subscribe(filter).await.map_err(Error::from)
     }
 
-    fn send_vrf_request(&self) -> Pin<Box<dyn Future<Output = Result<MessageId>> + Send + '_>> {
-        Box::pin(async move {
-            let payload = Payload::create_vrf_request();
-            self.send(payload).await?.ok_or(Error::MessageId)
-        })
+    async fn send_vrf_request(&self) -> Result<MessageId> {
+        let payload = Payload::create_vrf_request();
+        self.send(payload).await
     }
 
-    fn send_vrf_proof(
+    async fn send_vrf_proof(
         &self,
         message_id: MessageId,
         public_key: Vec<u8>,
         vrf_proof: Proof,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>> {
-        Box::pin(async move {
-            let payload = Payload::create_vrf_proof(message_id, public_key, vrf_proof);
-            self.send(payload).await
-        })
+    ) -> Result<MessageId> {
+        let payload = Payload::create_vrf_proof(message_id, public_key, vrf_proof);
+        self.send(payload).await
     }
 
-    fn send_vrf_consensus(
+    async fn send_vrf_consensus(
         &self,
         message_id: MessageId,
         random: [u8; 32],
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>> {
-        Box::pin(async move {
-            let payload = Payload::create_vrf_consensus(message_id, random);
-            self.send(payload).await
-        })
+    ) -> Result<MessageId> {
+        let payload = Payload::create_vrf_consensus(message_id, random);
+        self.send(payload).await
     }
 
-    fn send_vrf_failure(
-        &self,
-        message_id: MessageId,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>> {
-        Box::pin(async move {
-            let payload = Payload::create_vrf_failure(message_id);
-            self.send(payload).await
-        })
+    async fn send_vrf_failure(&self, message_id: MessageId) -> Result<MessageId> {
+        let payload = Payload::create_vrf_failure(message_id);
+        self.send(payload).await
     }
 }
 
@@ -116,7 +103,10 @@ impl MessagerEngine for Messager {
 mod tests {
     use std::sync::Arc;
 
-    use crate::network::transport::libp2p_transport::{test_transport::{TestTransport, TEST_TOPIC}, Libp2pTransport};
+    use crate::network::transport::libp2p_transport::{
+        test_transport::{TestTransport, TEST_TOPIC},
+        Libp2pTransport,
+    };
 
     use super::Messager;
 

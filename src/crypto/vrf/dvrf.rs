@@ -80,7 +80,7 @@ impl DVrf {
     }
 
     async fn start_message_handler(self: Arc<Self>) -> Result<()> {
-        let mut rx = self.messager.subscribe().await;
+        let mut rx = self.messager.subscribe().await?;
 
         tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
