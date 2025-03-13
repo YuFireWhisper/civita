@@ -17,18 +17,6 @@ pub enum Error {
     Lock(String),
 }
 
-impl From<vrf::openssl::Error> for Error {
-    fn from(err: vrf::openssl::Error) -> Self {
-        Error::EcvrfCreation(format!("{:?}", err))
-    }
-}
-
-impl From<PoisonError<MutexGuard<'_, ECVRF>>> for Error {
-    fn from(err: PoisonError<MutexGuard<'_, ECVRF>>) -> Self {
-        Error::Lock(err.to_string())
-    }
-}
-
 type Result<T> = std::result::Result<T, Error>;
 
 pub trait Crypto: Send + Sync {
@@ -96,6 +84,18 @@ impl Crypto for EcvrfCrypto {
 
     fn public_key(&self) -> &[u8] {
         &self.public_key
+    }
+}
+
+impl From<vrf::openssl::Error> for Error {
+    fn from(err: vrf::openssl::Error) -> Self {
+        Error::EcvrfCreation(format!("{:?}", err))
+    }
+}
+
+impl From<PoisonError<MutexGuard<'_, ECVRF>>> for Error {
+    fn from(err: PoisonError<MutexGuard<'_, ECVRF>>) -> Self {
+        Error::Lock(err.to_string())
     }
 }
 
