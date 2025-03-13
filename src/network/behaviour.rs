@@ -83,10 +83,6 @@ impl Behaviour {
         )
     }
 
-    fn create_request_response_config() -> request_response::Config {
-        request_response::Config::default()
-    }
-
     pub fn gossipsub(&self) -> &gossipsub::Behaviour {
         &self.gossipsub
     }
