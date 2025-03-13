@@ -3,7 +3,8 @@ use std::sync::Arc;
 use libp2p::PeerId;
 
 use crate::{
-    crypto::vrf::{Error, Vrf, VrfFactory}, network::transport::libp2p_transport::Libp2pTransport,
+    crypto::vrf::{Error, Vrf, VrfFactory},
+    network::transport::libp2p_transport::Libp2pTransport,
 };
 
 use super::{
@@ -57,7 +58,7 @@ impl Factory {
         let config = self.get_config();
         let peer_id = self.peer_id;
         let process_factory = self.get_process_factory();
-        let crypto = self.get_crypto();
+        let crypto = self.get_crypto()?;
         let components = Components {
             transport,
             peer_id,
@@ -82,15 +83,15 @@ impl Factory {
         self.process_factory.clone().unwrap()
     }
 
-    fn get_crypto(&mut self) -> Arc<dyn Crypto> {
+    fn get_crypto(&mut self) -> Result<Arc<dyn Crypto>, Error> {
         if self.crypto.is_none() {
-            self.crypto = Some(self.get_default_crypto().unwrap());
+            self.crypto = Some(Arc::new(self.get_default_crypto()?));
         }
-        self.crypto.clone().unwrap() // Safe to unwrap, and clone is cheap
+        Ok(self.crypto.clone().unwrap()) // Safe to unwrap, and clone is cheap
     }
 
-    fn get_default_crypto(&mut self) -> Result<Arc<dyn Crypto>, Error> {
-        Ok(Arc::new(EcvrfCrypto::new()?))
+    fn get_default_crypto(&mut self) -> Result<EcvrfCrypto, Error> {
+        Ok(EcvrfCrypto::new()?)
     }
 }
 

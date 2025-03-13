@@ -14,7 +14,7 @@ use std::{
 
 use config::Config;
 use consensus_process::{ConsensusProcessFactory, ProcessStatus};
-use crypto::{Crypto, EcvrfCrypto};
+use crypto::Crypto;
 use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
 use messager::{Messager, MessagerEngine};
@@ -41,7 +41,7 @@ pub struct Components {
 }
 
 pub struct DVrf {
-    crypto: EcvrfCrypto,
+    crypto: Arc<dyn Crypto>, // We use Arc because Crypto may can't be cloned
     messager: Messager,
     processes: Processes,
     peer_id: PeerId,
@@ -52,7 +52,7 @@ pub struct DVrf {
 
 impl DVrf {
     async fn new_with_components(components: Components) -> Result<Arc<Self>> {
-        let crypto = EcvrfCrypto::new()?;
+        let crypto = components.crypto;
         let messager = Messager::new(
             Arc::clone(&components.transport),
             components.config.topic.clone(),
