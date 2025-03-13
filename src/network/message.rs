@@ -26,6 +26,12 @@ pub enum Payload {
     },
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Message {
+    Gossipsub(gossipsub::Message),
+    RequestResponse(request_response::Message),
+}
+
 impl Payload {
     pub fn create_vrf_request() -> Payload {
         Payload::VrfRequest {}
@@ -54,10 +60,4 @@ impl Payload {
     pub fn create_raw_data(data: Vec<u8>) -> Payload {
         Payload::RawData { data }
     }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum Message {
-    Gossipsub(gossipsub::Message),
-    RequestResponse(request_response::Message),
 }
