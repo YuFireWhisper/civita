@@ -274,38 +274,27 @@ impl Transport for Libp2pTransport {
             let swarm = self.swarm.clone();
             let receive_interval = self.receive_interval;
             let cleanup_interval = self.cleanup_channel_interval;
-            let receive_task = Arc::clone(&self.receive_task);
             let subscription = Arc::clone(&self.subscription);
 
-            let cleanup_subscription = Arc::clone(&subscription);
-            tokio::spawn(async move {
-                let mut interval = interval(cleanup_interval);
-                loop {
-                    interval.tick().await;
-                    if let Ok(mut subs) = cleanup_subscription.try_write() {
-                        subs.remove_dead_channels();
-                    }
-                }
-            });
-
             let task = tokio::spawn(async move {
+                let mut cleanup_tick = interval(cleanup_interval);
                 loop {
-                    if let Ok(state) = receive_task.try_lock() {
-                        if !state.is_running() {
-                            break Ok(());
+                    tokio::select! {
+                        event = async {
+                            let mut swarm_lock = swarm.lock().await;
+                            swarm_lock.select_next_some().await
+                        } => {
+                            if let SwarmEvent::Behaviour(event) = event {
+                                Self::process_event(event, Arc::clone(&subscription)).await;
+                            }
+                        },
+                        _ = sleep(receive_interval) => {
+                            // Do nothing
+                        },
+                        _ = cleanup_tick.tick() => {
+                            let mut subs = subscription.write().await;
+                            subs.remove_dead_channels();
                         }
-                    }
-
-                    let event = {
-                        let mut swarm_lock = swarm.lock().await;
-                        tokio::select! {
-                            event = swarm_lock.select_next_some() => Some(event),
-                            _ = sleep(receive_interval) => None,
-                        }
-                    };
-
-                    if let Some(SwarmEvent::Behaviour(event)) = event {
-                        Self::process_event(event, Arc::clone(&subscription)).await;
                     }
                 }
             });
