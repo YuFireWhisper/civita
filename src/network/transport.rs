@@ -3,13 +3,11 @@ pub mod libp2p_transport;
 use std::{future::Future, io, pin::Pin};
 
 use libp2p::{gossipsub::MessageId, swarm, Multiaddr, PeerId};
+use libp2p_transport::behaviour;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-use super::{
-    behaviour,
-    message::{request_response, Message},
-};
+use super::message::Message;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -22,11 +20,9 @@ pub enum Error {
     #[error("{0}")]
     Publish(#[from] libp2p::gossipsub::PublishError),
     #[error("{0}")]
-    P2PBehaviour(#[from] behaviour::Error),
+    Behaviour(#[from] behaviour::Error),
     #[error("Failed to lock")]
     LockError,
-    #[error("{0}")]
-    RequestResponse(#[from] request_response::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;

@@ -1,9 +1,10 @@
+pub mod behaviour;
 pub mod receive_task;
 pub mod subscription;
-pub mod behaviour;
 
 use std::sync::Arc;
 
+use behaviour::{Behaviour, Event};
 use futures::StreamExt;
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
@@ -23,10 +24,7 @@ use tokio::{
     time::{sleep, timeout, Duration},
 };
 
-use crate::network::{
-    behaviour::{Behaviour, P2PEvent},
-    message::{gossipsub, request_response, Message},
-};
+use crate::network::message::{gossipsub, request_response, Message};
 
 use super::{Error, Result, SubscriptionFilter};
 
@@ -190,13 +188,13 @@ impl Libp2pTransport {
         task_state.set_handle(task);
     }
 
-    async fn process_event(event: P2PEvent, subscribers: Arc<RwLock<Subscription>>) {
+    async fn process_event(event: Event, subscribers: Arc<RwLock<Subscription>>) {
         match event {
-            P2PEvent::Gossipsub(event) => {
+            Event::Gossipsub(event) => {
                 Self::handle_gossipsub_event(*event, subscribers).await;
             }
-            P2PEvent::Kad(event) => Self::handle_kad_event(event),
-            P2PEvent::RequestResponse(event) => {
+            Event::Kad(event) => Self::handle_kad_event(event),
+            Event::RequestResponse(event) => {
                 Self::handle_request_response_event(event, subscribers).await;
             }
         }
@@ -391,12 +389,12 @@ pub mod test_transport {
     };
     use tokio::time::timeout;
 
-    use crate::network::{
-        behaviour::{Behaviour, P2PEvent},
-        message::Payload,
-    };
+    use crate::network::message::Payload;
 
-    use super::Libp2pTransport;
+    use super::{
+        behaviour::{Behaviour, Event},
+        Libp2pTransport,
+    };
 
     pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
     pub const TEST_TOPIC: &str = "test_topic";
@@ -542,7 +540,7 @@ pub mod test_transport {
             timeout(TEST_TIMEOUT_DURATION, async {
                 let mut swarm = self.p2p.swarm.lock().await;
                 while let Some(event) = swarm.next().await {
-                    if let SwarmEvent::Behaviour(P2PEvent::Gossipsub(gossipsub_event)) = event {
+                    if let SwarmEvent::Behaviour(Event::Gossipsub(gossipsub_event)) = event {
                         if let gossipsub::Event::Message { message, .. } = *gossipsub_event {
                             return Some(message.data);
                         }
