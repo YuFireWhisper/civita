@@ -23,7 +23,7 @@ use tokio::{
         mpsc::{channel, Receiver},
         Mutex, MutexGuard, RwLock,
     },
-    time::{sleep, timeout, Duration},
+    time::{interval, sleep, timeout, Duration},
 };
 
 use crate::network::message::{gossipsub, request_response, Message};
@@ -37,16 +37,15 @@ pub struct Libp2pTransport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     receive_task: Arc<Mutex<ReceiveTask<Result<()>>>>,
     keypair: Arc<Keypair>,
-    receive_timeout: Duration,
     subscription: Arc<RwLock<Subscription>>,
+    receive_interval: Duration,
+    cleanup_channel_interval: Duration,
+    channel_capacity: usize,
+    get_swarm_lock_timeout: Duration,
 }
 
 impl Libp2pTransport {
-    pub fn new(
-        keypair: Keypair,
-        listen_addr: Multiaddr,
-        receive_timeout: Duration,
-    ) -> Result<Self> {
+    pub fn new(keypair: Keypair, listen_addr: Multiaddr, config: config::Config) -> Result<Self> {
         let transport = Self::create_transport(keypair.clone());
         let behaviour = Behaviour::new(keypair.clone())?;
 
@@ -62,13 +61,20 @@ impl Libp2pTransport {
         let receive_task = Arc::new(Mutex::new(ReceiveTask::new()));
         let keypair = Arc::new(keypair);
         let subscription = Arc::new(RwLock::new(Subscription::new()));
+        let receive_interval = config.receive_interval;
+        let cleanup_channel_interval = config.cleanup_channel_interval;
+        let channel_capacity = config.channel_capacity;
+        let get_swarm_lock_timeout = config.get_swarm_lock_timeout;
 
         Ok(Self {
             swarm,
             receive_task,
             keypair,
-            receive_timeout,
             subscription,
+            receive_interval,
+            cleanup_channel_interval,
+            channel_capacity,
+            get_swarm_lock_timeout,
         })
     }
 
@@ -200,7 +206,7 @@ impl Libp2pTransport {
     }
 
     async fn get_swarm_lock(&self) -> Result<MutexGuard<'_, Swarm<Behaviour>>> {
-        match timeout(Duration::from_secs(5), self.swarm.lock()).await {
+        match timeout(self.get_swarm_lock_timeout, self.swarm.lock()).await {
             Ok(guard) => Ok(guard),
             Err(_) => Err(Error::LockError),
         }
@@ -237,7 +243,7 @@ impl Transport for Libp2pTransport {
                 self.subscribe_with_topic(topic).await?;
             }
 
-            let (tx, rx) = channel(32);
+            let (tx, rx) = channel(self.channel_capacity);
             self.subscription.write().await.add_subscription(filter, tx);
             Ok(rx)
         })
@@ -260,20 +266,20 @@ impl Transport for Libp2pTransport {
 
     fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {
-            const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
             let mut task_state = self.receive_task.lock().await;
             if task_state.is_running() {
                 return;
             }
 
             let swarm = self.swarm.clone();
-            let receive_timeout = self.receive_timeout;
+            let receive_interval = self.receive_interval;
+            let cleanup_interval = self.cleanup_channel_interval;
             let receive_task = Arc::clone(&self.receive_task);
             let subscription = Arc::clone(&self.subscription);
 
             let cleanup_subscription = Arc::clone(&subscription);
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
+                let mut interval = interval(cleanup_interval);
                 loop {
                     interval.tick().await;
                     if let Ok(mut subs) = cleanup_subscription.try_write() {
@@ -294,7 +300,7 @@ impl Transport for Libp2pTransport {
                         let mut swarm_lock = swarm.lock().await;
                         tokio::select! {
                             event = swarm_lock.select_next_some() => Some(event),
-                            _ = sleep(receive_timeout) => None,
+                            _ = sleep(receive_interval) => None,
                         }
                     };
 
@@ -376,7 +382,7 @@ mod tests {
         let filter = SubscriptionFilter::Topic(TEST_TOPIC.to_string());
         let rx = t1.p2p.subscribe(filter).await;
         assert!(rx.is_ok());
-        assert!(rx.unwrap().capacity() == 32);
+        assert!(rx.unwrap().capacity() == t1.config.channel_capacity);
     }
 
     #[tokio::test]
@@ -433,6 +439,7 @@ pub mod test_transport {
 
     use super::{
         behaviour::{Behaviour, Event},
+        config::Config,
         Libp2pTransport,
     };
 
@@ -450,15 +457,16 @@ pub mod test_transport {
         pub keypair: Keypair,
         pub listen_addr: Multiaddr,
         pub p2p: Libp2pTransport,
+        pub config: Config,
     }
 
     impl TestTransport {
         pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
             let keypair = Keypair::generate_ed25519();
             let listen_addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse()?;
+            let config = Config::default();
 
-            let p2p =
-                Libp2pTransport::new(keypair.clone(), listen_addr.clone(), TEST_TIMEOUT_DURATION)?;
+            let p2p = Libp2pTransport::new(keypair.clone(), listen_addr.clone(), config.clone())?;
 
             {
                 let mut swarm = p2p
@@ -483,6 +491,7 @@ pub mod test_transport {
                 keypair,
                 listen_addr,
                 p2p,
+                config,
             })
         }
 

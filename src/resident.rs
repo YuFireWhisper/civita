@@ -2,7 +2,13 @@ use libp2p::{identity::Keypair, Multiaddr};
 use thiserror::Error;
 use tokio::time::Duration;
 
-use crate::network::{message::Message, transport::{self, libp2p_transport::Libp2pTransport}};
+use crate::network::{
+    message::Message,
+    transport::{
+        self,
+        libp2p_transport::{config::Config, Libp2pTransport},
+    },
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -20,7 +26,7 @@ impl Resident {
     const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
     pub async fn new(keypair: Keypair, listen_addr: Multiaddr) -> ResidentResult<Self> {
-        let transport = Libp2pTransport::new(keypair, listen_addr, Self::DEFAULT_RECEIVE_TIMEOUT)?;
+        let transport = Libp2pTransport::new(keypair, listen_addr, Config::default())?;
         Ok(Self { transport })
     }
 
