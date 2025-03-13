@@ -51,7 +51,7 @@ pub struct DVrf {
 }
 
 impl DVrf {
-    pub(crate) async fn new_with_components(components: Components) -> Result<Arc<Self>> {
+    async fn new_with_components(components: Components) -> Result<Arc<Self>> {
         let crypto = EcvrfCrypto::new()?;
         let messager = Messager::new(
             Arc::clone(&components.transport),
