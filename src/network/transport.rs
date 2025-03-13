@@ -1,6 +1,6 @@
 pub mod libp2p_transport;
 
-use std::{future::Future, io};
+use std::{future::Future, io, pin::Pin};
 
 use libp2p::{
     gossipsub::{MessageId, PublishError, SubscriptionError},
@@ -29,8 +29,6 @@ pub enum Error {
     LockError,
 }
 
-type Result<T> = std::result::Result<T, Error>;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SubscriptionFilter {
     Topic(String),
@@ -42,15 +40,15 @@ pub trait Transport: Send + Sync {
         &self,
         peer_id: PeerId,
         addr: Multiaddr,
-    ) -> impl Future<Output = Result<()>> + Send;
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
     fn subscribe(
         &self,
         filter: SubscriptionFilter,
-    ) -> impl Future<Output = Result<Receiver<Message>>> + Send;
+    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + '_>>;
     fn send(
         &self,
         message: Message,
-    ) -> impl Future<Output = Result<Option<MessageId>>> + Send;
-    fn receive(&self) -> impl Future<Output = ()>;
-    fn stop_receive(&self) -> Result<()>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>, Error>> + Send + '_>>;
+    fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn stop_receive(&self) -> Result<(), Error>;
 }

@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::network::{
     message::{gossipsub, Message, Payload},
-    transport::{self, libp2p_transport::Libp2pTransport, SubscriptionFilter, Transport},
+    transport::{self, SubscriptionFilter, Transport},
 };
 
 use super::proof::Proof;
@@ -42,12 +42,12 @@ pub trait MessagerEngine: Send + Sync {
 }
 
 pub struct Messager {
-    transport: Arc<Libp2pTransport>,
+    transport: Arc<dyn Transport>,
     topic: String,
 }
 
 impl Messager {
-    pub fn new(transport: Arc<Libp2pTransport>, topic: String) -> Self {
+    pub fn new(transport: Arc<dyn Transport>, topic: String) -> Self {
         Self { transport, topic }
     }
 

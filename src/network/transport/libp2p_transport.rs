@@ -2,7 +2,7 @@ pub mod behaviour;
 pub mod receive_task;
 pub mod subscription;
 
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use behaviour::{Behaviour, Event};
 use futures::StreamExt;
@@ -27,7 +27,9 @@ use tokio::{
 
 use crate::network::message::{gossipsub, request_response, Message};
 
-use super::{Error, Result, SubscriptionFilter, Transport};
+use super::{Error, SubscriptionFilter, Transport};
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
 pub struct Libp2pTransport {
@@ -209,82 +211,100 @@ impl Libp2pTransport {
 }
 
 impl Transport for Libp2pTransport {
-    async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> Result<()> {
-        let mut swarm = self.swarm.lock().await;
-        swarm
-            .behaviour_mut()
-            .kad_mut()
-            .add_address(&peer_id, addr.clone());
-        swarm.dial(addr)?;
-        Ok(())
+    fn dial(
+        &self,
+        peer_id: PeerId,
+        addr: Multiaddr,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let mut swarm = self.swarm.lock().await;
+            swarm
+                .behaviour_mut()
+                .kad_mut()
+                .add_address(&peer_id, addr.clone());
+            swarm.dial(addr)?;
+            Ok(())
+        })
     }
 
-    async fn subscribe(&self, filter: SubscriptionFilter) -> Result<Receiver<Message>> {
-        if let SubscriptionFilter::Topic(topic) = &filter {
-            self.subscribe_with_topic(topic).await?;
-        }
-
-        let (tx, rx) = channel(32);
-        self.subscription.write().await.add_subscription(filter, tx);
-        Ok(rx)
-    }
-
-    async fn send(&self, message: Message) -> Result<Option<MessageId>> {
-        match message {
-            Message::Gossipsub(message) => self.send_gossipsub_message(message).await.map(Some),
-            Message::RequestResponse(message) => self
-                .send_reqeust_response_message(message)
-                .await
-                .map(|_| None),
-        }
-    }
-
-    async fn receive(&self) {
-        const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
-        let mut task_state = self.receive_task.lock().await;
-        if task_state.is_running() {
-            return;
-        }
-
-        let swarm = self.swarm.clone();
-        let receive_timeout = self.receive_timeout;
-        let receive_task = Arc::clone(&self.receive_task);
-        let subscription = Arc::clone(&self.subscription);
-
-        let cleanup_subscription = Arc::clone(&subscription);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
-            loop {
-                interval.tick().await;
-                if let Ok(mut subs) = cleanup_subscription.try_write() {
-                    subs.remove_dead_channels();
-                }
+    fn subscribe(
+        &self,
+        filter: SubscriptionFilter,
+    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send + '_>> {
+        Box::pin(async move {
+            if let SubscriptionFilter::Topic(topic) = &filter {
+                self.subscribe_with_topic(topic).await?;
             }
-        });
 
-        let task = tokio::spawn(async move {
-            loop {
-                if let Ok(state) = receive_task.try_lock() {
-                    if !state.is_running() {
-                        break Ok(());
+            let (tx, rx) = channel(32);
+            self.subscription.write().await.add_subscription(filter, tx);
+            Ok(rx)
+        })
+    }
+
+    fn send(
+        &self,
+        message: Message,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>> {
+        Box::pin(async move {
+            match message {
+                Message::Gossipsub(message) => self.send_gossipsub_message(message).await.map(Some),
+                Message::RequestResponse(message) => self
+                    .send_reqeust_response_message(message)
+                    .await
+                    .map(|_| None),
+            }
+        })
+    }
+
+    fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {
+            const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+            let mut task_state = self.receive_task.lock().await;
+            if task_state.is_running() {
+                return;
+            }
+
+            let swarm = self.swarm.clone();
+            let receive_timeout = self.receive_timeout;
+            let receive_task = Arc::clone(&self.receive_task);
+            let subscription = Arc::clone(&self.subscription);
+
+            let cleanup_subscription = Arc::clone(&subscription);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
+                loop {
+                    interval.tick().await;
+                    if let Ok(mut subs) = cleanup_subscription.try_write() {
+                        subs.remove_dead_channels();
                     }
                 }
+            });
 
-                let event = {
-                    let mut swarm_lock = swarm.lock().await;
-                    tokio::select! {
-                        event = swarm_lock.select_next_some() => Some(event),
-                        _ = sleep(receive_timeout) => None,
+            let task = tokio::spawn(async move {
+                loop {
+                    if let Ok(state) = receive_task.try_lock() {
+                        if !state.is_running() {
+                            break Ok(());
+                        }
                     }
-                };
 
-                if let Some(SwarmEvent::Behaviour(event)) = event {
-                    Self::process_event(event, Arc::clone(&subscription)).await;
+                    let event = {
+                        let mut swarm_lock = swarm.lock().await;
+                        tokio::select! {
+                            event = swarm_lock.select_next_some() => Some(event),
+                            _ = sleep(receive_timeout) => None,
+                        }
+                    };
+
+                    if let Some(SwarmEvent::Behaviour(event)) = event {
+                        Self::process_event(event, Arc::clone(&subscription)).await;
+                    }
                 }
-            }
-        });
+            });
 
-        task_state.set_handle(task);
+            task_state.set_handle(task);
+        })
     }
 
     fn stop_receive(&self) -> Result<()> {
