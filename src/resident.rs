@@ -4,11 +4,6 @@ use tokio::time::Duration;
 
 use crate::network::{message::Message, transport::{self, libp2p_transport::Libp2pTransport}};
 
-pub mod malicious_behaviour;
-pub mod requation_action;
-pub mod resident_id;
-pub mod resident_status;
-
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
