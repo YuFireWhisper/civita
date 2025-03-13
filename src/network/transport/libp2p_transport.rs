@@ -1,5 +1,6 @@
 pub mod receive_task;
 pub mod subscription;
+pub mod behaviour;
 
 use std::sync::Arc;
 
