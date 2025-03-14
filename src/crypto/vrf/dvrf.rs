@@ -289,3 +289,234 @@ impl VrfCallback for DVrf {
 fn message_id_to_bytes(message_id: &MessageId) -> Vec<u8> {
     message_id.to_string().as_bytes().to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::{future::Future, pin::Pin};
+
+    use libp2p::{gossipsub::MessageId, Multiaddr, PeerId};
+    use mockall::mock;
+    use tokio::{
+        sync::mpsc::Receiver,
+        time::{Duration, Instant},
+    };
+
+    use super::config::Config;
+    use super::crypto::Crypto;
+    use super::{Components, DVrf};
+    use crate::crypto::vrf::dvrf::consensus_process::ProcessStatus;
+    use crate::crypto::vrf::dvrf::proof::Proof;
+    use crate::crypto::vrf::dvrf::{
+        consensus_process::{
+            ConsensusProcess, ConsensusProcessFactory, Error as ConsensusProcessError,
+        },
+        crypto::Error as CryptoError,
+    };
+    use crate::crypto::vrf::VrfCallback;
+    use crate::network::transport::Error as TransportError;
+    use crate::network::transport::Transport;
+    use crate::network::{message::Message, transport::SubscriptionFilter};
+
+    const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
+    const TEST_OUTPUT: [u8; 32] = [1; 32];
+    const TEST_PFOOF: [u8; 32] = [1; 32];
+
+    mock! {
+        pub Transport {}
+        impl Transport for Transport {
+            fn dial(
+                &self,
+                peer_id: PeerId,
+                addr: Multiaddr,
+            ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send>>;
+            fn subscribe(
+                &self,
+                filter: SubscriptionFilter,
+            ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, TransportError>> + Send>>;
+            fn send(
+                &self,
+                message: Message,
+            ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>, TransportError>> + Send>>;
+            fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+            fn stop_receive(&self) -> Result<(), TransportError>;
+        }
+    }
+
+    mock! {
+        pub ConsensusProcessFactory {}
+        impl ConsensusProcessFactory for ConsensusProcessFactory {
+            fn create(&self, proof_duration: Duration, vote_duration: Duration) -> Box<dyn ConsensusProcess>;
+        }
+    }
+
+    mock! {
+        pub ConsensusProcess {}
+        impl ConsensusProcess for ConsensusProcess {
+            fn insert_voter(&mut self, peer_id: PeerId) -> Result<(), ConsensusProcessError>;
+            fn insert_proof(&mut self, proof: Vec<u8>) -> Result<(), ConsensusProcessError>;
+            fn calculate_consensus(&self) -> Result<[u8; 32], ConsensusProcessError>;
+            fn insert_completion_vote(
+                &mut self,
+                peer_id: PeerId,
+                random: [u8; 32],
+            ) -> Result<Option<[u8; 32]>, ConsensusProcessError>;
+            fn insert_failure_vote(&mut self, peer_id: PeerId) -> Result<bool, ConsensusProcessError>;
+            fn is_proof_timeout(&self) -> bool;
+            fn is_vote_timeout(&self) -> bool;
+            fn status(&mut self) -> ProcessStatus;
+            fn update_status(&mut self) -> ProcessStatus;
+            fn proof_deadline(&self) -> Instant;
+            fn vote_deadline(&self) -> Instant;
+            fn random(&self) -> Option<[u8; 32]>;
+        }
+    }
+
+    mock! {
+        pub Crypto {}
+        impl Crypto for Crypto {
+            fn generate_proof(&self, seed: &[u8]) -> Result<Proof, CryptoError>;
+            fn verify_proof(&self, public_key: &[u8], proof: &[u8], message_id: &[u8]) -> Result<(), CryptoError>;
+            fn public_key(&self) -> &[u8];
+        }
+    }
+
+    fn create_components() -> Components {
+        let mut transport = MockTransport::new();
+        transport.expect_subscribe().returning(|_| {
+            let (_, rx) = tokio::sync::mpsc::channel(100);
+            Box::pin(async { Ok(rx) })
+        });
+        transport
+            .expect_send()
+            .returning(|_| Box::pin(async { Ok(Some(create_message_id())) }));
+
+        let mut crypto = MockCrypto::new();
+        crypto.expect_public_key().return_const(vec![0u8; 32]);
+        crypto
+            .expect_generate_proof()
+            .returning(|_| Ok(create_proof()));
+
+        let mut process_factory = MockConsensusProcessFactory::new();
+        process_factory.expect_create().returning(|_, _| {
+            let mut process = MockConsensusProcess::new();
+            process.expect_insert_voter().returning(|_| Ok(()));
+            process.expect_insert_proof().returning(|_| Ok(()));
+            process.expect_proof_deadline().returning(Instant::now);
+            process.expect_vote_deadline().returning(Instant::now);
+            process
+                .expect_status()
+                .returning(|| ProcessStatus::InProgress);
+            Box::new(process)
+        });
+
+        let peer_id = PeerId::random();
+        let config = Config::default();
+
+        Components {
+            transport: Arc::new(transport),
+            peer_id,
+            config,
+            process_factory: Arc::new(process_factory),
+            crypto: Arc::new(crypto),
+        }
+    }
+
+    async fn create_dvrf() -> Arc<DVrf> {
+        let components = create_components();
+        DVrf::new_with_components(components).await.unwrap()
+    }
+
+    fn create_message_id() -> MessageId {
+        MessageId::from(TEST_MESSAGE_ID)
+    }
+
+    fn create_proof() -> Proof {
+        Proof::new(TEST_OUTPUT.to_vec(), TEST_PFOOF.to_vec())
+    }
+
+    #[tokio::test]
+    async fn test_new_with_components() {
+        let components = create_components();
+        let peer_id = components.peer_id;
+        let dvrf = super::DVrf::new_with_components(components).await;
+
+        assert!(dvrf.is_ok());
+        assert_eq!(dvrf.unwrap().peer_id, peer_id);
+    }
+
+    #[tokio::test]
+    async fn test_new_random_success() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_subscribe()
+            .returning(|_| {
+                let (_, rx) = tokio::sync::mpsc::channel(100);
+                Box::pin(async { Ok(rx) })
+            })
+            .times(1);
+        transport
+            .expect_send()
+            .returning(|_| Box::pin(async { Ok(Some(create_message_id())) }))
+            .times(2..);
+
+        let mut crypto = MockCrypto::new();
+        crypto.expect_public_key().return_const(vec![0u8; 32]);
+        crypto
+            .expect_generate_proof()
+            .returning(|_| Ok(create_proof()))
+            .times(1);
+
+        let mut process_factory = MockConsensusProcessFactory::new();
+        process_factory
+            .expect_create()
+            .returning(|_, _| {
+                let mut process = MockConsensusProcess::new();
+                process.expect_insert_voter().returning(|_| Ok(()));
+                process.expect_insert_proof().returning(|_| Ok(()));
+                process
+                    .expect_calculate_consensus()
+                    .returning(|| Ok(TEST_OUTPUT));
+                process.expect_proof_deadline().returning(Instant::now);
+                process.expect_vote_deadline().returning(Instant::now);
+                process
+                    .expect_status()
+                    .returning(|| ProcessStatus::Completed(TEST_OUTPUT));
+
+                Box::new(process)
+            })
+            .times(1);
+
+        let components = Components {
+            transport: Arc::new(transport),
+            peer_id: PeerId::random(),
+            config: Config::default(),
+            process_factory: Arc::new(process_factory),
+            crypto: Arc::new(crypto),
+        };
+
+        let dvrf = DVrf::new_with_components(components).await.unwrap();
+        let result = dvrf.new_random().await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), TEST_OUTPUT);
+    }
+
+    #[tokio::test]
+    async fn test_set_result_callback() {
+        let dvrf = create_dvrf().await;
+        let called = Arc::new(Mutex::new(None::<(MessageId, Vec<u8>)>));
+        let called_clone = called.clone();
+
+        dvrf.set_result_callback(move |msg_id, random| {
+            *called_clone.lock().unwrap() = Some((msg_id, random.to_vec()));
+        });
+
+        let message_id = create_message_id();
+        dvrf.notify_result(message_id.clone(), &TEST_OUTPUT);
+
+        let result = called.lock().unwrap().take().unwrap();
+        assert_eq!(result.0, message_id);
+        assert_eq!(result.1, TEST_OUTPUT.to_vec());
+    }
+}
