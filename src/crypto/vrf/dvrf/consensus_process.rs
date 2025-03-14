@@ -14,12 +14,16 @@ pub enum Error {
     Timeout,
     #[error("Proof Deadline not yet reached")]
     ProofDeadlineNotReached,
+    #[error("Proof Deadline has already been reached")]
+    ProofDeadlineReached,
     #[error("Vote Deadline has already been reached")]
     VoteDeadlineReached,
     #[error("Insufficient proofs collected")]
     InsufficientProofs,
-    #[error("Peer ID not found")]
-    PeerIdNotFound,
+    #[error("Peer ID not found: {0}")]
+    PeerIdNotFound(PeerId),
+    #[error("Peer ID already voted: {0}")]
+    PeerIdAlreadyVoted(PeerId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]

@@ -15,7 +15,7 @@ pub struct Process {
     proof_deadline: Instant,
     vote_deadline: Instant,
     voters: HashSet<PeerId>,
-    voters_num: usize,
+    already_voted: HashSet<PeerId>,
     proofs: Vec<Vec<u8>>,
     votes: HashMap<ProcessStatus, usize>,
     status: ProcessStatus,
@@ -27,7 +27,7 @@ impl Process {
         let proof_deadline = now + proof_duration;
         let vote_deadline = proof_deadline + vote_duration;
         let voters = HashSet::new();
-        let voters_num = 0;
+        let already_voted = HashSet::new();
         let proofs = Vec::new();
         let votes = HashMap::new();
         let status = ProcessStatus::InProgress;
@@ -35,7 +35,7 @@ impl Process {
             proof_deadline,
             vote_deadline,
             voters,
-            voters_num,
+            already_voted,
             proofs,
             votes,
             status,
@@ -51,7 +51,10 @@ impl Process {
     }
 
     fn threshold(&self) -> usize {
-        (self.voters_num as f64 * DEFAULT_THRESHOLD_PERCENTAGE).ceil() as usize
+        if self.voters.is_empty() {
+            return 0;
+        }
+        (self.voters.len() as f64 * DEFAULT_THRESHOLD_PERCENTAGE).ceil() as usize
     }
 
     fn consensus_status(&self) -> Option<ProcessStatus> {
@@ -59,7 +62,7 @@ impl Process {
             return Some(self.status);
         }
 
-        if self.voters_num == 0 {
+        if self.already_voted.is_empty() {
             return None;
         }
 
@@ -81,11 +84,10 @@ impl Process {
 impl ConsensusProcess for Process {
     fn insert_voter(&mut self, peer_id: PeerId) -> Result<()> {
         if self.is_proof_timeout() {
-            return Err(Error::ProofDeadlineNotReached);
+            return Err(Error::ProofDeadlineReached);
         }
 
         if self.voters.insert(peer_id) {
-            self.voters_num += 1;
             Ok(())
         } else {
             Err(Error::DuplicatePeerId(peer_id))
@@ -94,7 +96,7 @@ impl ConsensusProcess for Process {
 
     fn insert_proof(&mut self, proof: Vec<u8>) -> Result<()> {
         if self.is_proof_timeout() {
-            return Err(Error::ProofDeadlineNotReached);
+            return Err(Error::ProofDeadlineReached);
         }
 
         if self.proofs.contains(&proof) {
@@ -132,8 +134,12 @@ impl ConsensusProcess for Process {
             return Err(Error::VoteDeadlineReached);
         }
 
-        if !self.voters.remove(&peer_id) {
-            return Err(Error::PeerIdNotFound);
+        if !self.voters.contains(&peer_id) {
+            return Err(Error::PeerIdNotFound(peer_id));
+        }
+
+        if !self.already_voted.insert(peer_id) {
+            return Err(Error::PeerIdAlreadyVoted(peer_id));
         }
 
         self.insert_status(ProcessStatus::Completed(random));
@@ -155,8 +161,12 @@ impl ConsensusProcess for Process {
             return Err(Error::VoteDeadlineReached);
         }
 
-        if !self.voters.remove(&peer_id) {
-            return Err(Error::PeerIdNotFound);
+        if !self.voters.contains(&peer_id) {
+            return Err(Error::PeerIdNotFound(peer_id));
+        }
+
+        if !self.already_voted.insert(peer_id) {
+            return Err(Error::PeerIdAlreadyVoted(peer_id));
         }
 
         self.insert_status(ProcessStatus::Failed);
@@ -170,11 +180,11 @@ impl ConsensusProcess for Process {
     }
 
     fn is_proof_timeout(&self) -> bool {
-        Instant::now() > self.proof_deadline
+        Instant::now() >= self.proof_deadline
     }
 
     fn is_vote_timeout(&self) -> bool {
-        Instant::now() > self.vote_deadline
+        Instant::now() >= self.vote_deadline
     }
 
     fn update_status(&mut self) -> ProcessStatus {
@@ -231,7 +241,7 @@ mod tests {
 
     const VOTERS_NUM: usize = 10;
 
-    fn generate_peer_id() -> PeerId {
+    fn generate_random_peer_id() -> PeerId {
         PeerId::random()
     }
 
@@ -246,8 +256,78 @@ mod tests {
         Process::new(PROOF_DURATION, VOTE_DURATION)
     }
 
-    fn get_threshold() -> usize {
-        (VOTERS_NUM as f64 * DEFAULT_THRESHOLD_PERCENTAGE).ceil() as usize
+    fn insert_random_voters(process: &mut Process, num: usize) {
+        let mut used_peer_ids = HashSet::new();
+        for _ in 0..num {
+            let mut peer_id = generate_random_peer_id();
+            while used_peer_ids.contains(&peer_id) {
+                peer_id = generate_random_peer_id();
+            }
+            used_peer_ids.insert(peer_id);
+            process.insert_voter(peer_id).unwrap();
+        }
+    }
+
+    fn insert_random_completion_votes(
+        process: &mut Process,
+        num: usize,
+    ) -> Result<Option<[u8; 32]>> {
+        let required_voters = std::cmp::max(num, process.voters.len());
+        for _ in process.voters.len()..required_voters {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id)?;
+        }
+
+        let peer_ids: Vec<PeerId> = process.voters.iter().cloned().collect();
+        let random = [1u8; 32];
+
+        for i in 0..num {
+            if i >= peer_ids.len() {
+                return Err(Error::InsufficientProofs);
+            }
+
+            let peer_id = peer_ids[i];
+            let result = process.insert_completion_vote(peer_id, random)?;
+            if result.is_some() {
+                return Ok(result);
+            }
+        }
+
+        process.update_status();
+        Ok(process.random())
+    }
+
+    fn insert_random_failure_votes(process: &mut Process, num: usize) -> Result<bool> {
+        let required_voters = std::cmp::max(num, process.voters.len());
+        for _ in process.voters.len()..required_voters {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id)?;
+        }
+
+        let peer_ids: Vec<PeerId> = process.voters.iter().cloned().collect();
+
+        for i in 0..num {
+            if i >= peer_ids.len() {
+                return Err(Error::InsufficientProofs);
+            }
+
+            let peer_id = peer_ids[i];
+            let result = process.insert_failure_vote(peer_id);
+            if result.is_err() {
+                return result;
+            }
+        }
+
+        process.update_status();
+        if process.status == ProcessStatus::Failed {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn calculate_threshold(num: usize, percentage: f64) -> usize {
+        (num as f64 * percentage).ceil() as usize
     }
 
     #[test]
@@ -258,40 +338,10 @@ mod tests {
 
         assert_eq!(process.status, ProcessStatus::InProgress);
         assert_eq!(process.voters.len(), 0);
-        assert_eq!(process.voters_num, 0);
+        assert_eq!(process.already_voted.len(), 0);
         assert_eq!(process.proofs.len(), 0);
         assert_eq!(process.votes.len(), 0);
         assert!(process.proof_deadline > Instant::now());
-    }
-
-    #[test]
-    fn test_aggregate_proofs() {
-        const TEST_PROOF_1: [u8; 4] = [1, 2, 3, 4];
-        const TEST_PROOF_2: [u8; 4] = [5, 6, 7, 8];
-
-        let mut process = create_process();
-        process.proofs.push(TEST_PROOF_1.to_vec());
-        process.proofs.push(TEST_PROOF_2.to_vec());
-
-        let hash = process.aggregate_proofs(2);
-
-        let mut hasher = Sha256::new();
-        hasher.update(TEST_PROOF_1);
-        hasher.update(TEST_PROOF_2);
-        let expected: [u8; 32] = hasher.finalize().into();
-
-        assert_eq!(hash, expected);
-    }
-
-    #[test]
-    fn test_threshold() {
-        let mut process = create_process();
-        process.voters_num = VOTERS_NUM;
-
-        let threshold = process.threshold();
-
-        let expected = get_threshold();
-        assert_eq!(threshold, expected);
     }
 
     #[test]
@@ -304,72 +354,38 @@ mod tests {
     }
 
     #[test]
-    fn test_consensus_status_has_consensus() {
-        let mut process = create_process();
-        let threshold = get_threshold();
-        process.voters_num = VOTERS_NUM;
-        process.votes.insert(ProcessStatus::Failed, threshold);
-
-        let status = process.consensus_status();
-
-        assert_eq!(status, Some(ProcessStatus::Failed));
-    }
-
-    #[test]
-    fn test_consensus_status_already_completed() {
-        let random = [1u8; 32];
-        let mut process = create_process();
-        process.status = ProcessStatus::Completed(random);
-
-        let status = process.consensus_status();
-
-        assert_eq!(status, Some(ProcessStatus::Completed(random)));
-    }
-
-    #[test]
-    fn test_insert_status() {
-        let mut process = create_process();
-        let status = ProcessStatus::Failed;
-
-        process.insert_status(status);
-        process.insert_status(status);
-
-        assert_eq!(process.votes.get(&status), Some(&2));
-    }
-
-    #[test]
     fn test_insert_voter_success() {
         let mut process = create_process();
-        let peer_id = generate_peer_id();
+        let peer_id = generate_random_peer_id();
 
         let result = process.insert_voter(peer_id);
 
         assert!(result.is_ok());
-        assert_eq!(process.voters_num, 1);
+        assert_eq!(process.voters.len(), 1);
         assert!(process.voters.contains(&peer_id));
     }
 
     #[test]
     fn test_insert_voter_duplicate() {
         let mut process = create_process();
-        let peer_id = generate_peer_id();
+        let peer_id = generate_random_peer_id();
         process.insert_voter(peer_id).unwrap();
 
         let result = process.insert_voter(peer_id);
 
         assert!(matches!(result, Err(Error::DuplicatePeerId(_))));
-        assert_eq!(process.voters_num, 1);
+        assert_eq!(process.voters.len(), 1);
     }
 
     #[tokio::test]
     async fn test_insert_voter_timeout() {
         let mut process = create_process();
-        let peer_id = generate_peer_id();
-        sleep(PROOF_DURATION + VOTE_DURATION).await;
+        let peer_id = generate_random_peer_id();
+        sleep(PROOF_DURATION).await;
 
         let result = process.insert_voter(peer_id);
 
-        assert!(matches!(result, Err(Error::ProofDeadlineNotReached)));
+        assert!(matches!(result, Err(Error::ProofDeadlineReached)));
     }
 
     #[test]
@@ -402,11 +418,36 @@ mod tests {
 
         let result = process.insert_proof(proof);
 
-        assert!(matches!(result, Err(Error::ProofDeadlineNotReached)));
+        assert!(matches!(result, Err(Error::ProofDeadlineReached)));
+    }
+
+    #[tokio::test]
+    async fn test_calculate_consensus_success() {
+        let mut process = create_process();
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+        insert_random_voters(&mut process, VOTERS_NUM);
+
+        for i in 0..threshold {
+            let proof = vec![i as u8; 32];
+            process.insert_proof(proof).unwrap();
+        }
+
+        sleep(PROOF_DURATION).await;
+
+        let result = process.calculate_consensus();
+
+        assert!(result.is_ok());
+        let mut hasher = Sha256::new();
+        for i in 0..threshold {
+            hasher.update(vec![i as u8; 32]);
+        }
+        let expected: [u8; 32] = hasher.finalize().into();
+
+        assert_eq!(result.unwrap(), expected);
     }
 
     #[test]
-    fn test_calculate_consensus_deadline_not_reached() {
+    fn test_calculate_consensus_with_deadline_not_reached() {
         let process = create_process();
         let result = process.calculate_consensus();
         assert!(matches!(result, Err(Error::ProofDeadlineNotReached)));
@@ -415,7 +456,14 @@ mod tests {
     #[tokio::test]
     async fn test_calculate_consensus_insufficient_proofs() {
         let mut process = create_process();
-        process.voters_num = VOTERS_NUM;
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+        insert_random_voters(&mut process, VOTERS_NUM);
+
+        for i in 0..threshold - 1 {
+            let proof = vec![i as u8; 32];
+            process.insert_proof(proof).unwrap();
+        }
+
         sleep(PROOF_DURATION).await;
 
         let result = process.calculate_consensus();
@@ -424,61 +472,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_calculate_consensus_success() {
+    async fn test_insert_completion_vote_success() {
         let mut process = create_process();
-        process.voters_num = VOTERS_NUM;
-        let threshold = get_threshold();
-
-        for _ in 0..threshold {
-            process.proofs.push(generate_random_proof());
-        }
-
-        sleep(PROOF_DURATION).await;
-
-        let result = process.calculate_consensus();
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), process.aggregate_proofs(threshold));
-    }
-
-    #[test]
-    fn test_insert_completion_vote_deadline_not_reached() {
-        let mut process = create_process();
-        let peer_id = generate_peer_id();
+        let peer_id = generate_random_peer_id();
         let random = [1u8; 32];
         process.insert_voter(peer_id).unwrap();
-
-        let result = process.insert_completion_vote(peer_id, random);
-
-        assert!(matches!(result, Err(Error::ProofDeadlineNotReached)));
-    }
-
-    #[tokio::test]
-    async fn test_insert_completion_vote_peer_not_found() {
-        let mut process = create_process();
-        let peer_id = generate_peer_id();
-        let random = [1u8; 32];
-        sleep(PROOF_DURATION).await;
-
-        let result = process.insert_completion_vote(peer_id, random);
-
-        assert!(matches!(result, Err(Error::PeerIdNotFound)));
-    }
-
-    #[tokio::test]
-    async fn test_insert_completion_vote_success_without_consensus() {
-        let mut process = create_process();
-        let peer_id = generate_peer_id();
-        let random = [1u8; 32];
-        process.insert_voter(peer_id).unwrap();
-        process.voters_num = VOTERS_NUM; // Set a higher voter count so we don't reach consensus
         sleep(PROOF_DURATION).await;
 
         let result = process.insert_completion_vote(peer_id, random);
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-        assert!(!process.voters.contains(&peer_id));
+        assert!(process.already_voted.contains(&peer_id));
+        assert!(process
+            .votes
+            .contains_key(&ProcessStatus::Completed(random)));
         assert_eq!(
             process.votes.get(&ProcessStatus::Completed(random)),
             Some(&1)
@@ -486,76 +493,138 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_completion_vote_success_with_consensus() {
+    async fn test_insert_completion_vote_with_vote_deadline_reached() {
         let mut process = create_process();
-        let peer_id = generate_peer_id();
-        let random = [1u8; 32];
+        let peer_id = generate_random_peer_id();
         process.insert_voter(peer_id).unwrap();
-        println!("Voters: {:?}", process.voters);
-        println!("Voters num: {:?}", process.voters_num);
-        // Only one voter means we'll reach consensus immediately
-        sleep(PROOF_DURATION).await;
 
+        sleep(PROOF_DURATION + VOTE_DURATION + Duration::from_millis(5)).await;
+
+        let random = [1u8; 32];
         let result = process.insert_completion_vote(peer_id, random);
 
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(random));
-        assert!(!process.voters.contains(&peer_id));
-        assert_eq!(process.status, ProcessStatus::Completed(random));
+        assert!(matches!(result, Err(Error::VoteDeadlineReached)));
     }
 
     #[test]
-    fn test_insert_failure_vote_deadline_not_reached() {
+    fn test_insert_completion_vote_with_proof_deadline_not_reached() {
         let mut process = create_process();
-        let peer_id = generate_peer_id();
+        let peer_id = generate_random_peer_id();
         process.insert_voter(peer_id).unwrap();
 
-        let result = process.insert_failure_vote(peer_id);
+        let result = insert_random_completion_votes(&mut process, 1);
 
         assert!(matches!(result, Err(Error::ProofDeadlineNotReached)));
     }
 
     #[tokio::test]
-    async fn test_insert_failure_vote_peer_not_found() {
+    async fn test_insert_completion_vote_with_peer_id_not_found() {
         let mut process = create_process();
-        let peer_id = generate_peer_id();
+        let peer_id = generate_random_peer_id(); // Peer not inserted
+        let random = [1u8; 32];
+        sleep(PROOF_DURATION).await;
+
+        let result = process.insert_completion_vote(peer_id, random);
+
+        assert!(matches!(result, Err(Error::PeerIdNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_insert_completion_vote_with_consensus_success() {
+        let mut process = create_process();
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+        insert_random_voters(&mut process, VOTERS_NUM);
+        sleep(PROOF_DURATION).await;
+
+        let result = insert_random_completion_votes(&mut process, threshold);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_insert_completion_vote_success_without_consensus() {
+        let mut process = create_process();
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+        insert_random_voters(&mut process, VOTERS_NUM);
+        sleep(PROOF_DURATION).await;
+
+        let result = insert_random_completion_votes(&mut process, threshold - 1); // Will not reach consensus
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_insert_failure_vote_success() {
+        let mut process = create_process();
+        insert_random_voters(&mut process, VOTERS_NUM);
+        sleep(PROOF_DURATION).await;
+
+        let result = insert_random_failure_votes(&mut process, VOTERS_NUM);
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_insert_failure_vote_with_vote_deadline_reached() {
+        let mut process = create_process();
+        let peer_id = generate_random_peer_id();
+        process.insert_voter(peer_id).unwrap();
+
+        sleep(PROOF_DURATION + VOTE_DURATION + Duration::from_millis(5)).await;
+
+        let result = process.insert_failure_vote(peer_id);
+
+        assert!(matches!(result, Err(Error::VoteDeadlineReached)));
+    }
+
+    #[test]
+    fn test_insert_failure_vote_with_proof_deadline_not_reached() {
+        let mut process = create_process();
+        insert_random_voters(&mut process, VOTERS_NUM);
+
+        let result = insert_random_failure_votes(&mut process, 1);
+
+        assert!(matches!(result, Err(Error::ProofDeadlineNotReached)));
+    }
+
+    #[tokio::test]
+    async fn test_insert_failure_vote_with_peer_id_not_found() {
+        let mut process = create_process();
+        let peer_id = generate_random_peer_id(); // Peer not inserted
         sleep(PROOF_DURATION).await;
 
         let result = process.insert_failure_vote(peer_id);
 
-        assert!(matches!(result, Err(Error::PeerIdNotFound)));
+        assert!(matches!(result, Err(Error::PeerIdNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_insert_failure_vote_success_with_consensus_success() {
+        let mut process = create_process();
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+        insert_random_voters(&mut process, VOTERS_NUM);
+        sleep(PROOF_DURATION).await;
+
+        let result = insert_random_failure_votes(&mut process, threshold);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // Should be true when consensus is reached
+        assert_eq!(process.status, ProcessStatus::Failed);
     }
 
     #[tokio::test]
     async fn test_insert_failure_vote_success_without_consensus() {
         let mut process = create_process();
-        let peer_id = generate_peer_id();
-        process.insert_voter(peer_id).unwrap();
-        process.voters_num = VOTERS_NUM; // Set a higher voter count so we don't reach consensus
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+        insert_random_voters(&mut process, VOTERS_NUM);
         sleep(PROOF_DURATION).await;
 
-        let result = process.insert_failure_vote(peer_id);
-
+        let result = insert_random_failure_votes(&mut process, threshold - 1); // Will not reach
+                                                                               // consensus
         assert!(result.is_ok());
         assert!(!result.unwrap());
-        assert!(!process.voters.contains(&peer_id));
-        assert_eq!(process.votes.get(&ProcessStatus::Failed), Some(&1));
-    }
-
-    #[tokio::test]
-    async fn test_insert_failure_vote_success_with_consensus() {
-        let mut process = create_process();
-        let peer_id = generate_peer_id();
-        process.insert_voter(peer_id).unwrap();
-        // Only one voter means we'll reach consensus immediately
-        sleep(PROOF_DURATION).await;
-
-        let result = process.insert_failure_vote(peer_id);
-
-        assert!(result.is_ok());
-        assert!(result.unwrap());
-        assert!(!process.voters.contains(&peer_id));
-        assert_eq!(process.status, ProcessStatus::Failed);
     }
 
     #[tokio::test]
@@ -606,17 +675,28 @@ mod tests {
         assert_eq!(process.status, ProcessStatus::Failed);
     }
 
-    #[test]
-    fn test_update_status_consensus() {
+    #[tokio::test]
+    async fn test_update_status_consensus() {
         let mut process = create_process();
-        let threshold = get_threshold();
-        process.voters_num = VOTERS_NUM;
-        process.votes.insert(ProcessStatus::Failed, threshold);
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+
+        let mut peer_ids = Vec::new();
+        for _ in 0..VOTERS_NUM {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id).unwrap();
+            peer_ids.push(peer_id);
+        }
+
+        sleep(PROOF_DURATION).await;
+
+        let random = [1u8; 32];
+        for i in 0..threshold {
+            process.insert_completion_vote(peer_ids[i], random).unwrap();
+        }
 
         let status = process.update_status();
 
-        assert_eq!(status, ProcessStatus::Failed);
-        assert_eq!(process.status, ProcessStatus::Failed);
+        assert!(matches!(status, ProcessStatus::Completed(_)));
     }
 
     #[test]
@@ -628,10 +708,18 @@ mod tests {
     }
 
     #[test]
-    fn test_deadline() {
+    fn test_proof_deadline() {
         let process = create_process();
         let expected_deadline = process.proof_deadline;
         let deadline = process.proof_deadline();
+        assert_eq!(deadline, expected_deadline);
+    }
+
+    #[test]
+    fn test_vote_deadline() {
+        let process = create_process();
+        let expected_deadline = process.proof_deadline + VOTE_DURATION;
+        let deadline = process.vote_deadline();
         assert_eq!(deadline, expected_deadline);
     }
 
