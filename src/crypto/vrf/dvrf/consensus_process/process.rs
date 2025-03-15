@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap, HashSet},
+};
 
 use libp2p::PeerId;
 use sha2::{Digest, Sha256};
@@ -197,7 +200,7 @@ impl ConsensusProcess for Process {
         self.status
     }
 
-    fn status(&mut self) -> ProcessStatus {
+    fn status(&self) -> ProcessStatus {
         self.status
     }
 
@@ -214,6 +217,33 @@ impl ConsensusProcess for Process {
             ProcessStatus::Completed(random) => Some(*random),
             _ => None,
         }
+    }
+
+    fn elect(&self, num: usize) -> Result<Vec<PeerId>> {
+        let seed = self.random().unwrap(); // We will chage this line later
+
+        let mut heap = BinaryHeap::with_capacity(num + 1);
+
+        for &peer_id in self.voters.iter() {
+            let mut hasher = Sha256::new();
+            hasher.update(seed);
+            hasher.update(peer_id.to_bytes());
+            let hash = hasher.finalize();
+            let score = u64::from_le_bytes(hash[..8].try_into().unwrap());
+
+            heap.push(Reverse((score, peer_id)));
+            if heap.len() > num {
+                heap.pop();
+            }
+        }
+
+        let mut result: Vec<_> = heap
+            .into_iter()
+            .map(|Reverse((_, peer_id))| peer_id)
+            .collect();
+        result.sort();
+
+        Ok(result)
     }
 }
 
@@ -239,6 +269,7 @@ mod tests {
     const PROOF_DURATION: Duration = Duration::from_millis(5);
     const VOTE_DURATION: Duration = Duration::from_millis(10);
     const VOTERS_NUM: usize = 10;
+    const ELECTED_NUM: usize = 5;
 
     fn generate_random_peer_id() -> PeerId {
         PeerId::random()
@@ -663,8 +694,31 @@ mod tests {
     #[test]
     fn test_create() {
         let factory = ProcessFactory;
-        let mut process = factory.create(PROOF_DURATION, VOTE_DURATION);
+        let process = factory.create(PROOF_DURATION, VOTE_DURATION);
         assert_eq!(process.status(), ProcessStatus::InProgress);
         assert!(process.proof_deadline() > Instant::now());
+    }
+
+    #[tokio::test]
+    async fn test_elect_success() {
+        let mut process = create_process();
+        let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
+        let mut peer_ids = Vec::new();
+        for _ in 0..VOTERS_NUM {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id).unwrap();
+            peer_ids.push(peer_id);
+        }
+        sleep(PROOF_DURATION).await;
+        for peer_id in peer_ids.iter().take(threshold) {
+            process.insert_completion_vote(*peer_id, [1u8; 32]).unwrap();
+        }
+
+        let elected = process.elect(ELECTED_NUM).unwrap();
+
+        assert_eq!(elected.len(), ELECTED_NUM);
+        for peer_id in elected.iter() {
+            assert!(peer_ids.contains(peer_id));
+        }
     }
 }

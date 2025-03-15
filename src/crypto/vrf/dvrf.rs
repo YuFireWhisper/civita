@@ -364,11 +364,12 @@ mod tests {
             fn insert_failure_vote(&mut self, peer_id: PeerId) -> Result<bool, ConsensusProcessError>;
             fn is_proof_timeout(&self) -> bool;
             fn is_vote_timeout(&self) -> bool;
-            fn status(&mut self) -> ProcessStatus;
+            fn status(&self) -> ProcessStatus;
             fn update_status(&mut self) -> ProcessStatus;
             fn proof_deadline(&self) -> Instant;
             fn vote_deadline(&self) -> Instant;
             fn random(&self) -> Option<[u8; 32]>;
+            fn elect(&self, num: usize) -> Result<Vec<PeerId>, ConsensusProcessError>;
         }
     }
 
