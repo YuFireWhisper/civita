@@ -20,6 +20,8 @@ pub enum Error {
     VoteDeadlineReached,
     #[error("Insufficient proofs collected")]
     InsufficientProofs,
+    #[error("Insufficient voters")]
+    InsufficientVoters,
     #[error("Peer ID not found: {0}")]
     PeerIdNotFound(PeerId),
     #[error("Peer ID already voted: {0}")]

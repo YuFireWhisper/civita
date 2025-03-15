@@ -220,8 +220,19 @@ impl ConsensusProcess for Process {
     }
 
     fn elect(&self, num: usize) -> Result<Vec<PeerId>> {
-        let seed = self.random().unwrap(); // We will chage this line later
+        if self.voters.len() < num {
+            return Err(Error::InsufficientVoters);
+        }
 
+        if !self.is_proof_timeout() {
+            return Err(Error::ProofDeadlineNotReached);
+        }
+
+        if self.is_vote_timeout() {
+            return Err(Error::ProofDeadlineReached);
+        }
+
+        let seed = self.random().ok_or(Error::ProcessNotCompleted)?;
         let mut heap = BinaryHeap::with_capacity(num + 1);
 
         for &peer_id in self.voters.iter() {
@@ -720,5 +731,56 @@ mod tests {
         for peer_id in elected.iter() {
             assert!(peer_ids.contains(peer_id));
         }
+    }
+
+    #[tokio::test]
+    async fn test_elect_insufficient_voters() {
+        let mut process = create_process();
+        let mut peer_ids = Vec::new();
+        for _ in 0..ELECTED_NUM - 1 {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id).unwrap();
+            peer_ids.push(peer_id);
+        }
+        sleep(PROOF_DURATION).await;
+
+        let elected = process.elect(ELECTED_NUM);
+        
+        assert!(matches!(elected, Err(Error::InsufficientVoters)));
+    }
+
+    #[tokio::test]
+    async fn test_elect_before_proof_deadline() {
+        let mut process = create_process();
+        for _ in 0..ELECTED_NUM {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id).unwrap();
+        }
+        let elected = process.elect(ELECTED_NUM);
+        assert!(matches!(elected, Err(Error::ProofDeadlineNotReached)));
+    }
+
+    #[tokio::test]
+    async fn test_elect_after_vote_deadline() {
+        let mut process = create_process();
+        for _ in 0..ELECTED_NUM {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id).unwrap();
+        }
+        sleep(PROOF_DURATION + VOTE_DURATION).await;
+        let elected = process.elect(ELECTED_NUM);
+        assert!(matches!(elected, Err(Error::ProofDeadlineReached)));
+    }
+
+    #[tokio::test]
+    async fn test_elect_process_not_completed() {
+        let mut process = create_process();
+        for _ in 0..VOTERS_NUM {
+            let peer_id = generate_random_peer_id();
+            process.insert_voter(peer_id).unwrap();
+        }
+        sleep(PROOF_DURATION).await;
+        let elected = process.elect(ELECTED_NUM);
+        assert!(matches!(elected, Err(Error::ProcessNotCompleted)));
     }
 }
