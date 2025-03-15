@@ -15,6 +15,7 @@ use std::{
 use config::Config;
 use consensus_process::{ConsensusProcessFactory, ProcessStatus};
 use crypto::Crypto;
+pub use factory::Factory;
 use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
 use messager::{Messager, MessagerEngine};
