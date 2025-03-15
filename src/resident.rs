@@ -1,3 +1,6 @@
+pub mod info;
+pub mod role;
+
 use std::sync::Arc;
 
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
