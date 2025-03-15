@@ -1,12 +1,18 @@
-use libp2p::{identity::Keypair, Multiaddr};
-use thiserror::Error;
-use tokio::time::Duration;
+use std::sync::Arc;
 
-use crate::network::{
-    message::Message,
-    transport::{
+use libp2p::{identity::Keypair, Multiaddr, PeerId};
+use thiserror::Error;
+
+use crate::{
+    crypto::vrf::{
+        self,
+        dvrf::{self},
+        Vrf, VrfFactory,
+    },
+    network::transport::{
         self,
         libp2p_transport::{config::Config, Libp2pTransport},
+        Transport,
     },
 };
 
@@ -14,24 +20,30 @@ use crate::network::{
 pub enum Error {
     #[error("{0}")]
     Transport(#[from] transport::Error),
+    #[error("{0}")]
+    Vrf(#[from] vrf::Error),
 }
 
-type ResidentResult<T> = std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 pub struct Resident {
-    transport: Libp2pTransport,
+    transport: Arc<dyn Transport>,
+    vrf: Arc<dyn Vrf>,
 }
 
 impl Resident {
-    const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
+    pub async fn new(keypair: Keypair, listen_addr: Multiaddr) -> Result<Self> {
+        let peer_id = PeerId::from_public_key(&keypair.public());
+        let transport = Arc::new(Libp2pTransport::new(
+            keypair,
+            listen_addr,
+            Config::default(),
+        )?);
+        let vrf = dvrf::Factory::new(transport.clone(), peer_id)
+            .create_vrf()
+            .await?;
 
-    pub async fn new(keypair: Keypair, listen_addr: Multiaddr) -> ResidentResult<Self> {
-        let transport = Libp2pTransport::new(keypair, listen_addr, Config::default())?;
-        Ok(Self { transport })
-    }
-
-    fn handle_received_message(message: Message) {
-        println!("Received message: {:?}", message);
+        Ok(Self { transport, vrf })
     }
 }
 
