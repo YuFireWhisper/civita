@@ -11,7 +11,7 @@ use libp2p_transport::behaviour;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-use super::message::Message;
+use crate::network::transport::libp2p_transport::message::Message;
 
 #[derive(Debug, Error)]
 pub enum Error {

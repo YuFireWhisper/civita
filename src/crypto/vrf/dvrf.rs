@@ -23,7 +23,7 @@ use processes::Processes;
 use tokio::time::{sleep, sleep_until};
 
 use crate::network::{
-    message::{Message, Payload},
+    transport::libp2p_transport::message::{Message, Payload},
     transport::Transport,
 };
 
@@ -317,7 +317,7 @@ mod tests {
     use crate::crypto::vrf::VrfCallback;
     use crate::network::transport::Error as TransportError;
     use crate::network::transport::Transport;
-    use crate::network::{message::Message, transport::SubscriptionFilter};
+    use crate::network::{transport::libp2p_transport::message::Message, transport::SubscriptionFilter};
 
     const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
     const TEST_OUTPUT: [u8; 32] = [1; 32];

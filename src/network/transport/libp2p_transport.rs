@@ -1,5 +1,6 @@
 pub mod behaviour;
 pub mod config;
+pub mod message;
 pub mod receive_task;
 pub mod subscription;
 
@@ -26,7 +27,7 @@ use tokio::{
     time::{interval, sleep, timeout, Duration},
 };
 
-use crate::network::message::{gossipsub, request_response, Message};
+use crate::network::transport::libp2p_transport::message::{gossipsub, request_response, Message};
 
 use super::{Error, SubscriptionFilter, Transport};
 
@@ -337,12 +338,12 @@ impl PartialEq for Libp2pTransport {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::{
-        message,
-        transport::{
-            libp2p_transport::test_transport::{create_test_payload, TestTransport, TEST_TOPIC},
-            SubscriptionFilter, Transport,
+    use crate::network::transport::{
+        libp2p_transport::{
+            message,
+            test_transport::{create_test_payload, TestTransport, TEST_TOPIC},
         },
+        SubscriptionFilter, Transport,
     };
     use std::time::Duration;
 
@@ -424,12 +425,14 @@ pub mod test_transport {
     };
     use tokio::time::timeout;
 
-    use crate::network::{message::Payload, transport::Transport};
-
-    use super::{
-        behaviour::{Behaviour, Event},
-        config::Config,
-        Libp2pTransport,
+    use crate::network::transport::{
+        libp2p_transport::{
+            behaviour::{Behaviour, Event},
+            config::Config,
+            message::Payload,
+            Libp2pTransport,
+        },
+        Transport,
     };
 
     pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(1);

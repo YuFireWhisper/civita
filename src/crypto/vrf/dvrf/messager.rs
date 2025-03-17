@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
 use crate::network::{
-    message::{gossipsub, Message, Payload},
+    transport::libp2p_transport::message::{gossipsub, Message, Payload},
     transport::{self, SubscriptionFilter, Transport},
 };
 
@@ -35,10 +35,7 @@ pub trait MessagerEngine: Send + Sync {
         message_id: MessageId,
         random: [u8; 32],
     ) -> impl Future<Output = Result<MessageId>>;
-    fn send_vrf_failure(
-        &self,
-        message_id: MessageId,
-    ) -> impl Future<Output = Result<MessageId>>;
+    fn send_vrf_failure(&self, message_id: MessageId) -> impl Future<Output = Result<MessageId>>;
 }
 
 pub struct Messager {

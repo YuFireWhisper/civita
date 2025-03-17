@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc::Sender;
 
-use crate::network::{message::Message, transport::SubscriptionFilter};
+use crate::network::transport::{libp2p_transport::message::Message, SubscriptionFilter};
 
 pub(super) struct Subscription {
     subscriptions: HashMap<SubscriptionFilter, Vec<Sender<Message>>>,
@@ -37,14 +37,13 @@ impl Subscription {
 
 #[cfg(test)]
 mod tests {
+    use crate::network::transport::libp2p_transport::message::{gossipsub, Payload};
+
+    use super::*;
     use tokio::{
         sync::mpsc::{channel, Receiver},
         time::timeout,
     };
-
-    use crate::network::message::{gossipsub, Payload};
-
-    use super::*;
 
     const TEST_TOPIC: &str = "test";
 
