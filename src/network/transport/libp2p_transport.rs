@@ -103,6 +103,8 @@ impl Libp2pTransport {
                 .send_reqeust_response_message(message)
                 .await
                 .map(|_| None),
+            _ => Ok(None), // Ignore other message types
+            // TODO: Implement other message types
         }
     }
 
@@ -261,6 +263,8 @@ impl Transport for Libp2pTransport {
                     .send_reqeust_response_message(message)
                     .await
                     .map(|_| None),
+                _ => Ok(None), // Ignore other message types
+                // TODO: Implement other message types
             }
         })
     }
