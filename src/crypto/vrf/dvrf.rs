@@ -22,9 +22,9 @@ use messager::{Messager, MessagerEngine};
 use processes::Processes;
 use tokio::time::{sleep, sleep_until};
 
-use crate::network::{
-    transport::libp2p_transport::message::{Message, Payload},
-    transport::Transport,
+use crate::network::transport::{
+    libp2p_transport::message::{gossipsub::Payload, Message},
+    Transport,
 };
 
 use super::{Error, Vrf, VrfCallback};
@@ -95,34 +95,28 @@ impl DVrf {
     }
 
     async fn handle_message(&self, message: Message) -> Result<()> {
-        if let Message::Gossipsub(msg) = message {
-            let source = msg.source.ok_or(Error::SourcePeerId)?;
-            match msg.payload {
-                Payload::VrfRequest {} => {
-                    if let Some(message_id) = msg.message_id {
-                        self.handle_vrf_request(message_id).await?;
-                    }
-                }
-                Payload::VrfProof {
-                    message_id,
-                    public_key,
-                    vrf_proof,
-                } => {
-                    self.handle_vrf_proof(&public_key, vrf_proof.proof(), message_id)
-                        .await?;
-                }
-                Payload::VrfConsensus { message_id, random } => {
-                    self.handle_vrf_consensus(source, message_id, &random)?;
-                }
-                Payload::VrfProcessFailure { message_id } => {
-                    self.handle_vrf_failure(message_id, source)?;
-                }
-                _ => {
-                    error!("Received unknown message type");
-                }
-            }
+        let Message::Gossipsub(msg) = message else {
+            return Err(Error::InvalidMessageType);
+        };
+
+        msg.validate()?;
+        let source = msg.source.unwrap(); // Safe to unwrap, as it's validated
+        let message_id = msg.message_id.unwrap(); // Safe to unwrap, as it's validated
+
+        match msg.payload {
+            Payload::VrfRequest => self.handle_vrf_request(message_id).await,
+            Payload::VrfProof {
+                message_id: id,
+                public_key,
+                proof,
+            } => self.handle_vrf_proof(&public_key, &proof, id).await,
+            Payload::VrfConsensus {
+                message_id: id,
+                random,
+            } => self.handle_vrf_consensus(source, id, &random),
+            Payload::VrfProcessFailure(id) => self.handle_vrf_failure(id, source),
+            _ => Err(Error::InvalidPayload),
         }
-        Ok(())
     }
 
     async fn handle_vrf_request(&self, message_id: MessageId) -> Result<()> {
@@ -153,6 +147,7 @@ impl DVrf {
         let verify_result = self
             .crypto
             .verify_proof(public_key, proof, &message_id_bytes);
+        // Todo: We need to make it return output, not just error
 
         if verify_result.is_err() {
             error!("Failed to verify VRF proof for message: {:?}", message_id);
@@ -317,7 +312,9 @@ mod tests {
     use crate::crypto::vrf::VrfCallback;
     use crate::network::transport::Error as TransportError;
     use crate::network::transport::Transport;
-    use crate::network::{transport::libp2p_transport::message::Message, transport::SubscriptionFilter};
+    use crate::network::{
+        transport::libp2p_transport::message::Message, transport::SubscriptionFilter,
+    };
 
     const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
     const TEST_OUTPUT: [u8; 32] = [1; 32];

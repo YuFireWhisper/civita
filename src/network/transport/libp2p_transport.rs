@@ -341,7 +341,10 @@ mod tests {
     use crate::network::transport::{
         libp2p_transport::{
             message,
-            test_transport::{create_test_payload, TestTransport, TEST_TOPIC},
+            test_transport::{
+                create_gossipsub_payload, create_request_response_payload, TestTransport,
+                TEST_TOPIC,
+            },
         },
         SubscriptionFilter, Transport,
     };
@@ -380,7 +383,7 @@ mod tests {
         let mut t1 = TestTransport::new().await.unwrap();
         let mut t2 = TestTransport::new().await.unwrap();
         t1.establish_gossipsub_connection(&mut t2).await.unwrap();
-        let payload = create_test_payload();
+        let payload = create_gossipsub_payload();
         let msg = message::gossipsub::Message::new(TEST_TOPIC, payload);
         let transport_msg = message::Message::Gossipsub(msg);
         t1.p2p.send(transport_msg).await.unwrap();
@@ -392,7 +395,7 @@ mod tests {
     async fn test_send_request_response_message() {
         let mut t1 = TestTransport::new().await.unwrap();
         let t2 = TestTransport::new().await.unwrap();
-        let payload = create_test_payload();
+        let payload = create_request_response_payload();
         let req_msg = message::request_response::Message::new(t1.peer_id, t2.peer_id, payload);
         let transport_msg = message::Message::RequestResponse(req_msg);
         t1.p2p.send(transport_msg).await.unwrap();
@@ -429,7 +432,7 @@ pub mod test_transport {
         libp2p_transport::{
             behaviour::{Behaviour, Event},
             config::Config,
-            message::Payload,
+            message::{self},
             Libp2pTransport,
         },
         Transport,
@@ -437,11 +440,14 @@ pub mod test_transport {
 
     pub const TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
     pub const TEST_TOPIC: &str = "test_topic";
+    pub const PAYLOAD: &[u8] = &[1, 2, 3];
 
-    pub fn create_test_payload() -> Payload {
-        Payload::RawData {
-            data: b"test".to_vec(),
-        }
+    pub fn create_gossipsub_payload() -> message::gossipsub::Payload {
+        message::gossipsub::Payload::Raw(PAYLOAD.to_vec())
+    }
+
+    pub fn create_request_response_payload() -> message::request_response::Payload {
+        message::request_response::Payload::Raw(PAYLOAD.to_vec())
     }
 
     pub struct TestTransport {

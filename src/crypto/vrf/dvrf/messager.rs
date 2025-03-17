@@ -4,9 +4,13 @@ use libp2p::gossipsub::MessageId;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-use crate::network::{
-    transport::libp2p_transport::message::{gossipsub, Message, Payload},
-    transport::{self, SubscriptionFilter, Transport},
+use crate::network::transport::{
+    self,
+    libp2p_transport::message::{
+        gossipsub::{self, Payload},
+        Message,
+    },
+    SubscriptionFilter, Transport,
 };
 
 use super::proof::Proof;
@@ -67,8 +71,7 @@ impl MessagerEngine for Messager {
     }
 
     async fn send_vrf_request(&self) -> Result<MessageId> {
-        let payload = Payload::create_vrf_request();
-        self.send(payload).await
+        self.send(Payload::VrfRequest).await
     }
 
     async fn send_vrf_proof(
@@ -77,7 +80,7 @@ impl MessagerEngine for Messager {
         public_key: Vec<u8>,
         vrf_proof: Proof,
     ) -> Result<MessageId> {
-        let payload = Payload::create_vrf_proof(message_id, public_key, vrf_proof);
+        let payload = Payload::create_vrf_proof(message_id, public_key, vrf_proof.proof().to_vec());
         self.send(payload).await
     }
 
@@ -91,8 +94,7 @@ impl MessagerEngine for Messager {
     }
 
     async fn send_vrf_failure(&self, message_id: MessageId) -> Result<MessageId> {
-        let payload = Payload::create_vrf_failure(message_id);
-        self.send(payload).await
+        self.send(Payload::VrfProcessFailure(message_id)).await
     }
 }
 

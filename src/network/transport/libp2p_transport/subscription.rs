@@ -37,7 +37,7 @@ impl Subscription {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::transport::libp2p_transport::message::{gossipsub, Payload};
+    use crate::network::transport::libp2p_transport::message::gossipsub::{self, Payload};
 
     use super::*;
     use tokio::{
@@ -45,7 +45,8 @@ mod tests {
         time::timeout,
     };
 
-    const TEST_TOPIC: &str = "test";
+    const TEST_TOPIC: &str = "TEST";
+    const PAYLOAD: &[u8] = &[1, 2, 3];
 
     fn create_subscription() -> Subscription {
         Subscription::new()
@@ -61,9 +62,7 @@ mod tests {
     }
 
     fn create_message() -> Message {
-        let payload = Payload::RawData {
-            data: vec![1, 2, 3],
-        };
+        let payload = Payload::Raw(PAYLOAD.to_vec());
         Message::Gossipsub(gossipsub::Message::new(TEST_TOPIC, payload))
     }
 

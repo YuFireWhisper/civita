@@ -9,6 +9,8 @@ use libp2p::gossipsub::MessageId;
 use libp2p::identity;
 use thiserror::Error;
 
+use crate::network::transport::libp2p_transport::message::gossipsub;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
@@ -17,6 +19,8 @@ pub enum Error {
     Messager(#[from] messager::Error),
     #[error("{0}")]
     Processes(#[from] processes::Error),
+    #[error("{0}")]
+    Gossipsub(#[from] gossipsub::Error),
     #[error("Timeout waiting for VRF process: {0}")]
     Timeout(MessageId),
     #[error("Process not found: {0}")]
@@ -29,10 +33,12 @@ pub enum Error {
     PeerId(#[from] identity::ParseError),
     #[error("Message ID not available")]
     MessageId,
-    #[error("Failed to get source peer ID")]
-    SourcePeerId,
     #[error("Process error: {0}")]
     Process(String),
+    #[error("Invalid message type")]
+    InvalidMessageType,
+    #[error("Invalid payload")]
+    InvalidPayload,
 }
 
 pub trait Vrf: Send + Sync {

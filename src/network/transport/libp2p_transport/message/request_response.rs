@@ -1,8 +1,10 @@
+pub mod payload;
+
 use libp2p::{request_response, PeerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::Payload;
+pub use payload::Payload;
 
 #[derive(Debug, Error)]
 pub enum Error {
