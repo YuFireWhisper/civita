@@ -127,7 +127,7 @@ impl DVrf {
         self.messager
             .send_vrf_proof(message_id.clone(), public_key.clone(), proof.clone())
             .await?;
-        self.processes.insert_peer_and_proof(
+        self.processes.insert_peer_and_output(
             message_id.clone(),
             self.peer_id,
             proof.proof().to_vec(),
@@ -144,18 +144,12 @@ impl DVrf {
     ) -> Result<()> {
         let peer_id = PeerId::from_bytes(public_key).map_err(Error::from)?;
         let message_id_bytes = message_id_to_bytes(&message_id);
-        let verify_result = self
+        let output = self
             .crypto
-            .verify_proof(public_key, proof, &message_id_bytes);
-        // Todo: We need to make it return output, not just error
-
-        if verify_result.is_err() {
-            error!("Failed to verify VRF proof for message: {:?}", message_id);
-            return Err(Error::VerifyVrfProof);
-        }
+            .verify_proof(public_key, proof, &message_id_bytes)?;
 
         self.processes
-            .insert_peer_and_proof(message_id, peer_id, proof.to_vec())?;
+            .insert_peer_and_output(message_id, peer_id, output)?;
         Ok(())
     }
 
@@ -352,7 +346,7 @@ mod tests {
         pub ConsensusProcess {}
         impl ConsensusProcess for ConsensusProcess {
             fn insert_voter(&mut self, peer_id: PeerId) -> Result<(), ConsensusProcessError>;
-            fn insert_proof(&mut self, proof: Vec<u8>) -> Result<(), ConsensusProcessError>;
+            fn insert_output(&mut self, proof: Vec<u8>) -> Result<(), ConsensusProcessError>;
             fn calculate_consensus(&self) -> Result<[u8; 32], ConsensusProcessError>;
             fn insert_completion_vote(
                 &mut self,
@@ -375,7 +369,7 @@ mod tests {
         pub Crypto {}
         impl Crypto for Crypto {
             fn generate_proof(&self, seed: &[u8]) -> Result<Proof, CryptoError>;
-            fn verify_proof(&self, public_key: &[u8], proof: &[u8], message_id: &[u8]) -> Result<(), CryptoError>;
+            fn verify_proof(&self, public_key: &[u8], proof: &[u8], message_id: &[u8]) -> Result<Vec<u8>, CryptoError>;
             fn public_key(&self) -> &[u8];
         }
     }
@@ -400,7 +394,7 @@ mod tests {
         process_factory.expect_create().returning(|_, _| {
             let mut process = MockConsensusProcess::new();
             process.expect_insert_voter().returning(|_| Ok(()));
-            process.expect_insert_proof().returning(|_| Ok(()));
+            process.expect_insert_output().returning(|_| Ok(()));
             process.expect_proof_deadline().returning(Instant::now);
             process.expect_vote_deadline().returning(Instant::now);
             process
@@ -472,7 +466,7 @@ mod tests {
             .returning(|_, _| {
                 let mut process = MockConsensusProcess::new();
                 process.expect_insert_voter().returning(|_| Ok(()));
-                process.expect_insert_proof().returning(|_| Ok(()));
+                process.expect_insert_output().returning(|_| Ok(()));
                 process
                     .expect_calculate_consensus()
                     .returning(|| Ok(TEST_OUTPUT));

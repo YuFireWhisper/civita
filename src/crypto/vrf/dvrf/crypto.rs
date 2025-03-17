@@ -21,7 +21,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub trait Crypto: Send + Sync {
     fn generate_proof(&self, seed: &[u8]) -> Result<Proof>;
-    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<()>;
+    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<Vec<u8>>;
     fn public_key(&self) -> &[u8];
 }
 
@@ -76,10 +76,9 @@ impl Crypto for EcvrfCrypto {
         Ok(Proof::new(output, proof))
     }
 
-    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<()> {
+    fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<Vec<u8>> {
         let mut vrf = self.get_vrf()?;
-        vrf.verify(public_key, proof, seed)?;
-        Ok(())
+        vrf.verify(public_key, proof, seed).map_err(Error::from)
     }
 
     fn public_key(&self) -> &[u8] {

@@ -97,16 +97,16 @@ impl ConsensusProcess for Process {
         }
     }
 
-    fn insert_proof(&mut self, proof: Vec<u8>) -> Result<()> {
+    fn insert_output(&mut self, output: Vec<u8>) -> Result<()> {
         if self.is_proof_timeout() {
             return Err(Error::ProofDeadlineReached);
         }
 
-        if self.proofs.contains(&proof) {
+        if self.proofs.contains(&output) {
             return Err(Error::DuplicateProof);
         }
 
-        self.proofs.push(proof);
+        self.proofs.push(output);
         Ok(())
     }
 
@@ -316,10 +316,10 @@ mod tests {
             self
         }
 
-        fn insert_proofs(&mut self, num: usize) -> Result<()> {
+        fn insert_outputs(&mut self, num: usize) -> Result<()> {
             for i in 0..num {
                 let proof = vec![i as u8; 32];
-                self.process.insert_proof(proof)?;
+                self.process.insert_output(proof)?;
             }
             Ok(())
         }
@@ -354,7 +354,7 @@ mod tests {
         PeerId::random()
     }
 
-    fn generate_random_proof() -> Vec<u8> {
+    fn generate_random_output() -> Vec<u8> {
         let mut rng = rand::thread_rng();
         let mut proof = vec![0u8; 32];
         rand::Rng::fill(&mut rng, &mut proof[..]);
@@ -421,11 +421,11 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_proof_success() {
+    fn test_insert_output_success() {
         let mut ctx = TestContext::new();
-        let proof = generate_random_proof();
+        let proof = generate_random_output();
 
-        let result = ctx.process.insert_proof(proof.clone());
+        let result = ctx.process.insert_output(proof.clone());
 
         assert!(result.is_ok());
         assert!(ctx.process.proofs.contains(&proof));
@@ -433,23 +433,23 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_proof_duplicate() {
+    fn test_insert_output_duplicate() {
         let mut ctx = TestContext::new();
-        let proof = generate_random_proof();
+        let proof = generate_random_output();
 
-        ctx.process.insert_proof(proof.clone()).unwrap();
-        let result = ctx.process.insert_proof(proof);
+        ctx.process.insert_output(proof.clone()).unwrap();
+        let result = ctx.process.insert_output(proof);
 
         assert!(matches!(result, Err(Error::DuplicateProof)));
         assert_eq!(ctx.process.proofs.len(), 1);
     }
 
     #[tokio::test]
-    async fn test_insert_proof_timeout() {
+    async fn test_insert_output_timeout() {
         let mut ctx = TestContext::new().after_proof_deadline().await;
-        let proof = generate_random_proof();
+        let proof = generate_random_output();
 
-        let result = ctx.process.insert_proof(proof);
+        let result = ctx.process.insert_output(proof);
 
         assert!(matches!(result, Err(Error::ProofDeadlineReached)));
     }
@@ -459,7 +459,7 @@ mod tests {
         let mut ctx = TestContext::new().with_voters(VOTERS_NUM);
         let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
 
-        ctx.insert_proofs(threshold).unwrap();
+        ctx.insert_outputs(threshold).unwrap();
         let ctx = ctx.after_proof_deadline().await;
 
         let result = ctx.process.calculate_consensus();
@@ -482,7 +482,7 @@ mod tests {
         let mut ctx = TestContext::new().with_voters(VOTERS_NUM);
         let threshold = calculate_threshold(VOTERS_NUM, DEFAULT_THRESHOLD_PERCENTAGE);
 
-        ctx.insert_proofs(threshold - 1).unwrap();
+        ctx.insert_outputs(threshold - 1).unwrap();
         let ctx = ctx.after_proof_deadline().await;
 
         let result = ctx.process.calculate_consensus();

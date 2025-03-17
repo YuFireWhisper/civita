@@ -39,7 +39,7 @@ pub enum ProcessStatus {
 
 pub trait ConsensusProcess: Send + Sync {
     fn insert_voter(&mut self, peer_id: PeerId) -> Result<(), Error>;
-    fn insert_proof(&mut self, proof: Vec<u8>) -> Result<(), Error>;
+    fn insert_output(&mut self, output: Vec<u8>) -> Result<(), Error>;
     fn calculate_consensus(&self) -> Result<[u8; 32], Error>;
     fn insert_completion_vote(
         &mut self,

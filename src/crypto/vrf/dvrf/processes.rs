@@ -41,11 +41,11 @@ impl Processes {
         }
     }
 
-    pub fn insert_peer_and_proof(
+    pub fn insert_peer_and_output(
         &self,
         message_id: MessageId,
         peer_id: PeerId,
-        proof: Vec<u8>,
+        output: Vec<u8>,
     ) -> Result<()> {
         let mut process = self.processes.entry(message_id).or_insert_with(|| {
             self.process_factory
@@ -53,7 +53,7 @@ impl Processes {
         });
 
         process.insert_voter(peer_id)?;
-        process.insert_proof(proof)?;
+        process.insert_output(output)?;
         Ok(())
     }
 
@@ -153,7 +153,7 @@ mod tests {
 
         impl ConsensusProcess for ConsensusProcess {
             fn insert_voter(&mut self, peer_id: PeerId) -> Result<(), Error>;
-            fn insert_proof(&mut self, proof: Vec<u8>) -> Result<(), Error>;
+            fn insert_output(&mut self, output: Vec<u8>) -> Result<(), Error>;
             fn calculate_consensus(&self) -> Result<[u8; 32], Error>;
             fn insert_completion_vote(&mut self, peer_id: PeerId, random: [u8; 32]) -> Result<Option<[u8; 32]>, Error>;
             fn insert_failure_vote(&mut self, peer_id: PeerId) -> Result<bool, Error>;
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_peer_and_proof_success() {
+    fn test_insert_peer_and_output_success() {
         let mut fixture = TestFixture::new();
         let mut mock_process = fixture.setup_mock_process();
 
@@ -303,7 +303,7 @@ mod tests {
             .times(1)
             .returning(|_| Ok(()));
         mock_process
-            .expect_insert_proof()
+            .expect_insert_output()
             .with(mockall::predicate::eq(vec![1, 2, 3]))
             .times(1)
             .returning(|_| Ok(()));
@@ -313,13 +313,13 @@ mod tests {
         let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(fixture.factory);
         let processes = Processes::new(fixture.proof_duration, fixture.vote_duration, arc_factory);
         let result =
-            processes.insert_peer_and_proof(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
+            processes.insert_peer_and_output(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
 
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_insert_peer_and_proof_voter_error() {
+    fn test_insert_peer_and_output_voter_error() {
         let mut fixture = TestFixture::new();
         let mut mock_process = fixture.setup_mock_process();
 
@@ -334,13 +334,13 @@ mod tests {
         let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(fixture.factory);
         let processes = Processes::new(fixture.proof_duration, fixture.vote_duration, arc_factory);
         let result =
-            processes.insert_peer_and_proof(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
+            processes.insert_peer_and_output(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
 
         TestFixture::assert_process_error(result, Error::DuplicatePeerId(PeerId::random()));
     }
 
     #[test]
-    fn test_insert_peer_and_proof_proof_error() {
+    fn test_insert_peer_and_output_proof_error() {
         let mut fixture = TestFixture::new();
         let mut mock_process = fixture.setup_mock_process();
 
@@ -350,7 +350,7 @@ mod tests {
             .times(1)
             .returning(|_| Ok(()));
         mock_process
-            .expect_insert_proof()
+            .expect_insert_output()
             .with(mockall::predicate::eq(vec![1, 2, 3]))
             .times(1)
             .returning(|_| Err(Error::InsufficientProofs));
@@ -360,7 +360,7 @@ mod tests {
         let arc_factory: Arc<dyn ConsensusProcessFactory> = Arc::new(fixture.factory);
         let processes = Processes::new(fixture.proof_duration, fixture.vote_duration, arc_factory);
         let result =
-            processes.insert_peer_and_proof(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
+            processes.insert_peer_and_output(fixture.message_id, fixture.peer_id, vec![1, 2, 3]);
 
         TestFixture::assert_process_error(result, Error::InsufficientProofs);
     }
