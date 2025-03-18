@@ -18,11 +18,7 @@ pub enum Payload {
 }
 
 impl Payload {
-    pub fn create_vrf_proof(
-        message_id: MessageId,
-        public_key: Vec<u8>,
-        proof: Vec<u8>,
-    ) -> Payload {
+    pub fn create_vrf_proof(message_id: MessageId, public_key: Vec<u8>, proof: Vec<u8>) -> Payload {
         Payload::VrfProof {
             message_id,
             public_key,
@@ -40,8 +36,7 @@ mod tests {
     use libp2p::gossipsub::MessageId;
 
     use crate::{
-        crypto::vrf::dvrf::proof::Proof,
-        network::transport::libp2p_transport::message::gossipsub::Payload,
+        crypto::vrf::dvrf::proof::Proof, network::transport::libp2p_transport::protocols::gossipsub::Payload,
     };
 
     const MESSAGE_ID: &str = "MESSAGE_ID";

@@ -1,4 +1,5 @@
-pub mod gossipsub;
+use crate::network::transport::libp2p_transport::protocols::gossipsub;
+
 pub mod request_response;
 pub mod kad;
 

@@ -1,6 +1,7 @@
 pub mod behaviour;
 pub mod config;
 pub mod message;
+pub mod protocols;
 pub mod receive_task;
 pub mod subscription;
 
@@ -27,7 +28,10 @@ use tokio::{
     time::{interval, sleep, timeout, Duration},
 };
 
-use crate::network::transport::libp2p_transport::message::{gossipsub, request_response, Message};
+use crate::network::transport::libp2p_transport::{
+    message::{request_response, Message},
+    protocols::gossipsub,
+};
 
 use super::{Error, SubscriptionFilter, Transport};
 
@@ -104,7 +108,7 @@ impl Libp2pTransport {
                 .await
                 .map(|_| None),
             _ => Ok(None), // Ignore other message types
-            // TODO: Implement other message types
+                           // TODO: Implement other message types
         }
     }
 
@@ -264,7 +268,7 @@ impl Transport for Libp2pTransport {
                     .await
                     .map(|_| None),
                 _ => Ok(None), // Ignore other message types
-                // TODO: Implement other message types
+                               // TODO: Implement other message types
             }
         })
     }
@@ -344,7 +348,7 @@ impl PartialEq for Libp2pTransport {
 mod tests {
     use crate::network::transport::{
         libp2p_transport::{
-            message,
+            message, protocols,
             test_transport::{
                 create_gossipsub_payload, create_request_response_payload, TestTransport,
                 TEST_TOPIC,
@@ -388,7 +392,7 @@ mod tests {
         let mut t2 = TestTransport::new().await.unwrap();
         t1.establish_gossipsub_connection(&mut t2).await.unwrap();
         let payload = create_gossipsub_payload();
-        let msg = message::gossipsub::Message::new(TEST_TOPIC, payload);
+        let msg = protocols::gossipsub::Message::new(TEST_TOPIC, payload);
         let transport_msg = message::Message::Gossipsub(msg);
         t1.p2p.send(transport_msg).await.unwrap();
         let received = t2.wait_for_gossipsub_message().await;
@@ -437,7 +441,7 @@ pub mod test_transport {
             behaviour::{Behaviour, Event},
             config::Config,
             message::{self},
-            Libp2pTransport,
+            protocols, Libp2pTransport,
         },
         Transport,
     };
@@ -446,8 +450,8 @@ pub mod test_transport {
     pub const TEST_TOPIC: &str = "test_topic";
     pub const PAYLOAD: &[u8] = &[1, 2, 3];
 
-    pub fn create_gossipsub_payload() -> message::gossipsub::Payload {
-        message::gossipsub::Payload::Raw(PAYLOAD.to_vec())
+    pub fn create_gossipsub_payload() -> protocols::gossipsub::Payload {
+        protocols::gossipsub::Payload::Raw(PAYLOAD.to_vec())
     }
 
     pub fn create_request_response_payload() -> message::request_response::Payload {

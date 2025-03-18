@@ -9,7 +9,7 @@ use libp2p::gossipsub::MessageId;
 use libp2p::identity;
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::message::gossipsub;
+use crate::network::transport::libp2p_transport::protocols;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -20,7 +20,7 @@ pub enum Error {
     #[error("{0}")]
     Processes(#[from] processes::Error),
     #[error("{0}")]
-    Gossipsub(#[from] gossipsub::Error),
+    Gossipsub(#[from] protocols::gossipsub::message::Error),
     #[error("Timeout waiting for VRF process: {0}")]
     Timeout(MessageId),
     #[error("Process not found: {0}")]

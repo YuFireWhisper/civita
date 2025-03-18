@@ -23,7 +23,7 @@ use processes::Processes;
 use tokio::time::{sleep, sleep_until};
 
 use crate::network::transport::{
-    libp2p_transport::message::{gossipsub::Payload, Message},
+    libp2p_transport::{message::Message, protocols::gossipsub::Payload},
     Transport,
 };
 

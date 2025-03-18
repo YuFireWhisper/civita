@@ -1,5 +1,3 @@
-pub mod payload;
-
 use chrono::{DateTime, Utc};
 use libp2p::{
     gossipsub::{self, MessageId},
@@ -8,7 +6,7 @@ use libp2p::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use payload::Payload;
+use crate::network::transport::libp2p_transport::protocols::gossipsub::Payload;
 
 pub const TIMESTAMP_TOLERANCE_SECONDS: u64 = 30;
 
@@ -118,8 +116,8 @@ mod tests {
     use chrono::Utc;
     use libp2p::{gossipsub::MessageId, PeerId};
 
-    use crate::network::transport::libp2p_transport::message::gossipsub::{
-        Message, Payload, TIMESTAMP_TOLERANCE_SECONDS,
+    use crate::network::transport::libp2p_transport::protocols::gossipsub::{
+        message::TIMESTAMP_TOLERANCE_SECONDS, Message, Payload,
     };
 
     const TOPIC: &str = "TOPIC";

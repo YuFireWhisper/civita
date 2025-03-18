@@ -37,7 +37,7 @@ impl Subscription {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::transport::libp2p_transport::message::gossipsub::{self, Payload};
+    use crate::network::transport::libp2p_transport::protocols::gossipsub::{self, Payload};
 
     use super::*;
     use tokio::{
