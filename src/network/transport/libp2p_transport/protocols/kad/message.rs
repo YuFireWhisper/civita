@@ -1,10 +1,9 @@
-pub mod payload;
-
 use libp2p::identity::{Keypair, SigningError};
 use serde::{Deserialize, Serialize};
 
-pub use payload::Payload;
 use thiserror::Error;
+
+use crate::network::transport::libp2p_transport::protocols::kad::Payload;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -32,9 +31,8 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use libp2p::identity::Keypair;
-
-    use crate::network::transport::libp2p_transport::message::kad::{Message, Payload};
 
     const PAYLOAD: &[u8] = &[1, 2, 3];
 
