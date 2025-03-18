@@ -11,7 +11,13 @@ use libp2p_transport::behaviour;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-use crate::network::transport::libp2p_transport::{message::Message, protocols::gossipsub};
+use crate::network::transport::libp2p_transport::{
+    message::Message,
+    protocols::{
+        gossipsub,
+        request_response::payload::Request,
+    },
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -52,10 +58,11 @@ pub trait Transport: Send + Sync {
         topic: &'a str,
         payload: gossipsub::Payload,
     ) -> Pin<Box<dyn Future<Output = Result<MessageId, Error>> + Send + 'a>>;
-    fn send(
-        &self,
-        message: Message,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>, Error>> + Send + '_>>;
+    fn request<'a>(
+        &'a self,
+        peer_id: PeerId,
+        request: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
     fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     fn stop_receive(&self) -> Result<(), Error>;
 }

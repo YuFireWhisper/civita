@@ -10,7 +10,9 @@ use libp2p::{
 };
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::protocols::request_response as CivitaRequestResponse;
+use crate::network::transport::libp2p_transport::protocols::request_response::payload::{
+    Request, Response,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -21,10 +23,9 @@ pub enum Error {
 }
 
 type BehaviourResult<T> = std::result::Result<T, Error>;
-type CborBehaviour =
-    cbor::Behaviour<CivitaRequestResponse::Message, CivitaRequestResponse::Message>;
-type RequestResponseEvent =
-    request_response::Event<CivitaRequestResponse::Message, CivitaRequestResponse::Message>;
+
+type CborBehaviour = cbor::Behaviour<Request, Response>;
+type RequestResponseEvent = request_response::Event<Request, Response>;
 
 pub enum Event {
     Gossipsub(Box<gossipsub::Event>),
@@ -79,8 +80,7 @@ impl Behaviour {
         kad::Behaviour::new(peer_id, MemoryStore::new(peer_id))
     }
 
-    fn create_request_response(
-    ) -> cbor::Behaviour<CivitaRequestResponse::Message, CivitaRequestResponse::Message> {
+    fn create_request_response() -> cbor::Behaviour<Request, Response> {
         cbor::Behaviour::new(
             std::iter::once((
                 StreamProtocol::new(Self::PROTOCOL_NAME),
@@ -106,9 +106,7 @@ impl Behaviour {
         &mut self.kad
     }
 
-    pub fn request_response(
-        &self,
-    ) -> &cbor::Behaviour<CivitaRequestResponse::Message, CivitaRequestResponse::Message> {
+    pub fn request_response(&self) -> &cbor::Behaviour<Request, Response> {
         &self.request_response
     }
 

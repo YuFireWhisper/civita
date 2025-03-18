@@ -327,10 +327,11 @@ mod tests {
                 topic: &'a str,
                 payload: crate::network::transport::libp2p_transport::protocols::gossipsub::Payload,
             ) -> Pin<Box<dyn Future<Output = Result<MessageId, TransportError>> + Send>>;
-            fn send(
-                &self,
-                message: Message,
-            ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>, TransportError>> + Send>>;
+            fn request<'a>(
+                &'a self,
+                peer_id: PeerId,
+                payload: crate::network::transport::libp2p_transport::protocols::request_response::payload::Request,
+            ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send>>;
             fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
             fn stop_receive(&self) -> Result<(), TransportError>;
         }
@@ -382,8 +383,8 @@ mod tests {
             Box::pin(async { Ok(rx) })
         });
         transport
-            .expect_send()
-            .returning(|_| Box::pin(async { Ok(Some(create_message_id())) }));
+            .expect_publish()
+            .returning(|_, _| Box::pin(async { Ok(create_message_id()) }));
 
         let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);
@@ -450,8 +451,8 @@ mod tests {
             })
             .times(1);
         transport
-            .expect_send()
-            .returning(|_| Box::pin(async { Ok(Some(create_message_id())) }))
+            .expect_publish()
+            .returning(|_, _| Box::pin(async { Ok(create_message_id()) }))
             .times(2..);
 
         let mut crypto = MockCrypto::new();

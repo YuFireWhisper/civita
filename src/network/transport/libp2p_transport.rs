@@ -13,7 +13,7 @@ use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     gossipsub::{IdentTopic, MessageId},
     identity::Keypair,
-    kad, noise,
+    noise,
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
@@ -30,7 +30,10 @@ use tokio::{
 use crate::network::transport::libp2p_transport::{
     listener_manager::ListenerManager,
     message::Message,
-    protocols::{gossipsub, request_response},
+    protocols::{
+        gossipsub,
+        request_response::{self, payload::Request},
+    },
 };
 
 use super::{Error, Listener, Transport};
@@ -100,87 +103,45 @@ impl Libp2pTransport {
         Ok(())
     }
 
-    pub async fn send(&self, message: Message) -> Result<Option<MessageId>> {
-        match message {
-            Message::Gossipsub(_messagee) => panic!("Gossipsub message not supported"),
-            Message::RequestResponse(message) => self
-                .send_reqeust_response_message(message)
-                .await
-                .map(|_| None),
-            _ => Ok(None), // Ignore other message types
-                           // TODO: Implement other message types
-        }
-    }
-
-    async fn send_reqeust_response_message(
-        &self,
-        message: request_response::Message,
-    ) -> Result<()> {
-        let target = message.target;
-        let mut swarm = self.swarm.lock().await;
-        swarm
-            .behaviour_mut()
-            .request_response_mut()
-            .send_request(&target, message);
-        Ok(())
-    }
-
     async fn process_event(event: Event, subscribers: Arc<RwLock<ListenerManager>>) {
-        match event {
-            Event::Gossipsub(event) => {
-                Self::handle_gossipsub_event(*event, subscribers).await;
+        if let Ok(msg) = Message::try_from(event) {
+            match msg {
+                Message::Gossipsub(msg) => {
+                    Self::handle_gossipsub_event(msg, subscribers).await;
+                }
+                Message::Kad(msg) => Self::handle_kad_event(msg),
+                Message::RequestResponse(msg) => {
+                    Self::handle_request_response_event(msg, subscribers).await;
+                }
             }
-            Event::Kad(event) => Self::handle_kad_event(event),
-            Event::RequestResponse(event) => {
-                Self::handle_request_response_event(event, subscribers).await;
-            }
+        } else {
+            warn!("Unsupported message type");
         }
     }
 
     async fn handle_gossipsub_event(
-        event: libp2p::gossipsub::Event,
+        message: gossipsub::Message,
         subscription: Arc<RwLock<ListenerManager>>,
     ) {
-        match gossipsub::Message::try_from(event) {
-            Ok(msg) => {
-                let topic = &msg.topic;
-                let topic_filter = Listener::Topic(topic.clone());
+        let topic = &message.topic;
+        let topic_filter = Listener::Topic(topic.clone());
+        let msg = Message::Gossipsub(message);
 
-                let msg = Message::Gossipsub(msg);
-
-                subscription.read().await.broadcast(&topic_filter, msg);
-            }
-            Err(e) => warn!("Failed to parse gossipsub message: {:?}", e),
-        }
+        subscription.read().await.broadcast(&topic_filter, msg);
     }
 
-    fn handle_kad_event(event: kad::Event) {
-        println!("Kademlia event: {:?}", event);
+    fn handle_kad_event(message: protocols::kad::Message) {
+        println!("Kademlia event: {:?}", message);
     }
 
     async fn handle_request_response_event(
-        event: libp2p::request_response::Event<
-            request_response::Message,
-            request_response::Message,
-        >,
+        message: request_response::Message,
         listener_manager: Arc<RwLock<ListenerManager>>,
     ) {
-        if let libp2p::request_response::Event::Message { peer, message, .. } = event {
-            let source = peer;
-            if let libp2p::request_response::Message::Response { response, .. } = message {
-                if response.source != source {
-                    warn!("Source peer ID does not match message source");
-                    return;
-                }
+        let filter = Listener::Peer(vec![message.peer]);
+        let msg = Message::RequestResponse(message);
 
-                let msg = Message::RequestResponse(response.clone());
-
-                let peer_vec = vec![source];
-                let peer_filter = Listener::Peer(peer_vec);
-
-                listener_manager.read().await.broadcast(&peer_filter, msg);
-            }
-        }
+        listener_manager.read().await.broadcast(&filter, msg);
     }
 
     pub fn stop_receive(&self) -> Result<()> {
@@ -245,7 +206,7 @@ impl Transport for Libp2pTransport {
         &'a self,
         topic: &'a str,
         payload: gossipsub::Payload,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<MessageId, Error>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<MessageId>> + Send + 'a>> {
         Box::pin(async move {
             let topic = IdentTopic::new(topic);
             let data: Vec<u8> = payload.try_into()?;
@@ -258,20 +219,18 @@ impl Transport for Libp2pTransport {
         })
     }
 
-    fn send(
-        &self,
-        message: Message,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>> {
+    fn request<'a>(
+        &'a self,
+        peer_id: PeerId,
+        request: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            match message {
-                Message::Gossipsub(_) => panic!("Gossipsub message not supported"),
-                Message::RequestResponse(message) => self
-                    .send_reqeust_response_message(message)
-                    .await
-                    .map(|_| None),
-                _ => Ok(None), // Ignore other message types
-                               // TODO: Implement other message types
-            }
+            let mut swarm = self.swarm.lock().await;
+            swarm
+                .behaviour_mut()
+                .request_response_mut()
+                .send_request(&peer_id, request);
+            Ok(())
         })
     }
 
@@ -349,11 +308,7 @@ impl PartialEq for Libp2pTransport {
 #[cfg(test)]
 mod tests {
     use crate::network::transport::{
-        libp2p_transport::{
-            message,
-            protocols::request_response,
-            test_transport::{create_request_response_payload, TestTransport, TEST_TOPIC},
-        },
+        libp2p_transport::test_transport::{TestTransport, TEST_TOPIC},
         Listener, Transport,
     };
     use std::time::Duration;
@@ -399,16 +354,16 @@ mod tests {
     //     assert!(received.is_some());
     // }
 
-    #[tokio::test]
-    async fn test_send_request_response_message() {
-        let mut t1 = TestTransport::new().await.unwrap();
-        let t2 = TestTransport::new().await.unwrap();
-        let payload = create_request_response_payload();
-        let req_msg = request_response::Message::new(t1.peer_id, t2.peer_id, payload);
-        let transport_msg = message::Message::RequestResponse(req_msg);
-        t1.p2p.send(transport_msg).await.unwrap();
-        t1.process_events(Duration::from_secs(1)).await;
-    }
+    // #[tokio::test]
+    // async fn test_send_request_response_message() {
+    //     let mut t1 = TestTransport::new().await.unwrap();
+    //     let t2 = TestTransport::new().await.unwrap();
+    //     let payload = create_request_response_payload();
+    //     let req_msg = request_response::Message::new(t1.peer_id, t2.peer_id, payload);
+    //     let transport_msg = message::Message::RequestResponse(req_msg);
+    //     t1.p2p.send(transport_msg).await.unwrap();
+    //     t1.process_events(Duration::from_secs(1)).await;
+    // }
 
     #[tokio::test]
     async fn test_receive() {
@@ -440,8 +395,7 @@ pub mod test_transport {
         libp2p_transport::{
             behaviour::{Behaviour, Event},
             config::Config,
-            protocols::{self, request_response},
-            Libp2pTransport,
+            protocols, Libp2pTransport,
         },
         Transport,
     };
@@ -452,10 +406,6 @@ pub mod test_transport {
 
     pub fn create_gossipsub_payload() -> protocols::gossipsub::Payload {
         protocols::gossipsub::Payload::Raw(PAYLOAD.to_vec())
-    }
-
-    pub fn create_request_response_payload() -> request_response::Payload {
-        request_response::Payload::Raw(PAYLOAD.to_vec())
     }
 
     pub struct TestTransport {

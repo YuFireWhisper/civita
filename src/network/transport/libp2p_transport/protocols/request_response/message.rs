@@ -1,50 +1,53 @@
-use libp2p::{request_response, PeerId};
+use libp2p::{request_response::Event, PeerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::protocols::request_response::Payload;
+use crate::network::transport::libp2p_transport::protocols::request_response::{
+    payload::{Request, Response},
+    Payload,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
+    #[error("Event is not a message")]
+    NotMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Message {
-    pub request_id: Option<String>,
-    pub source: PeerId,
-    pub target: PeerId,
+    pub peer: PeerId,
     pub payload: Payload,
 }
 
-impl Message {
-    pub fn new(source: PeerId, target: PeerId, payload: Payload) -> Self {
-        Self {
-            request_id: None,
-            source,
-            target,
-            payload,
+impl TryFrom<Event<Request, Response>> for Message {
+    type Error = Error;
+
+    fn try_from(event: Event<Request, Response>) -> Result<Self, Self::Error> {
+        match event {
+            Event::Message { peer, message, .. } => {
+                let payload = Payload::from(message);
+                Ok(Self { peer, payload })
+            }
+            _ => Err(Error::NotMessage),
         }
     }
 }
 
-impl TryFrom<request_response::Message<Message, Message>> for Message {
-    type Error = Error;
+#[cfg(test)]
+mod mock_message {
+    use super::*;
 
-    fn try_from(message: request_response::Message<Message, Message>) -> Result<Self, Self::Error> {
-        match message {
-            request_response::Message::Request {
-                request_id,
-                request,
-                ..
-            } => Ok(Message {
-                request_id: Some(request_id.to_string()),
-                source: request.source,
-                target: request.target,
-                payload: request.payload,
-            }),
-            request_response::Message::Response { response, .. } => Ok(response),
-        }
+    const PAYLOAD: &[u8] = &[1, 2, 3];
+
+    fn create_request_message() -> Message {
+        let peer = PeerId::random();
+        let payload = Payload::Request(Request::Raw(PAYLOAD.to_vec()));
+        Message { peer, payload }
+    }
+
+    fn create_response_message() -> Message {
+        let peer = PeerId::random();
+        let payload = Payload::Response(Response::Raw(PAYLOAD.to_vec()));
+        Message { peer, payload }
     }
 }
