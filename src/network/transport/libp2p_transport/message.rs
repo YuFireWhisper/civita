@@ -1,7 +1,6 @@
-use crate::network::transport::libp2p_transport::protocols::gossipsub;
-
-pub mod request_response;
 pub mod kad;
+
+use crate::network::transport::libp2p_transport::protocols::{gossipsub, request_response};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Message {

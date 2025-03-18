@@ -1,10 +1,8 @@
-pub mod payload;
-
 use libp2p::{request_response, PeerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use payload::Payload;
+use crate::network::transport::libp2p_transport::protocols::request_response::Payload;
 
 #[derive(Debug, Error)]
 pub enum Error {

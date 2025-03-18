@@ -10,7 +10,7 @@ use libp2p::{
 };
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::message::request_response as CivitaRequestResponse;
+use crate::network::transport::libp2p_transport::protocols::request_response as CivitaRequestResponse;
 
 #[derive(Debug, Error)]
 pub enum Error {

@@ -29,8 +29,8 @@ use tokio::{
 };
 
 use crate::network::transport::libp2p_transport::{
-    message::{request_response, Message},
-    protocols::gossipsub,
+    message::Message,
+    protocols::{gossipsub, request_response},
 };
 
 use super::{Error, SubscriptionFilter, Transport};
@@ -348,7 +348,8 @@ impl PartialEq for Libp2pTransport {
 mod tests {
     use crate::network::transport::{
         libp2p_transport::{
-            message, protocols,
+            message,
+            protocols::{self, request_response},
             test_transport::{
                 create_gossipsub_payload, create_request_response_payload, TestTransport,
                 TEST_TOPIC,
@@ -404,7 +405,7 @@ mod tests {
         let mut t1 = TestTransport::new().await.unwrap();
         let t2 = TestTransport::new().await.unwrap();
         let payload = create_request_response_payload();
-        let req_msg = message::request_response::Message::new(t1.peer_id, t2.peer_id, payload);
+        let req_msg = request_response::Message::new(t1.peer_id, t2.peer_id, payload);
         let transport_msg = message::Message::RequestResponse(req_msg);
         t1.p2p.send(transport_msg).await.unwrap();
         t1.process_events(Duration::from_secs(1)).await;
@@ -440,8 +441,8 @@ pub mod test_transport {
         libp2p_transport::{
             behaviour::{Behaviour, Event},
             config::Config,
-            message::{self},
-            protocols, Libp2pTransport,
+            protocols::{self, request_response},
+            Libp2pTransport,
         },
         Transport,
     };
@@ -454,8 +455,8 @@ pub mod test_transport {
         protocols::gossipsub::Payload::Raw(PAYLOAD.to_vec())
     }
 
-    pub fn create_request_response_payload() -> message::request_response::Payload {
-        message::request_response::Payload::Raw(PAYLOAD.to_vec())
+    pub fn create_request_response_payload() -> request_response::Payload {
+        request_response::Payload::Raw(PAYLOAD.to_vec())
     }
 
     pub struct TestTransport {
