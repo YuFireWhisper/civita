@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc::Sender;
 
-use crate::network::transport::{libp2p_transport::message::Message, SubscriptionFilter};
+use crate::network::transport::{libp2p_transport::message::Message, Listener};
 
 pub(super) struct Subscription {
-    subscriptions: HashMap<SubscriptionFilter, Vec<Sender<Message>>>,
+    subscriptions: HashMap<Listener, Vec<Sender<Message>>>,
 }
 
 impl Subscription {
@@ -15,7 +15,7 @@ impl Subscription {
         }
     }
 
-    pub fn add_subscription(&mut self, filter: SubscriptionFilter, sender: Sender<Message>) {
+    pub fn add_subscription(&mut self, filter: Listener, sender: Sender<Message>) {
         self.subscriptions.entry(filter).or_default().push(sender);
     }
 
@@ -26,7 +26,7 @@ impl Subscription {
         });
     }
 
-    pub fn broadcast(&self, filter: &SubscriptionFilter, message: Message) {
+    pub fn broadcast(&self, filter: &Listener, message: Message) {
         if let Some(senders) = self.subscriptions.get(filter) {
             for sender in senders {
                 let _ = sender.try_send(message.clone());
@@ -52,8 +52,8 @@ mod tests {
         Subscription::new()
     }
 
-    fn create_filter() -> SubscriptionFilter {
-        SubscriptionFilter::Topic(TEST_TOPIC.to_string())
+    fn create_filter() -> Listener {
+        Listener::Topic(TEST_TOPIC.to_string())
     }
 
     fn create_channel() -> (Sender<Message>, Receiver<Message>) {

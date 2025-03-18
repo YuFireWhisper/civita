@@ -33,7 +33,7 @@ use crate::network::transport::libp2p_transport::{
     protocols::{gossipsub, request_response},
 };
 
-use super::{Error, SubscriptionFilter, Transport};
+use super::{Error, Listener, Transport};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -161,7 +161,7 @@ impl Libp2pTransport {
                 Ok(mut msg) => {
                     msg.source = Some(propagation_source);
                     let topic = &msg.topic;
-                    let topic_filter = SubscriptionFilter::Topic(topic.clone());
+                    let topic_filter = Listener::Topic(topic.clone());
 
                     let msg = Message::Gossipsub(msg);
 
@@ -194,7 +194,7 @@ impl Libp2pTransport {
                 let msg = Message::RequestResponse(response.clone());
 
                 let peer_vec = vec![source];
-                let peer_filter = SubscriptionFilter::Peer(peer_vec);
+                let peer_filter = Listener::Peer(peer_vec);
 
                 subscription.read().await.broadcast(&peer_filter, msg);
             }
@@ -241,12 +241,12 @@ impl Transport for Libp2pTransport {
         })
     }
 
-    fn subscribe(
+    fn listen(
         &self,
-        filter: SubscriptionFilter,
+        filter: Listener,
     ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send + '_>> {
         Box::pin(async move {
-            if let SubscriptionFilter::Topic(topic) = &filter {
+            if let Listener::Topic(topic) = &filter {
                 self.subscribe_with_topic(topic).await?;
             }
 
@@ -355,7 +355,7 @@ mod tests {
                 TEST_TOPIC,
             },
         },
-        SubscriptionFilter, Transport,
+        Listener, Transport,
     };
     use std::time::Duration;
 
@@ -381,8 +381,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe() {
         let t1 = TestTransport::new().await.unwrap();
-        let filter = SubscriptionFilter::Topic(TEST_TOPIC.to_string());
-        let rx = t1.p2p.subscribe(filter).await;
+        let filter = Listener::Topic(TEST_TOPIC.to_string());
+        let rx = t1.p2p.listen(filter).await;
         assert!(rx.is_ok());
         assert!(rx.unwrap().capacity() == t1.config.channel_capacity);
     }

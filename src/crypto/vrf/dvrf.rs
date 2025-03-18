@@ -307,7 +307,7 @@ mod tests {
     use crate::network::transport::Error as TransportError;
     use crate::network::transport::Transport;
     use crate::network::{
-        transport::libp2p_transport::message::Message, transport::SubscriptionFilter,
+        transport::libp2p_transport::message::Message, transport::Listener,
     };
 
     const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
@@ -322,9 +322,9 @@ mod tests {
                 peer_id: PeerId,
                 addr: Multiaddr,
             ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send>>;
-            fn subscribe(
+            fn listen(
                 &self,
-                filter: SubscriptionFilter,
+                filter: Listener,
             ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, TransportError>> + Send>>;
             fn send(
                 &self,
@@ -376,7 +376,7 @@ mod tests {
 
     fn create_components() -> Components {
         let mut transport = MockTransport::new();
-        transport.expect_subscribe().returning(|_| {
+        transport.expect_listen().returning(|_| {
             let (_, rx) = tokio::sync::mpsc::channel(100);
             Box::pin(async { Ok(rx) })
         });
@@ -442,7 +442,7 @@ mod tests {
     async fn test_new_random_success() {
         let mut transport = MockTransport::new();
         transport
-            .expect_subscribe()
+            .expect_listen()
             .returning(|_| {
                 let (_, rx) = tokio::sync::mpsc::channel(100);
                 Box::pin(async { Ok(rx) })

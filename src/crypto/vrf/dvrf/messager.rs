@@ -10,7 +10,7 @@ use crate::network::transport::{
         message::Message,
         protocols::gossipsub::{self, Payload},
     },
-    SubscriptionFilter, Transport,
+    Listener, Transport,
 };
 
 use super::proof::Proof;
@@ -66,8 +66,8 @@ impl Messager {
 
 impl MessagerEngine for Messager {
     async fn subscribe(&self) -> Result<Receiver<Message>> {
-        let filter = SubscriptionFilter::Topic(self.topic.clone());
-        self.transport.subscribe(filter).await.map_err(Error::from)
+        let filter = Listener::Topic(self.topic.clone());
+        self.transport.listen(filter).await.map_err(Error::from)
     }
 
     async fn send_vrf_request(&self) -> Result<MessageId> {

@@ -30,7 +30,7 @@ pub enum Error {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SubscriptionFilter {
+pub enum Listener {
     Topic(String),
     Peer(Vec<PeerId>),
 }
@@ -41,9 +41,9 @@ pub trait Transport: Send + Sync {
         peer_id: PeerId,
         addr: Multiaddr,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
-    fn subscribe(
+    fn listen(
         &self,
-        filter: SubscriptionFilter,
+        filter: Listener,
     ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + '_>>;
     fn send(
         &self,
