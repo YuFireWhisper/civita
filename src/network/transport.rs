@@ -11,7 +11,7 @@ use libp2p_transport::behaviour;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-use crate::network::transport::libp2p_transport::message::Message;
+use crate::network::transport::libp2p_transport::{message::Message, protocols::gossipsub};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -25,6 +25,8 @@ pub enum Error {
     Publish(#[from] PublishError),
     #[error("{0}")]
     Behaviour(#[from] behaviour::Error),
+    #[error("{0}")]
+    Serde(#[from] serde_json::Error),
     #[error("Failed to lock")]
     LockError,
 }
@@ -45,6 +47,11 @@ pub trait Transport: Send + Sync {
         &self,
         listener: Listener,
     ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + '_>>;
+    fn publish<'a>(
+        &'a self,
+        topic: &'a str,
+        payload: gossipsub::Payload,
+    ) -> Pin<Box<dyn Future<Output = Result<MessageId, Error>> + Send + 'a>>;
     fn send(
         &self,
         message: Message,

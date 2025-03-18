@@ -256,6 +256,23 @@ impl Transport for Libp2pTransport {
         })
     }
 
+    fn publish<'a>(
+        &'a self,
+        topic: &'a str,
+        payload: gossipsub::Payload,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<MessageId, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            let topic = IdentTopic::new(topic);
+            let data: Vec<u8> = payload.try_into()?;
+            let mut swarm = self.swarm.lock().await;
+            swarm
+                .behaviour_mut()
+                .gossipsub_mut()
+                .publish(topic, data)
+                .map_err(|e| e.into())
+        })
+    }
+
     fn send(
         &self,
         message: Message,

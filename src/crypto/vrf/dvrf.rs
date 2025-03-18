@@ -306,9 +306,7 @@ mod tests {
     use crate::crypto::vrf::VrfCallback;
     use crate::network::transport::Error as TransportError;
     use crate::network::transport::Transport;
-    use crate::network::{
-        transport::libp2p_transport::message::Message, transport::Listener,
-    };
+    use crate::network::{transport::libp2p_transport::message::Message, transport::Listener};
 
     const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
     const TEST_OUTPUT: [u8; 32] = [1; 32];
@@ -326,6 +324,11 @@ mod tests {
                 &self,
                 filter: Listener,
             ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, TransportError>> + Send>>;
+            fn publish<'a>(
+                &'a self,
+                topic: &'a str,
+                payload: crate::network::transport::libp2p_transport::protocols::gossipsub::Payload,
+            ) -> Pin<Box<dyn Future<Output = Result<MessageId, TransportError>> + Send>>;
             fn send(
                 &self,
                 message: Message,

@@ -31,19 +31,11 @@ impl Payload {
     }
 }
 
-impl TryFrom<Payload> for Vec<u8> {
-    type Error = String;
+impl TryInto<Vec<u8>> for Payload {
+    type Error = serde_json::Error;
 
-    fn try_from(payload: Payload) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(&payload).map_err(|e| e.to_string())
-    }
-}
-
-impl TryInto<Payload> for Vec<u8> {
-    type Error = String;
-
-    fn try_into(self) -> Result<Payload, Self::Error> {
-        serde_json::from_slice(&self).map_err(|e| e.to_string())
+    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(&self)
     }
 }
 
@@ -52,7 +44,8 @@ mod tests {
     use libp2p::gossipsub::MessageId;
 
     use crate::{
-        crypto::vrf::dvrf::proof::Proof, network::transport::libp2p_transport::protocols::gossipsub::Payload,
+        crypto::vrf::dvrf::proof::Proof,
+        network::transport::libp2p_transport::protocols::gossipsub::Payload,
     };
 
     const MESSAGE_ID: &str = "MESSAGE_ID";
