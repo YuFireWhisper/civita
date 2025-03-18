@@ -31,6 +31,14 @@ impl Payload {
     }
 }
 
+impl TryFrom<Payload> for Vec<u8> {
+    type Error = String;
+
+    fn try_from(payload: Payload) -> Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(&payload).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use libp2p::gossipsub::MessageId;
