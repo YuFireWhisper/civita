@@ -6,10 +6,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::network::transport::{
     self,
-    libp2p_transport::{
-        message::Message,
-        protocols::gossipsub::{self, Payload},
-    },
+    libp2p_transport::{message::Message, protocols::gossipsub::Payload},
     Listener, Transport,
 };
 
@@ -53,14 +50,8 @@ impl Messager {
     }
 
     async fn send(&self, payload: Payload) -> Result<MessageId> {
-        let msg = self.create_gossipsub_message(payload);
-        let message_id = self.transport.send(msg).await?.ok_or(Error::MessageId)?;
+        let message_id = self.transport.publish(&self.topic, payload).await?;
         Ok(message_id)
-    }
-
-    fn create_gossipsub_message(&self, payload: Payload) -> Message {
-        let gossip_msg = gossipsub::Message::new(&self.topic, payload);
-        Message::Gossipsub(gossip_msg)
     }
 }
 

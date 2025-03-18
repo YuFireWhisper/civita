@@ -36,7 +36,7 @@ impl ListenerManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::transport::libp2p_transport::protocols::gossipsub::{self, Payload};
+    use crate::network::transport::libp2p_transport::protocols::gossipsub::message::mock_message;
 
     use super::*;
     use tokio::{
@@ -45,7 +45,6 @@ mod tests {
     };
 
     const TEST_TOPIC: &str = "TEST";
-    const PAYLOAD: &[u8] = &[1, 2, 3];
 
     fn create_manager() -> ListenerManager {
         ListenerManager::new()
@@ -61,8 +60,8 @@ mod tests {
     }
 
     fn create_message() -> Message {
-        let payload = Payload::Raw(PAYLOAD.to_vec());
-        Message::Gossipsub(gossipsub::Message::new(TEST_TOPIC, payload))
+        let gossipsub = mock_message::create_message();
+        Message::Gossipsub(gossipsub)
     }
 
     #[test]

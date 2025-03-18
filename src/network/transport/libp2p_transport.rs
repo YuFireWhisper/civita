@@ -102,7 +102,7 @@ impl Libp2pTransport {
 
     pub async fn send(&self, message: Message) -> Result<Option<MessageId>> {
         match message {
-            Message::Gossipsub(message) => self.send_gossipsub_message(message).await.map(Some),
+            Message::Gossipsub(_messagee) => panic!("Gossipsub message not supported"),
             Message::RequestResponse(message) => self
                 .send_reqeust_response_message(message)
                 .await
@@ -110,16 +110,6 @@ impl Libp2pTransport {
             _ => Ok(None), // Ignore other message types
                            // TODO: Implement other message types
         }
-    }
-
-    async fn send_gossipsub_message(&self, message: gossipsub::Message) -> Result<MessageId> {
-        let topic = IdentTopic::new(&message.topic);
-        let mut swarm = self.swarm.lock().await;
-        swarm
-            .behaviour_mut()
-            .gossipsub_mut()
-            .publish(topic, message)
-            .map_err(|e| e.into())
     }
 
     async fn send_reqeust_response_message(
@@ -151,24 +141,16 @@ impl Libp2pTransport {
         event: libp2p::gossipsub::Event,
         subscription: Arc<RwLock<ListenerManager>>,
     ) {
-        if let libp2p::gossipsub::Event::Message {
-            propagation_source,
-            message,
-            ..
-        } = event
-        {
-            match gossipsub::Message::try_from(message) {
-                Ok(mut msg) => {
-                    msg.source = Some(propagation_source);
-                    let topic = &msg.topic;
-                    let topic_filter = Listener::Topic(topic.clone());
+        match gossipsub::Message::try_from(event) {
+            Ok(msg) => {
+                let topic = &msg.topic;
+                let topic_filter = Listener::Topic(topic.clone());
 
-                    let msg = Message::Gossipsub(msg);
+                let msg = Message::Gossipsub(msg);
 
-                    subscription.read().await.broadcast(&topic_filter, msg);
-                }
-                Err(e) => warn!("Failed to parse gossipsub message: {:?}", e),
+                subscription.read().await.broadcast(&topic_filter, msg);
             }
+            Err(e) => warn!("Failed to parse gossipsub message: {:?}", e),
         }
     }
 
@@ -251,7 +233,10 @@ impl Transport for Libp2pTransport {
             }
 
             let (tx, rx) = channel(self.channel_capacity);
-            self.listener_manager.write().await.add_listener(listener, tx);
+            self.listener_manager
+                .write()
+                .await
+                .add_listener(listener, tx);
             Ok(rx)
         })
     }
@@ -279,7 +264,7 @@ impl Transport for Libp2pTransport {
     ) -> Pin<Box<dyn Future<Output = Result<Option<MessageId>>> + Send + '_>> {
         Box::pin(async move {
             match message {
-                Message::Gossipsub(message) => self.send_gossipsub_message(message).await.map(Some),
+                Message::Gossipsub(_) => panic!("Gossipsub message not supported"),
                 Message::RequestResponse(message) => self
                     .send_reqeust_response_message(message)
                     .await
@@ -366,11 +351,8 @@ mod tests {
     use crate::network::transport::{
         libp2p_transport::{
             message,
-            protocols::{self, request_response},
-            test_transport::{
-                create_gossipsub_payload, create_request_response_payload, TestTransport,
-                TEST_TOPIC,
-            },
+            protocols::request_response,
+            test_transport::{create_request_response_payload, TestTransport, TEST_TOPIC},
         },
         Listener, Transport,
     };
@@ -404,18 +386,18 @@ mod tests {
         assert!(rx.unwrap().capacity() == t1.config.channel_capacity);
     }
 
-    #[tokio::test]
-    async fn test_send_gossipsub_message() {
-        let mut t1 = TestTransport::new().await.unwrap();
-        let mut t2 = TestTransport::new().await.unwrap();
-        t1.establish_gossipsub_connection(&mut t2).await.unwrap();
-        let payload = create_gossipsub_payload();
-        let msg = protocols::gossipsub::Message::new(TEST_TOPIC, payload);
-        let transport_msg = message::Message::Gossipsub(msg);
-        t1.p2p.send(transport_msg).await.unwrap();
-        let received = t2.wait_for_gossipsub_message().await;
-        assert!(received.is_some());
-    }
+    // #[tokio::test]
+    // async fn test_send_gossipsub_message() {
+    //     let mut t1 = TestTransport::new().await.unwrap();
+    //     let mut t2 = TestTransport::new().await.unwrap();
+    //     t1.establish_gossipsub_connection(&mut t2).await.unwrap();
+    //     let payload = create_gossipsub_payload();
+    //     let msg = protocols::gossipsub::Message::new(TEST_TOPIC, payload);
+    //     let transport_msg = message::Message::Gossipsub(msg);
+    //     t1.p2p.send(transport_msg).await.unwrap();
+    //     let received = t2.wait_for_gossipsub_message().await;
+    //     assert!(received.is_some());
+    // }
 
     #[tokio::test]
     async fn test_send_request_response_message() {

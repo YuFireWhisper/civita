@@ -99,12 +99,10 @@ impl DVrf {
             return Err(Error::InvalidMessageType);
         };
 
-        msg.validate()?;
-        let source = msg.source.unwrap(); // Safe to unwrap, as it's validated
-        let message_id = msg.message_id.unwrap(); // Safe to unwrap, as it's validated
+        // TODO: Validate sequence number of the message
 
         match msg.payload {
-            Payload::VrfRequest => self.handle_vrf_request(message_id).await,
+            Payload::VrfRequest => self.handle_vrf_request(msg.message_id).await,
             Payload::VrfProof {
                 message_id: id,
                 public_key,
@@ -113,8 +111,8 @@ impl DVrf {
             Payload::VrfConsensus {
                 message_id: id,
                 random,
-            } => self.handle_vrf_consensus(source, id, &random),
-            Payload::VrfProcessFailure(id) => self.handle_vrf_failure(id, source),
+            } => self.handle_vrf_consensus(msg.source, id, &random),
+            Payload::VrfProcessFailure(id) => self.handle_vrf_failure(id, msg.source),
             _ => Err(Error::InvalidPayload),
         }
     }
