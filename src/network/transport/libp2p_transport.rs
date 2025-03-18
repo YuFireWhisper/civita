@@ -1,9 +1,9 @@
 pub mod behaviour;
 pub mod config;
+pub mod listener_manager;
 pub mod message;
 pub mod protocols;
 pub mod receive_task;
-pub mod subscription;
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -19,7 +19,6 @@ use libp2p::{
 };
 use log::warn;
 use receive_task::ReceiveTask;
-use subscription::Subscription;
 use tokio::{
     sync::{
         mpsc::{channel, Receiver},
@@ -29,6 +28,7 @@ use tokio::{
 };
 
 use crate::network::transport::libp2p_transport::{
+    listener_manager::ListenerManager,
     message::Message,
     protocols::{gossipsub, request_response},
 };
@@ -42,7 +42,7 @@ pub struct Libp2pTransport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     receive_task: Arc<Mutex<ReceiveTask<Result<()>>>>,
     keypair: Arc<Keypair>,
-    subscription: Arc<RwLock<Subscription>>,
+    listener_manager: Arc<RwLock<ListenerManager>>,
     receive_interval: Duration,
     cleanup_channel_interval: Duration,
     channel_capacity: usize,
@@ -65,7 +65,7 @@ impl Libp2pTransport {
         let swarm = Arc::new(Mutex::new(swarm));
         let receive_task = Arc::new(Mutex::new(ReceiveTask::new()));
         let keypair = Arc::new(keypair);
-        let subscription = Arc::new(RwLock::new(Subscription::new()));
+        let listener_manager = Arc::new(RwLock::new(ListenerManager::new()));
         let receive_interval = config.receive_interval;
         let cleanup_channel_interval = config.cleanup_channel_interval;
         let channel_capacity = config.channel_capacity;
@@ -75,7 +75,7 @@ impl Libp2pTransport {
             swarm,
             receive_task,
             keypair,
-            subscription,
+            listener_manager,
             receive_interval,
             cleanup_channel_interval,
             channel_capacity,
@@ -135,7 +135,7 @@ impl Libp2pTransport {
         Ok(())
     }
 
-    async fn process_event(event: Event, subscribers: Arc<RwLock<Subscription>>) {
+    async fn process_event(event: Event, subscribers: Arc<RwLock<ListenerManager>>) {
         match event {
             Event::Gossipsub(event) => {
                 Self::handle_gossipsub_event(*event, subscribers).await;
@@ -149,7 +149,7 @@ impl Libp2pTransport {
 
     async fn handle_gossipsub_event(
         event: libp2p::gossipsub::Event,
-        subscription: Arc<RwLock<Subscription>>,
+        subscription: Arc<RwLock<ListenerManager>>,
     ) {
         if let libp2p::gossipsub::Event::Message {
             propagation_source,
@@ -181,7 +181,7 @@ impl Libp2pTransport {
             request_response::Message,
             request_response::Message,
         >,
-        subscription: Arc<RwLock<Subscription>>,
+        listener_manager: Arc<RwLock<ListenerManager>>,
     ) {
         if let libp2p::request_response::Event::Message { peer, message, .. } = event {
             let source = peer;
@@ -196,7 +196,7 @@ impl Libp2pTransport {
                 let peer_vec = vec![source];
                 let peer_filter = Listener::Peer(peer_vec);
 
-                subscription.read().await.broadcast(&peer_filter, msg);
+                listener_manager.read().await.broadcast(&peer_filter, msg);
             }
         }
     }
@@ -243,15 +243,15 @@ impl Transport for Libp2pTransport {
 
     fn listen(
         &self,
-        filter: Listener,
+        listener: Listener,
     ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send + '_>> {
         Box::pin(async move {
-            if let Listener::Topic(topic) = &filter {
+            if let Listener::Topic(topic) = &listener {
                 self.subscribe_with_topic(topic).await?;
             }
 
             let (tx, rx) = channel(self.channel_capacity);
-            self.subscription.write().await.add_subscription(filter, tx);
+            self.listener_manager.write().await.add_listener(listener, tx);
             Ok(rx)
         })
     }
@@ -283,7 +283,7 @@ impl Transport for Libp2pTransport {
             let swarm = self.swarm.clone();
             let receive_interval = self.receive_interval;
             let cleanup_interval = self.cleanup_channel_interval;
-            let subscription = Arc::clone(&self.subscription);
+            let subscription = Arc::clone(&self.listener_manager);
 
             let task = tokio::spawn(async move {
                 let mut cleanup_tick = interval(cleanup_interval);

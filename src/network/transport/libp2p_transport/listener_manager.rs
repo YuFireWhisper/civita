@@ -4,30 +4,29 @@ use tokio::sync::mpsc::Sender;
 
 use crate::network::transport::{libp2p_transport::message::Message, Listener};
 
-pub(super) struct Subscription {
-    subscriptions: HashMap<Listener, Vec<Sender<Message>>>,
+pub(super) struct ListenerManager {
+    listeners: HashMap<Listener, Vec<Sender<Message>>>,
 }
 
-impl Subscription {
+impl ListenerManager {
     pub fn new() -> Self {
-        Self {
-            subscriptions: HashMap::new(),
-        }
+        let listeners = HashMap::new();
+        Self { listeners }
     }
 
-    pub fn add_subscription(&mut self, filter: Listener, sender: Sender<Message>) {
-        self.subscriptions.entry(filter).or_default().push(sender);
+    pub fn add_listener(&mut self, listener: Listener, sender: Sender<Message>) {
+        self.listeners.entry(listener).or_default().push(sender);
     }
 
     pub fn remove_dead_channels(&mut self) {
-        self.subscriptions.retain(|_, senders| {
+        self.listeners.retain(|_, senders| {
             senders.retain(|sender| !sender.is_closed());
             !senders.is_empty()
         });
     }
 
-    pub fn broadcast(&self, filter: &Listener, message: Message) {
-        if let Some(senders) = self.subscriptions.get(filter) {
+    pub fn broadcast(&self, listener: &Listener, message: Message) {
+        if let Some(senders) = self.listeners.get(listener) {
             for sender in senders {
                 let _ = sender.try_send(message.clone());
             }
@@ -48,11 +47,11 @@ mod tests {
     const TEST_TOPIC: &str = "TEST";
     const PAYLOAD: &[u8] = &[1, 2, 3];
 
-    fn create_subscription() -> Subscription {
-        Subscription::new()
+    fn create_manager() -> ListenerManager {
+        ListenerManager::new()
     }
 
-    fn create_filter() -> Listener {
+    fn create_listener() -> Listener {
         Listener::Topic(TEST_TOPIC.to_string())
     }
 
@@ -68,51 +67,51 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let subscription = create_subscription();
-        assert!(subscription.subscriptions.is_empty());
+        let manager = create_manager();
+        assert!(manager.listeners.is_empty());
     }
 
     #[test]
-    fn test_add_subscription() {
-        let mut subscription = create_subscription();
-        let filter = create_filter();
+    fn test_add_listener() {
+        let mut manager = create_manager();
+        let listener = create_listener();
         let (sender, _) = create_channel();
 
-        subscription.add_subscription(filter.clone(), sender);
+        manager.add_listener(listener.clone(), sender);
 
-        assert_eq!(subscription.subscriptions.len(), 1);
-        assert_eq!(subscription.subscriptions.get(&filter).unwrap().len(), 1);
+        assert_eq!(manager.listeners.len(), 1);
+        assert_eq!(manager.listeners.get(&listener).unwrap().len(), 1);
     }
 
     #[test]
     fn test_remove_dead_channels() {
-        let mut subscription = create_subscription();
-        let filter = create_filter();
+        let mut manager = create_manager();
+        let listener = create_listener();
         let (sender1, receiver1) = create_channel();
         let (sender2, _receiver2) = create_channel();
 
-        subscription.add_subscription(filter.clone(), sender1);
-        subscription.add_subscription(filter.clone(), sender2);
+        manager.add_listener(listener.clone(), sender1);
+        manager.add_listener(listener.clone(), sender2);
         drop(receiver1);
 
-        subscription.remove_dead_channels();
+        manager.remove_dead_channels();
 
-        assert_eq!(subscription.subscriptions.len(), 1);
-        assert_eq!(subscription.subscriptions.get(&filter).unwrap().len(), 1);
+        assert_eq!(manager.listeners.len(), 1);
+        assert_eq!(manager.listeners.get(&listener).unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn test_broadcast_success() {
-        let mut subscription = create_subscription();
-        let filter = create_filter();
+        let mut manager = create_manager();
+        let listener = create_listener();
         let (sender1, mut receiver1) = create_channel();
         let (sender2, mut receiver2) = create_channel();
 
-        subscription.add_subscription(filter.clone(), sender1);
-        subscription.add_subscription(filter.clone(), sender2);
+        manager.add_listener(listener.clone(), sender1);
+        manager.add_listener(listener.clone(), sender2);
 
         let message = create_message();
-        subscription.broadcast(&filter, message.clone());
+        manager.broadcast(&listener, message.clone());
 
         let received1_message = receiver1.recv().await;
         let received2_message = receiver2.recv().await;
@@ -124,15 +123,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_broadcast_non_existent_filter() {
+    async fn test_broadcast_non_existent_listener() {
         const SLEEP_TIME: std::time::Duration = std::time::Duration::from_millis(100);
 
-        let subscription = create_subscription();
-        let filter = create_filter();
+        let manager = create_manager();
+        let listener = create_listener();
         let (_, mut receiver) = create_channel();
 
         let message = create_message();
-        subscription.broadcast(&filter, message.clone());
+        manager.broadcast(&listener, message.clone());
 
         let timeout = timeout(SLEEP_TIME, receiver.recv()).await;
         assert!(timeout.is_err() || timeout.unwrap().is_none());

@@ -43,7 +43,7 @@ pub trait Transport: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
     fn listen(
         &self,
-        filter: Listener,
+        listener: Listener,
     ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + '_>>;
     fn send(
         &self,
