@@ -96,7 +96,7 @@ impl Libp2pTransport {
             .boxed()
     }
 
-    async fn subscribe_with_topic(&self, topic: &str) -> Result<()> {
+    async fn subscribe(&self, topic: &str) -> Result<()> {
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
         swarm.behaviour_mut().gossipsub_mut().subscribe(&topic)?;
@@ -144,13 +144,6 @@ impl Libp2pTransport {
         listener_manager.read().await.broadcast(&filter, msg);
     }
 
-    pub fn stop_receive(&self) -> Result<()> {
-        if let Ok(mut task_state) = self.receive_task.try_lock() {
-            task_state.stop();
-        }
-        Ok(())
-    }
-
     pub async fn swarm(&self) -> Result<MutexGuard<'_, Swarm<Behaviour>>> {
         self.get_swarm_lock().await
     }
@@ -174,7 +167,7 @@ impl Transport for Libp2pTransport {
         addr: Multiaddr,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
-            let mut swarm = self.swarm.lock().await;
+            let mut swarm = self.get_swarm_lock().await?;
             swarm
                 .behaviour_mut()
                 .kad_mut()
@@ -190,7 +183,7 @@ impl Transport for Libp2pTransport {
     ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send + '_>> {
         Box::pin(async move {
             if let Listener::Topic(topic) = &listener {
-                self.subscribe_with_topic(topic).await?;
+                self.subscribe(topic).await?;
             }
 
             let (tx, rx) = channel(self.channel_capacity);
@@ -210,7 +203,7 @@ impl Transport for Libp2pTransport {
         Box::pin(async move {
             let topic = IdentTopic::new(topic);
             let data: Vec<u8> = payload.try_into()?;
-            let mut swarm = self.swarm.lock().await;
+            let mut swarm = self.get_swarm_lock().await?;
             swarm
                 .behaviour_mut()
                 .gossipsub_mut()
@@ -225,7 +218,7 @@ impl Transport for Libp2pTransport {
         request: Request,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let mut swarm = self.swarm.lock().await;
+            let mut swarm = self.get_swarm_lock().await?;
             swarm
                 .behaviour_mut()
                 .request_response_mut()
@@ -497,12 +490,12 @@ pub mod test_transport {
                 .map_err(|_| "Failed to dial")?;
 
             self.p2p
-                .subscribe_with_topic(TEST_TOPIC)
+                .subscribe(TEST_TOPIC)
                 .await
                 .map_err(|_| "Failed to subscribe self")?;
             other
                 .p2p
-                .subscribe_with_topic(TEST_TOPIC)
+                .subscribe(TEST_TOPIC)
                 .await
                 .map_err(|_| "Failed to subscribe other")?;
 
