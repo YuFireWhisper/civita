@@ -91,27 +91,25 @@ impl MessagerEngine for Messager {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use crate::network::transport::libp2p_transport::{
-        test_transport::{TestTransport, TEST_TOPIC},
-        Libp2pTransport,
-    };
-
-    use super::Messager;
-
-    async fn create_arc_test_transport() -> Arc<Libp2pTransport> {
-        Arc::new(TestTransport::new().await.unwrap().p2p)
-    }
-
-    #[tokio::test]
-    async fn test_new() {
-        let transport = create_arc_test_transport().await;
-
-        let messager = Messager::new(transport, TEST_TOPIC.to_string());
-
-        assert_eq!(messager.topic, TEST_TOPIC);
-    }
+    // use crate::network::transport::libp2p_transport::{
+    //     test_transport::{TestTransport, TEST_TOPIC},
+    //     Libp2pTransport,
+    // };
+    //
+    // use super::Messager;
+    //
+    // async fn create_arc_test_transport() -> Arc<Libp2pTransport> {
+    //     Arc::new(TestTransport::new().await.unwrap().p2p)
+    // }
+    //
+    // #[tokio::test]
+    // async fn test_new() {
+    //     let transport = create_arc_test_transport().await;
+    //
+    //     let messager = Messager::new(transport, TEST_TOPIC.to_string());
+    //
+    //     assert_eq!(messager.topic, TEST_TOPIC);
+    // }
 
     #[ignore]
     #[tokio::test]

@@ -35,6 +35,16 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
     #[error("Failed to lock")]
     LockError,
+    #[error("Listener failed: {0}")]
+    ListenerFailed(String),
+    #[error("Failed to bind to address within timeout")]
+    BindTimeout,
+    #[error("Connection Failed: {0}")]
+    ConnectionFailed(String),
+    #[error("Failed to connect to peer within timeout")]
+    ConnectTimeout,
+    #[error("Lock contention")]
+    LockContention,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

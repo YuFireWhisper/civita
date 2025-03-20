@@ -27,6 +27,7 @@ type BehaviourResult<T> = std::result::Result<T, Error>;
 type CborBehaviour = cbor::Behaviour<Request, Response>;
 type RequestResponseEvent = request_response::Event<Request, Response>;
 
+#[derive(Debug)]
 pub enum Event {
     Gossipsub(Box<gossipsub::Event>),
     Kad(kad::Event),

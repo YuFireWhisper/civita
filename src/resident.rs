@@ -37,11 +37,8 @@ pub struct Resident {
 impl Resident {
     pub async fn new(keypair: Keypair, listen_addr: Multiaddr) -> Result<Self> {
         let peer_id = PeerId::from_public_key(&keypair.public());
-        let transport = Arc::new(Libp2pTransport::new(
-            keypair,
-            listen_addr,
-            Config::default(),
-        )?);
+        let transport =
+            Arc::new(Libp2pTransport::new(keypair, listen_addr, Config::default()).await?);
         let vrf = dvrf::Factory::new(transport.clone(), peer_id)
             .create_vrf()
             .await?;
