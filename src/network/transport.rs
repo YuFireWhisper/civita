@@ -35,16 +35,10 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
     #[error("{0}")]
     Message(#[from] message::Error),
-    #[error("{0}")]
-    TokioElapsed(#[from] tokio::time::error::Elapsed),
     #[error("Listener failed: {0}")]
     ListenerFailed(String),
     #[error("Failed to bind to address within timeout")]
     BindTimeout,
-    #[error("Connection Failed: {0}")]
-    ConnectionFailed(String),
-    #[error("Failed to connect to peer within timeout")]
-    ConnectTimeout,
     #[error("Lock contention")]
     LockContention,
     #[error("No any peer listen on the topic: {0}")]

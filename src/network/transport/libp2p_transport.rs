@@ -16,7 +16,7 @@ use libp2p::{
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
-use log::{info, warn};
+use log::error;
 use tokio::{
     sync::{
         mpsc::{channel, Receiver},
@@ -126,7 +126,7 @@ impl Libp2pTransport {
                     _ = arc_self.clone().cleanup_channels(&mut cleanup_tick) => {},
                     event = arc_self.clone().next_behaviour_event() => {
                         if let Err(e) = arc_self.clone().process_event(event).await {
-                            warn!("Failed to process event: {:?}", e);
+                            error!("Failed to process event: {:?}", e);
                         }
                     },
                     _ = async { sleep(arc_self.config.wait_for_gossipsub_peer_timeout).await } => {},
@@ -213,39 +213,6 @@ impl Libp2pTransport {
         .unwrap_or(false)
     }
 
-    async fn confirm_connection(&self, peer: PeerId) -> Result<()> {
-        if let Ok(swarm) = self.try_lock_swarm() {
-            if swarm.is_connected(&peer) {
-                return Ok(());
-            }
-        }
-
-        timeout(self.config.check_dial_timeout, async {
-            let mut swarm = self.swarm.lock().await;
-            tokio::select! {
-                event = swarm.select_next_some() => {
-                    match event {
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
-                            info!("Connection established with {}", peer);
-                            return Ok(());
-                        }
-                        SwarmEvent::OutgoingConnectionError { peer_id: Some(peer_id), error, .. } if peer_id == peer => {
-                            return Err(Error::ConnectionFailed(error.to_string()));
-                        }
-                        _ => {
-                            if swarm.is_connected(&peer) {
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|_| Error::ConnectTimeout)?
-    }
-
     async fn subscribe(&self, topic: &str) -> Result<()> {
         let topic = IdentTopic::new(topic);
         let mut swarm = self.swarm.lock().await;
@@ -255,13 +222,6 @@ impl Libp2pTransport {
 
     pub async fn swarm(&self) -> Result<MutexGuard<'_, Swarm<Behaviour>>> {
         match timeout(self.config.get_swarm_lock_timeout, self.swarm.lock()).await {
-            Ok(guard) => Ok(guard),
-            Err(_) => Err(Error::LockContention),
-        }
-    }
-
-    pub fn try_lock_swarm(&self) -> Result<MutexGuard<'_, Swarm<Behaviour>>> {
-        match self.swarm.try_lock() {
             Ok(guard) => Ok(guard),
             Err(_) => Err(Error::LockContention),
         }
@@ -282,8 +242,6 @@ impl Transport for Libp2pTransport {
                 .add_address(&peer_id, addr.clone());
             swarm.add_peer_address(peer_id, addr.clone());
             swarm.dial(addr)?;
-            drop(swarm);
-            self.confirm_connection(peer_id).await?;
             Ok(())
         })
     }
@@ -387,12 +345,8 @@ mod tests {
 
     impl TestContext {
         async fn connected() -> Self {
-            let t1 = TestTransport::new(LISTEN_ADDR.parse().unwrap())
-                .await
-                .expect("Failed to create first transport");
-            let t2 = TestTransport::new(LISTEN_ADDR.parse().unwrap())
-                .await
-                .expect("Failed to create second transport");
+            let t1 = TestTransport::new(LISTEN_ADDR.parse().unwrap()).await;
+            let t2 = TestTransport::new(LISTEN_ADDR.parse().unwrap()).await;
 
             let t1_addrss = t1.listen_addr().await;
             let t1_addres = t1_addrss
@@ -539,29 +493,11 @@ mod tests {
 
 #[cfg(test)]
 pub mod test_transport {
-    use std::{
-        error::Error,
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        },
-    };
-
-    use libp2p::{
-        futures::StreamExt, gossipsub, identity::Keypair, request_response, swarm::SwarmEvent,
-        Multiaddr, PeerId, Swarm,
-    };
-    use tokio::{
-        sync::MutexGuard,
-        task::JoinHandle,
-        time::{sleep, Duration},
-    };
+    use libp2p::{identity::Keypair, Multiaddr, PeerId, Swarm};
+    use tokio::sync::MutexGuard;
 
     use crate::network::transport::libp2p_transport::{
-        behaviour::{Behaviour, Event},
-        config::Config,
-        protocols::request_response::payload::Request,
-        Libp2pTransport,
+        behaviour::Behaviour, config::Config, Libp2pTransport,
     };
 
     pub struct TestTransport {
@@ -572,19 +508,21 @@ pub mod test_transport {
     }
 
     impl TestTransport {
-        pub async fn new(listen_addr: Multiaddr) -> Result<Self, Box<dyn Error>> {
+        pub async fn new(listen_addr: Multiaddr) -> Self {
             let keypair = Keypair::generate_ed25519();
             let peer_id = PeerId::from_public_key(&keypair.public());
             let config = Config::default();
 
-            let p2p = Libp2pTransport::new(keypair.clone(), listen_addr, config.clone()).await?;
+            let p2p = Libp2pTransport::new(keypair.clone(), listen_addr, config.clone())
+                .await
+                .unwrap();
 
-            Ok(Self {
+            Self {
                 keypair,
                 peer_id,
                 config,
                 p2p,
-            })
+            }
         }
 
         pub async fn p2p_swarm(&self) -> MutexGuard<'_, Swarm<Behaviour>> {
@@ -603,58 +541,6 @@ pub mod test_transport {
         pub async fn listen_addr(&self) -> Vec<Multiaddr> {
             let swarm = self.p2p_swarm().await;
             swarm.listeners().cloned().collect()
-        }
-
-        pub async fn wait_for_message(
-            &self,
-            expected: Vec<u8>,
-            flag: Arc<AtomicBool>,
-        ) -> JoinHandle<()> {
-            let swarm = self.p2p.swarm.clone();
-            let expected = expected.clone();
-            let flag = flag.clone();
-
-            tokio::spawn(async move {
-                loop {
-                    let mut swarm = swarm.lock().await;
-                    let event = swarm.select_next_some().await;
-                    drop(swarm);
-                    println!("Got Event: {:?}", event);
-                    if Self::check_gossipsub_message(&expected, &event)
-                        || Self::check_request_message(&expected, &event)
-                    {
-                        flag.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-        }
-
-        fn check_gossipsub_message(expected: &[u8], event: &SwarmEvent<Event>) -> bool {
-            if let SwarmEvent::Behaviour(Event::Gossipsub(gossipsub_event)) = event {
-                println!("Gossipsub event: {:?}", gossipsub_event);
-                if let gossipsub::Event::Message { message, .. } = &**gossipsub_event {
-                    return message.data == expected;
-                }
-            }
-            false
-        }
-
-        fn check_request_message(expected: &[u8], event: &SwarmEvent<Event>) -> bool {
-            matches!(event,
-                SwarmEvent::Behaviour(Event::RequestResponse(
-                    request_response::Event::Message {
-                        message: request_response::Message::Request { request, .. },
-                        ..
-                    }
-                )) if {
-                    println!("RequestResponse event: {:?}", request);
-                    println!("Expected: {:?}", expected);
-                    let expected = Request::try_from(expected.to_vec()).unwrap();
-                    request == &expected
-                }
-            )
         }
     }
 }
