@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
 use crate::network::transport::libp2p_transport::{
-    message::Message,
+    message::{self, Message},
     protocols::{
         gossipsub,
         request_response::payload::Request,
@@ -33,8 +33,10 @@ pub enum Error {
     Behaviour(#[from] behaviour::Error),
     #[error("{0}")]
     Serde(#[from] serde_json::Error),
-    #[error("Failed to lock")]
-    LockError,
+    #[error("{0}")]
+    Message(#[from] message::Error),
+    #[error("{0}")]
+    TokioElapsed(#[from] tokio::time::error::Elapsed),
     #[error("Listener failed: {0}")]
     ListenerFailed(String),
     #[error("Failed to bind to address within timeout")]
@@ -45,6 +47,8 @@ pub enum Error {
     ConnectTimeout,
     #[error("Lock contention")]
     LockContention,
+    #[error("No any peer listen on the topic: {0}")]
+    NoPeerListen(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,6 +77,6 @@ pub trait Transport: Send + Sync {
         peer_id: PeerId,
         request: Request,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
-    fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-    fn stop_receive(&self) -> Result<(), Error>;
+    // fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    // fn stop_receive(&self) -> Result<(), Error>;
 }

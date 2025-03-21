@@ -332,8 +332,6 @@ mod tests {
                 peer_id: PeerId,
                 payload: crate::network::transport::libp2p_transport::protocols::request_response::payload::Request,
             ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send>>;
-            fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-            fn stop_receive(&self) -> Result<(), TransportError>;
         }
     }
 

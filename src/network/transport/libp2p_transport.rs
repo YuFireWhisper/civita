@@ -8,10 +8,11 @@ pub mod receive_task;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use behaviour::{Behaviour, Event};
+use dashmap::DashMap;
 use futures::StreamExt;
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
-    gossipsub::{IdentTopic, MessageId},
+    gossipsub::{IdentTopic, MessageId, TopicHash},
     identity::Keypair,
     noise,
     swarm::{self, SwarmEvent},
@@ -24,7 +25,7 @@ use tokio::{
         mpsc::{channel, Receiver},
         Mutex, MutexGuard, RwLock,
     },
-    time::{interval, timeout, Duration},
+    time::{interval, sleep, timeout, Duration, Interval},
 };
 
 use crate::network::transport::libp2p_transport::{
@@ -47,9 +48,12 @@ pub struct Libp2pTransport {
     keypair: Arc<Keypair>,
     listener_manager: Arc<RwLock<ListenerManager>>,
     check_dial_timeout: Duration,
-    cleanup_channel_interval: Duration,
     channel_capacity: usize,
     get_swarm_lock_timeout: Duration,
+    waiting_for_gossipsub_peer_timeout: Duration,
+    waiting_for_gossipsub_peer_interval: Duration,
+    waiting_for_next_event_timeout: Duration,
+    subscribed_topics: Arc<DashMap<TopicHash, ()>>,
 }
 
 impl Libp2pTransport {
@@ -75,20 +79,30 @@ impl Libp2pTransport {
         let keypair = Arc::new(keypair);
         let listener_manager = Arc::new(RwLock::new(ListenerManager::new()));
         let check_dial_timeout = config.check_dial_timeout;
-        let cleanup_channel_interval = config.cleanup_channel_interval;
         let channel_capacity = config.channel_capacity;
         let get_swarm_lock_timeout = config.get_swarm_lock_timeout;
+        let waiting_for_gossipsub_peer_timeout = config.wait_for_gossipsub_peer_timeout;
+        let waiting_for_gossipsub_peer_interval = config.wait_for_gossipsub_peer_interval;
+        let waiting_for_next_event_timeout = config.wait_next_event_timeout;
+        let subscribed_topics = Arc::new(DashMap::new());
 
-        Ok(Self {
+        let transport = Self {
             swarm,
             receive_task,
             keypair,
             listener_manager,
             check_dial_timeout,
-            cleanup_channel_interval,
             channel_capacity,
             get_swarm_lock_timeout,
-        })
+            waiting_for_gossipsub_peer_timeout,
+            waiting_for_gossipsub_peer_interval,
+            waiting_for_next_event_timeout,
+            subscribed_topics,
+        };
+
+        transport.receive(config.cleanup_channel_interval).await;
+
+        Ok(transport)
     }
 
     fn create_transport(keypair: Keypair) -> Boxed<(PeerId, StreamMuxerBox)> {
@@ -125,6 +139,125 @@ impl Libp2pTransport {
         })
         .await
         .map_err(|_| Error::BindTimeout)?
+    }
+
+    async fn receive(&self, cleanup_interval: Duration) {
+        let swarm = Arc::clone(&self.swarm);
+        let subscribed_topics = Arc::clone(&self.subscribed_topics);
+        let listener_manager = Arc::clone(&self.listener_manager);
+        let waiting_for_next_event_timeout = self.waiting_for_next_event_timeout;
+
+        tokio::spawn(async move {
+            let mut cleanup_tick = interval(cleanup_interval);
+
+            loop {
+                tokio::select! {
+                    _ = Self::cleanup_channels(&mut cleanup_tick, Arc::clone(&listener_manager)) => {},
+                    _ = Self::next_event(Arc::clone(&swarm), Arc::clone(&subscribed_topics), Arc::clone(&listener_manager)) => {},
+                    _ = async { sleep(waiting_for_next_event_timeout).await } => {},
+                }
+            }
+        });
+    }
+
+    async fn cleanup_channels(
+        interval: &mut Interval,
+        listener_manager: Arc<RwLock<ListenerManager>>,
+    ) {
+        interval.tick().await;
+        let mut subs = listener_manager.write().await;
+        subs.remove_dead_channels();
+    }
+
+    async fn next_event(
+        swarm: Arc<Mutex<Swarm<Behaviour>>>,
+        subscribed_topics: Arc<DashMap<TopicHash, ()>>,
+        listener_manager: Arc<RwLock<ListenerManager>>,
+    ) {
+        let event = swarm.lock().await.select_next_some().await;
+        if let SwarmEvent::Behaviour(event) = event {
+            if let Err(e) =
+                Self::process_event(event, subscribed_topics, Arc::clone(&listener_manager)).await
+            {
+                warn!("Failed to process event: {:?}", e);
+            }
+        }
+    }
+
+    async fn process_event(
+        event: Event,
+        subscribed_topics: Arc<DashMap<TopicHash, ()>>,
+        listener_manager: Arc<RwLock<ListenerManager>>,
+    ) -> Result<()> {
+        if let Event::Gossipsub(event) = &event {
+            if let libp2p::gossipsub::Event::Subscribed { peer_id, topic } = &**event {
+                println!("Got subscribed: {}, from: {}", topic, peer_id);
+                subscribed_topics.insert(topic.clone(), ());
+                for topic in subscribed_topics.iter() {
+                    println!("Subscribed topic(process_event): {}", topic.key());
+                }
+                return Ok(());
+            }
+        }
+
+        match Message::try_from(event)? {
+            Message::Gossipsub(msg) => {
+                Self::handle_gossipsub_event(msg, listener_manager).await;
+                Ok(())
+            }
+            Message::Kad(msg) => {
+                Self::handle_kad_event(msg);
+                Ok(())
+            }
+            Message::RequestResponse(msg) => {
+                Self::handle_request_response_event(msg, listener_manager).await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_gossipsub_event(
+        message: gossipsub::Message,
+        subscription: Arc<RwLock<ListenerManager>>,
+    ) {
+        let topic = &message.topic;
+        let topic_filter = Listener::Topic(topic.clone());
+        let msg = Message::Gossipsub(message);
+
+        subscription.read().await.broadcast(&topic_filter, msg);
+    }
+
+    fn handle_kad_event(message: protocols::kad::Message) {
+        println!("Kademlia event: {:?}", message);
+    }
+
+    async fn handle_request_response_event(
+        message: request_response::Message,
+        listener_manager: Arc<RwLock<ListenerManager>>,
+    ) {
+        let filter = Listener::Peer(vec![message.peer]);
+        let msg = Message::RequestResponse(message);
+
+        listener_manager.read().await.broadcast(&filter, msg);
+    }
+
+    async fn wait_for_gossipsub_subscription(&self, topic: &TopicHash) -> bool {
+        println!("Waiting for gossipsub subscription");
+
+        timeout(self.waiting_for_gossipsub_peer_timeout, async {
+            loop {
+                for topic in self.subscribed_topics.iter() {
+                    println!("Subscribed topic: {:?}", topic.key());
+                }
+
+                if self.subscribed_topics.contains_key(topic) {
+                    return true;
+                }
+                sleep(self.waiting_for_gossipsub_peer_interval).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
     }
 
     async fn confirm_connection(&self, peer: PeerId) -> Result<()> {
@@ -167,58 +300,10 @@ impl Libp2pTransport {
         Ok(())
     }
 
-    async fn process_event(event: Event, subscribers: Arc<RwLock<ListenerManager>>) {
-        if let Ok(msg) = Message::try_from(event) {
-            match msg {
-                Message::Gossipsub(msg) => {
-                    Self::handle_gossipsub_event(msg, subscribers).await;
-                }
-                Message::Kad(msg) => Self::handle_kad_event(msg),
-                Message::RequestResponse(msg) => {
-                    Self::handle_request_response_event(msg, subscribers).await;
-                }
-            }
-        } else {
-            println!("Unsupported message type");
-            warn!("Unsupported message type");
-        }
-    }
-
-    async fn handle_gossipsub_event(
-        message: gossipsub::Message,
-        subscription: Arc<RwLock<ListenerManager>>,
-    ) {
-        let topic = &message.topic;
-        let topic_filter = Listener::Topic(topic.clone());
-        let msg = Message::Gossipsub(message);
-
-        subscription.read().await.broadcast(&topic_filter, msg);
-    }
-
-    fn handle_kad_event(message: protocols::kad::Message) {
-        println!("Kademlia event: {:?}", message);
-    }
-
-    async fn handle_request_response_event(
-        message: request_response::Message,
-        listener_manager: Arc<RwLock<ListenerManager>>,
-    ) {
-        println!("RequestResponse event: {:?}", message);
-
-        let filter = Listener::Peer(vec![message.peer]);
-        let msg = Message::RequestResponse(message);
-
-        listener_manager.read().await.broadcast(&filter, msg);
-    }
-
     pub async fn swarm(&self) -> Result<MutexGuard<'_, Swarm<Behaviour>>> {
-        self.get_swarm_lock().await
-    }
-
-    async fn get_swarm_lock(&self) -> Result<MutexGuard<'_, Swarm<Behaviour>>> {
         match timeout(self.get_swarm_lock_timeout, self.swarm.lock()).await {
             Ok(guard) => Ok(guard),
-            Err(_) => Err(Error::LockError),
+            Err(_) => Err(Error::LockContention),
         }
     }
 
@@ -241,7 +326,7 @@ impl Transport for Libp2pTransport {
         addr: Multiaddr,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
-            let mut swarm = self.get_swarm_lock().await?;
+            let mut swarm = self.swarm().await?;
             swarm
                 .behaviour_mut()
                 .kad_mut()
@@ -274,18 +359,22 @@ impl Transport for Libp2pTransport {
 
     fn publish<'a>(
         &'a self,
-        topic: &'a str,
+        topic_str: &'a str,
         payload: gossipsub::Payload,
     ) -> Pin<Box<dyn Future<Output = Result<MessageId>> + Send + 'a>> {
         Box::pin(async move {
-            let topic = IdentTopic::new(topic);
+            let topic = IdentTopic::new(topic_str);
+            if !self.wait_for_gossipsub_subscription(&topic.hash()).await {
+                return Err(Error::NoPeerListen(topic_str.to_string()));
+            }
+
             let data: Vec<u8> = payload.try_into()?;
-            let mut swarm = self.get_swarm_lock().await?;
+            let mut swarm = self.swarm().await?;
             swarm
                 .behaviour_mut()
                 .gossipsub_mut()
-                .publish(topic, data)
-                .map_err(|e| e.into())
+                .publish(topic.clone(), data.clone())
+                .map_err(Error::from)
         })
     }
 
@@ -295,68 +384,13 @@ impl Transport for Libp2pTransport {
         request: Request,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let mut swarm = self.get_swarm_lock().await?;
-            if !swarm.is_connected(&peer_id) {
-                panic!("Peer is not connected");
-            }
+            let mut swarm = self.swarm().await?;
             swarm
                 .behaviour_mut()
                 .request_response_mut()
                 .send_request(&peer_id, request);
             Ok(())
         })
-    }
-
-    fn receive(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        use tokio::sync::oneshot::channel;
-
-        Box::pin(async {
-            let mut task_state = self.receive_task.lock().await;
-            if task_state.is_running() {
-                return;
-            }
-
-            let swarm = self.swarm.clone();
-            let cleanup_interval = self.cleanup_channel_interval;
-            let subscription = Arc::clone(&self.listener_manager);
-
-            let (tx, rx) = channel();
-
-            let task = tokio::spawn(async move {
-                let mut cleanup_tick = interval(cleanup_interval);
-
-                let _ = tx.send(());
-
-                loop {
-                    tokio::select! {
-                        _ = cleanup_tick.tick() => {
-                            let mut subs = subscription.write().await;
-                            subs.remove_dead_channels();
-                        },
-                        event = async {
-                            let mut s = swarm.lock().await;
-                            s.select_next_some().await
-                        } => {
-                            println!("Got event: {:?}", event);
-                            if let SwarmEvent::Behaviour(event) = event {
-                                Self::process_event(event, Arc::clone(&subscription)).await;
-                            }
-                        },
-                    }
-                }
-            });
-
-            task_state.set_handle(task);
-
-            let _ = rx.await;
-        })
-    }
-
-    fn stop_receive(&self) -> Result<()> {
-        if let Ok(mut task_state) = self.receive_task.try_lock() {
-            task_state.stop();
-        }
-        Ok(())
     }
 }
 
@@ -386,11 +420,6 @@ impl PartialEq for Libp2pTransport {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-
     use crate::network::transport::{
         libp2p_transport::{
             config::Config,
@@ -404,9 +433,8 @@ mod tests {
         },
         Listener, Transport,
     };
-    use futures::StreamExt;
     use libp2p::identity::Keypair;
-    use tokio::time::{sleep, timeout, Duration, Instant};
+    use tokio::time::{timeout, Duration};
 
     const LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
     const TOPIC: &str = "TOPIC";
@@ -450,26 +478,6 @@ mod tests {
 
             Self { t1, t2 }
         }
-
-        async fn process_event(&self, duation: Duration) {
-            let start = Instant::now();
-            let mut t1_swarm = self.t1.p2p_swarm().await;
-            let mut t2_swarm = self.t2.p2p_swarm().await;
-
-            while start.elapsed() < duation {
-                tokio::select! {
-                    event = t1_swarm.select_next_some() => {
-                        println!("T1 event: {:?}", event);
-                    },
-                    event = t2_swarm.select_next_some() => {
-                        println!("T2 event: {:?}", event);
-                    }
-                    _ = sleep(Duration::from_millis(1)) => {
-                        continue;
-                    }
-                }
-            }
-        }
     }
 
     #[tokio::test]
@@ -492,10 +500,6 @@ mod tests {
         assert_eq!(
             result.as_ref().unwrap().check_dial_timeout,
             config.check_dial_timeout
-        );
-        assert_eq!(
-            result.as_ref().unwrap().cleanup_channel_interval,
-            config.cleanup_channel_interval
         );
         assert_eq!(
             result.as_ref().unwrap().channel_capacity,
@@ -534,84 +538,24 @@ mod tests {
         use gossipsub::Payload;
 
         let ctx = TestContext::connected().await;
-
         let listener = Listener::Topic(TOPIC.to_string());
-        ctx.t2.p2p.listen(listener).await.unwrap();
-        ctx.process_event(Duration::from_secs(1)).await;
-
         let payload = Payload::Raw(PAYLOAD.to_vec());
-        ctx.t1.p2p.publish(TOPIC, payload.clone()).await.unwrap();
 
-        let is_got = Arc::new(AtomicBool::new(false));
-        let receive_handle = ctx
-            .t2
-            .wait_for_message(payload.clone().try_into().unwrap(), is_got.clone())
-            .await;
+        ctx.t2.p2p.listen(listener).await.unwrap();
 
-        let result = timeout(Duration::from_secs(5), async {
-            while !is_got.load(Ordering::Relaxed) {
-                sleep(Duration::from_millis(10)).await;
-            }
-            true
-        })
-        .await
-        .unwrap_or(false);
+        let result = ctx.t1.p2p.publish(TOPIC, payload.clone()).await;
 
-        receive_handle.abort();
-
-        assert!(result, "Failed to receive message");
+        assert!(result.is_ok(), "Failed to publish message: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_request() {
         let ctx = TestContext::connected().await;
         let request = Request::Raw(PAYLOAD.to_vec());
-        let is_got = Arc::new(AtomicBool::new(false));
 
-        let swarm = ctx.t1.p2p.swarm.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = sleep(Duration::from_millis(10)) => {
-                        continue;
-                    },
-                    _ = async {
-                        let mut swarm = swarm.lock().await;
-                        while let Some(event) = swarm.next().await {
-                            println!("Event: {:?}", event);
-                        }
-                    } => {
-                        break;
-                    }
-                }
-            }
-        });
-        sleep(Duration::from_secs(1)).await;
+        let result = ctx.t1.p2p.request(ctx.t2.peer_id, request.clone()).await;
 
-        ctx.t1
-            .p2p
-            .request(ctx.t2.peer_id, request.clone())
-            .await
-            .unwrap();
-
-        let receive_handle = ctx
-            .t2
-            .wait_for_message(request.clone().try_into().unwrap(), is_got.clone())
-            .await;
-
-        let result = timeout(Duration::from_secs(5), async {
-            while !is_got.load(Ordering::Relaxed) {
-                sleep(Duration::from_millis(10)).await;
-            }
-            true
-        })
-        .await
-        .unwrap_or(false);
-
-        handle.abort();
-        receive_handle.abort();
-
-        assert!(result, "Failed to receive request");
+        assert!(result.is_ok(), "Failed to send request: {:?}", result);
     }
 
     #[tokio::test]
@@ -622,9 +566,7 @@ mod tests {
         let payload = Payload::Raw(PAYLOAD.to_vec());
         let filter = Listener::Topic(TOPIC.to_string());
         let mut rx = ctx.t2.p2p.listen(filter).await.unwrap();
-        ctx.process_event(Duration::from_secs(1)).await;
 
-        ctx.t2.p2p.receive().await;
         ctx.t1.p2p.publish(TOPIC, payload.clone()).await.unwrap();
 
         let result = timeout(WAIT_MESSAGE_TIMEOUT, async {
@@ -645,10 +587,6 @@ mod tests {
     #[tokio::test]
     async fn test_receive_request_response() {
         let ctx = TestContext::connected().await;
-
-        ctx.t1.p2p.receive().await;
-        sleep(Duration::from_secs(1)).await;
-        ctx.t2.p2p.receive().await;
 
         let listener = Listener::Peer(vec![ctx.t1.peer_id]);
         let mut rx = ctx.t2.p2p.listen(listener).await.unwrap();
