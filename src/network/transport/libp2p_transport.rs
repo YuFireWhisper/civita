@@ -122,10 +122,8 @@ impl Libp2pTransport {
     }
 
     async fn receive(&self) {
-        let swarm = Arc::clone(&self.swarm);
+        let arc_self = Arc::new(self.clone());
         let cleanup_interval = self.config.cleanup_channel_interval;
-        let subscribed_topics = Arc::clone(&self.subscribed_topics);
-        let listener_manager = Arc::clone(&self.listener_manager);
         let waiting_for_next_event_timeout = self.config.wait_for_gossipsub_peer_timeout;
 
         tokio::spawn(async move {
@@ -133,53 +131,44 @@ impl Libp2pTransport {
 
             loop {
                 tokio::select! {
-                    _ = Self::cleanup_channels(&mut cleanup_tick, Arc::clone(&listener_manager)) => {},
-                    _ = Self::next_event(Arc::clone(&swarm), Arc::clone(&subscribed_topics), Arc::clone(&listener_manager)) => {},
+                    _ = arc_self.clone().cleanup_channels(&mut cleanup_tick) => {},
+                    _ = arc_self.clone().next_event() => {},
                     _ = async { sleep(waiting_for_next_event_timeout).await } => {},
                 }
             }
         });
     }
 
-    async fn cleanup_channels(
-        interval: &mut Interval,
-        listener_manager: Arc<RwLock<ListenerManager>>,
-    ) {
+    async fn cleanup_channels(self: Arc<Self>, interval: &mut Interval) {
         interval.tick().await;
-        let mut subs = listener_manager.write().await;
+        let mut subs = self.listener_manager.write().await;
         subs.remove_dead_channels();
     }
 
-    async fn next_event(
-        swarm: Arc<Mutex<Swarm<Behaviour>>>,
-        subscribed_topics: Arc<Mutex<HashSet<TopicHash>>>,
-        listener_manager: Arc<RwLock<ListenerManager>>,
-    ) {
-        let event = swarm.lock().await.select_next_some().await;
+    async fn next_event(self: Arc<Self>) {
+        let event = self.swarm_without_timeout().await.select_next_some().await;
         if let SwarmEvent::Behaviour(event) = event {
-            if let Err(e) =
-                Self::process_event(event, subscribed_topics, Arc::clone(&listener_manager)).await
-            {
+            if let Err(e) = self.process_event(event).await {
                 warn!("Failed to process event: {:?}", e);
             }
         }
     }
 
-    async fn process_event(
-        event: Event,
-        subscribed_topics: Arc<Mutex<HashSet<TopicHash>>>,
-        listener_manager: Arc<RwLock<ListenerManager>>,
-    ) -> Result<()> {
+    async fn swarm_without_timeout(self: &Arc<Self>) -> MutexGuard<'_, Swarm<Behaviour>> {
+        self.swarm.lock().await
+    }
+
+    async fn process_event(self: Arc<Self>, event: Event) -> Result<()> {
         if let Event::Gossipsub(event) = &event {
             if let libp2p::gossipsub::Event::Subscribed { topic, .. } = &**event {
-                subscribed_topics.lock().await.insert(topic.clone());
+                self.subscribed_topics.lock().await.insert(topic.clone());
                 return Ok(());
             }
         }
 
         match Message::try_from(event)? {
             Message::Gossipsub(msg) => {
-                Self::handle_gossipsub_event(msg, listener_manager).await;
+                self.handle_gossipsub_event(msg).await;
                 Ok(())
             }
             Message::Kad(msg) => {
@@ -187,35 +176,32 @@ impl Libp2pTransport {
                 Ok(())
             }
             Message::RequestResponse(msg) => {
-                Self::handle_request_response_event(msg, listener_manager).await;
+                self.handle_request_response_event(msg).await;
                 Ok(())
             }
         }
     }
 
-    async fn handle_gossipsub_event(
-        message: gossipsub::Message,
-        subscription: Arc<RwLock<ListenerManager>>,
-    ) {
+    async fn handle_gossipsub_event(self: Arc<Self>, message: gossipsub::Message) {
         let topic = &message.topic;
         let topic_filter = Listener::Topic(topic.clone());
         let msg = Message::Gossipsub(message);
 
-        subscription.read().await.broadcast(&topic_filter, msg);
+        self.listener_manager
+            .read()
+            .await
+            .broadcast(&topic_filter, msg);
     }
 
     fn handle_kad_event(message: protocols::kad::Message) {
         println!("Kademlia event: {:?}", message);
     }
 
-    async fn handle_request_response_event(
-        message: request_response::Message,
-        listener_manager: Arc<RwLock<ListenerManager>>,
-    ) {
+    async fn handle_request_response_event(self: Arc<Self>, message: request_response::Message) {
         let filter = Listener::Peer(vec![message.peer]);
         let msg = Message::RequestResponse(message);
 
-        listener_manager.read().await.broadcast(&filter, msg);
+        self.listener_manager.read().await.broadcast(&filter, msg);
     }
 
     async fn wait_for_gossipsub_subscription(&self, topic: &TopicHash) -> bool {
