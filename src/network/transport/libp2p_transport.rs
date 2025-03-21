@@ -18,7 +18,6 @@ use libp2p::{
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use log::{info, warn};
-use receive_task::ReceiveTask;
 use tokio::{
     sync::{
         mpsc::{channel, Receiver},
@@ -44,7 +43,6 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub struct Libp2pTransport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
-    receive_task: Arc<Mutex<ReceiveTask<Result<()>>>>,
     keypair: Arc<Keypair>,
     listener_manager: Arc<RwLock<ListenerManager>>,
     config: Config,
@@ -66,14 +64,12 @@ impl Libp2pTransport {
         Self::listen_on(&mut swarm, listen_addr, config.check_listen_timeout).await?;
 
         let swarm = Arc::new(Mutex::new(swarm));
-        let receive_task = Arc::new(Mutex::new(ReceiveTask::new()));
         let keypair = Arc::new(keypair);
         let listener_manager = Arc::new(RwLock::new(ListenerManager::new()));
         let subscribed_topics = Arc::new(Mutex::new(HashSet::new()));
 
         let transport = Self {
             swarm,
-            receive_task,
             keypair,
             listener_manager,
             config,
@@ -351,16 +347,6 @@ impl Transport for Libp2pTransport {
 impl std::fmt::Debug for Libp2pTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2PCommunication")
-            .field(
-                "receive_task",
-                &format!(
-                    "{}",
-                    self.receive_task
-                        .try_lock()
-                        .map(|s| s.is_running())
-                        .unwrap_or(false)
-                ),
-            )
             .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>")
             .finish()
     }
