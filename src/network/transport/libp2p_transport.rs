@@ -29,6 +29,7 @@ use tokio::{
 };
 
 use crate::network::transport::libp2p_transport::{
+    config::Config,
     listener_manager::ListenerManager,
     message::Message,
     protocols::{
@@ -47,21 +48,12 @@ pub struct Libp2pTransport {
     receive_task: Arc<Mutex<ReceiveTask<Result<()>>>>,
     keypair: Arc<Keypair>,
     listener_manager: Arc<RwLock<ListenerManager>>,
-    check_dial_timeout: Duration,
-    channel_capacity: usize,
-    get_swarm_lock_timeout: Duration,
-    waiting_for_gossipsub_peer_timeout: Duration,
-    waiting_for_gossipsub_peer_interval: Duration,
-    waiting_for_next_event_timeout: Duration,
+    config: Config,
     subscribed_topics: Arc<DashMap<TopicHash, ()>>,
 }
 
 impl Libp2pTransport {
-    pub async fn new(
-        keypair: Keypair,
-        listen_addr: Multiaddr,
-        config: config::Config,
-    ) -> Result<Self> {
+    pub async fn new(keypair: Keypair, listen_addr: Multiaddr, config: Config) -> Result<Self> {
         let transport = Self::create_transport(keypair.clone());
         let behaviour = Behaviour::new(keypair.clone())?;
         let peer_id = Self::create_peer_id(&keypair);
@@ -78,12 +70,6 @@ impl Libp2pTransport {
         let receive_task = Arc::new(Mutex::new(ReceiveTask::new()));
         let keypair = Arc::new(keypair);
         let listener_manager = Arc::new(RwLock::new(ListenerManager::new()));
-        let check_dial_timeout = config.check_dial_timeout;
-        let channel_capacity = config.channel_capacity;
-        let get_swarm_lock_timeout = config.get_swarm_lock_timeout;
-        let waiting_for_gossipsub_peer_timeout = config.wait_for_gossipsub_peer_timeout;
-        let waiting_for_gossipsub_peer_interval = config.wait_for_gossipsub_peer_interval;
-        let waiting_for_next_event_timeout = config.wait_next_event_timeout;
         let subscribed_topics = Arc::new(DashMap::new());
 
         let transport = Self {
@@ -91,16 +77,11 @@ impl Libp2pTransport {
             receive_task,
             keypair,
             listener_manager,
-            check_dial_timeout,
-            channel_capacity,
-            get_swarm_lock_timeout,
-            waiting_for_gossipsub_peer_timeout,
-            waiting_for_gossipsub_peer_interval,
-            waiting_for_next_event_timeout,
+            config,
             subscribed_topics,
         };
 
-        transport.receive(config.cleanup_channel_interval).await;
+        transport.receive().await;
 
         Ok(transport)
     }
@@ -141,11 +122,12 @@ impl Libp2pTransport {
         .map_err(|_| Error::BindTimeout)?
     }
 
-    async fn receive(&self, cleanup_interval: Duration) {
+    async fn receive(&self) {
         let swarm = Arc::clone(&self.swarm);
+        let cleanup_interval = self.config.cleanup_channel_interval;
         let subscribed_topics = Arc::clone(&self.subscribed_topics);
         let listener_manager = Arc::clone(&self.listener_manager);
-        let waiting_for_next_event_timeout = self.waiting_for_next_event_timeout;
+        let waiting_for_next_event_timeout = self.config.wait_for_gossipsub_peer_timeout;
 
         tokio::spawn(async move {
             let mut cleanup_tick = interval(cleanup_interval);
@@ -242,18 +224,12 @@ impl Libp2pTransport {
     }
 
     async fn wait_for_gossipsub_subscription(&self, topic: &TopicHash) -> bool {
-        println!("Waiting for gossipsub subscription");
-
-        timeout(self.waiting_for_gossipsub_peer_timeout, async {
+        timeout(self.config.wait_for_gossipsub_peer_timeout, async {
             loop {
-                for topic in self.subscribed_topics.iter() {
-                    println!("Subscribed topic: {:?}", topic.key());
-                }
-
                 if self.subscribed_topics.contains_key(topic) {
                     return true;
                 }
-                sleep(self.waiting_for_gossipsub_peer_interval).await;
+                sleep(self.config.wait_for_gossipsub_peer_interval).await;
             }
         })
         .await
@@ -267,7 +243,7 @@ impl Libp2pTransport {
             }
         }
 
-        timeout(self.check_dial_timeout, async {
+        timeout(self.config.check_dial_timeout, async {
             let mut swarm = self.swarm.lock().await;
             tokio::select! {
                 event = swarm.select_next_some() => {
@@ -301,7 +277,7 @@ impl Libp2pTransport {
     }
 
     pub async fn swarm(&self) -> Result<MutexGuard<'_, Swarm<Behaviour>>> {
-        match timeout(self.get_swarm_lock_timeout, self.swarm.lock()).await {
+        match timeout(self.config.get_swarm_lock_timeout, self.swarm.lock()).await {
             Ok(guard) => Ok(guard),
             Err(_) => Err(Error::LockContention),
         }
@@ -348,7 +324,7 @@ impl Transport for Libp2pTransport {
                 self.subscribe(topic).await?;
             }
 
-            let (tx, rx) = channel(self.channel_capacity);
+            let (tx, rx) = channel(self.config.channel_capacity);
             self.listener_manager
                 .write()
                 .await
@@ -497,18 +473,7 @@ mod tests {
             !result.as_ref().unwrap().is_receiving().await,
             "Receiving task should not be running"
         );
-        assert_eq!(
-            result.as_ref().unwrap().check_dial_timeout,
-            config.check_dial_timeout
-        );
-        assert_eq!(
-            result.as_ref().unwrap().channel_capacity,
-            config.channel_capacity
-        );
-        assert_eq!(
-            result.as_ref().unwrap().get_swarm_lock_timeout,
-            config.get_swarm_lock_timeout
-        );
+        assert_eq!(result.as_ref().unwrap().config, config);
     }
 
     #[tokio::test]

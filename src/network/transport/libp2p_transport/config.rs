@@ -9,7 +9,7 @@ const DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_TIMEOUT: Duration = Duration::from_secs(10
 const DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_WAIT_NEXT_EVENT_TIMEOUT: Duration = Duration::from_millis(10);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub check_listen_timeout: Duration,
     pub check_dial_timeout: Duration,
@@ -31,7 +31,6 @@ impl Default for Config {
         let wait_for_gossipsub_peer_timeout = DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_TIMEOUT;
         let wait_for_gossipsub_peer_interval = DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_INTERVAL;
         let wait_next_event_timeout = DEFAULT_WAIT_NEXT_EVENT_TIMEOUT;
-
 
         Self {
             check_listen_timeout,
