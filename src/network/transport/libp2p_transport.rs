@@ -271,10 +271,6 @@ impl Libp2pTransport {
             Err(_) => Err(Error::LockContention),
         }
     }
-
-    pub async fn is_receiving(&self) -> bool {
-        self.receive_task.lock().await.is_running()
-    }
 }
 
 impl Transport for Libp2pTransport {
@@ -450,10 +446,6 @@ mod tests {
             result.is_ok(),
             "Failed to create Libp2pTransport: {:?}",
             result
-        );
-        assert!(
-            !result.as_ref().unwrap().is_receiving().await,
-            "Receiving task should not be running"
         );
         assert_eq!(result.as_ref().unwrap().config, config);
     }
