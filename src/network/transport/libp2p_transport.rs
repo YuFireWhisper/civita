@@ -123,17 +123,14 @@ impl Libp2pTransport {
 
     async fn receive(&self) {
         let arc_self = Arc::new(self.clone());
-        let cleanup_interval = self.config.cleanup_channel_interval;
-        let waiting_for_next_event_timeout = self.config.wait_for_gossipsub_peer_timeout;
-
         tokio::spawn(async move {
-            let mut cleanup_tick = interval(cleanup_interval);
+            let mut cleanup_tick = interval(arc_self.config.cleanup_channel_interval);
 
             loop {
                 tokio::select! {
                     _ = arc_self.clone().cleanup_channels(&mut cleanup_tick) => {},
                     _ = arc_self.clone().next_event() => {},
-                    _ = async { sleep(waiting_for_next_event_timeout).await } => {},
+                    _ = async { sleep(arc_self.config.wait_for_gossipsub_peer_timeout).await } => {},
                 }
             }
         });
