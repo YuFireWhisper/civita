@@ -5,10 +5,9 @@ pub mod message;
 pub mod protocols;
 pub mod receive_task;
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
 
 use behaviour::{Behaviour, Event};
-use dashmap::DashMap;
 use futures::StreamExt;
 use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
@@ -49,7 +48,7 @@ pub struct Libp2pTransport {
     keypair: Arc<Keypair>,
     listener_manager: Arc<RwLock<ListenerManager>>,
     config: Config,
-    subscribed_topics: Arc<DashMap<TopicHash, ()>>,
+    subscribed_topics: Arc<Mutex<HashSet<TopicHash>>>,
 }
 
 impl Libp2pTransport {
@@ -70,7 +69,7 @@ impl Libp2pTransport {
         let receive_task = Arc::new(Mutex::new(ReceiveTask::new()));
         let keypair = Arc::new(keypair);
         let listener_manager = Arc::new(RwLock::new(ListenerManager::new()));
-        let subscribed_topics = Arc::new(DashMap::new());
+        let subscribed_topics = Arc::new(Mutex::new(HashSet::new()));
 
         let transport = Self {
             swarm,
@@ -153,7 +152,7 @@ impl Libp2pTransport {
 
     async fn next_event(
         swarm: Arc<Mutex<Swarm<Behaviour>>>,
-        subscribed_topics: Arc<DashMap<TopicHash, ()>>,
+        subscribed_topics: Arc<Mutex<HashSet<TopicHash>>>,
         listener_manager: Arc<RwLock<ListenerManager>>,
     ) {
         let event = swarm.lock().await.select_next_some().await;
@@ -168,16 +167,12 @@ impl Libp2pTransport {
 
     async fn process_event(
         event: Event,
-        subscribed_topics: Arc<DashMap<TopicHash, ()>>,
+        subscribed_topics: Arc<Mutex<HashSet<TopicHash>>>,
         listener_manager: Arc<RwLock<ListenerManager>>,
     ) -> Result<()> {
         if let Event::Gossipsub(event) = &event {
-            if let libp2p::gossipsub::Event::Subscribed { peer_id, topic } = &**event {
-                println!("Got subscribed: {}, from: {}", topic, peer_id);
-                subscribed_topics.insert(topic.clone(), ());
-                for topic in subscribed_topics.iter() {
-                    println!("Subscribed topic(process_event): {}", topic.key());
-                }
+            if let libp2p::gossipsub::Event::Subscribed { topic, .. } = &**event {
+                subscribed_topics.lock().await.insert(topic.clone());
                 return Ok(());
             }
         }
@@ -226,7 +221,7 @@ impl Libp2pTransport {
     async fn wait_for_gossipsub_subscription(&self, topic: &TopicHash) -> bool {
         timeout(self.config.wait_for_gossipsub_peer_timeout, async {
             loop {
-                if self.subscribed_topics.contains_key(topic) {
+                if self.subscribed_topics.lock().await.contains(topic) {
                     return true;
                 }
                 sleep(self.config.wait_for_gossipsub_peer_interval).await;
