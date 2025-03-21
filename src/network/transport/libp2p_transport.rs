@@ -129,7 +129,11 @@ impl Libp2pTransport {
             loop {
                 tokio::select! {
                     _ = arc_self.clone().cleanup_channels(&mut cleanup_tick) => {},
-                    _ = arc_self.clone().next_event() => {},
+                    event = arc_self.clone().next_behaviour_event() => {
+                        if let Err(e) = arc_self.clone().process_event(event).await {
+                            warn!("Failed to process event: {:?}", e);
+                        }
+                    },
                     _ = async { sleep(arc_self.config.wait_for_gossipsub_peer_timeout).await } => {},
                 }
             }
@@ -142,11 +146,11 @@ impl Libp2pTransport {
         subs.remove_dead_channels();
     }
 
-    async fn next_event(self: Arc<Self>) {
-        let event = self.swarm_without_timeout().await.select_next_some().await;
-        if let SwarmEvent::Behaviour(event) = event {
-            if let Err(e) = self.process_event(event).await {
-                warn!("Failed to process event: {:?}", e);
+    async fn next_behaviour_event(self: Arc<Self>) -> Event {
+        loop {
+            match self.swarm_without_timeout().await.select_next_some().await {
+                SwarmEvent::Behaviour(event) => return event,
+                _ => continue,
             }
         }
     }
