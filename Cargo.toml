@@ -19,7 +19,7 @@ libp2p = { version = "0.55", features = [
 ] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
-sha2 = "0.10"
+sha2 = "0.9" # Required by curv-kzen, can't upgrade
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures = "0.3"
@@ -30,6 +30,7 @@ rand_core = "0.6" # Required by p256, can't upgrade
 mockall = "0.13"
 log = "0.4"
 rand = "0.9"
+curv-kzen = "0.10"
 
 [dev-dependencies]
 tempfile = "3.17"
