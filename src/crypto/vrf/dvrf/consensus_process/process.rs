@@ -273,7 +273,6 @@ impl ConsensusProcessFactory for ProcessFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_std::rand;
     use libp2p::PeerId;
     use tokio::time::{sleep, Duration};
 
@@ -355,7 +354,7 @@ mod tests {
     }
 
     fn generate_random_output() -> Vec<u8> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut proof = vec![0u8; 32];
         rand::Rng::fill(&mut rng, &mut proof[..]);
         proof
