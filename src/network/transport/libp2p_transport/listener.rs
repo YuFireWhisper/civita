@@ -61,8 +61,8 @@ impl Listener {
         sender.try_send(message).map_err(Error::from)
     }
 
-    pub fn broadcast_to_peer(&self, peer: PeerId, message: Message) -> Result<()> {
-        let sender = self.peers.get(&peer).ok_or(Error::NoSuchItem)?;
+    pub fn broadcast_to_peer(&self, peer: &PeerId, message: Message) -> Result<()> {
+        let sender = self.peers.get(peer).ok_or(Error::NoSuchItem)?;
         sender.try_send(message).map_err(Error::from)
     }
 }
