@@ -16,7 +16,7 @@ pub enum Error {
     #[error("{0}")]
     Crypto(#[from] crypto::Error),
     #[error("{0}")]
-    Messager(#[from] messager::Error),
+    Messager(String),
     #[error("{0}")]
     Processes(#[from] processes::Error),
     #[error("{0}")]
@@ -39,6 +39,12 @@ pub enum Error {
     InvalidMessageType,
     #[error("Invalid payload")]
     InvalidPayload,
+}
+
+impl From<messager::Error> for Error {
+    fn from(err: messager::Error) -> Self {
+        Error::Messager(err.to_string())
+    }
 }
 
 pub trait Vrf: Send + Sync {

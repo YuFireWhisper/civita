@@ -33,17 +33,17 @@ type Result<T> = std::result::Result<T, Error>;
 type ResultCallback = Box<dyn Fn(MessageId, &[u8]) + Send + Sync + 'static>;
 type FailureCallback = Box<dyn Fn(MessageId) + Send + Sync + 'static>;
 
-pub struct Components {
-    pub transport: Arc<dyn Transport>,
+pub struct Components<T: Transport + 'static> {
+    pub transport: Arc<T>,
     pub peer_id: PeerId,
     pub config: Config,
     pub process_factory: Arc<dyn ConsensusProcessFactory>,
     pub crypto: Arc<dyn Crypto>,
 }
 
-pub struct DVrf {
+pub struct DVrf<T: Transport + 'static> {
     crypto: Arc<dyn Crypto>, // We use Arc because Crypto may can't be cloned
-    messager: Messager,
+    messager: Messager<T>,
     processes: Processes,
     peer_id: PeerId,
     config: Config,
@@ -51,8 +51,8 @@ pub struct DVrf {
     on_failure: Mutex<Option<FailureCallback>>,
 }
 
-impl DVrf {
-    async fn new_with_components(components: Components) -> Result<Arc<Self>> {
+impl<T: Transport> DVrf<T> {
+    async fn new_with_components(components: Components<T>) -> Result<Arc<Self>> {
         let crypto = components.crypto;
         let messager = Messager::new(
             Arc::clone(&components.transport),
@@ -248,13 +248,13 @@ impl DVrf {
     }
 }
 
-impl Vrf for DVrf {
+impl<T: Transport> Vrf for DVrf<T> {
     fn new_random(self: Arc<Self>) -> Pin<Box<dyn Future<Output = Result<[u8; 32]>> + Send>> {
         Box::pin(self.new_random())
     }
 }
 
-impl VrfCallback for DVrf {
+impl<T: Transport> VrfCallback for DVrf<T> {
     fn set_result_callback<F>(&self, callback: F)
     where
         F: Fn(MessageId, &[u8]) + Send + Sync + 'static,
@@ -281,14 +281,10 @@ fn message_id_to_bytes(message_id: &MessageId) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::{future::Future, pin::Pin};
 
-    use libp2p::{gossipsub::MessageId, Multiaddr, PeerId};
+    use libp2p::{gossipsub::MessageId, PeerId};
     use mockall::mock;
-    use tokio::{
-        sync::mpsc::Receiver,
-        time::{Duration, Instant},
-    };
+    use tokio::time::{Duration, Instant};
 
     use super::config::Config;
     use super::crypto::Crypto;
@@ -302,38 +298,11 @@ mod tests {
         crypto::Error as CryptoError,
     };
     use crate::crypto::vrf::VrfCallback;
-    use crate::network::transport::Error as TransportError;
-    use crate::network::transport::Transport;
-    use crate::network::{transport::libp2p_transport::message::Message, transport::Listener};
+    use crate::network::transport::libp2p_transport::mock_transport::MockTransport;
 
     const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
     const TEST_OUTPUT: [u8; 32] = [1; 32];
     const TEST_PFOOF: [u8; 32] = [1; 32];
-
-    mock! {
-        pub Transport {}
-        impl Transport for Transport {
-            fn dial(
-                &self,
-                peer_id: PeerId,
-                addr: Multiaddr,
-            ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send>>;
-            fn listen(
-                &self,
-                filter: Listener,
-            ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, TransportError>> + Send>>;
-            fn publish<'a>(
-                &'a self,
-                topic: &'a str,
-                payload: crate::network::transport::libp2p_transport::protocols::gossipsub::Payload,
-            ) -> Pin<Box<dyn Future<Output = Result<MessageId, TransportError>> + Send>>;
-            fn request<'a>(
-                &'a self,
-                peer_id: PeerId,
-                payload: crate::network::transport::libp2p_transport::protocols::request_response::payload::Request,
-            ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send>>;
-        }
-    }
 
     mock! {
         pub ConsensusProcessFactory {}
@@ -374,16 +343,8 @@ mod tests {
         }
     }
 
-    fn create_components() -> Components {
-        let mut transport = MockTransport::new();
-        transport.expect_listen().returning(|_| {
-            let (_, rx) = tokio::sync::mpsc::channel(100);
-            Box::pin(async { Ok(rx) })
-        });
-        transport
-            .expect_publish()
-            .returning(|_, _| Box::pin(async { Ok(create_message_id()) }));
-
+    fn create_components() -> Components<MockTransport> {
+        let transport = MockTransport::new();
         let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);
         crypto
@@ -415,7 +376,7 @@ mod tests {
         }
     }
 
-    async fn create_dvrf() -> Arc<DVrf> {
+    async fn create_dvrf() -> Arc<DVrf<MockTransport>> {
         let components = create_components();
         DVrf::new_with_components(components).await.unwrap()
     }
@@ -440,18 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_random_success() {
-        let mut transport = MockTransport::new();
-        transport
-            .expect_listen()
-            .returning(|_| {
-                let (_, rx) = tokio::sync::mpsc::channel(100);
-                Box::pin(async { Ok(rx) })
-            })
-            .times(1);
-        transport
-            .expect_publish()
-            .returning(|_, _| Box::pin(async { Ok(create_message_id()) }))
-            .times(2..);
+        let transport = MockTransport::new();
 
         let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);

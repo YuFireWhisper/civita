@@ -11,7 +11,13 @@ pub enum Error {
     #[error("No such item")]
     NoSuchItem,
     #[error("Failed to send message: {0}")]
-    SendFailed(#[from] TrySendError<Message>),
+    SendFailed(String),
+}
+
+impl From<TrySendError<Message>> for Error {
+    fn from(err: TrySendError<Message>) -> Self {
+        Error::SendFailed(err.to_string())
+    }
 }
 
 type Result<T> = std::result::Result<T, Error>;

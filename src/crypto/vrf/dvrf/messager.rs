@@ -7,7 +7,7 @@ use tokio::sync::mpsc::Receiver;
 use crate::network::transport::{
     self,
     libp2p_transport::{message::Message, protocols::gossipsub::Payload},
-    Listener, Transport,
+    Transport,
 };
 
 use super::proof::Proof;
@@ -15,9 +15,15 @@ use super::proof::Proof;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
-    Transport(#[from] transport::Error),
+    Transport(String),
     #[error("Failed to get message ID")]
     MessageId,
+}
+
+impl From<transport::Error> for Error {
+    fn from(err: transport::Error) -> Self {
+        Error::Transport(err.to_string())
+    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -39,13 +45,13 @@ pub trait MessagerEngine: Send + Sync {
     fn send_vrf_failure(&self, message_id: MessageId) -> impl Future<Output = Result<MessageId>>;
 }
 
-pub struct Messager {
-    transport: Arc<dyn Transport>,
+pub struct Messager<T: Transport> {
+    transport: Arc<T>,
     topic: String,
 }
 
-impl Messager {
-    pub fn new(transport: Arc<dyn Transport>, topic: String) -> Self {
+impl<T: Transport> Messager<T> {
+    pub fn new(transport: Arc<T>, topic: String) -> Self {
         Self { transport, topic }
     }
 
@@ -55,10 +61,12 @@ impl Messager {
     }
 }
 
-impl MessagerEngine for Messager {
+impl<T: Transport> MessagerEngine for Messager<T> {
     async fn subscribe(&self) -> Result<Receiver<Message>> {
-        let filter = Listener::Topic(self.topic.clone());
-        self.transport.listen(filter).await.map_err(Error::from)
+        self.transport
+            .listen_on_topic(&self.topic)
+            .await
+            .map_err(Error::from)
     }
 
     async fn send_vrf_request(&self) -> Result<MessageId> {
@@ -91,26 +99,6 @@ impl MessagerEngine for Messager {
 
 #[cfg(test)]
 mod tests {
-    // use crate::network::transport::libp2p_transport::{
-    //     test_transport::{TestTransport, TEST_TOPIC},
-    //     Libp2pTransport,
-    // };
-    //
-    // use super::Messager;
-    //
-    // async fn create_arc_test_transport() -> Arc<Libp2pTransport> {
-    //     Arc::new(TestTransport::new().await.unwrap().p2p)
-    // }
-    //
-    // #[tokio::test]
-    // async fn test_new() {
-    //     let transport = create_arc_test_transport().await;
-    //
-    //     let messager = Messager::new(transport, TEST_TOPIC.to_string());
-    //
-    //     assert_eq!(messager.topic, TEST_TOPIC);
-    // }
-
     #[ignore]
     #[tokio::test]
     async fn test_subscribe() {

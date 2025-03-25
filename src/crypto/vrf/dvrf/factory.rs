@@ -53,7 +53,7 @@ impl Factory {
         self
     }
 
-    pub async fn create_service(&mut self) -> Result<Arc<DVrf>, Error> {
+    pub async fn create_service(&mut self) -> Result<Arc<DVrf<Libp2pTransport>>, Error> {
         let transport = Arc::clone(&self.transport);
         let config = self.get_config();
         let peer_id = self.peer_id;

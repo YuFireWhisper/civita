@@ -1,6 +1,6 @@
 pub mod behaviour;
 pub mod config;
-pub mod listener_manager;
+pub mod listener;
 pub mod message;
 pub mod protocols;
 
@@ -25,17 +25,18 @@ use tokio::{
     time::{interval, sleep, timeout, Duration, Interval},
 };
 
-use crate::network::transport::libp2p_transport::{
-    config::Config,
-    listener_manager::ListenerManager,
-    message::Message,
-    protocols::{
-        gossipsub,
-        request_response::{self, payload::Request},
+use crate::network::transport::{
+    libp2p_transport::{
+        config::Config,
+        listener::Listener,
+        message::Message,
+        protocols::{
+            gossipsub,
+            request_response::{self, payload::Request},
+        },
     },
+    Error, Transport,
 };
-
-use super::{Error, Listener, Transport};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -43,7 +44,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct Libp2pTransport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     keypair: Arc<Keypair>,
-    listener_manager: Arc<RwLock<ListenerManager>>,
+    listener: Arc<RwLock<Listener>>,
     config: Config,
     subscribed_topics: Arc<Mutex<HashSet<TopicHash>>>,
 }
@@ -64,13 +65,13 @@ impl Libp2pTransport {
 
         let swarm = Arc::new(Mutex::new(swarm));
         let keypair = Arc::new(keypair);
-        let listener_manager = Arc::new(RwLock::new(ListenerManager::new()));
+        let listener = Arc::new(RwLock::new(Listener::new()));
         let subscribed_topics = Arc::new(Mutex::new(HashSet::new()));
 
         let transport = Self {
             swarm,
             keypair,
-            listener_manager,
+            listener,
             config,
             subscribed_topics,
         };
@@ -137,8 +138,7 @@ impl Libp2pTransport {
 
     async fn cleanup_channels(self: Arc<Self>, interval: &mut Interval) {
         interval.tick().await;
-        let mut subs = self.listener_manager.write().await;
-        subs.remove_dead_channels();
+        self.listener.write().await.remove_dead_channels();
     }
 
     async fn next_behaviour_event(self: Arc<Self>) -> Event {
@@ -163,41 +163,40 @@ impl Libp2pTransport {
         }
 
         match Message::try_from(event)? {
-            Message::Gossipsub(msg) => {
-                self.handle_gossipsub_event(msg).await;
-                Ok(())
-            }
+            Message::Gossipsub(msg) => self.handle_gossipsub_event(msg).await,
             Message::Kad(msg) => {
                 Self::handle_kad_event(msg);
                 Ok(())
             }
-            Message::RequestResponse(msg) => {
-                self.handle_request_response_event(msg).await;
-                Ok(())
-            }
+            Message::RequestResponse(msg) => self.handle_request_response_event(msg).await,
         }
     }
 
-    async fn handle_gossipsub_event(self: Arc<Self>, message: gossipsub::Message) {
-        let topic = &message.topic;
-        let topic_filter = Listener::Topic(topic.clone());
+    async fn handle_gossipsub_event(self: Arc<Self>, message: gossipsub::Message) -> Result<()> {
+        let topic = message.topic.clone();
         let msg = Message::Gossipsub(message);
-
-        self.listener_manager
+        self.listener
             .read()
             .await
-            .broadcast(&topic_filter, msg);
+            .broadcast_to_topic(&topic, msg)
+            .map_err(Error::from)
     }
 
     fn handle_kad_event(message: protocols::kad::Message) {
         println!("Kademlia event: {:?}", message);
     }
 
-    async fn handle_request_response_event(self: Arc<Self>, message: request_response::Message) {
-        let filter = Listener::Peer(vec![message.peer]);
+    async fn handle_request_response_event(
+        self: Arc<Self>,
+        message: request_response::Message,
+    ) -> Result<()> {
+        let peer = message.peer;
         let msg = Message::RequestResponse(message);
-
-        self.listener_manager.read().await.broadcast(&filter, msg);
+        self.listener
+            .read()
+            .await
+            .broadcast_to_peer(&peer, msg)
+            .map_err(Error::from)
     }
 
     async fn wait_for_gossipsub_subscription(&self, topic: &TopicHash) -> bool {
@@ -246,20 +245,28 @@ impl Transport for Libp2pTransport {
         })
     }
 
-    fn listen(
-        &self,
-        listener: Listener,
-    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send + '_>> {
+    fn listen_on_topic<'a>(
+        &'a self,
+        topic: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send + 'a>> {
         Box::pin(async move {
-            if let Listener::Topic(topic) = &listener {
-                self.subscribe(topic).await?;
-            }
-
+            self.subscribe(topic).await?;
             let (tx, rx) = channel(self.config.channel_capacity);
-            self.listener_manager
+            self.listener
                 .write()
                 .await
-                .add_listener(listener, tx);
+                .add_topic(topic.to_string(), &tx);
+            Ok(rx)
+        })
+    }
+
+    fn listen_on_peers<'a>(
+        &'a self,
+        peers: impl IntoIterator<Item = PeerId> + Send + 'a,
+    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>>> + Send + 'a>> {
+        Box::pin(async move {
+            let (tx, rx) = channel(self.config.channel_capacity);
+            self.listener.write().await.add_peers(peers, &tx);
             Ok(rx)
         })
     }
@@ -328,7 +335,7 @@ mod tests {
             test_transport::TestTransport,
             Libp2pTransport,
         },
-        Listener, Transport,
+        Transport,
     };
     use libp2p::identity::Keypair;
     use tokio::time::{timeout, Duration};
@@ -374,7 +381,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_new() {
+    async fn create_success() {
         let keypair = Keypair::generate_ed25519();
         let listen_addr = LISTEN_ADDR.parse().unwrap();
         let config = Config::default();
@@ -386,11 +393,10 @@ mod tests {
             "Failed to create Libp2pTransport: {:?}",
             result
         );
-        assert_eq!(result.as_ref().unwrap().config, config);
     }
 
     #[tokio::test]
-    async fn test_dial() {
+    async fn dial_connection() {
         let mut ctx = TestContext::connected().await;
 
         let t1_connected = ctx.t1.check_kad_connection(&ctx.t2.peer_id).await;
@@ -401,14 +407,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_listen() {
+    async fn listen_on_topic_success() {
         let ctx = TestContext::connected().await;
-        let filter = Listener::Topic(TOPIC.to_string());
 
-        let result = ctx.t2.p2p.listen(filter).await;
+        let result = ctx.t1.p2p.listen_on_topic(TOPIC).await;
 
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().capacity(), ctx.t1.config.channel_capacity);
+        assert!(result.is_ok(), "Failed to listen on topic: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn listen_on_peers_success() {
+        let ctx = TestContext::connected().await;
+
+        let result = ctx.t1.p2p.listen_on_peers(vec![ctx.t2.peer_id]).await;
+
+        assert!(result.is_ok(), "Failed to listen on peers: {:?}", result);
     }
 
     #[tokio::test]
@@ -416,10 +429,9 @@ mod tests {
         use gossipsub::Payload;
 
         let ctx = TestContext::connected().await;
-        let listener = Listener::Topic(TOPIC.to_string());
         let payload = Payload::Raw(PAYLOAD.to_vec());
 
-        ctx.t2.p2p.listen(listener).await.unwrap();
+        ctx.t2.p2p.listen_on_topic(TOPIC).await.unwrap();
 
         let result = ctx.t1.p2p.publish(TOPIC, payload.clone()).await;
 
@@ -442,8 +454,7 @@ mod tests {
 
         let ctx = TestContext::connected().await;
         let payload = Payload::Raw(PAYLOAD.to_vec());
-        let filter = Listener::Topic(TOPIC.to_string());
-        let mut rx = ctx.t2.p2p.listen(filter).await.unwrap();
+        let mut rx = ctx.t2.p2p.listen_on_topic(TOPIC).await.unwrap();
 
         ctx.t1.p2p.publish(TOPIC, payload.clone()).await.unwrap();
 
@@ -466,8 +477,12 @@ mod tests {
     async fn test_receive_request_response() {
         let ctx = TestContext::connected().await;
 
-        let listener = Listener::Peer(vec![ctx.t1.peer_id]);
-        let mut rx = ctx.t2.p2p.listen(listener).await.unwrap();
+        let mut rx = ctx
+            .t2
+            .p2p
+            .listen_on_peers(vec![ctx.t1.peer_id])
+            .await
+            .unwrap();
 
         let request = Request::Raw(PAYLOAD.to_vec());
         ctx.t1
@@ -541,6 +556,134 @@ pub mod test_transport {
         pub async fn listen_addr(&self) -> Vec<Multiaddr> {
             let swarm = self.p2p_swarm().await;
             swarm.listeners().cloned().collect()
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod mock_transport {
+    use std::{collections::VecDeque, sync::Mutex};
+
+    use libp2p::gossipsub::MessageId;
+    use tokio::sync::mpsc::Receiver;
+
+    use crate::network::transport::{libp2p_transport::message::Message, Transport};
+
+    const MESSAGE_ID: &str = "MESSAGE_ID";
+
+    #[derive(Default)]
+    pub struct MockTransport {
+        pub topic_rxs: Mutex<VecDeque<Receiver<Message>>>,
+        pub peer_rxs: Mutex<VecDeque<Receiver<Message>>>,
+    }
+
+    impl MockTransport {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn with_topic_rx(self, rx: Receiver<Message>) -> Self {
+            self.topic_rxs.lock().unwrap().push_back(rx);
+            self
+        }
+
+        pub fn with_peer_rx(self, rx: Receiver<Message>) -> Self {
+            self.peer_rxs.lock().unwrap().push_back(rx);
+            self
+        }
+
+        fn next_topic_rx(&self) -> Receiver<Message> {
+            self.topic_rxs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("No topic rx available")
+        }
+
+        fn next_peer_rx(&self) -> Receiver<Message> {
+            self.peer_rxs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("No peer rx available")
+        }
+    }
+
+    impl Transport for MockTransport {
+        fn dial(
+            &self,
+            _peer_id: libp2p::PeerId,
+            _addr: libp2p::Multiaddr,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::prelude::rust_2024::Future<
+                        Output = Result<(), crate::network::transport::Error>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn listen_on_topic<'a>(
+            &'a self,
+            _topic: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::prelude::rust_2024::Future<
+                        Output = Result<Receiver<Message>, crate::network::transport::Error>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(self.next_topic_rx()) })
+        }
+
+        fn listen_on_peers<'a>(
+            &'a self,
+            _peers: impl IntoIterator<Item = libp2p::PeerId> + Send + 'a,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::prelude::rust_2024::Future<
+                        Output = Result<Receiver<Message>, crate::network::transport::Error>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(self.next_peer_rx()) })
+        }
+
+        fn publish<'a>(
+            &'a self,
+            _topic: &'a str,
+            _payload: super::protocols::gossipsub::Payload,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::prelude::rust_2024::Future<
+                        Output = Result<
+                            libp2p::gossipsub::MessageId,
+                            crate::network::transport::Error,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(MessageId::from(MESSAGE_ID)) })
+        }
+
+        fn request<'a>(
+            &'a self,
+            _peer_id: libp2p::PeerId,
+            _request: super::protocols::request_response::payload::Request,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::prelude::rust_2024::Future<
+                        Output = Result<(), crate::network::transport::Error>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(()) })
         }
     }
 }

@@ -1,5 +1,7 @@
-use libp2p::gossipsub::MessageId;
+use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
+
+use crate::network::transport::libp2p_transport::message::Message;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {
@@ -14,6 +16,7 @@ pub enum Payload {
         random: [u8; 32],
     },
     VrfProcessFailure(MessageId),
+    DkgVSS(Vec<u8>),
     Raw(Vec<u8>), // For testing
 }
 
@@ -28,6 +31,15 @@ impl Payload {
 
     pub fn create_vrf_consensus(message_id: MessageId, random: [u8; 32]) -> Payload {
         Payload::VrfConsensus { message_id, random }
+    }
+
+    pub fn get_dkg_vss(msg: Message) -> Option<(PeerId, Vec<u8>)> {
+        if let Message::Gossipsub(gossipsub_msg) = msg {
+            if let Payload::DkgVSS(vss) = gossipsub_msg.payload {
+                return Some((gossipsub_msg.source, vss));
+            }
+        }
+        None
     }
 }
 
@@ -53,7 +65,7 @@ mod tests {
 
     use crate::{
         crypto::vrf::dvrf::proof::Proof,
-        network::transport::libp2p_transport::protocols::gossipsub::Payload,
+        network::transport::libp2p_transport::{message::Message, protocols::gossipsub::{self, message::mock_message::create_message, Payload}},
     };
 
     const MESSAGE_ID: &str = "MESSAGE_ID";
@@ -72,6 +84,20 @@ mod tests {
 
     fn create_proof() -> Proof {
         Proof::new(OUTPUT.to_vec(), PROOF.to_vec())
+    }
+
+    fn create_network_msg(msg: gossipsub::Message) -> Message {
+        Message::Gossipsub(msg)
+    }
+
+    fn create_gossipsub_msg(payload: Payload) -> gossipsub::Message {
+        let mut msg = create_message();
+        msg.payload = payload;
+        msg
+    }
+
+    fn create_dkg_vss_payload() -> Payload {
+        Payload::DkgVSS(OUTPUT.to_vec())
     }
 
     #[test]
@@ -110,5 +136,17 @@ mod tests {
             "Expected: {:?}, got: {:?}",
             expected, result
         );
+    }
+
+    #[test]
+    fn return_vec_for_dkg_vss() {
+        let payload = create_dkg_vss_payload();
+        let gossipsub_msg = create_gossipsub_msg(payload);
+        let peer = gossipsub_msg.source;
+        let network_msg = create_network_msg(gossipsub_msg);
+
+        let result = Payload::get_dkg_vss(network_msg);
+
+        assert_eq!(result, Some((peer, OUTPUT.to_vec())));
     }
 }
