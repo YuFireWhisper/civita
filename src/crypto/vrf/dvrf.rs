@@ -284,6 +284,7 @@ mod tests {
 
     use libp2p::{gossipsub::MessageId, PeerId};
     use mockall::mock;
+    use tokio::sync::mpsc::channel;
     use tokio::time::{Duration, Instant};
 
     use super::config::Config;
@@ -344,7 +345,8 @@ mod tests {
     }
 
     fn create_components() -> Components<MockTransport> {
-        let transport = MockTransport::new();
+        let (_, rx) = channel(100);
+        let transport = MockTransport::new().with_topic_rx(rx);
         let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);
         crypto
@@ -401,7 +403,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_random_success() {
-        let transport = MockTransport::new();
+        let (_, rx) = channel(100);
+        let transport = MockTransport::new().with_topic_rx(rx);
 
         let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);
@@ -425,7 +428,6 @@ mod tests {
                 process
                     .expect_status()
                     .returning(|| ProcessStatus::Completed(TEST_OUTPUT));
-
                 Box::new(process)
             })
             .times(1);
