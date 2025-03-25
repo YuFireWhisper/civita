@@ -562,19 +562,35 @@ pub mod test_transport {
 
 #[cfg(test)]
 pub mod mock_transport {
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{collections::VecDeque, future::Future, pin::Pin, sync::Mutex};
 
-    use libp2p::gossipsub::MessageId;
+    use libp2p::{gossipsub::MessageId, Multiaddr, PeerId};
     use tokio::sync::mpsc::Receiver;
 
-    use crate::network::transport::{libp2p_transport::message::Message, Transport};
+    use crate::network::transport::{
+        libp2p_transport::{
+            message::Message,
+            protocols::{gossipsub::Payload, request_response::payload::Request},
+        },
+        Error, Transport,
+    };
 
-    const MESSAGE_ID: &str = "MESSAGE_ID";
+    pub trait ListenOnTopicCallback: FnOnce(&str) -> Receiver<Message> + Send {}
+    pub trait ListenOnPeersCallback: FnOnce(Vec<PeerId>) -> Receiver<Message> + Send {}
+    pub trait PublishCallback: FnOnce(&str, Payload) -> MessageId  + Send {}
+    pub trait RequestCallback: FnOnce(PeerId, Request) + Send {}
+
+    impl<F> ListenOnTopicCallback for F where F: FnOnce(&str) -> Receiver<Message>  + Send{}
+    impl<F> ListenOnPeersCallback for F where F: FnOnce(Vec<PeerId>) -> Receiver<Message> + Send {}
+    impl<F> PublishCallback for F where F: FnOnce(&str, Payload) -> MessageId + Send {}
+    impl<F> RequestCallback for F where F: FnOnce(PeerId, Request) + Send {}
 
     #[derive(Default)]
     pub struct MockTransport {
-        pub topic_rxs: Mutex<VecDeque<Receiver<Message>>>,
-        pub peer_rxs: Mutex<VecDeque<Receiver<Message>>>,
+        pub listen_on_topic_cbs: Mutex<VecDeque<Box<dyn ListenOnTopicCallback>>>,
+        pub listen_on_peers_cbs: Mutex<VecDeque<Box<dyn ListenOnPeersCallback>>>,
+        pub publish_cbs: Mutex<VecDeque<Box<dyn PublishCallback>>>,
+        pub request_cbs: Mutex<VecDeque<Box<dyn RequestCallback>>>,
     }
 
     impl MockTransport {
@@ -582,108 +598,147 @@ pub mod mock_transport {
             Self::default()
         }
 
-        pub fn with_topic_rx(self, rx: Receiver<Message>) -> Self {
-            self.topic_rxs.lock().unwrap().push_back(rx);
+        pub fn with_listen_on_topic_cb<F>(self, cb: F, times: usize) -> Self
+        where
+            F: ListenOnTopicCallback + 'static + Clone,
+        {
+            for _ in 0..times {
+                self.listen_on_topic_cbs
+                    .lock()
+                    .unwrap()
+                    .push_back(Box::new(cb.clone()));
+            }
             self
         }
 
-        pub fn with_peer_rx(self, rx: Receiver<Message>) -> Self {
-            self.peer_rxs.lock().unwrap().push_back(rx);
+        pub fn with_listen_on_topic_cb_once<F>(self, cb: F) -> Self
+        where
+            F: ListenOnTopicCallback + 'static,
+        {
+            self.listen_on_topic_cbs
+                .lock()
+                .unwrap()
+                .push_back(Box::new(cb));
             self
         }
 
-        fn next_topic_rx(&self) -> Receiver<Message> {
-            self.topic_rxs
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("No topic rx available")
+        pub fn with_listen_on_peers_cb<F>(self, cb: F, times: usize) -> Self
+        where
+            F: ListenOnPeersCallback + 'static + Clone,
+        {
+            for _ in 0..times {
+                self.listen_on_peers_cbs
+                    .lock()
+                    .unwrap()
+                    .push_back(Box::new(cb.clone()));
+            }
+            self
         }
 
-        fn next_peer_rx(&self) -> Receiver<Message> {
-            self.peer_rxs
+        pub fn with_listen_on_peers_cb_once<F>(self, cb: F) -> Self
+        where
+            F: ListenOnPeersCallback + 'static,
+        {
+            self.listen_on_peers_cbs
+                .lock()
+                .unwrap()
+                .push_back(Box::new(cb));
+            self
+        }
+
+        pub fn with_publish_cb<F>(self, cb: F, times: usize) -> Self
+        where
+            F: PublishCallback + 'static + Clone,
+        {
+            for _ in 0..times {
+                self.publish_cbs.lock().unwrap().push_back(Box::new(cb.clone()));
+            }
+            self
+        }
+
+        pub fn with_request_cb<F>(self, cb: F, times: usize) -> Self
+        where
+            F: RequestCallback + 'static + Clone,
+        {
+            for _ in 0..times {
+                self.request_cbs.lock().unwrap().push_back(Box::new(cb.clone()));
+            }
+            self
+        }
+
+        fn next_topic_cb(&self) -> Box<dyn ListenOnTopicCallback> {
+            self.listen_on_topic_cbs
                 .lock()
                 .unwrap()
                 .pop_front()
-                .expect("No peer rx available")
+                .expect("No listen on topic callback available")
+        }
+
+        fn next_peer_cb(&self) -> Box<dyn ListenOnPeersCallback> {
+            self.listen_on_peers_cbs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("No listen on peers callback available")
+        }
+
+        fn next_publish_cb(&self) -> Box<dyn PublishCallback> {
+            self.publish_cbs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("No publish callback available")
+        }
+
+        fn next_request_cb(&self) -> Box<dyn RequestCallback> {
+            self.request_cbs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("No request callback available")
         }
     }
 
     impl Transport for MockTransport {
         fn dial(
             &self,
-            _peer_id: libp2p::PeerId,
-            _addr: libp2p::Multiaddr,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::prelude::rust_2024::Future<
-                        Output = Result<(), crate::network::transport::Error>,
-                    > + Send
-                    + '_,
-            >,
-        > {
+            _peer_id: PeerId,
+            _addr: Multiaddr,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
         fn listen_on_topic<'a>(
             &'a self,
-            _topic: &'a str,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::prelude::rust_2024::Future<
-                        Output = Result<Receiver<Message>, crate::network::transport::Error>,
-                    > + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(self.next_topic_rx()) })
+            topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + 'a>> {
+            Box::pin(async { Ok(self.next_topic_cb()(topic)) })
         }
 
         fn listen_on_peers<'a>(
             &'a self,
-            _peers: impl IntoIterator<Item = libp2p::PeerId> + Send + 'a,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::prelude::rust_2024::Future<
-                        Output = Result<Receiver<Message>, crate::network::transport::Error>,
-                    > + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(self.next_peer_rx()) })
+            peers: impl IntoIterator<Item = PeerId> + Send + 'a,
+        ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + 'a>> {
+            Box::pin(async { Ok(self.next_peer_cb()(peers.into_iter().collect())) })
         }
 
         fn publish<'a>(
             &'a self,
-            _topic: &'a str,
-            _payload: super::protocols::gossipsub::Payload,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::prelude::rust_2024::Future<
-                        Output = Result<
-                            libp2p::gossipsub::MessageId,
-                            crate::network::transport::Error,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(MessageId::from(MESSAGE_ID)) })
+            topic: &'a str,
+            payload: Payload,
+        ) -> Pin<Box<dyn Future<Output = Result<MessageId, Error>> + Send + 'a>> {
+            Box::pin(async { Ok(self.next_publish_cb()(topic, payload)) })
         }
 
         fn request<'a>(
             &'a self,
-            _peer_id: libp2p::PeerId,
-            _request: super::protocols::request_response::payload::Request,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::prelude::rust_2024::Future<
-                        Output = Result<(), crate::network::transport::Error>,
-                    > + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(()) })
+            peer_id: PeerId,
+            request: Request,
+        ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
+            Box::pin(async move {
+                self.next_request_cb()(peer_id, request);
+                Ok(())
+            })
         }
     }
 }

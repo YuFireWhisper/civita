@@ -121,19 +121,22 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
         let num_peers = Self::calculate_num_peers(&peers);
         let threshold = (config.threshold_counter)(num_peers);
-        let (verifiable_ss, secret_shares) = Self::generate_shares::<H>(threshold - 1, num_peers);
+        let (verifiable_ss, secret_shares) = Self::generate_shares::<H>(threshold, num_peers);
 
-        Self::publish_verifiable_ss(transport.clone(), verifiable_ss.clone()).await?;
-        Self::send_shares(transport.clone(), &peers, secret_shares.clone()).await?;
+        Self::publish_verifiable_ss(transport.clone(), &verifiable_ss).await?;
+        Self::send_shares(transport.clone(), &peers, &secret_shares).await?;
 
         let collected = timeout(config.timeout, async {
-            Self::collect_data::<H>(share_rx, vss_rx, num_peers - 1).await
+            let nums = num_peers - 1; // Exclude self
+            Self::collect_data::<H>(share_rx, vss_rx, nums).await
         })
         .await
         .map_err(|_| Error::Timeout)??;
-        let self_index = Self::self_index(self_peer, &peers);
+
+        let self_index = Self::self_index(&self_peer, &peers);
         let mut shares = Self::validate_data(&collected, self_index)?;
         shares.push(secret_shares[(self_index - 1) as usize].clone());
+
         let secret = Self::construct_secret(
             &verifiable_ss,
             &(1..=num_peers).collect::<Vec<u16>>(),
@@ -190,14 +193,15 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         nums: u16,
     ) -> (VerifiableSS<E, H>, SecretShares<E>) {
         let secret = Scalar::random();
+        let threshold = threshold - 1; // share need t - 1
         VerifiableSS::<E, H>::share(threshold, nums, &secret)
     }
 
     async fn publish_verifiable_ss<H: Digest + Clone>(
         transport: Arc<T>,
-        verifiable_ss: VerifiableSS<E, H>,
+        verifiable_ss: &VerifiableSS<E, H>,
     ) -> Result<()> {
-        let bytes = serde_json::to_string(&verifiable_ss)?;
+        let bytes = serde_json::to_string(verifiable_ss)?;
         let request = Payload::DkgVSS(bytes.into());
         transport.publish(DKG_TOPIC, request).await?;
         Ok(())
@@ -206,7 +210,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
     async fn send_shares(
         transport: Arc<T>,
         peers: &HashMap<PeerId, u16>,
-        shares: SecretShares<E>,
+        shares: &SecretShares<E>,
     ) -> Result<()> {
         for ((peer_id, _), share) in peers.iter().zip(shares.iter()) {
             let request = Request::DkgScalar(share.to_bytes().to_vec());
@@ -250,8 +254,8 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         Ok(collected)
     }
 
-    fn self_index(self_peer: PeerId, peers: &HashMap<PeerId, u16>) -> u16 {
-        peers.get(&self_peer).copied().unwrap_or_default()
+    fn self_index(self_peer: &PeerId, peers: &HashMap<PeerId, u16>) -> u16 {
+        peers.get(self_peer).copied().unwrap_or_default()
     }
 
     fn validate_data<H: Digest + Clone>(
@@ -311,10 +315,7 @@ where
 #[cfg(test)]
 mod tests {
 
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Arc,
-    };
+    use std::{collections::HashSet, sync::Arc};
 
     use curv::{
         cryptographic_primitives::secret_sharing::feldman_vss::{SecretShares, VerifiableSS},
@@ -345,57 +346,43 @@ mod tests {
     type E = Secp256k1;
     type H = Sha256;
 
-    fn generate_peers(n: u16) -> (PeerId, HashSet<PeerId>) {
-        let self_peer = PeerId::random();
-        let mut other_peers = HashSet::with_capacity(n as usize);
-        for _ in 0..n - 1 {
-            other_peers.insert(PeerId::random());
-        }
-        (self_peer, other_peers)
+    struct MockNode {
+        peer: PeerId,
+        v_ss: VerifiableSS<E, H>,
+        shares: SecretShares<E>,
+        target_index: u16,
     }
 
-    fn generate_shares(
-        threshold: u16,
-        peers: HashSet<PeerId>,
-    ) -> (
-        HashMap<PeerId, VerifiableSS<E, H>>,
-        HashMap<PeerId, SecretShares<E>>,
-    ) {
-        let mut v_ss_map: HashMap<PeerId, VerifiableSS<E, H>> = HashMap::with_capacity(peers.len());
-        let mut shares_map: HashMap<PeerId, SecretShares<E>> = HashMap::with_capacity(peers.len());
-        let len = peers.len() as u16;
+    impl MockNode {
+        fn new(peer: PeerId, target_index: u16) -> Self {
+            let scalar = Scalar::random();
+            let threshold = (2 * NUM_PEERS / 3) + 1;
+            let (v_ss, shares) = VerifiableSS::<E, H>::share(threshold - 1, NUM_PEERS, &scalar);
 
-        for peer in peers.into_iter() {
-            let (v_ss, shares) = VerifiableSS::<E, H>::share(threshold, len, &Scalar::random());
-            v_ss_map.insert(peer, v_ss);
-            shares_map.insert(peer, shares);
-        }
-
-        (v_ss_map, shares_map)
-    }
-
-    fn get_self_index(self_peer: PeerId, peers: HashSet<PeerId>) -> u16 {
-        let mut sorted_peers: Vec<PeerId> = peers.into_iter().collect();
-        sorted_peers.sort();
-        match sorted_peers.binary_search(&self_peer) {
-            Ok(index) => (index + 1) as u16,
-            Err(_) => panic!("Self peer not found in peers list"),
-        }
-    }
-
-    async fn send_v_sss(
-        topic_tx: &Sender<Message>,
-        self_peer: PeerId,
-        v_ss_map: HashMap<PeerId, VerifiableSS<E, H>>,
-    ) {
-        for (peer, v_ss) in v_ss_map.into_iter() {
-            if peer == self_peer {
-                continue;
+            Self {
+                peer,
+                v_ss,
+                shares,
+                target_index,
             }
-            let payload = Payload::DkgVSS(serde_json::to_string(&v_ss).unwrap().into());
-            let msg = create_gossipsub_message(peer, DKG_TOPIC, payload);
+        }
+
+        async fn send_v_ss(&self, topic_tx: &Sender<Message>) {
+            let payload = Payload::DkgVSS(serde_json::to_string(&self.v_ss).unwrap().into());
+            let msg = create_gossipsub_message(self.peer, DKG_TOPIC, payload);
             topic_tx.send(msg).await.unwrap();
         }
+
+        async fn send_shares(&self, peer_tx: &Sender<Message>) {
+            let share = &self.shares[self.target_index as usize - 1];
+            let payload = Request::DkgScalar(share.to_bytes().to_vec());
+            let msg = create_request_message(self.peer, payload);
+            peer_tx.send(msg).await.unwrap();
+        }
+    }
+
+    fn generate_peers(n: u16) -> HashSet<PeerId> {
+        (0..n).map(|_| PeerId::random()).collect()
     }
 
     fn create_gossipsub_message(source: PeerId, topic: &str, payload: Payload) -> Message {
@@ -411,24 +398,6 @@ mod tests {
         })
     }
 
-    async fn send_shares(
-        topic_tx: &Sender<Message>,
-        self_peer: PeerId,
-        shares_map: HashMap<PeerId, SecretShares<E>>,
-    ) {
-        let peers: HashSet<PeerId> = shares_map.keys().copied().collect();
-        let index = get_self_index(self_peer, peers) - 1;
-
-        for (peer, shares) in shares_map.into_iter() {
-            if peer == self_peer {
-                continue;
-            }
-            let payload = Request::DkgScalar(shares[index as usize].to_bytes().to_vec());
-            let msg = create_request_message(peer, payload);
-            topic_tx.send(msg).await.unwrap();
-        }
-    }
-
     fn create_request_message(peer: PeerId, payload: Request) -> Message {
         let payload = request_response::Payload::Request(payload);
         Message::RequestResponse(request_response::Message { peer, payload })
@@ -439,8 +408,10 @@ mod tests {
         peer_rx: Receiver<Message>,
     ) -> MockTransport {
         MockTransport::new()
-            .with_topic_rx(topic_rx)
-            .with_peer_rx(peer_rx)
+            .with_listen_on_topic_cb_once(|_| topic_rx)
+            .with_listen_on_peers_cb_once(|_| peer_rx)
+            .with_publish_cb(|_, _| MessageId::from(MESSAGE_ID), 2)
+            .with_request_cb(|_, _| (), 3)
     }
 
     fn create_config() -> Config {
@@ -468,21 +439,20 @@ mod tests {
         let (topic_tx, topic_rx) = channel((NUM_PEERS - 1).into());
         let (peer_tx, peer_rx) = channel((NUM_PEERS - 1).into());
 
-        let (self_peer, mut other_peers) = generate_peers(NUM_PEERS);
-        other_peers.insert(self_peer);
-        let all_peers = other_peers.clone();
-        let (v_ss_map, shares_map) =
-            generate_shares(threshold_counter(NUM_PEERS) - 1, all_peers.clone());
+        let peers: Vec<PeerId> = generate_peers(NUM_PEERS).into_iter().collect();
 
-        send_v_sss(&topic_tx, self_peer, v_ss_map).await;
-        send_shares(&peer_tx, self_peer, shares_map).await;
+        for i in 0..NUM_PEERS - 1 {
+            let node = MockNode::new(peers[i as usize], NUM_PEERS);
+            node.send_v_ss(&topic_tx).await;
+            node.send_shares(&peer_tx).await;
+        }
 
-        let transport = create_mock_transport(topic_rx, peer_rx);
-        let config = create_config();
-
+        let transport = Arc::new(create_mock_transport(topic_rx, peer_rx));
+        let self_peer = peers[NUM_PEERS as usize - 1];
+        let mut other_peers: HashSet<_> = peers.into_iter().collect();
         other_peers.remove(&self_peer);
-        let classic =
-            Classic::<_, E>::new::<H>(Arc::new(transport), self_peer, other_peers, config).await;
+        let config = create_config();
+        let classic = Classic::<_, E>::new::<H>(transport, self_peer, other_peers, config).await;
 
         assert!(
             classic.is_ok(),
@@ -497,7 +467,10 @@ mod tests {
         let (_, peer_rx) = channel((NUM_PEERS - 1).into());
 
         let transport = create_mock_transport(topic_rx, peer_rx);
-        let (self_peer, other_peers) = generate_peers(NUM_PEERS);
+        let peers: Vec<PeerId> = generate_peers(NUM_PEERS).into_iter().collect();
+        let self_peer = peers[NUM_PEERS as usize - 1];
+        let mut other_peers: HashSet<PeerId> = peers.into_iter().collect();
+        other_peers.remove(&self_peer);
         let config = create_config_with_timeout(Duration::from_millis(1)); // Very short timeout
 
         let classic =

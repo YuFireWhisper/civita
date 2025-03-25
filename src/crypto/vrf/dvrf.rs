@@ -345,8 +345,11 @@ mod tests {
     }
 
     fn create_components() -> Components<MockTransport> {
-        let (_, rx) = channel(100);
-        let transport = MockTransport::new().with_topic_rx(rx);
+        let transport = MockTransport::new().with_listen_on_topic_cb(|_| {
+            let (_, rx) = channel(100);
+            rx
+        }, 1);
+
         let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);
         crypto
@@ -403,10 +406,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_random_success() {
-        let (_, rx) = channel(100);
-        let transport = MockTransport::new().with_topic_rx(rx);
-
         let mut crypto = MockCrypto::new();
+        let transport = MockTransport::new()
+            .with_listen_on_topic_cb_once(|_| {
+                let (_, rx) = channel(100);
+                rx
+            })
+            .with_listen_on_peers_cb(|_| {
+                let (_, rx) = channel(100);
+                rx
+            }, 1)
+            .with_publish_cb(|_, _| MessageId::from(TEST_MESSAGE_ID), 3);
+
         crypto.expect_public_key().return_const(vec![0u8; 32]);
         crypto
             .expect_generate_proof()
