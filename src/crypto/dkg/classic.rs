@@ -50,7 +50,54 @@ pub enum Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
-type DkgSharePair<E, H> = (Option<VerifiableSS<E, H>>, Option<Scalar<E>>);
+
+#[derive(Debug)]
+struct PeerShare<E: Curve, H: Digest + Clone> {
+    vss: Option<VerifiableSS<E, H>>,
+    scalar: Option<Scalar<E>>,
+}
+
+impl<E: Curve, H: Digest + Clone> PeerShare<E, H> {
+    pub fn new() -> Self {
+        let vss = None;
+        let scalar = None;
+        Self { vss, scalar }
+    }
+
+    pub fn update_v_ss(&mut self, v_ss: VerifiableSS<E, H>) -> bool {
+        self.vss = Some(v_ss);
+
+        self.is_complete()
+    }
+
+    pub fn update_scalar(&mut self, scalar: Scalar<E>) -> bool {
+        self.scalar = Some(scalar);
+
+        self.is_complete()
+    }
+
+    fn is_complete(&self) -> bool {
+        self.vss.is_some() && self.scalar.is_some()
+    }
+
+    pub fn validate(&self, index: u16) -> bool {
+        assert!(
+            self.is_complete(),
+            "PeerShare is not complete, please update it before validation"
+        );
+
+        let v_ss = self
+            .vss
+            .as_ref()
+            .expect("VSS is missing, this should never happen");
+        let scalar = self
+            .scalar
+            .as_ref()
+            .expect("Scalar is missing, this should never happen");
+
+        v_ss.validate_share(scalar, index).is_ok()
+    }
+}
 
 pub struct Classic<T: Transport, E: Curve> {
     #[allow(dead_code)]
@@ -68,33 +115,41 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         other_peers: HashSet<PeerId>,
         config: Config,
     ) -> Result<Self> {
-        let v_ss_rx = Self::listen_verifiable_ss(transport.clone()).await?;
+        let vss_rx = Self::listen_verifiable_ss(transport.clone()).await?;
         let share_rx = Self::listen_share(transport.clone(), other_peers.clone()).await?;
 
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
         let num_peers = Self::calculate_num_peers(&peers);
-        let threshold = (config.threshold_counter)(num_peers) - 1;
-        let (verifiable_ss, secret_shares) = Self::generate_shares::<H>(threshold, num_peers);
+        let threshold = (config.threshold_counter)(num_peers);
+        let (verifiable_ss, secret_shares) = Self::generate_shares::<H>(threshold - 1, num_peers);
 
         Self::publish_verifiable_ss(transport.clone(), verifiable_ss.clone()).await?;
-        Self::send_shares(transport.clone(), peers.clone(), secret_shares.clone()).await?;
+        Self::send_shares(transport.clone(), &peers, secret_shares.clone()).await?;
 
-        let data = timeout(config.timeout, async {
-            Self::collect_data::<H>(share_rx, v_ss_rx, num_peers - 1).await
+        let collected = timeout(config.timeout, async {
+            Self::collect_data::<H>(share_rx, vss_rx, num_peers - 1).await
         })
         .await
         .map_err(|_| Error::Timeout)??;
         let self_index = Self::self_index(self_peer, &peers);
-        let mut shares = Self::validate_data(&data, self_index)?;
+        let mut shares = Self::validate_data(&collected, self_index)?;
         shares.push(secret_shares[(self_index - 1) as usize].clone());
         let secret = Self::construct_secret(
             &verifiable_ss,
             &(1..=num_peers).collect::<Vec<u16>>(),
             &shares,
         );
-        let public_key: Vec<_> = data
-            .into_iter()
-            .map(|(_, (v_ss, _))| v_ss.commitments.into_iter().next().unwrap())
+        let public_key: Vec<_> = collected
+            .into_values()
+            .map(|peer_share| {
+                peer_share
+                    .vss
+                    .expect("VSS is missing, this should never happen")
+                    .commitments
+                    .into_iter()
+                    .next()
+                    .expect("Commitment is missing, this should never happen")
+            })
             .collect();
 
         Ok(Self {
@@ -150,7 +205,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
 
     async fn send_shares(
         transport: Arc<T>,
-        peers: HashMap<PeerId, u16>,
+        peers: &HashMap<PeerId, u16>,
         shares: SecretShares<E>,
     ) -> Result<()> {
         for ((peer_id, _), share) in peers.iter().zip(shares.iter()) {
@@ -162,54 +217,37 @@ impl<T: Transport, E: Curve> Classic<T, E> {
 
     async fn collect_data<H: Digest + Clone>(
         mut scalar_rx: Receiver<Message>,
-        mut v_ss_rx: Receiver<Message>,
-        nums: u16,
-    ) -> Result<HashMap<PeerId, (VerifiableSS<E, H>, Scalar<E>)>> {
-        let mut collected = HashMap::with_capacity(nums as usize);
+        mut vss_rx: Receiver<Message>,
+        expected: u16,
+    ) -> Result<HashMap<PeerId, PeerShare<E, H>>> {
+        let mut collected: HashMap<PeerId, PeerShare<E, H>> =
+            HashMap::with_capacity(expected as usize);
         let mut complete_count = 0;
 
-        while complete_count < nums {
+        while complete_count < expected {
             tokio::select! {
                 Some(msg) = scalar_rx.recv() => {
-                    if let Some((peer, scalar)) = Request::get_dkg_scalar(msg) {
-                        let scalar = Scalar::from_bytes(scalar.as_slice())?;
-                        complete_count += Self::update_entry(&mut collected, peer, Some(scalar), None);
+                    if let Some((peer, scalar_bytes)) = Request::get_dkg_scalar(msg) {
+                        let scalar = Scalar::from_bytes(scalar_bytes.as_slice())?;
+                        let entry = collected.entry(peer).or_insert_with(PeerShare::new);
+                        if entry.update_scalar(scalar) {
+                            complete_count += 1;
+                        }
                     }
                 }
-                Some(msg) = v_ss_rx.recv() => {
-                    if let Some((peer, v_ss)) = Payload::get_dkg_vss(msg) {
-                        let v_ss: VerifiableSS<E, H> = serde_json::from_slice(&v_ss)?;
-                        complete_count += Self::update_entry(&mut collected, peer, None, Some(v_ss));
+                Some(msg) = vss_rx.recv() => {
+                    if let Some((peer, vss_bytes)) = Payload::get_dkg_vss(msg) {
+                        let vss: VerifiableSS<E, H> = serde_json::from_slice(&vss_bytes)?;
+                        let entry = collected.entry(peer).or_insert_with(PeerShare::new);
+                        if entry.update_v_ss(vss) {
+                            complete_count += 1;
+                        }
                     }
                 }
                 else => return Err(Error::ChannelClosed),
             }
         }
-
-        Ok(collected
-            .into_iter()
-            .map(|(peer, (v_ss, scalar))| (peer, (v_ss.unwrap(), scalar.unwrap())))
-            .collect())
-    }
-
-    fn update_entry<H: Digest + Clone>(
-        map: &mut HashMap<PeerId, DkgSharePair<E, H>>,
-        peer: PeerId,
-        scalar: Option<Scalar<E>>,
-        v_ss: Option<VerifiableSS<E, H>>,
-    ) -> u16 {
-        let entry = map.entry(peer).or_insert((None, None));
-        let was_complete = entry.0.is_some() && entry.1.is_some();
-
-        if let Some(scalar) = scalar {
-            entry.1 = Some(scalar);
-        }
-        if let Some(v_ss) = v_ss {
-            entry.0 = Some(v_ss);
-        }
-
-        let is_complete_now = entry.0.is_some() && entry.1.is_some();
-        (!was_complete && is_complete_now) as u16
+        Ok(collected)
     }
 
     fn self_index(self_peer: PeerId, peers: &HashMap<PeerId, u16>) -> u16 {
@@ -217,14 +255,21 @@ impl<T: Transport, E: Curve> Classic<T, E> {
     }
 
     fn validate_data<H: Digest + Clone>(
-        data: &HashMap<PeerId, (VerifiableSS<E, H>, Scalar<E>)>,
+        data: &HashMap<PeerId, PeerShare<E, H>>,
         self_index: u16,
     ) -> Result<Vec<Scalar<E>>> {
         data.iter()
-            .map(|(peer, (v_ss, scalar))| {
-                v_ss.validate_share(scalar, self_index)
-                    .map(|_| scalar.clone())
-                    .map_err(|_| Error::ValidateShare(*peer))
+            .map(|(peer, peer_share)| {
+                if peer_share.validate(self_index) {
+                    let scalar = peer_share
+                        .scalar
+                        .as_ref()
+                        .expect("Scalar is missing, this should never happen");
+                    Ok(scalar.clone())
+                } else {
+                    error!("Failed to validate share from peer: {:?}", peer);
+                    Err(Error::ValidateShare(*peer))
+                }
             })
             .collect()
     }
@@ -277,7 +322,10 @@ mod tests {
     };
     use libp2p::{gossipsub::MessageId, PeerId};
     use sha2::Sha256;
-    use tokio::{sync::mpsc::{channel, Receiver, Sender}, time::Duration};
+    use tokio::{
+        sync::mpsc::{channel, Receiver, Sender},
+        time::Duration,
+    };
 
     use crate::{
         crypto::dkg::classic::{config::Config, Classic, DKG_TOPIC},
@@ -451,8 +499,9 @@ mod tests {
         let transport = create_mock_transport(topic_rx, peer_rx);
         let (self_peer, other_peers) = generate_peers(NUM_PEERS);
         let config = create_config_with_timeout(Duration::from_millis(1)); // Very short timeout
-        
-        let classic = Classic::<_, E>::new::<H>(Arc::new(transport), self_peer, other_peers, config).await;
+
+        let classic =
+            Classic::<_, E>::new::<H>(Arc::new(transport), self_peer, other_peers, config).await;
 
         assert!(
             classic.is_err(),
