@@ -16,7 +16,7 @@ use curv::{
 use libp2p::PeerId;
 use log::error;
 use thiserror::Error;
-use tokio::sync::mpsc::Receiver;
+use tokio::{sync::mpsc::Receiver, time::timeout};
 
 use crate::{
     crypto::dkg::classic::config::Config,
@@ -43,6 +43,10 @@ pub enum Error {
     Deserialization(#[from] curv::elliptic::curves::error::DeserializationError),
     #[error("Validate share failed, peer: {0}")]
     ValidateShare(PeerId),
+    #[error("Timeout")]
+    Timeout,
+    #[error("Channel is closed")]
+    ChannelClosed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -75,7 +79,11 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         Self::publish_verifiable_ss(transport.clone(), verifiable_ss.clone()).await?;
         Self::send_shares(transport.clone(), peers.clone(), secret_shares.clone()).await?;
 
-        let data = Self::collect_data::<H>(share_rx, v_ss_rx, num_peers - 1).await?;
+        let data = timeout(config.timeout, async {
+            Self::collect_data::<H>(share_rx, v_ss_rx, num_peers - 1).await
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
         let self_index = Self::self_index(self_peer, &peers);
         let mut shares = Self::validate_data(&data, self_index)?;
         shares.push(secret_shares[(self_index - 1) as usize].clone());
@@ -174,6 +182,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
                         complete_count += Self::update_entry(&mut collected, peer, None, Some(v_ss));
                     }
                 }
+                else => return Err(Error::ChannelClosed),
             }
         }
 
@@ -268,7 +277,7 @@ mod tests {
     };
     use libp2p::{gossipsub::MessageId, PeerId};
     use sha2::Sha256;
-    use tokio::sync::mpsc::{channel, Receiver, Sender};
+    use tokio::{sync::mpsc::{channel, Receiver, Sender}, time::Duration};
 
     use crate::{
         crypto::dkg::classic::{config::Config, Classic, DKG_TOPIC},
@@ -394,6 +403,14 @@ mod tests {
         }
     }
 
+    fn create_config_with_timeout(timeout: Duration) -> Config {
+        let threshold_counter = Box::new(threshold_counter);
+        Config {
+            threshold_counter,
+            timeout,
+        }
+    }
+
     fn threshold_counter(n: u16) -> u16 {
         (2 * n / 3) + 1
     }
@@ -423,6 +440,23 @@ mod tests {
             classic.is_ok(),
             "Failed to create classic DKG instance: {:?}",
             classic.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_when_timeout() {
+        let (_, topic_rx) = channel((NUM_PEERS - 1).into());
+        let (_, peer_rx) = channel((NUM_PEERS - 1).into());
+
+        let transport = create_mock_transport(topic_rx, peer_rx);
+        let (self_peer, other_peers) = generate_peers(NUM_PEERS);
+        let config = create_config_with_timeout(Duration::from_millis(1)); // Very short timeout
+        
+        let classic = Classic::<_, E>::new::<H>(Arc::new(transport), self_peer, other_peers, config).await;
+
+        assert!(
+            classic.is_err(),
+            "Classic DKG instance should not be created due to timeout"
         );
     }
 }
