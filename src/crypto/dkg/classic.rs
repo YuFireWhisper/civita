@@ -356,7 +356,7 @@ mod tests {
     impl MockNode {
         fn new(peer: PeerId, target_index: u16) -> Self {
             let scalar = Scalar::random();
-            let threshold = (2 * NUM_PEERS / 3) + 1;
+            let threshold = threshold_counter(NUM_PEERS);
             let (v_ss, shares) = VerifiableSS::<E, H>::share(threshold - 1, NUM_PEERS, &scalar);
 
             Self {
@@ -439,7 +439,8 @@ mod tests {
         let (topic_tx, topic_rx) = channel((NUM_PEERS - 1).into());
         let (peer_tx, peer_rx) = channel((NUM_PEERS - 1).into());
 
-        let peers: Vec<PeerId> = generate_peers(NUM_PEERS).into_iter().collect();
+        let mut peers: Vec<PeerId> = generate_peers(NUM_PEERS).into_iter().collect();
+        peers.sort();
 
         for i in 0..NUM_PEERS - 1 {
             let node = MockNode::new(peers[i as usize], NUM_PEERS);
