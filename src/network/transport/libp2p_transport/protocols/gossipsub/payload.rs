@@ -17,6 +17,12 @@ pub enum Payload {
     },
     VrfProcessFailure(MessageId),
     DkgVSS(Vec<u8>),
+    // Raw message, for other node checks
+    DkgSign(Vec<u8>),
+    DkgSignResponse {
+        message_id: MessageId,
+        signature: Vec<u8>,
+    },
     Raw(Vec<u8>), // For testing
 }
 
