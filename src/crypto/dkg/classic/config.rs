@@ -4,7 +4,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Config {
     pub timeout: Duration,
-    pub threshold_counter: Box<dyn Fn(u16) -> u16>,
+    pub threshold_counter: Box<dyn Fn(u16) -> u16 + Send + Sync>,
 }
 
 impl Default for Config {

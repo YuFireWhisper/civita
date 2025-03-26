@@ -212,9 +212,16 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         peers: &HashMap<PeerId, u16>,
         shares: &SecretShares<E>,
     ) -> Result<()> {
-        for ((peer_id, _), share) in peers.iter().zip(shares.iter()) {
+        for (peer, &index) in peers.iter() {
+            let share = &shares.get(index as usize - 1).unwrap_or_else(|| {
+                panic!(
+                    "Invalid index, shares len: {}, index: {}",
+                    shares.len(),
+                    index
+                )
+            });
             let request = Request::DkgScalar(share.to_bytes().to_vec());
-            transport.request(*peer_id, request).await?;
+            transport.request(*peer, request).await?;
         }
         Ok(())
     }
@@ -255,7 +262,10 @@ impl<T: Transport, E: Curve> Classic<T, E> {
     }
 
     fn self_index(self_peer: &PeerId, peers: &HashMap<PeerId, u16>) -> u16 {
-        peers.get(self_peer).copied().unwrap_or_default()
+        peers
+            .get(self_peer)
+            .copied()
+            .expect("Self peer not found in peers map")
     }
 
     fn validate_data<H: Digest + Clone>(
