@@ -19,7 +19,11 @@ use curv::{
 use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
 use thiserror::Error;
-use tokio::{sync::mpsc::Receiver, task::JoinHandle, time::timeout};
+use tokio::{
+    sync::mpsc::{channel, Receiver, Sender},
+    task::JoinHandle,
+    time::timeout,
+};
 
 use crate::{
     crypto::dkg::classic::config::Config,
@@ -154,15 +158,18 @@ pub struct Classic<T: Transport + 'static> {
     transport: Arc<T>,
     config: Config,
     handle: Option<JoinHandle<()>>,
+    to_self_tx: Option<Sender<Message>>,
 }
 
 impl<T: Transport + 'static> Classic<T> {
     pub fn new(transport: Arc<T>, config: Config) -> Self {
         let handle = None;
+        let to_self_tx = None;
         Self {
             transport,
             config,
             handle,
+            to_self_tx,
         }
     }
 
@@ -365,39 +372,52 @@ impl<T: Transport + 'static> Classic<T> {
     }
 
     async fn receive<E: Curve, H: Digest + Clone>(
-        &self,
+        &mut self,
         mut signer: Signer<E>,
         mut topic_rx: Receiver<Message>,
     ) -> JoinHandle<()> {
+        const CHANNEL_SIZE: usize = 1000;
+        let (to_self_tx, mut to_self_rx) = channel(CHANNEL_SIZE);
+
         let transport = self.transport.clone();
+        self.to_self_tx = Some(to_self_tx);
 
         tokio::spawn(async move {
             loop {
-                match topic_rx.recv().await {
-                    Some(msg) => {
-                        if let Some((message_id, msg_to_sign)) = Payload::get_dkg_sign(msg) {
-                            let signature = signer.sign::<H>(&msg_to_sign);
-                            signer.update(message_id.clone(), signature);
-                            let signature = signature.serialize_compressed().to_vec();
-                            let response = Payload::DkgSignResponse {
-                                message_id,
-                                signature,
-                            };
-                            if let Err(e) = transport.publish(DKG_TOPIC, response).await {
-                                error!("Failed to publish signature: {:?}", e);
-                            };
-                        }
-                    }
-                    None => {
+                let msg = tokio::select! {
+                    Some(msg) = topic_rx.recv() => msg,
+                    Some(msg) = to_self_rx.recv() => msg,
+                    else => {
                         error!("Channel is closed");
                         break;
                     }
-                }
+                };
+                Self::handle_message::<E, H>(msg, &mut signer, &transport).await;
             }
         })
     }
 
-    async fn stop(&mut self) {
+    async fn handle_message<E: Curve, H: Digest + Clone>(
+        msg: Message,
+        signer: &mut Signer<E>,
+        transport: &Arc<T>,
+    ) {
+        if let Some((message_id, msg_to_sign)) = Payload::get_dkg_sign(msg) {
+            let signature = signer.sign::<H>(&msg_to_sign);
+            signer.update(message_id.clone(), signature);
+            let signature = signature.serialize_compressed().to_vec();
+            let response = Payload::DkgSignResponse {
+                message_id,
+                signature,
+            };
+
+            if let Err(e) = transport.publish(DKG_TOPIC, response).await {
+                error!("Failed to publish signature: {:?}", e);
+            };
+        }
+    }
+
+    pub async fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
