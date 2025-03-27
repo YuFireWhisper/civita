@@ -6,12 +6,52 @@ use curv::{
     elliptic::curves::{Curve, Point, Scalar},
     BigInt,
 };
-use libp2p::{gossipsub::MessageId, PeerId};
+use libp2p::PeerId;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum Error {}
+pub enum Error {
+}
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Default)]
+#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq)]
+pub struct Signature {
+    signature: Vec<u8>,
+    random_public_key: Vec<u8>,
+}
+
+impl Signature {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_signature<E: Curve>(mut self, signature: Scalar<E>) -> Self {
+        self.signature = signature.to_bytes().to_vec();
+        self
+    }
+
+    pub fn with_random_public_key<E: Curve>(mut self, random_public_key: Point<E>) -> Self {
+        self.random_public_key = random_public_key.to_bytes(true).to_vec();
+        self
+    }
+
+    pub fn signature<E: Curve>(&self) -> Scalar<E> {
+        Scalar::from_bytes(&self.signature).expect("Invalid signature bytes, this should never happen")
+    }
+
+    pub fn random_public_key<E: Curve>(&self) -> Point<E> {
+        Point::from_bytes(&self.random_public_key).expect("Invalid random public key bytes, this should never happen")
+    }
+
+    pub fn random_public_key_bytes(&self) -> &[u8] {
+        &self.random_public_key
+    }
+}
 
 #[derive(Debug)]
 pub struct Signer<E: Curve> {
@@ -19,16 +59,12 @@ pub struct Signer<E: Curve> {
     public_key: Point<E>,
     threshold: u16,
     peers: HashMap<PeerId, u16>,
-    processing: HashMap<MessageId, HashMap<u16, Scalar<E>>>,
+    processing: HashMap<Vec<u8>, HashMap<u16, Scalar<E>>>,
 }
 
 impl<E: Curve> Signer<E> {
-    pub fn new(
-        secret: Scalar<E>,
-        public_key: Point<E>,
-        threshold: u16,
-        peers: HashMap<PeerId, u16>,
-    ) -> Self {
+    pub fn new(secret: Scalar<E>, public_key: Point<E>, threshold: u16) -> Self {
+        let peers = HashMap::new();
         let processing = HashMap::new();
         Self {
             secret,
@@ -39,15 +75,24 @@ impl<E: Curve> Signer<E> {
         }
     }
 
-    pub fn sign<H: Digest + Clone>(&self, seed: &[u8], raw_msg: &[u8]) -> Scalar<E> {
-        let k = Self::calculate_nonce(seed);
-        let r = Self::calculate_random_public_key(&k);
-        let e = Self::calculate_challenge_value::<H>(
+    pub fn with_peers(mut self, peers: HashMap<PeerId, u16>) -> Self {
+        self.peers.extend(peers);
+        self
+    }
+
+    pub fn sign<H: Digest + Clone>(&self, seed: &[u8], raw_msg: &[u8]) -> Signature {
+        let nonce = Self::calculate_nonce(seed);
+        let random_pub_key = Self::calculate_random_public_key(&nonce);
+        let challenge = Self::calculate_challenge_value::<H>(
             raw_msg,
-            &r.to_bytes(true),
+            &random_pub_key.to_bytes(true),
             &self.public_key.to_bytes(true),
         );
-        &k + &(&e * &self.secret)
+        let s = Self::calculate_signature(self, &nonce, &challenge);
+
+        Signature::new()
+            .with_signature(s)
+            .with_random_public_key(random_pub_key)
     }
 
     fn calculate_nonce(seed: &[u8]) -> Scalar<E> {
@@ -66,15 +111,24 @@ impl<E: Curve> Signer<E> {
         Scalar::from_bigint(&b)
     }
 
+    fn calculate_signature(&self, nonce: &Scalar<E>, challenge: &Scalar<E>) -> Scalar<E> {
+        nonce + &(challenge * &self.secret)
+    }
+
     pub fn update<H: Digest + Clone>(
         &mut self,
-        message_id: MessageId,
+        signature: Signature,
         peer: PeerId,
-        signature: Scalar<E>,
-    ) -> Option<Scalar<E>> {
-        let signatures = self.processing.entry(message_id.clone()).or_default();
+    ) -> Option<Signature> {
+        let signatures = self
+            .processing
+            .entry(signature.random_public_key.clone())
+            .or_default();
         let index = *self.peers.get(&peer).expect("peer not found");
-        signatures.insert(index, signature);
+        signatures.insert(
+            index,
+            signature.signature()
+        );
 
         if signatures.len() == self.threshold as usize {
             let points = signatures
@@ -82,11 +136,12 @@ impl<E: Curve> Signer<E> {
                 .map(|&i| Scalar::from(i))
                 .collect::<Vec<_>>();
             let scalars = signatures.values().cloned().collect::<Vec<_>>();
-            let signature = VerifiableSS::<E, H>::lagrange_interpolation_at_zero(&points, &scalars);
+            let final_signature =
+                VerifiableSS::<E, H>::lagrange_interpolation_at_zero(&points, &scalars);
 
-            self.processing.remove(&message_id);
+            self.processing.remove(&signature.random_public_key);
 
-            Some(signature)
+            Some(signature.with_signature(final_signature))
         } else {
             None
         }

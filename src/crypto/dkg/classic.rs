@@ -30,7 +30,11 @@ use tokio::{
 };
 
 use crate::{
-    crypto::dkg::classic::{config::Config, peer_share::PeerShare, signer::Signer},
+    crypto::dkg::classic::{
+        config::Config,
+        peer_share::PeerShare,
+        signer::{Signature, Signer},
+    },
     network::transport::{
         libp2p_transport::{
             message::Message,
@@ -42,7 +46,7 @@ use crate::{
 
 const DKG_TOPIC: &str = "dkg";
 
-type ToSelfTxType<E> = (MessageId, Vec<u8>, oneshot::Sender<Scalar<E>>);
+type ToSelfTxType = (MessageId, Vec<u8>, oneshot::Sender<Signature>);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -61,9 +65,11 @@ pub enum Error {
     #[error("Channel is closed")]
     ChannelClosed,
     #[error("Send error: {0}")]
-    SendError(String),
+    Send(String),
     #[error("Failed to receive: {0}")]
-    ReceiveError(#[from] RecvError),
+    Receive(#[from] RecvError),
+    #[error("Signer error: {0}")]
+    Signer(#[from] signer::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -72,8 +78,8 @@ pub struct Classic<T: Transport + 'static, E: Curve> {
     transport: Arc<T>,
     config: Config,
     handle: Option<JoinHandle<()>>,
-    to_self_tx: Option<Sender<ToSelfTxType<E>>>,
-    completed: Arc<Mutex<HashMap<MessageId, Scalar<E>>>>,
+    to_self_tx: Option<Sender<ToSelfTxType>>,
+    completed: Arc<Mutex<HashMap<Vec<u8>, Scalar<E>>>>,
     peer: Option<PeerId>,
 }
 
@@ -147,7 +153,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             })
             .sum();
 
-        let signer = Signer::new(secret, public_key, threshold, peers);
+        let signer = Signer::new(secret, public_key, threshold).with_peers(peers);
 
         Ok((signer, topic_rx))
     }
@@ -311,40 +317,31 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             loop {
                 tokio::select! {
                     Some(msg) = topic_rx.recv() => {
+                        // New DkG Generation
                         if let Some((message_id, peer, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
                             let signature = signer.sign::<H>(message_id.to_string().as_bytes(), &msg_to_sign);
-                            Self::publish_signature(&transport, message_id.clone(), signature.to_bytes().to_vec()).await;
-                            let final_signature = signer.update::<H>(message_id.clone(), peer, signature);
-                            if let Some(signature) = final_signature {
-                                if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.to_bytes().to_vec()).await {
-                                    error!("Failed to publish final signature: {:?}", e);
-                                }
-                                completed.lock().await.insert(message_id, signature);
+                            let payload = Payload::DkgSignResponse(signature.clone());
+                            Self::publish(&transport, payload).await;
+                            if let Some(signature) = signer.update::<H>(signature, peer) {
+                                Self::publish_final_signature(&transport, signature, completed.clone()).await;
                             }
-                            continue;
                         }
 
-                        if let Some((message_id, peer, signature)) = Payload::get_dkg_sign_response(msg) {
-                            if let Ok(scalar) = Scalar::from_bytes(signature.as_slice()) {
-                                let final_signature = signer.update::<H>(message_id.clone(), peer, scalar);
-                                if let Some(signature) = final_signature {
-                                    if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.to_bytes().to_vec()).await {
-                                        error!("Failed to publish signature: {:?}", e);
-                                    }
-                                    completed.lock().await.insert(message_id, signature);
-                                }
+                        // Collect existing DKG Generation
+                        if let Some((peer, signature)) = Payload::get_dkg_sign_response(msg) {
+                            if let Some(signature) = signer.update::<H>(signature, peer) {
+                                Self::publish_final_signature(&transport, signature, completed.clone()).await;
                             }
                         }
                     }
+                    // New DKG Generation from self
                     Some((msg_id, msg_to_sign, tx)) = to_self_rx.recv() => {
-                        let signature = signer.sign::<H>(&msg_to_sign, &msg_to_sign);
-                        Self::publish_signature(&transport,msg_id.clone(), signature.to_bytes().to_vec()).await;
-                        let final_signature = signer.update::<H>(msg_id.clone(), self_peer, signature);
-                        if let Some(signature) = final_signature {
-                            if let Err(e) = Self::publish_final_signature(&transport, msg_id.clone(), signature.to_bytes().to_vec()).await {
-                                error!("Failed to publish final signature: {:?}", e);
-                            }
-                            completed.lock().await.insert(msg_id, signature.clone());
+                        let signature = signer.sign::<H>(msg_id.to_string().as_bytes(), &msg_to_sign);
+                        let payload = Payload::DkgSign(msg_to_sign);
+                        Self::publish(&transport, payload).await;
+
+                        if let Some(signature) = signer.update::<H>(signature, self_peer) {
+                            Self::publish_final_signature(&transport, signature.clone(), completed.clone()).await;
                             if let Err(e) = tx.send(signature) {
                                 error!("Failed to send signature to self: {:?}", e);
                             }
@@ -359,29 +356,22 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         })
     }
 
-    async fn publish_signature(transport: &Arc<T>, message_id: MessageId, signature: Vec<u8>) {
-        let response = Payload::DkgSignResponse {
-            message_id,
-            signature,
-        };
-
-        if let Err(e) = transport.publish(DKG_TOPIC, response).await {
-            error!("Failed to publish signature: {:?}", e);
-        };
+    async fn publish(transport: &Arc<T>, payload: Payload) {
+        if let Err(e) = transport.publish(DKG_TOPIC, payload).await {
+            error!("Failed to publish payload: {:?}", e);
+        }
     }
 
     async fn publish_final_signature(
         transport: &Arc<T>,
-        message_id: MessageId,
-        signature: Vec<u8>,
-    ) -> Result<()> {
-        let response = Payload::DkgSignFinal {
-            message_id,
-            signature,
-        };
-
-        transport.publish(DKG_TOPIC, response).await?;
-        Ok(())
+        signature: Signature,
+        completed: Arc<Mutex<HashMap<Vec<u8>, Scalar<E>>>>,
+    ) {
+        let scalar = signature.signature();
+        let public_key = signature.random_public_key_bytes().to_vec();
+        let payload = Payload::DkgSignFinal(signature);
+        Self::publish(transport, payload).await;
+        completed.lock().await.insert(public_key, scalar);
     }
 
     pub async fn stop(&mut self) {
@@ -392,7 +382,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         }
     }
 
-    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Scalar<E>> {
+    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Signature> {
         let payload = Payload::DkgSign(msg_to_sign.clone());
         let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
         let (tx, rx) = oneshot::channel();
@@ -401,7 +391,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             to_self_tx
                 .send((message_id, msg_to_sign, tx))
                 .await
-                .map_err(|e| Error::SendError(e.to_string()))?;
+                .map_err(|e| Error::Send(e.to_string()))?;
         }
 
         match timeout(self.config.timeout, rx).await {

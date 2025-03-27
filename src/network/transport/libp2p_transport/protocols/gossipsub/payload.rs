@@ -1,7 +1,10 @@
 use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
-use crate::{extract_variant, network::transport::libp2p_transport::message::Message};
+use crate::{
+    crypto::dkg::classic::signer::Signature, extract_variant,
+    network::transport::libp2p_transport::message::Message,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {
@@ -19,14 +22,8 @@ pub enum Payload {
     DkgVSS(Vec<u8>),
     // Raw message, for other node checks
     DkgSign(Vec<u8>),
-    DkgSignResponse {
-        message_id: MessageId,
-        signature: Vec<u8>,
-    },
-    DkgSignFinal {
-        message_id: MessageId,
-        signature: Vec<u8>,
-    },
+    DkgSignResponse(Signature),
+    DkgSignFinal(Signature),
     Raw(Vec<u8>), // For testing
 }
 
@@ -59,11 +56,11 @@ impl Payload {
         )
     }
 
-    pub fn get_dkg_sign_response(msg: Message) -> Option<(MessageId, PeerId, Vec<u8>)> {
+    pub fn get_dkg_sign_response(msg: Message) -> Option<(PeerId, Signature)> {
         extract_variant!(
             msg,
             Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
-            Payload::DkgSignResponse { message_id, signature } => (message_id, gossipsub_msg.source, signature)
+            Payload::DkgSignResponse(v) => (gossipsub_msg.source, v)
         )
     }
 }
