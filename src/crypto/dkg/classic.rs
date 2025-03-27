@@ -1,4 +1,6 @@
 pub mod config;
+pub mod peer_share;
+pub mod signer;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -6,15 +8,13 @@ use std::{
     sync::Arc,
 };
 
+use curv::elliptic::curves::Scalar;
 use curv::{
     cryptographic_primitives::{
         hashing::Digest,
         secret_sharing::feldman_vss::{SecretShares, VerifiableSS},
     },
-    elliptic::curves::{
-        bls12_381::{g1::G1Point, scalar::FieldScalar},
-        Curve, ECPoint, ECScalar, Point, Scalar,
-    },
+    elliptic::curves::{bls12_381::g1::G1Point, Curve, ECPoint},
 };
 use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
@@ -30,7 +30,7 @@ use tokio::{
 };
 
 use crate::{
-    crypto::dkg::classic::config::Config,
+    crypto::dkg::classic::{config::Config, peer_share::PeerShare, signer::Signer},
     network::transport::{
         libp2p_transport::{
             message::Message,
@@ -67,101 +67,6 @@ pub enum Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug)]
-struct PeerShare<E: Curve, H: Digest + Clone> {
-    vss: Option<VerifiableSS<E, H>>,
-    scalar: Option<Scalar<E>>,
-}
-
-impl<E: Curve, H: Digest + Clone> PeerShare<E, H> {
-    pub fn new() -> Self {
-        let vss = None;
-        let scalar = None;
-        Self { vss, scalar }
-    }
-
-    pub fn update_v_ss(&mut self, v_ss: VerifiableSS<E, H>) -> bool {
-        self.vss = Some(v_ss);
-
-        self.is_complete()
-    }
-
-    pub fn update_scalar(&mut self, scalar: Scalar<E>) -> bool {
-        self.scalar = Some(scalar);
-
-        self.is_complete()
-    }
-
-    fn is_complete(&self) -> bool {
-        self.vss.is_some() && self.scalar.is_some()
-    }
-
-    pub fn validate(&self, index: u16) -> bool {
-        assert!(
-            self.is_complete(),
-            "PeerShare is not complete, please update it before validation"
-        );
-
-        let v_ss = self
-            .vss
-            .as_ref()
-            .expect("VSS is missing, this should never happen");
-        let scalar = self
-            .scalar
-            .as_ref()
-            .expect("Scalar is missing, this should never happen");
-
-        v_ss.validate_share(scalar, index).is_ok()
-    }
-}
-
-#[derive(Debug)]
-struct Signer<E: Curve> {
-    secret: Scalar<E>,
-    public_key: Vec<Point<E>>,
-    threshold: u16,
-    processing: HashMap<MessageId, Vec<G1Point>>,
-}
-
-impl<E: Curve> Signer<E> {
-    pub fn new(secret: Scalar<E>, public_key: Vec<Point<E>>, threshold: u16) -> Self {
-        let processing = HashMap::new();
-        Self {
-            secret,
-            public_key,
-            threshold,
-            processing,
-        }
-    }
-
-    pub fn sign<H: Digest + Clone>(&self, raw_msg: &[u8]) -> G1Point {
-        let msg = H::new().chain(raw_msg).finalize();
-        let hash = G1Point::hash_to_curve(&msg);
-        let field_scalar = FieldScalar::from_bigint(&self.secret.to_bigint());
-        hash.scalar_mul(&field_scalar)
-    }
-
-    pub fn update(&mut self, message_id: MessageId, signature: G1Point) -> Option<G1Point> {
-        let signatures = self.processing.entry(message_id.clone()).or_default();
-        signatures.push(signature);
-
-        if signatures.len() == self.threshold as usize {
-            let aggregated = Self::aggregate_signatures(signatures.drain(..));
-            self.processing.remove(&message_id);
-            Some(aggregated)
-        } else {
-            None
-        }
-    }
-
-    fn aggregate_signatures(signatures: impl IntoIterator<Item = G1Point>) -> G1Point {
-        signatures
-            .into_iter()
-            .reduce(|acc, sig| acc.add_point(&sig))
-            .expect("signatures is empty")
-    }
-}
 
 pub struct Classic<T: Transport + 'static> {
     transport: Arc<T>,
@@ -228,7 +133,7 @@ impl<T: Transport + 'static> Classic<T> {
             .into_values()
             .map(|peer_share| {
                 peer_share
-                    .vss
+                    .vss_into()
                     .expect("VSS is missing, this should never happen")
                     .commitments
                     .into_iter()
@@ -326,8 +231,8 @@ impl<T: Transport + 'static> Classic<T> {
                 Some(msg) = topic_rx.recv() => {
                     if let Some((peer, vss_bytes)) = Payload::get_dkg_vss(msg) {
                         let vss: VerifiableSS<E, H> = serde_json::from_slice(&vss_bytes)?;
-                        let entry = collected.entry(peer).or_insert_with(PeerShare::new);
-                        if entry.update_v_ss(vss) {
+                        let entry = collected.entry(peer).or_default();
+                        if entry.update_vss(vss) {
                             complete_count += 1;
                         }
                     }
@@ -336,7 +241,7 @@ impl<T: Transport + 'static> Classic<T> {
                 Some(msg) = peers_rx.recv() => {
                     if let Some((peer, scalar_bytes)) = Request::get_dkg_scalar(msg) {
                         let scalar = Scalar::from_bytes(scalar_bytes.as_slice())?;
-                        let entry = collected.entry(peer).or_insert_with(PeerShare::new);
+                        let entry = collected.entry(peer).or_default();
                         if entry.update_scalar(scalar) {
                             complete_count += 1;
                         }
@@ -363,8 +268,7 @@ impl<T: Transport + 'static> Classic<T> {
             .map(|(peer, peer_share)| {
                 if peer_share.validate(self_index) {
                     let scalar = peer_share
-                        .scalar
-                        .as_ref()
+                        .scalar()
                         .expect("Scalar is missing, this should never happen");
                     Ok(scalar.clone())
                 } else {
