@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use curv::elliptic::curves::Scalar;
+use curv::elliptic::curves::{Point, Scalar};
 use curv::{
     cryptographic_primitives::{
         hashing::Digest,
@@ -129,18 +129,19 @@ impl<T: Transport + 'static> Classic<T> {
         shares.push(self_shares[(self_index - 1) as usize].clone());
 
         let secret = Self::construct_secret(&vss, &(1..=num_peers).collect::<Vec<u16>>(), &shares);
-        let public_key: Vec<_> = collected
+        let public_key: Point<E> = collected
             .into_values()
-            .map(|peer_share| {
-                peer_share
-                    .vss_into()
+            .map(|c| {
+                c.vss_into()
                     .expect("VSS is missing, this should never happen")
-                    .commitments
+            })
+            .map(|vss| {
+                vss.commitments
                     .into_iter()
                     .next()
                     .expect("Commitment is missing, this should never happen")
             })
-            .collect();
+            .sum();
 
         let signer = Signer::new(secret, public_key, threshold);
 

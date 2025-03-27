@@ -10,13 +10,13 @@ use sha2::Digest;
 #[derive(Debug)]
 pub struct Signer<E: Curve> {
     secret: Scalar<E>,
-    public_key: Vec<Point<E>>,
+    public_key: Point<E>,
     threshold: u16,
     processing: HashMap<MessageId, Vec<G1Point>>,
 }
 
 impl<E: Curve> Signer<E> {
-    pub fn new(secret: Scalar<E>, public_key: Vec<Point<E>>, threshold: u16) -> Self {
+    pub fn new(secret: Scalar<E>, public_key: Point<E>, threshold: u16) -> Self {
         let processing = HashMap::new();
         Self {
             secret,
