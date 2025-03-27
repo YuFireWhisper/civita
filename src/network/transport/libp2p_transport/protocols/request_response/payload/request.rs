@@ -1,7 +1,12 @@
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
-use crate::network::transport::libp2p_transport::{message::Message, protocols::request_response};
+use crate::{
+    extract_variant,
+    network::transport::libp2p_transport::{
+        message::Message, protocols::request_response::Payload,
+    },
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Request {
@@ -11,15 +16,11 @@ pub enum Request {
 
 impl Request {
     pub fn get_dkg_scalar(msg: Message) -> Option<(PeerId, Vec<u8>)> {
-        if let Message::RequestResponse(req_resp_msg) = msg {
-            let peer = req_resp_msg.peer;
-            if let request_response::Payload::Request(Request::DkgScalar(share)) =
-                req_resp_msg.payload
-            {
-                return Some((peer, share));
-            }
-        }
-        None
+        extract_variant!(
+            msg,
+            Message::RequestResponse(req_resp_msg) => &req_resp_msg.payload,
+            Payload::Request(Request::DkgScalar(v)) => (req_resp_msg.peer, v.clone())
+        )
     }
 }
 

@@ -5,6 +5,41 @@ use crate::network::transport::libp2p_transport::{
     protocols::{gossipsub, kad, request_response},
 };
 
+#[macro_export]
+macro_rules! extract_variant {
+    ($value:expr, $pattern:pat => $result:expr) => {
+        match $value {
+            $pattern => Some($result),
+            _ => None,
+        }
+    };
+    
+    (
+        $value:expr, 
+        $outer_pattern:pat => $inner_expr:expr,
+        $inner_pattern:pat => $result:expr
+    ) => {
+        match $value {
+            $outer_pattern => match $inner_expr {
+                $inner_pattern => Some($result),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    
+    (
+        $value:expr, 
+        $pattern:pat => $result:expr,
+        else $else_expr:expr
+    ) => {
+        match $value {
+            $pattern => Some($result),
+            _ => $else_expr,
+        }
+    };
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
