@@ -396,6 +396,12 @@ impl<T: Transport + 'static> Classic<T> {
             }
         })
     }
+
+    async fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 fn to_order_map<T, N, I>(iter: I, capacity: N) -> std::result::Result<HashMap<T, N>, ()>
@@ -545,6 +551,27 @@ mod tests {
         (2 * n / 3) + 1
     }
 
+    async fn create_classic(n: u16) -> (Classic<MockTransport>, PeerId, HashSet<PeerId>) {
+        let (topic_tx, topic_rx) = channel((n - 1).into());
+        let (peer_tx, peer_rx) = channel((n - 1).into());
+
+        let mut peers: Vec<PeerId> = generate_peers(NUM_PEERS).into_iter().collect();
+        peers.sort();
+
+        for i in 0..n - 1 {
+            let node = MockNode::new(peers[i as usize], NUM_PEERS);
+            node.send_v_ss(&topic_tx).await;
+            node.send_shares(&peer_tx).await;
+        }
+
+        let transport = Arc::new(create_mock_transport(topic_rx, peer_rx));
+        let self_peer = peers[n as usize - 1];
+        let mut other_peers: HashSet<_> = peers.into_iter().collect();
+        other_peers.remove(&self_peer);
+        let config = create_config();
+        (Classic::new(transport, config), self_peer, other_peers)
+    }
+
     #[tokio::test]
     async fn create_success() {
         let (topic_tx, topic_rx) = channel((NUM_PEERS - 1).into());
@@ -573,6 +600,10 @@ mod tests {
             "Failed to create classic DKG instance: {:?}",
             result.err()
         );
+        assert!(
+            classic.handle.is_some(),
+            "Classic DKG instance is not running"
+        );
     }
 
     #[tokio::test]
@@ -594,6 +625,19 @@ mod tests {
         assert!(
             result.is_err(),
             "Classic DKG instance should not be created due to timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop() {
+        let (mut classic, self_peer, other_peers) = create_classic(NUM_PEERS).await;
+
+        classic.start::<E, H>(self_peer, other_peers).await.unwrap();
+        classic.stop().await;
+
+        assert!(
+            classic.handle.is_none(),
+            "Classic DKG instance is still running"
         );
     }
 }
