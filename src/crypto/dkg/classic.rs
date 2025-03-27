@@ -150,7 +150,8 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             })
             .sum();
 
-        let signer = Signer::new(secret, public_key, threshold).with_peers(peers);
+        let mut signer = Signer::new(secret, public_key, threshold);
+        signer.add_peers(peers);
 
         Ok((signer, topic_rx))
     }

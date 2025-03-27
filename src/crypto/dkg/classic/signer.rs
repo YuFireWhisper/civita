@@ -33,27 +33,26 @@ impl<E: Curve> Signer<E> {
         }
     }
 
-    pub fn with_peers(mut self, peers: HashMap<PeerId, u16>) -> Self {
+    pub fn add_peers(&mut self, peers: HashMap<PeerId, u16>) {
         self.peers.extend(peers);
-        self
     }
 
-    pub fn sign<H: Digest + Clone>(&self, seed: &[u8], raw_msg: &[u8]) -> Signature {
-        let nonce = Self::calculate_nonce(seed);
+    pub fn sign<H: Digest + Clone>(&self, seed: &[u8], message: &[u8]) -> Signature {
+        let nonce = Self::generate_nonce(seed);
         let random_pub_key = Self::calculate_random_public_key(&nonce);
-        let challenge = Self::calculate_challenge_value::<H>(
-            raw_msg,
+        let challenge = Self::compute_challenge::<H>(
+            message,
             &random_pub_key.to_bytes(true),
             &self.public_key.to_bytes(true),
         );
-        let s = Self::calculate_signature(self, &nonce, &challenge);
+        let s = self.calculate_signature(&nonce, &challenge);
 
         Signature::new()
             .with_signature(s)
             .with_random_public_key(random_pub_key)
     }
 
-    fn calculate_nonce(seed: &[u8]) -> Scalar<E> {
+    fn generate_nonce(seed: &[u8]) -> Scalar<E> {
         let b = BigInt::from_bytes(seed);
         Scalar::from_bigint(&b)
     }
@@ -62,8 +61,12 @@ impl<E: Curve> Signer<E> {
         Point::generator() * k
     }
 
-    fn calculate_challenge_value<H: Digest + Clone>(m: &[u8], r: &[u8], y: &[u8]) -> Scalar<E> {
-        let input = [m, r, y].concat();
+    fn compute_challenge<H: Digest + Clone>(
+        message: &[u8],
+        random_pk: &[u8],
+        pub_key: &[u8],
+    ) -> Scalar<E> {
+        let input = [message, random_pk, pub_key].concat();
         let h = H::new().chain(&input).finalize();
         let b = BigInt::from_bytes(&h);
         Scalar::from_bigint(&b)
@@ -78,27 +81,32 @@ impl<E: Curve> Signer<E> {
         signature: Signature,
         peer: PeerId,
     ) -> Option<Signature> {
-        let signatures = self
-            .processing
-            .entry(signature.random_public_key_bytes().to_vec())
-            .or_default();
-        let index = *self.peers.get(&peer).expect("peer not found");
+        let random_pk_bytes = signature.random_public_key_bytes();
+        let index = self.get_peer_index(&peer).expect("Unknown peer");
+        let signatures = self.processing.entry(random_pk_bytes.to_vec()).or_default();
         signatures.insert(index, signature.signature());
 
-        if signatures.len() == self.threshold as usize {
-            let points = signatures
-                .keys()
-                .map(|&i| Scalar::from(i))
-                .collect::<Vec<_>>();
-            let scalars = signatures.values().cloned().collect::<Vec<_>>();
-            let final_signature =
-                VerifiableSS::<E, H>::lagrange_interpolation_at_zero(&points, &scalars);
+        (signatures.len() == self.threshold as usize)
+            .then(|| self.finalize_signature::<H>(random_pk_bytes))
+    }
 
-            self.processing.remove(signature.random_public_key_bytes());
+    fn get_peer_index(&self, peer: &PeerId) -> Option<u16> {
+        self.peers.get(peer).copied()
+    }
 
-            Some(signature.with_signature(final_signature))
-        } else {
-            None
-        }
+    fn finalize_signature<H: Digest + Clone>(&mut self, random_pk_bytes: &[u8]) -> Signature {
+        let signatures = self
+            .processing
+            .remove(random_pk_bytes)
+            .expect("Unknown random public key");
+        let points = signatures
+            .keys()
+            .map(|&i| Scalar::from(i))
+            .collect::<Vec<_>>();
+        let scalars = signatures.values().cloned().collect::<Vec<_>>();
+        let final_signature =
+            VerifiableSS::<E, H>::lagrange_interpolation_at_zero(&points, &scalars);
+
+        Signature::new().with_signature(final_signature)
     }
 }
