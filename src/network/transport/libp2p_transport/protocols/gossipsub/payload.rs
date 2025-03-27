@@ -2,7 +2,7 @@ use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::dkg::classic::signer::Signature, extract_variant,
+    crypto::dkg::classic::Signature, extract_variant,
     network::transport::libp2p_transport::message::Message,
 };
 

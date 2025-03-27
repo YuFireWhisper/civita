@@ -1,6 +1,9 @@
 pub mod config;
 pub mod peer_share;
+pub mod signature;
 pub mod signer;
+
+pub use signature::Signature;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -30,11 +33,7 @@ use tokio::{
 };
 
 use crate::{
-    crypto::dkg::classic::{
-        config::Config,
-        peer_share::PeerShare,
-        signer::{Signature, Signer},
-    },
+    crypto::dkg::classic::{config::Config, peer_share::PeerShare, signer::Signer},
     network::transport::{
         libp2p_transport::{
             message::Message,
@@ -56,6 +55,10 @@ pub enum Error {
     ResidentsSize(u16),
     #[error("Serde error: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("Send error: {0}")]
+    Send(String),
+    #[error("Failed to receive: {0}")]
+    Receive(#[from] RecvError),
     #[error("Curv deserialization error: {0}")]
     Deserialization(#[from] curv::elliptic::curves::error::DeserializationError),
     #[error("Validate share failed, peer: {0}")]
@@ -64,12 +67,6 @@ pub enum Error {
     Timeout,
     #[error("Channel is closed")]
     ChannelClosed,
-    #[error("Send error: {0}")]
-    Send(String),
-    #[error("Failed to receive: {0}")]
-    Receive(#[from] RecvError),
-    #[error("Signer error: {0}")]
-    Signer(#[from] signer::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
