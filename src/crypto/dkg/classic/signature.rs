@@ -40,3 +40,49 @@ impl Signature {
         &self.r_pub_key
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use curv::elliptic::curves::{Point, Scalar, Secp256k1};
+
+    use crate::crypto::dkg::classic::Signature;
+
+    type E = Secp256k1;
+
+    #[test]
+    fn return_default_signature() {
+        let result = Signature::new();
+
+        assert!(result.sig_bytes.is_empty());
+        assert!(result.r_pub_key.is_empty());
+    }
+
+    #[test]
+    fn same_signature() {
+        let signature = Scalar::<E>::random();
+
+        let result = Signature::new().with_signature(signature.clone());
+
+        assert_eq!(result.signature(), signature);
+    }
+
+    #[test]
+    fn same_random_public_key() {
+        let random_public_key = Point::<E>::zero();
+
+        let result = Signature::new().with_random_public_key(random_public_key.clone());
+
+        assert_eq!(result.random_public_key(), random_public_key);
+    }
+
+    #[test]
+    fn same_random_public_key_bytes() {
+        let random_public_key = Point::<E>::zero();
+        let expected = random_public_key.to_bytes(true).to_vec();
+        let sig = Signature::new().with_random_public_key(random_public_key.clone());
+
+        let result = sig.random_public_key_bytes();
+
+        assert_eq!(result, expected);
+    }
+}
