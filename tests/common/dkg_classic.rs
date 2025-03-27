@@ -15,9 +15,7 @@ type T = Libp2pTransport;
 type E = Secp256k1;
 type H = Sha256;
 
-pub async fn generate_classic_nodes(
-    infos: Vec<TransportInfo>,
-) -> Result<Vec<Classic<T, E>>, String> {
+pub async fn generate_classic_nodes(infos: Vec<TransportInfo>) -> Result<Vec<Classic<T>>, String> {
     let all_peers: Vec<PeerId> = infos.iter().map(|info| info.peer_id).collect();
 
     let node_futures = infos.iter().enumerate().map(|(index, info)| {
@@ -31,7 +29,7 @@ pub async fn generate_classic_nodes(
 
         async move {
             let mut node = Classic::new(transport, Config::default());
-            node.init::<H>(self_peer, other_peers)
+            node.start::<E, H>(self_peer, other_peers)
                 .await
                 .map(|_| node)
                 .map_err(|e| {
@@ -44,9 +42,9 @@ pub async fn generate_classic_nodes(
     });
 
     let results = join_all(node_futures).await;
-    let nodes: Vec<Classic<T, E>> = results
+    let nodes: Vec<Classic<T>> = results
         .into_iter()
-        .collect::<Result<Vec<Classic<T, E>>, String>>()?;
+        .collect::<Result<Vec<Classic<T>>, String>>()?;
 
     Ok(nodes)
 }

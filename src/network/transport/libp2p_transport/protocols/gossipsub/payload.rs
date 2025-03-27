@@ -1,7 +1,7 @@
 use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
-use crate::network::transport::libp2p_transport::message::Message;
+use crate::{extract_variant, network::transport::libp2p_transport::message::Message};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {
@@ -40,12 +40,19 @@ impl Payload {
     }
 
     pub fn get_dkg_vss(msg: Message) -> Option<(PeerId, Vec<u8>)> {
-        if let Message::Gossipsub(gossipsub_msg) = msg {
-            if let Payload::DkgVSS(vss) = gossipsub_msg.payload {
-                return Some((gossipsub_msg.source, vss));
-            }
-        }
-        None
+        extract_variant!(
+            msg,
+            Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
+            Payload::DkgVSS(v) => (gossipsub_msg.source, v)
+        )
+    }
+
+    pub fn get_dkg_sign(msg: Message) -> Option<(MessageId, Vec<u8>)> {
+        extract_variant!(
+            msg,
+            Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
+            Payload::DkgSign(v) => (gossipsub_msg.message_id, v)
+        )
     }
 }
 
@@ -71,7 +78,10 @@ mod tests {
 
     use crate::{
         crypto::vrf::dvrf::proof::Proof,
-        network::transport::libp2p_transport::{message::Message, protocols::gossipsub::{self, message::mock_message::create_message, Payload}},
+        network::transport::libp2p_transport::{
+            message::Message,
+            protocols::gossipsub::{self, message::mock_message::create_message, Payload},
+        },
     };
 
     const MESSAGE_ID: &str = "MESSAGE_ID";

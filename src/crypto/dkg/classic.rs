@@ -11,12 +11,15 @@ use curv::{
         hashing::Digest,
         secret_sharing::feldman_vss::{SecretShares, VerifiableSS},
     },
-    elliptic::curves::{bls12_381::g1::G1Point, Curve, ECPoint, Point, Scalar},
+    elliptic::curves::{
+        bls12_381::{g1::G1Point, scalar::FieldScalar},
+        Curve, ECPoint, ECScalar, Point, Scalar,
+    },
 };
 use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
 use thiserror::Error;
-use tokio::{sync::mpsc::Receiver, time::timeout};
+use tokio::{sync::mpsc::Receiver, task::JoinHandle, time::timeout};
 
 use crate::{
     crypto::dkg::classic::config::Config,
@@ -118,6 +121,13 @@ impl<E: Curve> Signer<E> {
         }
     }
 
+    pub fn sign<H: Digest + Clone>(&self, raw_msg: &[u8]) -> G1Point {
+        let msg = H::new().chain(raw_msg).finalize();
+        let hash = G1Point::hash_to_curve(&msg);
+        let field_scalar = FieldScalar::from_bigint(&self.secret.to_bigint());
+        hash.scalar_mul(&field_scalar)
+    }
+
     pub fn update(&mut self, message_id: MessageId, signature: G1Point) -> Option<G1Point> {
         let signatures = self.processing.entry(message_id.clone()).or_default();
         signatures.push(signature);
@@ -139,34 +149,46 @@ impl<E: Curve> Signer<E> {
     }
 }
 
-pub struct Classic<T: Transport, E: Curve> {
+pub struct Classic<T: Transport + 'static> {
     #[allow(dead_code)]
     transport: Arc<T>,
     config: Config,
-    signer: Option<Signer<E>>,
+    handle: Option<JoinHandle<()>>,
 }
 
-impl<T: Transport, E: Curve> Classic<T, E> {
+impl<T: Transport + 'static> Classic<T> {
     pub fn new(transport: Arc<T>, config: Config) -> Self {
-        let signer = None;
+        let handle = None;
         Self {
             transport,
             config,
-            signer,
+            handle,
         }
     }
 
-    pub async fn init<H: Digest + Clone>(
+    pub async fn start<E: Curve, H: Digest + Clone>(
         &mut self,
         self_peer: PeerId,
         other_peers: HashSet<PeerId>,
-    ) -> Result<()> { 
+    ) -> Result<()> {
+        let (signer, topic_rx) = self.init_signer::<E, H>(self_peer, other_peers).await?;
+        let handle = self.receive::<E, H>(signer, topic_rx).await;
+        self.handle = Some(handle);
+
+        Ok(())
+    }
+
+    async fn init_signer<E: Curve, H: Digest + Clone>(
+        &self,
+        self_peer: PeerId,
+        other_peers: HashSet<PeerId>,
+    ) -> Result<(Signer<E>, Receiver<Message>)> {
         let mut topic_rx = self.listen_topic().await?;
         let mut peers_rx = self.listen_peers(other_peers.clone()).await?;
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
         let num_peers = Self::calculate_num_peers(&peers);
         let threshold = (self.config.threshold_counter)(num_peers);
-        let (vss, self_shares) = Self::generate_shares::<H>(threshold, num_peers);
+        let (vss, self_shares) = Self::generate_shares::<E, H>(threshold, num_peers);
 
         Self::publish_verifiable_ss(&self.transport, &vss).await?;
         Self::send_shares(&self.transport, &peers, &self_shares).await?;
@@ -174,7 +196,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         let self_index = Self::self_index(&self_peer, &peers);
         let collected = timeout(self.config.timeout, async {
             let nums = num_peers - 1;
-            Self::collect_data::<H>(&mut topic_rx, &mut peers_rx, nums).await
+            Self::collect_data::<E, H>(&mut topic_rx, &mut peers_rx, nums).await
         })
         .await
         .map_err(|_| Error::Timeout)??;
@@ -196,10 +218,9 @@ impl<T: Transport, E: Curve> Classic<T, E> {
             })
             .collect();
 
-        let signer = Some(Signer::new(secret, public_key, threshold));
-        self.signer = signer;
+        let signer = Signer::new(secret, public_key, threshold);
 
-        Ok(())
+        Ok((signer, topic_rx))
     }
 
     async fn listen_topic(&self) -> Result<Receiver<Message>> {
@@ -234,7 +255,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
             .expect("Failed to convert usize to u16, this should never happen")
     }
 
-    fn generate_shares<H: Digest + Clone>(
+    fn generate_shares<E: Curve, H: Digest + Clone>(
         threshold: u16,
         nums: u16,
     ) -> (VerifiableSS<E, H>, SecretShares<E>) {
@@ -243,7 +264,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         VerifiableSS::<E, H>::share(threshold, nums, &secret)
     }
 
-    async fn publish_verifiable_ss<H: Digest + Clone>(
+    async fn publish_verifiable_ss<E: Curve, H: Digest + Clone>(
         transport: &Arc<T>,
         verifiable_ss: &VerifiableSS<E, H>,
     ) -> Result<()> {
@@ -253,7 +274,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         Ok(())
     }
 
-    async fn send_shares(
+    async fn send_shares<E: Curve>(
         transport: &Arc<T>,
         peers: &HashMap<PeerId, u16>,
         shares: &SecretShares<E>,
@@ -272,7 +293,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
         Ok(())
     }
 
-    async fn collect_data<H: Digest + Clone>(
+    async fn collect_data<E: Curve, H: Digest + Clone>(
         topic_rx: &mut Receiver<Message>,
         peers_rx: &mut Receiver<Message>,
         expected: u16,
@@ -283,7 +304,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
 
         while complete_count < expected {
             tokio::select! {
-                                Some(msg) = topic_rx.recv() => {
+                Some(msg) = topic_rx.recv() => {
                     if let Some((peer, vss_bytes)) = Payload::get_dkg_vss(msg) {
                         let vss: VerifiableSS<E, H> = serde_json::from_slice(&vss_bytes)?;
                         let entry = collected.entry(peer).or_insert_with(PeerShare::new);
@@ -315,7 +336,7 @@ impl<T: Transport, E: Curve> Classic<T, E> {
             .expect("Self peer not found in peers map")
     }
 
-    fn validate_data<H: Digest + Clone>(
+    fn validate_data<E: Curve, H: Digest + Clone>(
         data: &HashMap<PeerId, PeerShare<E, H>>,
         self_index: u16,
     ) -> Result<Vec<Scalar<E>>> {
@@ -335,12 +356,45 @@ impl<T: Transport, E: Curve> Classic<T, E> {
             .collect()
     }
 
-    fn construct_secret<H: Digest + Clone>(
+    fn construct_secret<E: Curve, H: Digest + Clone>(
         v_ss: &VerifiableSS<E, H>,
         indices: &[u16],
         shares: &[Scalar<E>],
     ) -> Scalar<E> {
         v_ss.reconstruct(indices, shares)
+    }
+
+    async fn receive<E: Curve, H: Digest + Clone>(
+        &self,
+        mut signer: Signer<E>,
+        mut topic_rx: Receiver<Message>,
+    ) -> JoinHandle<()> {
+        let transport = self.transport.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match topic_rx.recv().await {
+                    Some(msg) => {
+                        if let Some((message_id, msg_to_sign)) = Payload::get_dkg_sign(msg) {
+                            let signature = signer.sign::<H>(&msg_to_sign);
+                            signer.update(message_id.clone(), signature);
+                            let signature = signature.serialize_compressed().to_vec();
+                            let response = Payload::DkgSignResponse {
+                                message_id,
+                                signature,
+                            };
+                            if let Err(e) = transport.publish(DKG_TOPIC, response).await {
+                                error!("Failed to publish signature: {:?}", e);
+                            };
+                        }
+                    }
+                    None => {
+                        error!("Channel is closed");
+                        break;
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -510,9 +564,9 @@ mod tests {
         let mut other_peers: HashSet<_> = peers.into_iter().collect();
         other_peers.remove(&self_peer);
         let config = create_config();
-        let mut classic = Classic::<_, E>::new(transport, config);
+        let mut classic = Classic::new(transport, config);
 
-        let result = classic.init::<H>(self_peer, other_peers).await;
+        let result = classic.start::<E, H>(self_peer, other_peers).await;
 
         assert!(
             result.is_ok(),
@@ -533,8 +587,8 @@ mod tests {
         other_peers.remove(&self_peer);
         let config = create_config_with_timeout(Duration::from_millis(1)); // Very short timeout
 
-        let result = Classic::<_, E>::new(Arc::new(transport), config)
-            .init::<H>(self_peer, other_peers)
+        let result = Classic::new(Arc::new(transport), config)
+            .start::<E, H>(self_peer, other_peers)
             .await;
 
         assert!(
