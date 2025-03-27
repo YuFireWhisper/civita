@@ -51,19 +51,19 @@ impl Payload {
         )
     }
 
-    pub fn get_dkg_sign(msg: Message) -> Option<(MessageId, Vec<u8>)> {
+    pub fn get_dkg_sign(msg: Message) -> Option<(MessageId, PeerId, Vec<u8>)> {
         extract_variant!(
             msg,
             Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
-            Payload::DkgSign(v) => (gossipsub_msg.message_id, v)
+            Payload::DkgSign(v) => (gossipsub_msg.message_id, gossipsub_msg.source, v)
         )
     }
 
-    pub fn get_dkg_sign_response(msg: Message) -> Option<(MessageId, Vec<u8>)> {
+    pub fn get_dkg_sign_response(msg: Message) -> Option<(MessageId, PeerId, Vec<u8>)> {
         extract_variant!(
             msg,
             Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
-            Payload::DkgSignResponse { message_id, signature } => (message_id, signature)
+            Payload::DkgSignResponse { message_id, signature } => (message_id, gossipsub_msg.source, signature)
         )
     }
 }

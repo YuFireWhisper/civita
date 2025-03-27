@@ -14,14 +14,14 @@ use curv::{
         hashing::Digest,
         secret_sharing::feldman_vss::{SecretShares, VerifiableSS},
     },
-    elliptic::curves::{bls12_381::g1::G1Point, Curve, ECPoint},
+    elliptic::curves::Curve,
 };
 use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
 use thiserror::Error;
 use tokio::{
     sync::{
-        mpsc::{channel, error::SendError, Receiver, Sender},
+        mpsc::{channel, Receiver, Sender},
         oneshot::{self, error::RecvError},
         Mutex,
     },
@@ -42,7 +42,7 @@ use crate::{
 
 const DKG_TOPIC: &str = "dkg";
 
-type ToSelfTxType = (MessageId, Vec<u8>, oneshot::Sender<G1Point>);
+type ToSelfTxType<E> = (MessageId, Vec<u8>, oneshot::Sender<Scalar<E>>);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -61,48 +61,52 @@ pub enum Error {
     #[error("Channel is closed")]
     ChannelClosed,
     #[error("Send error: {0}")]
-    SendError(#[from] SendError<ToSelfTxType>),
+    SendError(String),
     #[error("Failed to receive: {0}")]
     ReceiveError(#[from] RecvError),
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub struct Classic<T: Transport + 'static> {
+pub struct Classic<T: Transport + 'static, E: Curve> {
     transport: Arc<T>,
     config: Config,
     handle: Option<JoinHandle<()>>,
-    to_self_tx: Option<Sender<ToSelfTxType>>,
-    completed: Arc<Mutex<HashMap<MessageId, G1Point>>>,
+    to_self_tx: Option<Sender<ToSelfTxType<E>>>,
+    completed: Arc<Mutex<HashMap<MessageId, Scalar<E>>>>,
+    peer: Option<PeerId>,
 }
 
-impl<T: Transport + 'static> Classic<T> {
+impl<T: Transport + 'static, E: Curve> Classic<T, E> {
     pub fn new(transport: Arc<T>, config: Config) -> Self {
         let handle = None;
         let to_self_tx = None;
         let completed = Arc::new(Mutex::new(HashMap::new()));
+        let peer = None;
         Self {
             transport,
             config,
             handle,
             to_self_tx,
             completed,
+            peer,
         }
     }
 
-    pub async fn start<E: Curve, H: Digest + Clone>(
+    pub async fn start<H: Digest + Clone>(
         &mut self,
         self_peer: PeerId,
         other_peers: HashSet<PeerId>,
     ) -> Result<()> {
-        let (signer, topic_rx) = self.init_signer::<E, H>(self_peer, other_peers).await?;
-        let handle = self.receive::<E, H>(signer, topic_rx).await;
+        self.peer = Some(self_peer);
+        let (signer, topic_rx) = self.init_signer::<H>(self_peer, other_peers).await?;
+        let handle = self.receive::<H>(signer, topic_rx).await;
         self.handle = Some(handle);
 
         Ok(())
     }
 
-    async fn init_signer<E: Curve, H: Digest + Clone>(
+    async fn init_signer<H: Digest + Clone>(
         &self,
         self_peer: PeerId,
         other_peers: HashSet<PeerId>,
@@ -112,7 +116,7 @@ impl<T: Transport + 'static> Classic<T> {
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
         let num_peers = Self::calculate_num_peers(&peers);
         let threshold = (self.config.threshold_counter)(num_peers);
-        let (vss, self_shares) = Self::generate_shares::<E, H>(threshold, num_peers);
+        let (vss, self_shares) = Self::generate_shares::<H>(threshold, num_peers);
 
         Self::publish_verifiable_ss(&self.transport, &vss).await?;
         Self::send_shares(&self.transport, &peers, &self_shares).await?;
@@ -120,7 +124,7 @@ impl<T: Transport + 'static> Classic<T> {
         let self_index = Self::self_index(&self_peer, &peers);
         let collected = timeout(self.config.timeout, async {
             let nums = num_peers - 1;
-            Self::collect_data::<E, H>(&mut topic_rx, &mut peers_rx, nums).await
+            Self::collect_data::<H>(&mut topic_rx, &mut peers_rx, nums).await
         })
         .await
         .map_err(|_| Error::Timeout)??;
@@ -143,7 +147,7 @@ impl<T: Transport + 'static> Classic<T> {
             })
             .sum();
 
-        let signer = Signer::new(secret, public_key, threshold);
+        let signer = Signer::new(secret, public_key, threshold, peers);
 
         Ok((signer, topic_rx))
     }
@@ -180,7 +184,7 @@ impl<T: Transport + 'static> Classic<T> {
             .expect("Failed to convert usize to u16, this should never happen")
     }
 
-    fn generate_shares<E: Curve, H: Digest + Clone>(
+    fn generate_shares<H: Digest + Clone>(
         threshold: u16,
         nums: u16,
     ) -> (VerifiableSS<E, H>, SecretShares<E>) {
@@ -189,7 +193,7 @@ impl<T: Transport + 'static> Classic<T> {
         VerifiableSS::<E, H>::share(threshold, nums, &secret)
     }
 
-    async fn publish_verifiable_ss<E: Curve, H: Digest + Clone>(
+    async fn publish_verifiable_ss<H: Digest + Clone>(
         transport: &Arc<T>,
         verifiable_ss: &VerifiableSS<E, H>,
     ) -> Result<()> {
@@ -199,7 +203,7 @@ impl<T: Transport + 'static> Classic<T> {
         Ok(())
     }
 
-    async fn send_shares<E: Curve>(
+    async fn send_shares(
         transport: &Arc<T>,
         peers: &HashMap<PeerId, u16>,
         shares: &SecretShares<E>,
@@ -218,7 +222,7 @@ impl<T: Transport + 'static> Classic<T> {
         Ok(())
     }
 
-    async fn collect_data<E: Curve, H: Digest + Clone>(
+    async fn collect_data<H: Digest + Clone>(
         topic_rx: &mut Receiver<Message>,
         peers_rx: &mut Receiver<Message>,
         expected: u16,
@@ -261,7 +265,7 @@ impl<T: Transport + 'static> Classic<T> {
             .expect("Self peer not found in peers map")
     }
 
-    fn validate_data<E: Curve, H: Digest + Clone>(
+    fn validate_data<H: Digest + Clone>(
         data: &HashMap<PeerId, PeerShare<E, H>>,
         self_index: u16,
     ) -> Result<Vec<Scalar<E>>> {
@@ -280,7 +284,7 @@ impl<T: Transport + 'static> Classic<T> {
             .collect()
     }
 
-    fn construct_secret<E: Curve, H: Digest + Clone>(
+    fn construct_secret<H: Digest + Clone>(
         v_ss: &VerifiableSS<E, H>,
         indices: &[u16],
         shares: &[Scalar<E>],
@@ -288,7 +292,7 @@ impl<T: Transport + 'static> Classic<T> {
         v_ss.reconstruct(indices, shares)
     }
 
-    async fn receive<E: Curve, H: Digest + Clone>(
+    async fn receive<H: Digest + Clone>(
         &mut self,
         mut signer: Signer<E>,
         mut topic_rx: Receiver<Message>,
@@ -298,18 +302,21 @@ impl<T: Transport + 'static> Classic<T> {
 
         let transport = self.transport.clone();
         let completed = self.completed.clone();
+        let self_peer = self
+            .peer
+            .expect("Self peer is missing, this should never happen");
         self.to_self_tx = Some(to_self_tx);
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     Some(msg) = topic_rx.recv() => {
-                        if let Some((message_id, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
-                            let signature = signer.sign::<H>(&msg_to_sign);
-                            Self::publish_signature(&transport, message_id.clone(), signature.serialize_compressed().to_vec()).await;
-                            let final_signature = signer.update(message_id.clone(), signature);
+                        if let Some((message_id, peer, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
+                            let signature = signer.sign::<H>(message_id.to_string().as_bytes(), &msg_to_sign);
+                            Self::publish_signature(&transport, message_id.clone(), signature.to_bytes().to_vec()).await;
+                            let final_signature = signer.update::<H>(message_id.clone(), peer, signature);
                             if let Some(signature) = final_signature {
-                                if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.serialize_compressed().to_vec()).await {
+                                if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.to_bytes().to_vec()).await {
                                     error!("Failed to publish final signature: {:?}", e);
                                 }
                                 completed.lock().await.insert(message_id, signature);
@@ -317,11 +324,11 @@ impl<T: Transport + 'static> Classic<T> {
                             continue;
                         }
 
-                        if let Some((message_id, signature)) = Payload::get_dkg_sign_response(msg) {
-                            if let Ok(point) = G1Point::deserialize(&signature) {
-                                let final_signature = signer.update(message_id.clone(), point);
+                        if let Some((message_id, peer, signature)) = Payload::get_dkg_sign_response(msg) {
+                            if let Ok(scalar) = Scalar::from_bytes(signature.as_slice()) {
+                                let final_signature = signer.update::<H>(message_id.clone(), peer, scalar);
                                 if let Some(signature) = final_signature {
-                                    if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.serialize_compressed().to_vec()).await {
+                                    if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.to_bytes().to_vec()).await {
                                         error!("Failed to publish signature: {:?}", e);
                                     }
                                     completed.lock().await.insert(message_id, signature);
@@ -330,14 +337,14 @@ impl<T: Transport + 'static> Classic<T> {
                         }
                     }
                     Some((msg_id, msg_to_sign, tx)) = to_self_rx.recv() => {
-                        let signature = signer.sign::<H>(&msg_to_sign);
-                        Self::publish_signature(&transport,msg_id.clone(), signature.serialize_compressed().to_vec()).await;
-                        let final_signature = signer.update(msg_id.clone(), signature);
+                        let signature = signer.sign::<H>(&msg_to_sign, &msg_to_sign);
+                        Self::publish_signature(&transport,msg_id.clone(), signature.to_bytes().to_vec()).await;
+                        let final_signature = signer.update::<H>(msg_id.clone(), self_peer, signature);
                         if let Some(signature) = final_signature {
-                            if let Err(e) = Self::publish_final_signature(&transport, msg_id.clone(), signature.serialize_compressed().to_vec()).await {
+                            if let Err(e) = Self::publish_final_signature(&transport, msg_id.clone(), signature.to_bytes().to_vec()).await {
                                 error!("Failed to publish final signature: {:?}", e);
                             }
-                            completed.lock().await.insert(msg_id, signature);
+                            completed.lock().await.insert(msg_id, signature.clone());
                             if let Err(e) = tx.send(signature) {
                                 error!("Failed to send signature to self: {:?}", e);
                             }
@@ -350,6 +357,17 @@ impl<T: Transport + 'static> Classic<T> {
                 }
             }
         })
+    }
+
+    async fn publish_signature(transport: &Arc<T>, message_id: MessageId, signature: Vec<u8>) {
+        let response = Payload::DkgSignResponse {
+            message_id,
+            signature,
+        };
+
+        if let Err(e) = transport.publish(DKG_TOPIC, response).await {
+            error!("Failed to publish signature: {:?}", e);
+        };
     }
 
     async fn publish_final_signature(
@@ -366,17 +384,6 @@ impl<T: Transport + 'static> Classic<T> {
         Ok(())
     }
 
-    async fn publish_signature(transport: &Arc<T>, message_id: MessageId, signature: Vec<u8>) {
-        let response = Payload::DkgSignResponse {
-            message_id,
-            signature,
-        };
-
-        if let Err(e) = transport.publish(DKG_TOPIC, response).await {
-            error!("Failed to publish signature: {:?}", e);
-        };
-    }
-
     pub async fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
@@ -385,13 +392,16 @@ impl<T: Transport + 'static> Classic<T> {
         }
     }
 
-    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<G1Point> {
+    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Scalar<E>> {
         let payload = Payload::DkgSign(msg_to_sign.clone());
         let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
         let (tx, rx) = oneshot::channel();
 
         if let Some(to_self_tx) = &self.to_self_tx {
-            to_self_tx.send((message_id, msg_to_sign, tx)).await?;
+            to_self_tx
+                .send((message_id, msg_to_sign, tx))
+                .await
+                .map_err(|e| Error::SendError(e.to_string()))?;
         }
 
         match timeout(self.config.timeout, rx).await {
@@ -550,7 +560,7 @@ mod tests {
         (2 * n / 3) + 1
     }
 
-    async fn create_classic(n: u16) -> (Classic<MockTransport>, PeerId, HashSet<PeerId>) {
+    async fn create_classic(n: u16) -> (Classic<MockTransport, E>, PeerId, HashSet<PeerId>) {
         let (topic_tx, topic_rx) = channel((n - 1).into());
         let (peer_tx, peer_rx) = channel((n - 1).into());
 
@@ -590,9 +600,9 @@ mod tests {
         let mut other_peers: HashSet<_> = peers.into_iter().collect();
         other_peers.remove(&self_peer);
         let config = create_config();
-        let mut classic = Classic::new(transport, config);
+        let mut classic = Classic::<_, E>::new(transport, config);
 
-        let result = classic.start::<E, H>(self_peer, other_peers).await;
+        let result = classic.start::<H>(self_peer, other_peers).await;
 
         assert!(
             result.is_ok(),
@@ -617,8 +627,8 @@ mod tests {
         other_peers.remove(&self_peer);
         let config = create_config_with_timeout(Duration::from_millis(1)); // Very short timeout
 
-        let result = Classic::new(Arc::new(transport), config)
-            .start::<E, H>(self_peer, other_peers)
+        let result = Classic::<_, E>::new(Arc::new(transport), config)
+            .start::<H>(self_peer, other_peers)
             .await;
 
         assert!(
@@ -631,7 +641,7 @@ mod tests {
     async fn stop() {
         let (mut classic, self_peer, other_peers) = create_classic(NUM_PEERS).await;
 
-        classic.start::<E, H>(self_peer, other_peers).await.unwrap();
+        classic.start::<H>(self_peer, other_peers).await.unwrap();
         classic.stop().await;
 
         assert!(
@@ -649,7 +659,7 @@ mod tests {
         // real peer in the test, if we use the default threshold_counter, the test will fail
         classic.config.threshold_counter = Box::new(|_| 1);
 
-        classic.start::<E, H>(self_peer, other_peers).await.unwrap();
+        classic.start::<H>(self_peer, other_peers).await.unwrap();
         let result = classic.sign(MESSAGE.to_vec()).await;
 
         assert!(

@@ -1,55 +1,94 @@
 use std::collections::HashMap;
 
-use curv::elliptic::curves::{
-    bls12_381::{g1::G1Point, scalar::FieldScalar},
-    Curve, ECPoint, ECScalar, Point, Scalar,
+use curv::{
+    arithmetic::Converter,
+    cryptographic_primitives::secret_sharing::feldman_vss::VerifiableSS,
+    elliptic::curves::{Curve, Point, Scalar},
+    BigInt,
 };
-use libp2p::gossipsub::MessageId;
+use libp2p::{gossipsub::MessageId, PeerId};
 use sha2::Digest;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum Error {}
 
 #[derive(Debug)]
 pub struct Signer<E: Curve> {
     secret: Scalar<E>,
     public_key: Point<E>,
     threshold: u16,
-    processing: HashMap<MessageId, Vec<G1Point>>,
+    peers: HashMap<PeerId, u16>,
+    processing: HashMap<MessageId, HashMap<u16, Scalar<E>>>,
 }
 
 impl<E: Curve> Signer<E> {
-    pub fn new(secret: Scalar<E>, public_key: Point<E>, threshold: u16) -> Self {
+    pub fn new(
+        secret: Scalar<E>,
+        public_key: Point<E>,
+        threshold: u16,
+        peers: HashMap<PeerId, u16>,
+    ) -> Self {
         let processing = HashMap::new();
         Self {
             secret,
             public_key,
             threshold,
+            peers,
             processing,
         }
     }
 
-    pub fn sign<H: Digest + Clone>(&self, raw_msg: &[u8]) -> G1Point {
-        let msg = H::new().chain(raw_msg).finalize();
-        let hash = G1Point::hash_to_curve(&msg);
-        let field_scalar = FieldScalar::from_bigint(&self.secret.to_bigint());
-        hash.scalar_mul(&field_scalar)
+    pub fn sign<H: Digest + Clone>(&self, seed: &[u8], raw_msg: &[u8]) -> Scalar<E> {
+        let k = Self::calculate_nonce(seed);
+        let r = Self::calculate_random_public_key(&k);
+        let e = Self::calculate_challenge_value::<H>(
+            raw_msg,
+            &r.to_bytes(true),
+            &self.public_key.to_bytes(true),
+        );
+        &k + &(&e * &self.secret)
     }
 
-    pub fn update(&mut self, message_id: MessageId, signature: G1Point) -> Option<G1Point> {
+    fn calculate_nonce(seed: &[u8]) -> Scalar<E> {
+        let b = BigInt::from_bytes(seed);
+        Scalar::from_bigint(&b)
+    }
+
+    fn calculate_random_public_key(k: &Scalar<E>) -> Point<E> {
+        Point::generator() * k
+    }
+
+    fn calculate_challenge_value<H: Digest + Clone>(m: &[u8], r: &[u8], y: &[u8]) -> Scalar<E> {
+        let input = [m, r, y].concat();
+        let h = H::new().chain(&input).finalize();
+        let b = BigInt::from_bytes(&h);
+        Scalar::from_bigint(&b)
+    }
+
+    pub fn update<H: Digest + Clone>(
+        &mut self,
+        message_id: MessageId,
+        peer: PeerId,
+        signature: Scalar<E>,
+    ) -> Option<Scalar<E>> {
         let signatures = self.processing.entry(message_id.clone()).or_default();
-        signatures.push(signature);
+        let index = *self.peers.get(&peer).expect("peer not found");
+        signatures.insert(index, signature);
 
         if signatures.len() == self.threshold as usize {
-            let aggregated = Self::aggregate_signatures(signatures.drain(..));
+            let points = signatures
+                .keys()
+                .map(|&i| Scalar::from(i))
+                .collect::<Vec<_>>();
+            let scalars = signatures.values().cloned().collect::<Vec<_>>();
+            let signature = VerifiableSS::<E, H>::lagrange_interpolation_at_zero(&points, &scalars);
+
             self.processing.remove(&message_id);
-            Some(aggregated)
+
+            Some(signature)
         } else {
             None
         }
-    }
-
-    fn aggregate_signatures(signatures: impl IntoIterator<Item = G1Point>) -> G1Point {
-        signatures
-            .into_iter()
-            .reduce(|acc, sig| acc.add_point(&sig))
-            .expect("signatures is empty")
     }
 }
