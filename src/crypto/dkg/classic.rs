@@ -20,7 +20,7 @@ use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
 use thiserror::Error;
 use tokio::{
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::mpsc::{channel, error::SendError, Receiver, Sender},
     task::JoinHandle,
     time::timeout,
 };
@@ -38,6 +38,8 @@ use crate::{
 
 const DKG_TOPIC: &str = "dkg";
 
+type ToSelfTxType = (MessageId, Vec<u8>);
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
@@ -54,6 +56,8 @@ pub enum Error {
     Timeout,
     #[error("Channel is closed")]
     ChannelClosed,
+    #[error("Send error: {0}")]
+    SendError(#[from] SendError<ToSelfTxType>),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -158,7 +162,7 @@ pub struct Classic<T: Transport + 'static> {
     transport: Arc<T>,
     config: Config,
     handle: Option<JoinHandle<()>>,
-    to_self_tx: Option<Sender<Message>>,
+    to_self_tx: Option<Sender<ToSelfTxType>>,
 }
 
 impl<T: Transport + 'static> Classic<T> {
@@ -384,15 +388,19 @@ impl<T: Transport + 'static> Classic<T> {
 
         tokio::spawn(async move {
             loop {
-                let msg = tokio::select! {
-                    Some(msg) = topic_rx.recv() => msg,
-                    Some(msg) = to_self_rx.recv() => msg,
+                tokio::select! {
+                    Some(msg) = topic_rx.recv() => {
+                        Self::handle_message::<E, H>(msg, &mut signer, &transport).await;
+                    }
+                    Some((msg_id, msg_to_sign)) = to_self_rx.recv() => {
+                        let signature = Self::update_singer::<E, H>(msg_id.clone(), &msg_to_sign, &mut signer).await;
+                        Self::publish_signature(&transport, msg_id, signature).await;
+                    }
                     else => {
                         error!("Channel is closed");
                         break;
                     }
-                };
-                Self::handle_message::<E, H>(msg, &mut signer, &transport).await;
+                }
             }
         })
     }
@@ -417,10 +425,44 @@ impl<T: Transport + 'static> Classic<T> {
         }
     }
 
+    async fn update_singer<E: Curve, H: Digest + Clone>(
+        message_id: MessageId,
+        msg_to_sign: &[u8],
+        signer: &mut Signer<E>,
+    ) -> Vec<u8> {
+        let signature = signer.sign::<H>(msg_to_sign);
+        signer.update(message_id.clone(), signature);
+        signature.serialize_compressed().to_vec()
+    }
+
+    async fn publish_signature(transport: &Arc<T>, message_id: MessageId, signature: Vec<u8>) {
+        let response = Payload::DkgSignResponse {
+            message_id,
+            signature,
+        };
+
+        if let Err(e) = transport.publish(DKG_TOPIC, response).await {
+            error!("Failed to publish signature: {:?}", e);
+        };
+    }
+
     pub async fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
+
+            self.to_self_tx = None;
         }
+    }
+
+    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<()> {
+        let payload = Payload::DkgSign(msg_to_sign.clone());
+        let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
+
+        if let Some(tx) = &self.to_self_tx {
+            tx.send((message_id, msg_to_sign)).await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -658,6 +700,22 @@ mod tests {
         assert!(
             classic.handle.is_none(),
             "Classic DKG instance is still running"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign() {
+        const MESSAGE: &[u8] = b"MESSAGE";
+
+        let (mut classic, self_peer, other_peers) = create_classic(NUM_PEERS).await;
+
+        classic.start::<E, H>(self_peer, other_peers).await.unwrap();
+        let result = classic.sign(MESSAGE.to_vec()).await;
+
+        assert!(
+            result.is_ok(),
+            "Failed to sign message: {:?}",
+            result.err().unwrap()
         );
     }
 }
