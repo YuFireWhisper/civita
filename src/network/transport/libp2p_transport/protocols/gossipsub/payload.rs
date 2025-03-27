@@ -23,6 +23,10 @@ pub enum Payload {
         message_id: MessageId,
         signature: Vec<u8>,
     },
+    DkgSignFinal {
+        message_id: MessageId,
+        signature: Vec<u8>,
+    },
     Raw(Vec<u8>), // For testing
 }
 
@@ -52,6 +56,14 @@ impl Payload {
             msg,
             Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
             Payload::DkgSign(v) => (gossipsub_msg.message_id, v)
+        )
+    }
+
+    pub fn get_dkg_sign_response(msg: Message) -> Option<(MessageId, Vec<u8>)> {
+        extract_variant!(
+            msg,
+            Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
+            Payload::DkgSignResponse { message_id, signature } => (message_id, signature)
         )
     }
 }

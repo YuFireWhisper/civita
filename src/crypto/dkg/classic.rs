@@ -20,7 +20,11 @@ use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
 use thiserror::Error;
 use tokio::{
-    sync::mpsc::{channel, error::SendError, Receiver, Sender},
+    sync::{
+        mpsc::{channel, error::SendError, Receiver, Sender},
+        oneshot::{self, error::RecvError},
+        Mutex,
+    },
     task::JoinHandle,
     time::timeout,
 };
@@ -38,7 +42,7 @@ use crate::{
 
 const DKG_TOPIC: &str = "dkg";
 
-type ToSelfTxType = (MessageId, Vec<u8>);
+type ToSelfTxType = (MessageId, Vec<u8>, oneshot::Sender<G1Point>);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -58,6 +62,8 @@ pub enum Error {
     ChannelClosed,
     #[error("Send error: {0}")]
     SendError(#[from] SendError<ToSelfTxType>),
+    #[error("Failed to receive: {0}")]
+    ReceiveError(#[from] RecvError),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -158,22 +164,24 @@ impl<E: Curve> Signer<E> {
 }
 
 pub struct Classic<T: Transport + 'static> {
-    #[allow(dead_code)]
     transport: Arc<T>,
     config: Config,
     handle: Option<JoinHandle<()>>,
     to_self_tx: Option<Sender<ToSelfTxType>>,
+    completed: Arc<Mutex<HashMap<MessageId, G1Point>>>,
 }
 
 impl<T: Transport + 'static> Classic<T> {
     pub fn new(transport: Arc<T>, config: Config) -> Self {
         let handle = None;
         let to_self_tx = None;
+        let completed = Arc::new(Mutex::new(HashMap::new()));
         Self {
             transport,
             config,
             handle,
             to_self_tx,
+            completed,
         }
     }
 
@@ -384,17 +392,51 @@ impl<T: Transport + 'static> Classic<T> {
         let (to_self_tx, mut to_self_rx) = channel(CHANNEL_SIZE);
 
         let transport = self.transport.clone();
+        let completed = self.completed.clone();
         self.to_self_tx = Some(to_self_tx);
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     Some(msg) = topic_rx.recv() => {
-                        Self::handle_message::<E, H>(msg, &mut signer, &transport).await;
+                        if let Some((message_id, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
+                            let signature = signer.sign::<H>(&msg_to_sign);
+                            Self::publish_signature(&transport, message_id.clone(), signature.serialize_compressed().to_vec()).await;
+                            let final_signature = signer.update(message_id.clone(), signature);
+                            if let Some(signature) = final_signature {
+                                if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.serialize_compressed().to_vec()).await {
+                                    error!("Failed to publish final signature: {:?}", e);
+                                }
+                                completed.lock().await.insert(message_id, signature);
+                            }
+                            continue;
+                        }
+
+                        if let Some((message_id, signature)) = Payload::get_dkg_sign_response(msg) {
+                            if let Ok(point) = G1Point::deserialize(&signature) {
+                                let final_signature = signer.update(message_id.clone(), point);
+                                if let Some(signature) = final_signature {
+                                    if let Err(e) = Self::publish_final_signature(&transport, message_id.clone(), signature.serialize_compressed().to_vec()).await {
+                                        error!("Failed to publish signature: {:?}", e);
+                                    }
+                                    completed.lock().await.insert(message_id, signature);
+                                }
+                            }
+                        }
                     }
-                    Some((msg_id, msg_to_sign)) = to_self_rx.recv() => {
-                        let signature = Self::update_singer::<E, H>(msg_id.clone(), &msg_to_sign, &mut signer).await;
-                        Self::publish_signature(&transport, msg_id, signature).await;
+                    Some((msg_id, msg_to_sign, tx)) = to_self_rx.recv() => {
+                        let signature = signer.sign::<H>(&msg_to_sign);
+                        Self::publish_signature(&transport,msg_id.clone(), signature.serialize_compressed().to_vec()).await;
+                        let final_signature = signer.update(msg_id.clone(), signature);
+                        if let Some(signature) = final_signature {
+                            if let Err(e) = Self::publish_final_signature(&transport, msg_id.clone(), signature.serialize_compressed().to_vec()).await {
+                                error!("Failed to publish final signature: {:?}", e);
+                            }
+                            completed.lock().await.insert(msg_id, signature);
+                            if let Err(e) = tx.send(signature) {
+                                error!("Failed to send signature to self: {:?}", e);
+                            }
+                        }
                     }
                     else => {
                         error!("Channel is closed");
@@ -405,34 +447,18 @@ impl<T: Transport + 'static> Classic<T> {
         })
     }
 
-    async fn handle_message<E: Curve, H: Digest + Clone>(
-        msg: Message,
-        signer: &mut Signer<E>,
+    async fn publish_final_signature(
         transport: &Arc<T>,
-    ) {
-        if let Some((message_id, msg_to_sign)) = Payload::get_dkg_sign(msg) {
-            let signature = signer.sign::<H>(&msg_to_sign);
-            signer.update(message_id.clone(), signature);
-            let signature = signature.serialize_compressed().to_vec();
-            let response = Payload::DkgSignResponse {
-                message_id,
-                signature,
-            };
-
-            if let Err(e) = transport.publish(DKG_TOPIC, response).await {
-                error!("Failed to publish signature: {:?}", e);
-            };
-        }
-    }
-
-    async fn update_singer<E: Curve, H: Digest + Clone>(
         message_id: MessageId,
-        msg_to_sign: &[u8],
-        signer: &mut Signer<E>,
-    ) -> Vec<u8> {
-        let signature = signer.sign::<H>(msg_to_sign);
-        signer.update(message_id.clone(), signature);
-        signature.serialize_compressed().to_vec()
+        signature: Vec<u8>,
+    ) -> Result<()> {
+        let response = Payload::DkgSignFinal {
+            message_id,
+            signature,
+        };
+
+        transport.publish(DKG_TOPIC, response).await?;
+        Ok(())
     }
 
     async fn publish_signature(transport: &Arc<T>, message_id: MessageId, signature: Vec<u8>) {
@@ -454,15 +480,20 @@ impl<T: Transport + 'static> Classic<T> {
         }
     }
 
-    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<()> {
+    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<G1Point> {
         let payload = Payload::DkgSign(msg_to_sign.clone());
         let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
+        let (tx, rx) = oneshot::channel();
 
-        if let Some(tx) = &self.to_self_tx {
-            tx.send((message_id, msg_to_sign)).await?;
+        if let Some(to_self_tx) = &self.to_self_tx {
+            to_self_tx.send((message_id, msg_to_sign, tx)).await?;
         }
 
-        Ok(())
+        match timeout(self.config.timeout, rx).await {
+            Ok(Ok(signature)) => Ok(signature),
+            Ok(Err(e)) => Err(Error::from(e)),
+            Err(_) => Err(Error::Timeout),
+        }
     }
 }
 
@@ -589,7 +620,7 @@ mod tests {
         MockTransport::new()
             .with_listen_on_topic_cb_once(|_| topic_rx)
             .with_listen_on_peers_cb_once(|_| peer_rx)
-            .with_publish_cb(|_, _| MessageId::from(MESSAGE_ID), 2)
+            .with_publish_cb(|_, _| MessageId::from(MESSAGE_ID), 4)
             .with_request_cb(|_, _| (), 3)
     }
 
@@ -604,8 +635,9 @@ mod tests {
     fn create_config_with_timeout(timeout: Duration) -> Config {
         let threshold_counter = Box::new(threshold_counter);
         Config {
-            threshold_counter,
             timeout,
+            threshold_counter,
+            ..Default::default()
         }
     }
 
@@ -708,6 +740,9 @@ mod tests {
         const MESSAGE: &[u8] = b"MESSAGE";
 
         let (mut classic, self_peer, other_peers) = create_classic(NUM_PEERS).await;
+        // We use it because we only have 1
+        // real peer in the test, if we use the default threshold_counter, the test will fail
+        classic.config.threshold_counter = Box::new(|_| 1);
 
         classic.start::<E, H>(self_peer, other_peers).await.unwrap();
         let result = classic.sign(MESSAGE.to_vec()).await;
