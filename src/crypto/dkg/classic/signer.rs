@@ -95,17 +95,17 @@ impl<E: Curve> Signer<E> {
         signatures.insert(index, signature.signature());
 
         (signatures.len() == self.threshold as usize)
-            .then(|| self.finalize_signature::<H>(random_pk_bytes))
+            .then(|| self.finalize_signature::<H>(signature.random_public_key()))
     }
 
     fn get_peer_index(&self, peer: &PeerId) -> Option<u16> {
         self.peers.get(peer).copied()
     }
 
-    fn finalize_signature<H: Digest + Clone>(&mut self, random_pk_bytes: &[u8]) -> Signature {
+    fn finalize_signature<H: Digest + Clone>(&mut self, random_pk: Point<E>) -> Signature {
         let signatures = self
             .processing
-            .remove(random_pk_bytes)
+            .remove(&random_pk.to_bytes(true).to_vec())
             .expect("Unknown random public key");
         let points = signatures
             .keys()
@@ -115,7 +115,22 @@ impl<E: Curve> Signer<E> {
         let final_signature =
             VerifiableSS::<E, H>::lagrange_interpolation_at_zero(&points, &scalars);
 
-        Signature::new().with_signature(final_signature)
+        Signature::new()
+            .with_signature(final_signature)
+            .with_random_public_key(random_pk)
+    }
+
+    pub fn validate<H: Digest + Clone>(&self, signature: &Signature, message: &[u8]) -> bool {
+        let challenge = Self::compute_challenge::<H>(
+            message,
+            signature.random_public_key_bytes(),
+            &self.public_key.to_bytes(true),
+        );
+
+        let left = Point::generator() * &signature.signature();
+        let right = signature.random_public_key() + &(&self.public_key * &challenge);
+
+        left == right
     }
 }
 
@@ -202,6 +217,43 @@ mod tests {
         assert!(
             final_signature.signature() != Scalar::<E>::zero(),
             "Signature should not be zero"
+        );
+    }
+
+    #[test]
+    fn test_validate_signature() {
+        const MESSAGE: &[u8] = b"test message";
+        const SEED: &[u8] = b"test seed";
+
+        let secret = Scalar::<E>::random();
+        let public_key = Point::generator() * &secret;
+        let threshold_counter = Box::new(threshold_counter);
+        let mut signer = Signer::<E>::new(secret, public_key.clone(), threshold_counter);
+
+        let peers = generate_peers(NUM_PEERS);
+        signer.add_peers(peers.clone());
+
+        let initial_signature = signer.sign::<H>(SEED, MESSAGE);
+
+        let peer_ids: Vec<PeerId> = peers.keys().copied().collect();
+        let threshold = signer.threshold;
+        let mut result = None;
+        for (i, peer) in peer_ids.iter().enumerate() {
+            result = signer.update::<H>(initial_signature.clone(), *peer);
+            if i == threshold as usize - 1 {
+                break;
+            }
+        }
+        let final_signature = result.expect("Should have a signature at threshold");
+
+        let is_valid = signer.validate::<H>(&final_signature, MESSAGE);
+        assert!(is_valid, "Signature should be valid with correct message");
+
+        let invalid_message = b"invalid message";
+        let is_invalid = signer.validate::<H>(&final_signature, invalid_message);
+        assert!(
+            !is_invalid,
+            "Signature should be invalid with wrong message"
         );
     }
 }
