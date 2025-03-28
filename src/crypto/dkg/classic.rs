@@ -118,7 +118,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         let mut peers_rx = self.listen_peers(other_peers.clone()).await?;
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
         let num_peers = Self::calculate_num_peers(&peers);
-        let threshold = (self.config.threshold_counter)(num_peers);
+        let threshold = self.config.threshold_counter.call(num_peers);
         let (vss, self_shares) = Self::generate_shares::<H>(threshold, num_peers);
 
         Self::publish_verifiable_ss(&self.transport, &vss).await?;
@@ -150,7 +150,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             })
             .sum();
 
-        let mut signer = Signer::new(secret, public_key, threshold);
+        let mut signer = Signer::new(secret, public_key, self.config.threshold_counter.clone_box());
         signer.add_peers(peers);
 
         Ok((signer, topic_rx))

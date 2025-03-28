@@ -9,33 +9,40 @@ use curv::{
 use libp2p::PeerId;
 use sha2::Digest;
 
-use crate::crypto::dkg::classic::Signature;
+use crate::crypto::dkg::classic::{config::ThresholdCounter, Signature};
 
-#[derive(Debug)]
 pub struct Signer<E: Curve> {
     secret: Scalar<E>,
     public_key: Point<E>,
-    threshold: u16,
     peers: HashMap<PeerId, u16>,
     processing: HashMap<Vec<u8>, HashMap<u16, Scalar<E>>>,
+    threshold: u16,
+    threshold_counter: Box<dyn ThresholdCounter>,
 }
 
 impl<E: Curve> Signer<E> {
-    // TODO: threshold should be a Fn
-    pub fn new(secret: Scalar<E>, public_key: Point<E>, threshold: u16) -> Self {
+    pub fn new(
+        secret: Scalar<E>,
+        public_key: Point<E>,
+        threshold_counter: Box<dyn ThresholdCounter>,
+    ) -> Self {
         let peers = HashMap::new();
         let processing = HashMap::new();
+        let threshold = 0;
+
         Self {
             secret,
             public_key,
-            threshold,
             peers,
             processing,
+            threshold,
+            threshold_counter,
         }
     }
 
     pub fn add_peers(&mut self, peers: HashMap<PeerId, u16>) {
         self.peers.extend(peers);
+        self.threshold = self.threshold_counter.call(self.peers.len() as u16);
     }
 
     pub fn sign<H: Digest + Clone>(&self, seed: &[u8], message: &[u8]) -> Signature {
@@ -133,7 +140,7 @@ mod tests {
             .collect::<HashMap<_, _>>()
     }
 
-    fn calculate_threshold(n: u16) -> u16 {
+    fn threshold_counter(n: u16) -> u16 {
         (2 * n / 3) + 1
     }
 
@@ -141,28 +148,29 @@ mod tests {
     fn create_current_items() {
         let scalar = Scalar::<E>::random();
         let point = Point::zero();
-        let threshold = calculate_threshold(NUM_PEERS);
+        let threshold_counter = Box::new(threshold_counter);
 
-        let signer = Signer::new(scalar.clone(), point.clone(), threshold);
+        let signer = Signer::new(scalar.clone(), point.clone(), threshold_counter);
 
         assert_eq!(signer.secret, scalar);
         assert_eq!(signer.public_key, point);
-        assert_eq!(signer.threshold, threshold);
         assert!(signer.peers.is_empty());
         assert!(signer.processing.is_empty());
+        assert_eq!(signer.threshold, 0);
     }
 
     #[test]
     fn same_peers() {
         let scalar = Scalar::<E>::random();
         let point = Point::zero();
-        let threshold = calculate_threshold(NUM_PEERS);
-        let mut signer = Signer::new(scalar, point, threshold);
+        let threshold_counter_box = Box::new(threshold_counter);
+        let mut signer = Signer::new(scalar, point, threshold_counter_box);
 
         let peers = generate_peers(NUM_PEERS);
         signer.add_peers(peers.clone());
 
         assert_eq!(signer.peers, peers);
+        assert_eq!(signer.threshold, threshold_counter(NUM_PEERS));
     }
 
     #[test]
@@ -172,12 +180,15 @@ mod tests {
 
         let secret = Scalar::<E>::random();
         let public_key = Point::generator() * &secret;
-        let threshold = calculate_threshold(NUM_PEERS);
-        let mut signer = Signer::<E>::new(secret, public_key, threshold);
+        let threshold_counter = Box::new(threshold_counter);
+        let mut signer = Signer::<E>::new(secret, public_key, threshold_counter);
+
         let peers = generate_peers(NUM_PEERS);
         signer.add_peers(peers.clone());
+
         let initial_signature = signer.sign::<H>(SEED, MESSAGE);
         let peer_ids: Vec<PeerId> = peers.keys().copied().collect();
+        let threshold = signer.threshold;
 
         let mut result = None;
         for (i, peer) in peer_ids.iter().enumerate() {
