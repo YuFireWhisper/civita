@@ -290,10 +290,12 @@ impl<E: Curve> From<SignatureBytes> for Signature<E> {
 #[cfg(test)]
 mod tests {
     use curv::elliptic::curves::{Point, Scalar, Secp256k1};
+    use sha2::Sha256;
 
     use crate::crypto::dkg::classic::Signature;
 
     type E = Secp256k1;
+    type H = Sha256;
 
     #[test]
     fn return_default_signature() {
@@ -312,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn same_random_global_public_key() {
+    fn same_random_public_key() {
         let random_public_key = Point::<E>::zero();
 
         let result = Signature::new().with_random_public_key(random_public_key.clone());
@@ -321,12 +323,115 @@ mod tests {
     }
 
     #[test]
-    fn same_random_public_key() {
+    fn same_global_public_key() {
         let expected = Point::<E>::zero();
-        let sig = Signature::new().with_random_public_key(expected.clone());
+        let sig = Signature::new().with_global_public_key(expected.clone());
 
-        let result = sig.random_public_key();
+        let result = sig.global_public_key();
 
         assert_eq!(result, Some(&expected));
+    }
+
+    #[test]
+    fn with_keypair_sets_secret_and_global_public_key() {
+        let secret = Scalar::<E>::random();
+        let global_public_key = Point::<E>::generator() * &secret;
+
+        let sig = Signature::new().with_keypair(secret.clone(), global_public_key.clone());
+
+        assert_eq!(sig.secret(), Some(&secret));
+        assert_eq!(sig.global_public_key(), Some(&global_public_key));
+    }
+
+    #[test]
+    fn generate_signature_validates_correctly() {
+        let secret = Scalar::<E>::random();
+        let global_public_key = Point::<E>::generator() * &secret;
+        let seed = b"test_seed";
+        let message = b"test_message";
+
+        let sig = Signature::new()
+            .with_keypair(secret, global_public_key)
+            .generate::<H>(seed, message);
+
+        assert!(sig.signature().is_some());
+        assert!(sig.random_public_key().is_some());
+        assert!(sig.challenge().is_some());
+        assert!(sig.validate());
+    }
+
+    #[test]
+    fn set_index_and_retrieve() {
+        let index = 42u16;
+        let mut sig = Signature::<E>::new();
+
+        sig.set_index(index);
+
+        assert_eq!(sig.index(), Some(index));
+    }
+
+    #[test]
+    fn aggregate_signatures_with_consistent_keys() {
+        let secret1 = Scalar::<E>::random();
+        let secret2 = Scalar::<E>::random();
+        let global_public_key =
+            Point::<E>::generator() * &secret1 + Point::<E>::generator() * &secret2;
+        let seed = b"test_seed";
+        let message = b"test_message";
+
+        let mut sig1 = Signature::new()
+            .with_keypair(secret1, global_public_key.clone())
+            .generate::<H>(seed, message);
+        sig1.set_index(1);
+
+        let mut sig2 = Signature::new()
+            .with_keypair(secret2, global_public_key.clone())
+            .generate::<H>(seed, message);
+        sig2.set_index(2);
+
+        let aggregated = sig1.aggregate::<Sha256>(&[sig2.clone()]);
+
+        assert!(aggregated.signature().is_some());
+        assert_eq!(aggregated.random_public_key(), sig1.random_public_key());
+        assert_eq!(aggregated.global_public_key(), sig1.global_public_key());
+    }
+
+    #[test]
+    #[should_panic(expected = "Random public keys are different")]
+    fn aggregate_fails_with_different_random_public_keys() {
+        let secret = Scalar::<E>::random();
+        let global_public_key = Point::<E>::generator() * &secret;
+        let message = b"test_message";
+
+        let mut sig1 = Signature::new()
+            .with_keypair(secret.clone(), global_public_key.clone())
+            .generate::<H>(b"seed1", message);
+        sig1.set_index(1);
+
+        let mut sig2 = Signature::new()
+            .with_keypair(secret, global_public_key)
+            .generate::<H>(b"seed2", message); // Different seed, different r_pub_key
+        sig2.set_index(2);
+
+        sig1.aggregate::<Sha256>(&[sig2]); // Should panic
+    }
+
+    #[test]
+    fn signature_to_bytes_and_back() {
+        let secret = Scalar::<E>::random();
+        let global_public_key = Point::<E>::generator() * &secret;
+        let seed = b"test_seed";
+        let message = b"test_message";
+        let original = Signature::new()
+            .with_keypair(secret, global_public_key)
+            .generate::<H>(seed, message);
+
+        let bytes: Vec<u8> = original.clone().into();
+        let restored = Signature::<E>::from(bytes.as_slice());
+
+        assert_eq!(original.signature(), restored.signature());
+        assert_eq!(original.random_public_key(), restored.random_public_key());
+        assert_eq!(original.global_public_key(), restored.global_public_key());
+        assert_eq!(original.challenge(), restored.challenge());
     }
 }
