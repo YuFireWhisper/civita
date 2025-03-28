@@ -1,3 +1,4 @@
+use curv::elliptic::curves::Curve;
 use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
@@ -22,9 +23,9 @@ pub enum Payload {
     DkgVSS(Vec<u8>),
     // Raw message, for other node checks
     DkgSign(Vec<u8>),
-    DkgSignResponse(Signature),
-    DkgSignFinal(Signature),
-    Raw(Vec<u8>), // For testing
+    DkgSignResponse(Vec<u8>), // Signature object
+    DkgSignFinal(Vec<u8>),    // Signature object
+    Raw(Vec<u8>),             // For testing
 }
 
 impl Payload {
@@ -56,7 +57,7 @@ impl Payload {
         )
     }
 
-    pub fn get_dkg_sign_response(msg: Message) -> Option<(PeerId, Signature)> {
+    pub fn get_dkg_sign_response(msg: Message) -> Option<(PeerId, Vec<u8>)> {
         extract_variant!(
             msg,
             Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,

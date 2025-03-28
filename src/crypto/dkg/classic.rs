@@ -45,7 +45,7 @@ use crate::{
 
 const DKG_TOPIC: &str = "dkg";
 
-type ToSelfTxType = (MessageId, Vec<u8>, oneshot::Sender<Signature>);
+type ToSelfTxType<E> = (MessageId, Vec<u8>, oneshot::Sender<Signature<E>>);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -75,8 +75,8 @@ pub struct Classic<T: Transport + 'static, E: Curve> {
     transport: Arc<T>,
     config: Config,
     handle: Option<JoinHandle<()>>,
-    to_self_tx: Option<Sender<ToSelfTxType>>,
-    completed: Arc<Mutex<HashMap<Vec<u8>, Scalar<E>>>>,
+    to_self_tx: Option<Sender<ToSelfTxType<E>>>,
+    completed: Arc<Mutex<HashMap<Vec<u8>, Signature<E>>>>,
     peer: Option<PeerId>,
 }
 
@@ -318,7 +318,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
                         // New DkG Generation
                         if let Some((message_id, peer, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
                             let signature = signer.sign::<H>(message_id.to_string().as_bytes(), &msg_to_sign);
-                            let payload = Payload::DkgSignResponse(signature.clone());
+                            let payload = Payload::DkgSignResponse(signature.clone().into());
                             Self::publish(&transport, payload).await;
                             if let Some(signature) = signer.update::<H>(signature, peer) {
                                 Self::publish_final_signature(&transport, signature, completed.clone()).await;
@@ -327,6 +327,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
 
                         // Collect existing DKG Generation
                         if let Some((peer, signature)) = Payload::get_dkg_sign_response(msg) {
+                            let signature = Signature::from(signature.as_slice());
                             if let Some(signature) = signer.update::<H>(signature, peer) {
                                 Self::publish_final_signature(&transport, signature, completed.clone()).await;
                             }
@@ -362,14 +363,13 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
 
     async fn publish_final_signature(
         transport: &Arc<T>,
-        signature: Signature,
-        completed: Arc<Mutex<HashMap<Vec<u8>, Scalar<E>>>>,
+        signature: Signature<E>,
+        completed: Arc<Mutex<HashMap<Vec<u8>, Signature<E>>>>,
     ) {
-        let scalar = signature.signature();
-        let public_key = signature.random_public_key_bytes().to_vec();
-        let payload = Payload::DkgSignFinal(signature);
+        let r_pub_key = signature.random_public_key_bytes().expect("Random public key is missing");
+        let payload = Payload::DkgSignFinal(signature.clone().into());
         Self::publish(transport, payload).await;
-        completed.lock().await.insert(public_key, scalar);
+        completed.lock().await.insert(r_pub_key, signature);
     }
 
     pub async fn stop(&mut self) {
@@ -380,7 +380,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         }
     }
 
-    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Signature> {
+    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Signature<E>> {
         let payload = Payload::DkgSign(msg_to_sign.clone());
         let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
         let (tx, rx) = oneshot::channel();
