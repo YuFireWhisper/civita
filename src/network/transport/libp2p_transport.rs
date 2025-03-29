@@ -130,7 +130,7 @@ impl Libp2pTransport {
                             error!("Failed to process event: {:?}", e);
                         }
                     },
-                    _ = async { sleep(arc_self.config.wait_for_gossipsub_peer_timeout).await } => {},
+                    _ = async { sleep(arc_self.config.wait_for_gossipsub_peer_interval).await } => {},
                 }
             }
         });
@@ -577,10 +577,10 @@ pub mod mock_transport {
 
     pub trait ListenOnTopicCallback: FnOnce(&str) -> Receiver<Message> + Send {}
     pub trait ListenOnPeersCallback: FnOnce(Vec<PeerId>) -> Receiver<Message> + Send {}
-    pub trait PublishCallback: FnOnce(&str, Payload) -> MessageId  + Send {}
+    pub trait PublishCallback: FnOnce(&str, Payload) -> MessageId + Send {}
     pub trait RequestCallback: FnOnce(PeerId, Request) + Send {}
 
-    impl<F> ListenOnTopicCallback for F where F: FnOnce(&str) -> Receiver<Message>  + Send{}
+    impl<F> ListenOnTopicCallback for F where F: FnOnce(&str) -> Receiver<Message> + Send {}
     impl<F> ListenOnPeersCallback for F where F: FnOnce(Vec<PeerId>) -> Receiver<Message> + Send {}
     impl<F> PublishCallback for F where F: FnOnce(&str, Payload) -> MessageId + Send {}
     impl<F> RequestCallback for F where F: FnOnce(PeerId, Request) + Send {}
@@ -651,7 +651,10 @@ pub mod mock_transport {
             F: PublishCallback + 'static + Clone,
         {
             for _ in 0..times {
-                self.publish_cbs.lock().unwrap().push_back(Box::new(cb.clone()));
+                self.publish_cbs
+                    .lock()
+                    .unwrap()
+                    .push_back(Box::new(cb.clone()));
             }
             self
         }
@@ -661,7 +664,10 @@ pub mod mock_transport {
             F: RequestCallback + 'static + Clone,
         {
             for _ in 0..times {
-                self.request_cbs.lock().unwrap().push_back(Box::new(cb.clone()));
+                self.request_cbs
+                    .lock()
+                    .unwrap()
+                    .push_back(Box::new(cb.clone()));
             }
             self
         }

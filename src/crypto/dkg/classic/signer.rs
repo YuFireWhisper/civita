@@ -75,6 +75,10 @@ impl<E: Curve> Signer<E> {
     fn get_peer_index(&self, peer: &PeerId) -> Option<u16> {
         self.peers.get(peer).copied()
     }
+
+    pub fn keypair(&self) -> &Keypair<E> {
+        &self.keypair
+    }
 }
 
 #[cfg(test)]
@@ -146,12 +150,12 @@ mod tests {
     fn sign_generates_valid_signature() {
         let keypair = Keypair::<E>::random();
         let threshold_counter = Box::new(TestThresholdCounter);
-        let signer = Signer::new(keypair, threshold_counter);
+        let signer = Signer::new(keypair.clone(), threshold_counter);
         let seed = b"test_seed";
         let message = b"test_message";
 
         let signature = signer.sign::<H>(seed, message);
-        let is_valid = signature.validate();
+        let is_valid = signature.validate::<H>(message, keypair.public_key());
 
         assert!(is_valid, "Signature should be valid");
     }

@@ -7,7 +7,10 @@ pub mod signer;
 pub use signature::Signature;
 
 use std::{
-    collections::{HashMap, HashSet}, hash::Hash, iter::once, sync::Arc
+    collections::{HashMap, HashSet},
+    hash::Hash,
+    iter::once,
+    sync::Arc,
 };
 
 use curv::elliptic::curves::{Point, Scalar};
@@ -34,7 +37,7 @@ use tokio::{
 use crate::{
     crypto::dkg::classic::{
         config::Config,
-        keypair::{Keypair, PrivateKey},
+        keypair::{Keypair, PublicKey, Secret},
         peer_share::PeerShare,
         signer::Signer,
     },
@@ -81,6 +84,7 @@ pub struct Classic<T: Transport + 'static, E: Curve> {
     to_self_tx: Option<Sender<ToSelfTxType<E>>>,
     completed: Arc<Mutex<HashMap<Vec<u8>, Signature<E>>>>,
     peer: Option<PeerId>,
+    pub_key: Option<PublicKey<E>>,
 }
 
 impl<T: Transport + 'static, E: Curve> Classic<T, E> {
@@ -89,6 +93,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         let to_self_tx = None;
         let completed = Arc::new(Mutex::new(HashMap::new()));
         let peer = None;
+        let pub_key = None;
         Self {
             transport,
             config,
@@ -96,6 +101,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             to_self_tx,
             completed,
             peer,
+            pub_key,
         }
     }
 
@@ -113,7 +119,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
     }
 
     async fn init_signer<H: Digest + Clone>(
-        &self,
+        &mut self,
         self_peer: PeerId,
         other_peers: HashSet<PeerId>,
     ) -> Result<(Signer<E>, Receiver<Message>)> {
@@ -136,10 +142,9 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         .map_err(|_| Error::Timeout)??;
 
         let mut shares = Self::validate_data(&collected, self_index)?;
-        shares.push(self_shares[(self_index - 1) as usize].clone());
+        shares.push(self_shares[(self_index - 1) as usize].clone().into());
 
-        let indices = peers.values().copied().collect::<Vec<u16>>();
-        let private_key = PrivateKey::aggrege::<H>(&indices, &shares);
+        let private_key = Secret::sum(shares.into_iter());
         let points = collected
             .into_values()
             .map(|peer_share| {
@@ -154,6 +159,8 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             .chain(once(vss.commitments.into_iter().next().unwrap()))
             .collect::<Vec<Point<E>>>();
         let keypair = Keypair::new(points, private_key);
+        let pub_key = keypair.public_key().clone();
+        self.pub_key = Some(pub_key.clone());
 
         let mut signer = Signer::new(keypair, self.config.threshold_counter.clone_box());
         signer.add_peers(peers);
@@ -277,14 +284,14 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
     fn validate_data<H: Digest + Clone>(
         data: &HashMap<PeerId, PeerShare<E, H>>,
         self_index: u16,
-    ) -> Result<Vec<Scalar<E>>> {
+    ) -> Result<Vec<Secret<E>>> {
         data.iter()
             .map(|(peer, peer_share)| {
                 if peer_share.validate(self_index) {
                     let scalar = peer_share
                         .scalar()
                         .expect("Scalar is missing, this should never happen");
-                    Ok(scalar.clone())
+                    Ok(Secret::from(scalar.clone()))
                 } else {
                     error!("Failed to validate share from peer: {:?}", peer);
                     Err(Error::ValidateShare(*peer))
@@ -309,15 +316,22 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         self.to_self_tx = Some(to_self_tx);
 
         tokio::spawn(async move {
+            let mut callback_tx: Option<oneshot::Sender<Signature<E>>> = None;
+
             loop {
                 tokio::select! {
                     Some(msg) = topic_rx.recv() => {
                         // New DkG Generation
-                        if let Some((message_id, peer, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
+                        if let Some((message_id, _, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
                             let signature = signer.sign::<H>(message_id.to_string().as_bytes(), &msg_to_sign);
                             let payload = Payload::DkgSignResponse(signature.clone().into());
                             Self::publish(&transport, payload).await;
-                            if let Some(signature) = signer.update::<H>(signature, peer) {
+                            if let Some(signature) = signer.update::<H>(signature, self_peer) {
+                                if let Some(tx) = callback_tx.take() {
+                                    if let Err(e) = tx.send(signature.clone()) {
+                                        error!("Failed to send signature to self: {:?}", e);
+                                    }
+                                }
                                 Self::publish_final_signature(&transport, signature, completed.clone()).await;
                             }
                         }
@@ -326,21 +340,28 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
                         if let Some((peer, signature)) = Payload::get_dkg_sign_response(msg) {
                             let signature = Signature::from(signature.as_slice());
                             if let Some(signature) = signer.update::<H>(signature, peer) {
+                                if let Some(tx) = callback_tx.take() {
+                                    if let Err(e) = tx.send(signature.clone()) {
+                                        error!("Failed to send signature to self: {:?}", e);
+                                    }
+                                }
                                 Self::publish_final_signature(&transport, signature, completed.clone()).await;
                             }
                         }
                     }
                     // New DKG Generation from self
                     Some((msg_id, msg_to_sign, tx)) = to_self_rx.recv() => {
+                        callback_tx = Some(tx);
                         let signature = signer.sign::<H>(msg_id.to_string().as_bytes(), &msg_to_sign);
                         let payload = Payload::DkgSign(msg_to_sign);
                         Self::publish(&transport, payload).await;
-
                         if let Some(signature) = signer.update::<H>(signature, self_peer) {
-                            Self::publish_final_signature(&transport, signature.clone(), completed.clone()).await;
-                            if let Err(e) = tx.send(signature) {
-                                error!("Failed to send signature to self: {:?}", e);
+                            if let Some(tx) = callback_tx.take() {
+                                if let Err(e) = tx.send(signature.clone()) {
+                                    error!("Failed to send signature to self: {:?}", e);
+                                }
                             }
+                            Self::publish_final_signature(&transport, signature, completed.clone()).await;
                         }
                     }
                     else => {
@@ -399,6 +420,10 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             Ok(Err(e)) => Err(Error::from(e)),
             Err(_) => Err(Error::Timeout),
         }
+    }
+
+    pub fn pub_key(&self) -> Option<&PublicKey<E>> {
+        self.pub_key.as_ref()
     }
 }
 
