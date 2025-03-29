@@ -1,4 +1,5 @@
 pub mod config;
+pub mod keypair;
 pub mod peer_share;
 pub mod signature;
 pub mod signer;
@@ -6,9 +7,7 @@ pub mod signer;
 pub use signature::Signature;
 
 use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-    sync::Arc,
+    collections::{HashMap, HashSet}, hash::Hash, iter::once, sync::Arc
 };
 
 use curv::elliptic::curves::{Point, Scalar};
@@ -33,7 +32,12 @@ use tokio::{
 };
 
 use crate::{
-    crypto::dkg::classic::{config::Config, peer_share::PeerShare, signer::Signer},
+    crypto::dkg::classic::{
+        config::Config,
+        keypair::{Keypair, PrivateKey},
+        peer_share::PeerShare,
+        signer::Signer,
+    },
     network::transport::{
         libp2p_transport::{
             message::Message,
@@ -43,9 +47,10 @@ use crate::{
     },
 };
 
-const DKG_TOPIC: &str = "dkg";
-
+type Result<T> = std::result::Result<T, Error>;
 type ToSelfTxType<E> = (MessageId, Vec<u8>, oneshot::Sender<Signature<E>>);
+
+const DKG_TOPIC: &str = "dkg";
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -68,8 +73,6 @@ pub enum Error {
     #[error("Channel is closed")]
     ChannelClosed,
 }
-
-type Result<T> = std::result::Result<T, Error>;
 
 pub struct Classic<T: Transport + 'static, E: Curve> {
     transport: Arc<T>,
@@ -135,22 +138,24 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         let mut shares = Self::validate_data(&collected, self_index)?;
         shares.push(self_shares[(self_index - 1) as usize].clone());
 
-        let secret = Self::construct_secret(&vss, &(1..=num_peers).collect::<Vec<u16>>(), &shares);
-        let public_key: Point<E> = collected
+        let indices = peers.values().copied().collect::<Vec<u16>>();
+        let private_key = PrivateKey::aggrege::<H>(&indices, &shares);
+        let points = collected
             .into_values()
-            .map(|c| {
-                c.vss_into()
-                    .expect("VSS is missing, this should never happen")
-            })
-            .map(|vss| {
-                vss.commitments
+            .map(|peer_share| {
+                peer_share
+                    .vss_into()
+                    .expect("VSS is missing")
+                    .commitments
                     .into_iter()
                     .next()
-                    .expect("Commitment is missing, this should never happen")
+                    .expect("Commitment is missing")
             })
-            .sum();
+            .chain(once(vss.commitments.into_iter().next().unwrap()))
+            .collect::<Vec<Point<E>>>();
+        let keypair = Keypair::new(points, private_key);
 
-        let mut signer = Signer::new(secret, public_key, self.config.threshold_counter.clone_box());
+        let mut signer = Signer::new(keypair, self.config.threshold_counter.clone_box());
         signer.add_peers(peers);
 
         Ok((signer, topic_rx))
@@ -288,14 +293,6 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             .collect()
     }
 
-    fn construct_secret<H: Digest + Clone>(
-        v_ss: &VerifiableSS<E, H>,
-        indices: &[u16],
-        shares: &[Scalar<E>],
-    ) -> Scalar<E> {
-        v_ss.reconstruct(indices, shares)
-    }
-
     async fn receive<H: Digest + Clone>(
         &mut self,
         mut signer: Signer<E>,
@@ -366,10 +363,15 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         signature: Signature<E>,
         completed: Arc<Mutex<HashMap<Vec<u8>, Signature<E>>>>,
     ) {
-        let r_pub_key = signature.random_public_key_bytes().expect("Random public key is missing");
+        let r_pub_key = signature
+            .random_pub_key()
+            .expect("Random public key is missing");
         let payload = Payload::DkgSignFinal(signature.clone().into());
         Self::publish(transport, payload).await;
-        completed.lock().await.insert(r_pub_key, signature);
+        completed
+            .lock()
+            .await
+            .insert(r_pub_key.to_bytes(), signature);
     }
 
     pub async fn stop(&mut self) {
