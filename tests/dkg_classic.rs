@@ -1,3 +1,4 @@
+use civita::crypto::dkg::Dkg;
 use sha2::Sha256;
 
 use crate::common::{

@@ -35,11 +35,14 @@ use tokio::{
 };
 
 use crate::{
-    crypto::dkg::classic::{
-        config::Config,
-        keypair::{Keypair, PublicKey, Secret},
-        peer_share::PeerShare,
-        signer::Signer,
+    crypto::dkg::{
+        classic::{
+            config::Config,
+            keypair::{Keypair, PublicKey, Secret},
+            peer_share::PeerShare,
+            signer::Signer,
+        },
+        Dkg,
     },
     network::transport::{
         libp2p_transport::{
@@ -103,19 +106,6 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             peer,
             pub_key,
         }
-    }
-
-    pub async fn start<H: Digest + Clone>(
-        &mut self,
-        self_peer: PeerId,
-        other_peers: HashSet<PeerId>,
-    ) -> Result<()> {
-        self.peer = Some(self_peer);
-        let (signer, topic_rx) = self.init_signer::<H>(self_peer, other_peers).await?;
-        let handle = self.receive::<H>(signer, topic_rx).await;
-        self.handle = Some(handle);
-
-        Ok(())
     }
 
     async fn init_signer<H: Digest + Clone>(
@@ -396,37 +386,6 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             .await
             .insert(r_pub_key.to_bytes(), signature);
     }
-
-    pub async fn stop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-
-            self.to_self_tx = None;
-        }
-    }
-
-    pub async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Signature<E>> {
-        let payload = Payload::DkgSign(msg_to_sign.clone());
-        let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
-        let (tx, rx) = oneshot::channel();
-
-        if let Some(to_self_tx) = &self.to_self_tx {
-            to_self_tx
-                .send((message_id, msg_to_sign, tx))
-                .await
-                .map_err(|e| Error::Send(e.to_string()))?;
-        }
-
-        match timeout(self.config.timeout, rx).await {
-            Ok(Ok(signature)) => Ok(signature),
-            Ok(Err(e)) => Err(Error::from(e)),
-            Err(_) => Err(Error::Timeout),
-        }
-    }
-
-    pub fn pub_key(&self) -> Option<&PublicKey<E>> {
-        self.pub_key.as_ref()
-    }
 }
 
 fn to_order_map<T, N, I>(iter: I, capacity: N) -> std::result::Result<HashMap<T, N>, ()>
@@ -454,9 +413,54 @@ where
     Ok(map)
 }
 
+impl<T: Transport + 'static, E: Curve> Dkg<T, E> for Classic<T, E> {
+    async fn start<H: Digest + Clone>(
+        &mut self,
+        self_peer: PeerId,
+        other_peers: HashSet<PeerId>,
+    ) -> Result<()> {
+        self.peer = Some(self_peer);
+        let (signer, topic_rx) = self.init_signer::<H>(self_peer, other_peers).await?;
+        let handle = self.receive::<H>(signer, topic_rx).await;
+        self.handle = Some(handle);
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+
+            self.to_self_tx = None;
+        }
+    }
+
+    async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Signature<E>> {
+        let payload = Payload::DkgSign(msg_to_sign.clone());
+        let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
+        let (tx, rx) = oneshot::channel();
+
+        if let Some(to_self_tx) = &self.to_self_tx {
+            to_self_tx
+                .send((message_id, msg_to_sign, tx))
+                .await
+                .map_err(|e| Error::Send(e.to_string()))?;
+        }
+
+        match timeout(self.config.timeout, rx).await {
+            Ok(Ok(signature)) => Ok(signature),
+            Ok(Err(e)) => Err(Error::from(e)),
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
+    fn pub_key(&self) -> Option<&PublicKey<E>> {
+        self.pub_key.as_ref()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-
     use std::{collections::HashSet, sync::Arc};
 
     use curv::{
@@ -472,6 +476,7 @@ mod tests {
 
     use crate::{
         crypto::dkg::classic::{config::Config, Classic, DKG_TOPIC},
+        crypto::dkg::Dkg,
         network::transport::libp2p_transport::{
             message::Message,
             mock_transport::MockTransport,

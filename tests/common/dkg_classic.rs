@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use civita::{
-    crypto::dkg::classic::{config::Config, Classic},
+    crypto::dkg::{classic::{config::Config, Classic}, Dkg},
     network::transport::libp2p_transport::Libp2pTransport,
 };
 use curv::elliptic::curves::Secp256k1;
