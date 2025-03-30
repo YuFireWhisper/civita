@@ -115,7 +115,7 @@ impl<E: Curve> Signature<E> {
             .map(|s| s.signature.clone().expect("Missing signature"))
             .collect::<Vec<_>>();
 
-        let sig = Secret::aggrege(indices, &shares);
+        let sig = Secret::lagrange_interpolation(indices, &shares);
 
         Self {
             signature: Some(sig),

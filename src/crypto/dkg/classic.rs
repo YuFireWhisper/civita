@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use curv::elliptic::curves::{Point, Scalar};
+use curv::elliptic::curves::Scalar;
 use curv::{
     cryptographic_primitives::{
         hashing::Digest,
@@ -144,8 +144,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         let mut shares = Self::validate_data(&collected, self_index)?;
         shares.push(self_shares[(self_index - 1) as usize].clone().into());
 
-        let private_key = Secret::sum(shares.into_iter());
-        let points = collected
+        let pub_keys = collected
             .into_values()
             .map(|peer_share| {
                 peer_share
@@ -155,10 +154,13 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
                     .into_iter()
                     .next()
                     .expect("Commitment is missing")
+                    .into()
             })
-            .chain(once(vss.commitments.into_iter().next().unwrap()))
-            .collect::<Vec<Point<E>>>();
-        let keypair = Keypair::new(points, private_key);
+            .chain(once(vss.commitments.into_iter().next().unwrap().into()))
+            .collect::<Vec<PublicKey<E>>>();
+        let pub_key = PublicKey::aggrege(&pub_keys);
+        let pri_key: Secret<E> = shares.iter().sum();
+        let keypair = Keypair::new(pub_key, pri_key);
         let pub_key = keypair.public_key().clone();
         self.pub_key = Some(pub_key.clone());
 
