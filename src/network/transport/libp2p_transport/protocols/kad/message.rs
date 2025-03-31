@@ -1,19 +1,41 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{crypto::dkg::Data, network::transport::libp2p_transport::protocols::kad::Payload};
+
+type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+#[derive(Error)]
+pub enum Error {
+    #[error("Failed to decode message: {0}")]
+    Decode(#[from] serde_json::Error),
+}
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub struct Message {
-    payload: Payload,
-    signature: Data,
+    pub payload: Payload,
+    pub signature: Data,
 }
 
 impl Message {
     pub fn new(payload: Payload, signature: Data) -> Self {
         Self { payload, signature }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bytes.try_into()
+    }
+}
+
+impl TryFrom<&[u8]> for Message {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
+        serde_json::from_slice(value).map_err(Error::from)
     }
 }
 
