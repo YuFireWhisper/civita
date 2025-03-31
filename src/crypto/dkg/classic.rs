@@ -1,11 +1,3 @@
-pub mod config;
-pub mod keypair;
-pub mod peer_share;
-pub mod signature;
-pub mod signer;
-
-pub use signature::Signature;
-
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -23,6 +15,7 @@ use curv::{
 };
 use libp2p::{gossipsub::MessageId, PeerId};
 use log::error;
+use sha2::Sha256;
 use thiserror::Error;
 use tokio::{
     sync::{
@@ -36,9 +29,10 @@ use tokio::{
 
 use crate::{
     crypto::dkg::{
+        self,
         classic::{
             config::Config,
-            keypair::{Keypair, PublicKey, Secret},
+            keypair::{Keypair, Secret},
             peer_share::PeerShare,
             signer::Signer,
         },
@@ -52,6 +46,15 @@ use crate::{
         Transport,
     },
 };
+
+pub mod config;
+pub mod keypair;
+pub mod peer_share;
+pub mod signature;
+pub mod signer;
+
+pub use keypair::PublicKey;
+pub use signature::Signature;
 
 type Result<T> = std::result::Result<T, Error>;
 type ToSelfTxType<E> = (MessageId, Vec<u8>, oneshot::Sender<Signature<E>>);
@@ -413,21 +416,23 @@ where
     Ok(map)
 }
 
-impl<T: Transport + 'static, E: Curve> Dkg<T, E> for Classic<T, E> {
-    async fn start<H: Digest + Clone>(
+impl<T: Transport + 'static, E: Curve> Dkg<T> for Classic<T, E> {
+    type Error = Error;
+
+    async fn start(
         &mut self,
         self_peer: PeerId,
         other_peers: HashSet<PeerId>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), Self::Error> {
         self.peer = Some(self_peer);
-        let (signer, topic_rx) = self.init_signer::<H>(self_peer, other_peers).await?;
-        let handle = self.receive::<H>(signer, topic_rx).await;
+        let (signer, topic_rx) = self.init_signer::<Sha256>(self_peer, other_peers).await?;
+        let handle = self.receive::<Sha256>(signer, topic_rx).await;
         self.handle = Some(handle);
 
         Ok(())
     }
 
-    async fn stop(&mut self) {
+    fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
 
@@ -435,9 +440,16 @@ impl<T: Transport + 'static, E: Curve> Dkg<T, E> for Classic<T, E> {
         }
     }
 
-    async fn sign(&self, msg_to_sign: Vec<u8>) -> Result<Signature<E>> {
+    async fn sign(
+        &self,
+        msg_to_sign: Vec<u8>,
+    ) -> std::result::Result<Box<dyn dkg::Data>, Self::Error> {
         let payload = Payload::DkgSign(msg_to_sign.clone());
-        let message_id = self.transport.publish(DKG_TOPIC, payload.clone()).await?;
+        let message_id = self
+            .transport
+            .publish(DKG_TOPIC, payload.clone())
+            .await
+            .map_err(Error::from)?;
         let (tx, rx) = oneshot::channel();
 
         if let Some(to_self_tx) = &self.to_self_tx {
@@ -448,14 +460,18 @@ impl<T: Transport + 'static, E: Curve> Dkg<T, E> for Classic<T, E> {
         }
 
         match timeout(self.config.timeout, rx).await {
-            Ok(Ok(signature)) => Ok(signature),
+            Ok(Ok(signature)) => Ok(Box::new(signature)),
             Ok(Err(e)) => Err(Error::from(e)),
             Err(_) => Err(Error::Timeout),
         }
     }
 
-    fn pub_key(&self) -> Option<&PublicKey<E>> {
-        self.pub_key.as_ref()
+    fn validate(
+        &self,
+        msg_to_sign: Vec<u8>,
+        signature: Box<dyn dkg::Data>,
+    ) -> std::result::Result<bool, Self::Error> {
+        Ok(signature.validate(&msg_to_sign, &self.pub_key.as_ref().unwrap().to_bytes()))
     }
 }
 
@@ -624,7 +640,7 @@ mod tests {
         let config = create_config();
         let mut classic = Classic::<_, E>::new(transport, config);
 
-        let result = classic.start::<H>(self_peer, other_peers).await;
+        let result = classic.start(self_peer, other_peers).await;
 
         assert!(
             result.is_ok(),
@@ -650,7 +666,7 @@ mod tests {
         let config = create_config_with_timeout(Duration::from_millis(1)); // Very short timeout
 
         let result = Classic::<_, E>::new(Arc::new(transport), config)
-            .start::<H>(self_peer, other_peers)
+            .start(self_peer, other_peers)
             .await;
 
         assert!(
@@ -663,8 +679,8 @@ mod tests {
     async fn stop() {
         let (mut classic, self_peer, other_peers) = create_classic(NUM_PEERS).await;
 
-        classic.start::<H>(self_peer, other_peers).await.unwrap();
-        classic.stop().await;
+        classic.start(self_peer, other_peers).await.unwrap();
+        classic.stop();
 
         assert!(
             classic.handle.is_none(),
@@ -681,7 +697,7 @@ mod tests {
         // real peer in the test, if we use the default threshold_counter, the test will fail
         classic.config.threshold_counter = Box::new(|_| 1);
 
-        classic.start::<H>(self_peer, other_peers).await.unwrap();
+        classic.start(self_peer, other_peers).await.unwrap();
         let result = classic.sign(MESSAGE.to_vec()).await;
 
         assert!(

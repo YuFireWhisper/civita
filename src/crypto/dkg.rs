@@ -1,25 +1,30 @@
 use std::{collections::HashSet, future::Future};
 
-use curv::{cryptographic_primitives::hashing::Digest, elliptic::curves::Curve};
 use libp2p::PeerId;
 
-use crate::crypto::dkg::classic::keypair::PublicKey;
-use crate::crypto::dkg::classic::signature::Signature;
-use crate::crypto::dkg::classic::Error;
 use crate::network::transport::Transport;
 
-pub trait Dkg<T: Transport + 'static, E: Curve> {
-    fn start<H: Digest + Clone>(
+pub mod classic;
+pub mod signature;
+
+pub use signature::{Data, Scheme};
+
+pub trait Dkg<T: Transport + 'static> {
+    type Error;
+
+    fn start(
         &mut self,
         self_peer: PeerId,
         other_peers: HashSet<PeerId>,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
-    fn stop(&mut self) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn stop(&mut self);
     fn sign(
         &self,
         msg_to_sign: Vec<u8>,
-    ) -> impl Future<Output = Result<Signature<E>, Error>> + Send;
-    fn pub_key(&self) -> Option<&PublicKey<E>>;
+    ) -> impl Future<Output = Result<Box<dyn signature::Data>, Self::Error>> + Send;
+    fn validate(
+        &self,
+        msg_to_sign: Vec<u8>,
+        signature: Box<dyn signature::Data>,
+    ) -> Result<bool, Self::Error>;
 }
-
-pub mod classic;

@@ -5,9 +5,12 @@ use curv::{
     BigInt,
 };
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 
-use crate::crypto::dkg::classic::keypair::{Keypair, PublicKey, Secret};
+use crate::crypto::dkg::{
+    classic::keypair::{Keypair, PublicKey, Secret},
+    signature, Scheme,
+};
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -145,6 +148,28 @@ impl<E: Curve> Signature<E> {
 
     pub fn random_pub_key(&self) -> Option<&PublicKey<E>> {
         self.random_pub_key.as_ref()
+    }
+}
+
+impl<E: Curve> signature::Data for Signature<E> {
+    fn validate(&self, message: &[u8], key: &[u8]) -> bool {
+        let public_key = PublicKey::from_bytes(key);
+        self.validate::<Sha256>(message, &public_key)
+    }
+}
+
+impl<E: Curve> Scheme for Signature<E> {
+    type Error = ();
+    type Output = Signature<E>;
+    type Keypair = Keypair<E>;
+
+    fn sign(
+        seed: &[u8],
+        message: &[u8],
+        keypair: &Self::Keypair,
+    ) -> Result<Self::Output, Self::Error> {
+        let signature = Self::generate::<Sha256>(seed, message, keypair);
+        Ok(signature)
     }
 }
 

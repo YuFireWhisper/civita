@@ -1,13 +1,10 @@
 use civita::crypto::dkg::Dkg;
-use sha2::Sha256;
 
 use crate::common::{
     dkg_classic::generate_classic_nodes, transport::generate_connected_transports,
 };
 
 mod common;
-
-type H = Sha256;
 
 #[tokio::test]
 async fn create_success() {
@@ -32,10 +29,7 @@ async fn valid_sign() {
 
     assert!(result.is_ok(), "failed to sign: {:?}", result.err());
     assert!(
-        result
-            .as_ref()
-            .unwrap()
-            .validate::<H>(MESSAGE, nodes[0].pub_key().unwrap()),
-        "failed to validate sign"
+        nodes[0].validate(MESSAGE.into(), result.unwrap()).is_ok(),
+        "signature validation failed"
     );
 }

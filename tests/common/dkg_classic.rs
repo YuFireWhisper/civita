@@ -1,19 +1,20 @@
 use std::sync::Arc;
 
 use civita::{
-    crypto::dkg::{classic::{config::Config, Classic}, Dkg},
+    crypto::dkg::{
+        classic::{config::Config, Classic},
+        Dkg,
+    },
     network::transport::libp2p_transport::Libp2pTransport,
 };
 use curv::elliptic::curves::Secp256k1;
 use futures::future::join_all;
 use libp2p::PeerId;
-use sha2::Sha256;
 
 use crate::common::transport::TransportInfo;
 
 type T = Libp2pTransport;
 type E = Secp256k1;
-type H = Sha256;
 
 pub async fn generate_classic_nodes(
     infos: Vec<TransportInfo>,
@@ -31,7 +32,7 @@ pub async fn generate_classic_nodes(
 
         async move {
             let mut node = Classic::<_, E>::new(transport, Config::default());
-            node.start::<H>(self_peer, other_peers)
+            node.start(self_peer, other_peers)
                 .await
                 .map(|_| node)
                 .map_err(|e| {
