@@ -27,4 +27,5 @@ pub trait Dkg<T: Transport + 'static> {
         msg_to_sign: Vec<u8>,
         signature: Box<dyn signature::Data>,
     ) -> Result<bool, Self::Error>;
+    fn public_key(&self) -> Option<Vec<u8>>;
 }

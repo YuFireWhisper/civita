@@ -473,6 +473,16 @@ impl<T: Transport + 'static, E: Curve> Dkg<T> for Classic<T, E> {
     ) -> std::result::Result<bool, Self::Error> {
         Ok(signature.validate(&msg_to_sign, &self.pub_key.as_ref().unwrap().to_bytes()))
     }
+
+    fn public_key(&self) -> Option<Vec<u8>> {
+        self.pub_key
+            .as_ref()
+            .map(|pub_key| pub_key.to_bytes())
+            .or_else(|| {
+                error!("Public key is missing");
+                None
+            })
+    }
 }
 
 #[cfg(test)]
