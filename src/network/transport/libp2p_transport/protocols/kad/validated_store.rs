@@ -34,6 +34,10 @@ impl ValidatedStore {
     }
 
     fn validate_record(&self, record: &Record) -> Result<bool> {
+        if self.pub_key.is_empty() {
+            return Ok(false);
+        }
+
         let message = Message::from_bytes(&record.value)?;
 
         let signature = message.signature;
