@@ -20,6 +20,8 @@ pub enum Error {
     Payload(#[from] payload::Error),
 }
 
+#[derive(Debug)]
+#[derive(Default)]
 pub struct ValidatedStore {
     pub_key: Vec<u8>,
     records: HashMap<RecordKey, Record>,
@@ -27,6 +29,10 @@ pub struct ValidatedStore {
 }
 
 impl ValidatedStore {
+    pub fn set_pub_key(&mut self, pub_key: Vec<u8>) {
+        self.pub_key = pub_key;
+    }
+
     fn validate_record(&self, record: &Record) -> Result<bool> {
         let message = Message::from_bytes(&record.value)?;
 
