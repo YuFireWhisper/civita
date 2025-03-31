@@ -1,11 +1,7 @@
-use curv::elliptic::curves::Curve;
 use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    crypto::dkg::classic::Signature, extract_variant,
-    network::transport::libp2p_transport::message::Message,
-};
+use crate::{extract_variant, network::transport::libp2p_transport::message::Message};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {

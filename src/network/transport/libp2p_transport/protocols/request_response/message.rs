@@ -32,22 +32,3 @@ impl TryFrom<Event<Request, Response>> for Message {
         }
     }
 }
-
-#[cfg(test)]
-mod mock_message {
-    use super::*;
-
-    const PAYLOAD: &[u8] = &[1, 2, 3];
-
-    fn create_request_message() -> Message {
-        let peer = PeerId::random();
-        let payload = Payload::Request(Request::Raw(PAYLOAD.to_vec()));
-        Message { peer, payload }
-    }
-
-    fn create_response_message() -> Message {
-        let peer = PeerId::random();
-        let payload = Payload::Response(Response::Raw(PAYLOAD.to_vec()));
-        Message { peer, payload }
-    }
-}
