@@ -18,14 +18,7 @@ pub trait Dkg<T: Transport + 'static> {
         other_peers: HashSet<PeerId>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
     fn stop(&mut self);
-    fn sign(
-        &self,
-        msg_to_sign: Vec<u8>,
-    ) -> impl Future<Output = Result<Box<dyn signature::Data>, Self::Error>> + Send;
-    fn validate(
-        &self,
-        msg_to_sign: Vec<u8>,
-        signature: Box<dyn signature::Data>,
-    ) -> Result<bool, Self::Error>;
+    fn sign(&self, msg_to_sign: Vec<u8>) -> impl Future<Output = Result<Data, Self::Error>> + Send;
+    fn validate(&self, msg_to_sign: Vec<u8>, signature: Data) -> Result<bool, Self::Error>;
     fn public_key(&self) -> Option<Vec<u8>>;
 }

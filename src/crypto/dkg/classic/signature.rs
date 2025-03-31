@@ -1,15 +1,20 @@
 use bincode::{config::standard, serde::encode_to_vec, Decode, Encode};
 use curv::{
     arithmetic::Converter,
-    elliptic::curves::{Curve, Point, Scalar},
+    elliptic::curves::{
+        Bls12_381_1, Bls12_381_2, Curve, Ed25519, Point, Ristretto, Scalar, Secp256k1, Secp256r1,
+    },
     BigInt,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::dkg::{
-    classic::keypair::{Keypair, PublicKey, Secret},
-    signature, Scheme,
+    classic::{
+        keypair::{Keypair, PublicKey, Secret},
+        CurveType,
+    },
+    Data, Scheme,
 };
 
 #[derive(Clone)]
@@ -21,8 +26,13 @@ pub struct Signature<E: Curve> {
     random_pub_key: Option<PublicKey<E>>,
 }
 
-#[derive(Serialize, Deserialize, Encode, Decode)]
-struct SignatureBytes {
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Encode, Decode)]
+#[derive(Serialize, Deserialize)]
+pub struct SignatureBytes {
+    curve_type: CurveType,
     signature: Option<Vec<u8>>,
     random_pub_key: Option<Vec<u8>>,
 }
@@ -149,27 +159,83 @@ impl<E: Curve> Signature<E> {
     pub fn random_pub_key(&self) -> Option<&PublicKey<E>> {
         self.random_pub_key.as_ref()
     }
+
+    pub fn random() -> Self {
+        let signature = Secret::random();
+        let random_pub_key = PublicKey::random();
+
+        let signature = Some(signature);
+        let random_pub_key = Some(random_pub_key);
+
+        Self {
+            signature,
+            random_pub_key,
+        }
+    }
 }
 
-impl<E: Curve> signature::Data for Signature<E> {
-    fn validate(&self, message: &[u8], key: &[u8]) -> bool {
+impl SignatureBytes {
+    pub fn validate(&self, message: &[u8], key: &[u8]) -> bool {
+        match self.curve_type {
+            CurveType::Secp256k1 => self.validate_with_established_curve::<Secp256k1>(message, key),
+            CurveType::Ed25519 => self.validate_with_established_curve::<Ed25519>(message, key),
+            CurveType::Bls12_381_1 => {
+                self.validate_with_established_curve::<Bls12_381_1>(message, key)
+            }
+            CurveType::Bls12_381_2 => {
+                self.validate_with_established_curve::<Bls12_381_2>(message, key)
+            }
+            CurveType::Ristretto => self.validate_with_established_curve::<Ristretto>(message, key),
+            CurveType::Secp256r1 => self.validate_with_established_curve::<Secp256r1>(message, key),
+            CurveType::Unknown => panic!("Unknown curve type"),
+        }
+    }
+
+    fn validate_with_established_curve<E: Curve>(&self, message: &[u8], key: &[u8]) -> bool {
+        let sig = match &self.signature {
+            Some(sig) => Secret::<E>::from_bytes(sig),
+            None => return false,
+        };
+        let r_pub_key = match &self.random_pub_key {
+            Some(r_pub_key) => PublicKey::<E>::from_bytes(r_pub_key),
+            None => return false,
+        };
         let public_key = PublicKey::from_bytes(key);
-        self.validate::<Sha256>(message, &public_key)
+
+        let challenge = Signature::<E>::compute_challenge::<Sha256>(
+            message,
+            &r_pub_key.to_bytes(),
+            &public_key.to_bytes(),
+        );
+
+        let left = Point::generator() * &sig;
+        let right = &r_pub_key - &(&public_key * &challenge);
+
+        left == right
+    }
+
+    pub fn random() -> Self {
+        let curve_type = CurveType::from_type::<Secp256k1>();
+        let sig = Signature::<Secp256k1>::random();
+
+        let signature = sig.signature.map(|s| s.to_bytes());
+        let random_pub_key = sig.random_pub_key.map(|p| p.to_bytes());
+
+        Self {
+            curve_type,
+            signature,
+            random_pub_key,
+        }
     }
 }
 
 impl<E: Curve> Scheme for Signature<E> {
     type Error = ();
-    type Output = Signature<E>;
     type Keypair = Keypair<E>;
 
-    fn sign(
-        seed: &[u8],
-        message: &[u8],
-        keypair: &Self::Keypair,
-    ) -> Result<Self::Output, Self::Error> {
+    fn sign(seed: &[u8], message: &[u8], keypair: &Self::Keypair) -> Result<Data, Self::Error> {
         let signature = Self::generate::<Sha256>(seed, message, keypair);
-        Ok(signature)
+        Ok(signature.into())
     }
 }
 
@@ -206,10 +272,12 @@ impl<E: Curve> From<&[u8]> for Signature<E> {
 
 impl<E: Curve> From<Signature<E>> for SignatureBytes {
     fn from(value: Signature<E>) -> Self {
+        let curve_type = CurveType::from_type::<E>();
         let signature = value.signature.map(|s| s.to_bytes());
         let random_pub_key = value.random_pub_key.map(|p| p.to_bytes());
 
         Self {
+            curve_type,
             signature,
             random_pub_key,
         }
@@ -225,6 +293,12 @@ impl<E: Curve> From<SignatureBytes> for Signature<E> {
             signature,
             random_pub_key,
         }
+    }
+}
+
+impl<E: Curve> From<Signature<E>> for Data {
+    fn from(value: Signature<E>) -> Self {
+        Data::Classic(SignatureBytes::from(value))
     }
 }
 

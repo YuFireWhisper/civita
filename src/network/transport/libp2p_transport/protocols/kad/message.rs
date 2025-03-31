@@ -1,38 +1,27 @@
-use libp2p::identity::{Keypair, SigningError};
 use serde::{Deserialize, Serialize};
 
-use thiserror::Error;
+use crate::{crypto::dkg::Data, network::transport::libp2p_transport::protocols::kad::Payload};
 
-use crate::network::transport::libp2p_transport::protocols::kad::Payload;
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("Failed to serialize message: {0}")]
-    Serialize(#[from] serde_json::Error),
-    #[error("Failed to sign message: {0}")]
-    Sign(#[from] SigningError),
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
 pub struct Message {
     payload: Payload,
-    signature: Vec<u8>,
+    signature: Data,
 }
 
 impl Message {
-    pub fn new(payload: Payload, keypair: &Keypair) -> Result<Self> {
-        let signature = keypair.sign(&serde_json::to_vec(&payload)?)?;
-
-        Ok(Self { payload, signature })
+    pub fn new(payload: Payload, signature: Data) -> Self {
+        Self { payload, signature }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::dkg::classic::signature::SignatureBytes;
+
     use super::*;
-    use libp2p::identity::Keypair;
 
     const PAYLOAD: &[u8] = &[1, 2, 3];
 
@@ -40,24 +29,15 @@ mod tests {
         Payload::Raw(PAYLOAD.to_vec())
     }
 
-    fn create_keypair() -> Keypair {
-        Keypair::generate_ed25519()
-    }
-
-    fn verify_signature(payload: &Payload, signature: &[u8], keypair: &Keypair) -> bool {
-        let payload = serde_json::to_vec(payload).unwrap();
-        keypair.public().verify(&payload, signature)
-    }
-
     #[test]
     fn test_new() {
         let payload = create_payload();
-        let keypair = create_keypair();
+        let signature = SignatureBytes::random();
+        let data = Data::Classic(signature);
 
-        let message = Message::new(payload.clone(), &keypair).unwrap();
-        let is_valid = verify_signature(&payload, &message.signature, &keypair);
+        let result = Message::new(payload.clone(), data.clone());
 
-        assert_eq!(message.payload, payload);
-        assert!(is_valid);
+        assert_eq!(result.payload, payload);
+        assert_eq!(result.signature, data);
     }
 }

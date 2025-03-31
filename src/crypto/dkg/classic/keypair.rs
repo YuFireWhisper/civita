@@ -42,6 +42,12 @@ impl<E: Curve> PublicKey<E> {
         public_keys.iter().sum()
     }
 
+    pub fn random() -> Self {
+        let scalar = Scalar::random();
+        let point = Point::generator() * &scalar;
+        Self(point)
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let point = Point::from_bytes(bytes).expect("Invalid public key bytes");
         Self(point)
@@ -89,6 +95,11 @@ impl<E: Curve> Secret<E> {
 
     fn u16_to_scalars(points: &[u16]) -> Vec<Scalar<E>> {
         points.iter().map(|p| (*p).into()).collect()
+    }
+
+    pub fn random() -> Self {
+        let scalar = Scalar::random();
+        Self(scalar)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {

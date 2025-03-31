@@ -29,14 +29,13 @@ use tokio::{
 
 use crate::{
     crypto::dkg::{
-        self,
         classic::{
             config::Config,
             keypair::{Keypair, Secret},
             peer_share::PeerShare,
             signer::Signer,
         },
-        Dkg,
+        Data, Dkg,
     },
     network::transport::{
         libp2p_transport::{
@@ -48,11 +47,13 @@ use crate::{
 };
 
 pub mod config;
+pub mod curve_type;
 pub mod keypair;
 pub mod peer_share;
 pub mod signature;
 pub mod signer;
 
+pub use curve_type::CurveType;
 pub use keypair::PublicKey;
 pub use signature::Signature;
 
@@ -440,10 +441,7 @@ impl<T: Transport + 'static, E: Curve> Dkg<T> for Classic<T, E> {
         }
     }
 
-    async fn sign(
-        &self,
-        msg_to_sign: Vec<u8>,
-    ) -> std::result::Result<Box<dyn dkg::Data>, Self::Error> {
+    async fn sign(&self, msg_to_sign: Vec<u8>) -> std::result::Result<Data, Self::Error> {
         let payload = Payload::DkgSign(msg_to_sign.clone());
         let message_id = self
             .transport
@@ -460,7 +458,7 @@ impl<T: Transport + 'static, E: Curve> Dkg<T> for Classic<T, E> {
         }
 
         match timeout(self.config.timeout, rx).await {
-            Ok(Ok(signature)) => Ok(Box::new(signature)),
+            Ok(Ok(signature)) => Ok(Data::Classic(signature.into())),
             Ok(Err(e)) => Err(Error::from(e)),
             Err(_) => Err(Error::Timeout),
         }
@@ -469,7 +467,7 @@ impl<T: Transport + 'static, E: Curve> Dkg<T> for Classic<T, E> {
     fn validate(
         &self,
         msg_to_sign: Vec<u8>,
-        signature: Box<dyn dkg::Data>,
+        signature: Data,
     ) -> std::result::Result<bool, Self::Error> {
         Ok(signature.validate(&msg_to_sign, &self.pub_key.as_ref().unwrap().to_bytes()))
     }
