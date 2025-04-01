@@ -1,7 +1,9 @@
-use std::any::type_name;
+use std::any::TypeId;
 
 use bincode::{Decode, Encode};
-use curv::elliptic::curves::Curve;
+use curv::elliptic::curves::{
+    Bls12_381_1, Bls12_381_2, Curve, Ed25519, Ristretto, Secp256k1, Secp256r1,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Copy, Clone)]
@@ -21,15 +23,15 @@ pub enum CurveType {
 
 impl CurveType {
     pub fn from_type<T: Curve>() -> Self {
-        let type_name = type_name::<T>();
+        let type_id = TypeId::of::<T>();
 
-        match type_name {
-            "curv::elliptic::curves::Bls12_381_1" => CurveType::Bls12_381_1,
-            "curv::elliptic::curves::Bls12_381_2" => CurveType::Bls12_381_2,
-            "curv::elliptic::curves::Ed25519" => CurveType::Ed25519,
-            "curv::elliptic::curves::Ristretto" => CurveType::Ristretto,
-            "curv::elliptic::curves::Secp256k1" => CurveType::Secp256k1,
-            "curv::elliptic::curves::Secp256r1" => CurveType::Secp256r1,
+        match type_id {
+            id if id == TypeId::of::<Bls12_381_1>() => CurveType::Bls12_381_1,
+            id if id == TypeId::of::<Bls12_381_2>() => CurveType::Bls12_381_2,
+            id if id == TypeId::of::<Ed25519>() => CurveType::Ed25519,
+            id if id == TypeId::of::<Ristretto>() => CurveType::Ristretto,
+            id if id == TypeId::of::<Secp256k1>() => CurveType::Secp256k1,
+            id if id == TypeId::of::<Secp256r1>() => CurveType::Secp256r1,
             _ => CurveType::Unknown,
         }
     }
