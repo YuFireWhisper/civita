@@ -46,7 +46,6 @@ pub mod factory;
 pub mod keypair;
 pub mod peer_share;
 pub mod signature;
-pub mod signer;
 
 pub use curve_type::CurveType;
 pub use keypair::PublicKey;
