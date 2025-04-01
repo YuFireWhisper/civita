@@ -62,5 +62,8 @@ pub trait VrfCallback: Send + Sync {
 }
 
 pub trait VrfFactory: Send + Sync {
-    fn create_vrf(&mut self) -> impl Future<Output = Result<Arc<dyn Vrf>, Error>> + Send;
+    type E;
+    type T: Vrf;
+
+    fn create(&mut self) -> impl Future<Output = Result<Arc<Self::T>, Self::E>> + Send;
 }
