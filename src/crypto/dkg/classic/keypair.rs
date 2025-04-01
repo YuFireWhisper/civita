@@ -9,9 +9,9 @@ use curv::{
     elliptic::curves::{Curve, Generator, Point, Scalar},
 };
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 
-use crate::crypto::dkg::classic::config::ThresholdCounter;
+use crate::crypto::dkg::classic::{config::ThresholdCounter, Signature};
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -184,6 +184,14 @@ impl<E: Curve> Keypair<E> {
         }
 
         keypairs
+    }
+
+    pub fn sign(&self, seed: &[u8], msg: &[u8]) -> Signature<E> {
+        Signature::generate::<Sha256>(seed, msg, self)
+    }
+
+    pub fn validate(&self, msg: &[u8], sig: &Signature<E>) -> bool {
+        sig.validate::<Sha256>(msg, &self.public_key)
     }
 }
 

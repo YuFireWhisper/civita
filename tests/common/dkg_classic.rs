@@ -1,24 +1,15 @@
 use std::sync::Arc;
 
-use civita::{
-    crypto::dkg::{
-        classic::{config::Config, Classic},
-        Dkg,
-    },
-    network::transport::libp2p_transport::Libp2pTransport,
-};
-use curv::elliptic::curves::Secp256k1;
+use civita::crypto::dkg::classic::{config::Config, Classic};
+use curv::elliptic::curves::Curve;
 use futures::future::join_all;
 use libp2p::PeerId;
 
 use crate::common::transport::TransportInfo;
 
-type T = Libp2pTransport;
-type E = Secp256k1;
-
-pub async fn generate_classic_nodes(
+pub async fn generate_classic_nodes<E: Curve>(
     infos: Vec<TransportInfo>,
-) -> Result<Vec<Classic<T, E>>, String> {
+) -> Result<Vec<Classic<E>>, String> {
     let all_peers: Vec<PeerId> = infos.iter().map(|info| info.peer_id).collect();
 
     let node_futures = infos.iter().enumerate().map(|(index, info)| {
@@ -31,23 +22,16 @@ pub async fn generate_classic_nodes(
             .collect();
 
         async move {
-            let mut node = Classic::<_, E>::new(transport, Config::default());
-            node.start(self_peer, other_peers)
+            Classic::<E>::new(transport, self_peer, other_peers, Config::default())
                 .await
-                .map(|_| node)
-                .map_err(|e| {
-                    format!(
-                        "Failed to initialize node {} with peer_id {}: {}",
-                        index, self_peer, e
-                    )
-                })
+                .map_err(|e| format!("Failed to create node {}: {}", index, e))
         }
     });
 
     let results = join_all(node_futures).await;
-    let nodes: Vec<Classic<T, E>> = results
+    let nodes: Vec<Classic<E>> = results
         .into_iter()
-        .collect::<Result<Vec<Classic<T, E>>, String>>()?;
+        .collect::<Result<Vec<Classic<E>>, String>>()?;
 
     Ok(nodes)
 }

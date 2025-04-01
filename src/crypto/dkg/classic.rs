@@ -13,17 +13,12 @@ use curv::{
     },
     elliptic::curves::Curve,
 };
-use libp2p::{gossipsub::MessageId, PeerId};
+use libp2p::PeerId;
 use log::error;
 use sha2::Sha256;
 use thiserror::Error;
 use tokio::{
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        oneshot::{self, error::RecvError},
-        Mutex,
-    },
-    task::JoinHandle,
+    sync::{mpsc::Receiver, oneshot::error::RecvError},
     time::timeout,
 };
 
@@ -33,7 +28,6 @@ use crate::{
             config::Config,
             keypair::{Keypair, Secret},
             peer_share::PeerShare,
-            signer::Signer,
         },
         Data, Dkg,
     },
@@ -59,7 +53,6 @@ pub use keypair::PublicKey;
 pub use signature::Signature;
 
 type Result<T> = std::result::Result<T, Error>;
-type ToSelfTxType<E> = (MessageId, Vec<u8>, oneshot::Sender<Signature<E>>);
 
 const DKG_TOPIC: &str = "dkg";
 
@@ -85,53 +78,32 @@ pub enum Error {
     ChannelClosed,
 }
 
-pub struct Classic<T: Transport + 'static, E: Curve> {
-    transport: Arc<T>,
-    config: Config,
-    handle: Option<JoinHandle<()>>,
-    to_self_tx: Option<Sender<ToSelfTxType<E>>>,
-    completed: Arc<Mutex<HashMap<Vec<u8>, Signature<E>>>>,
-    peer: Option<PeerId>,
-    pub_key: Option<PublicKey<E>>,
+pub struct Classic<E: Curve> {
+    keypair: Keypair<E>,
 }
 
-impl<T: Transport + 'static, E: Curve> Classic<T, E> {
-    pub fn new(transport: Arc<T>, config: Config) -> Self {
-        let handle = None;
-        let to_self_tx = None;
-        let completed = Arc::new(Mutex::new(HashMap::new()));
-        let peer = None;
-        let pub_key = None;
-        Self {
-            transport,
-            config,
-            handle,
-            to_self_tx,
-            completed,
-            peer,
-            pub_key,
-        }
-    }
-
-    async fn init_signer<H: Digest + Clone>(
-        &mut self,
+impl<E: Curve> Classic<E> {
+    pub async fn new<T: Transport>(
+        transport: Arc<T>,
         self_peer: PeerId,
         other_peers: HashSet<PeerId>,
-    ) -> Result<(Signer<E>, Receiver<Message>)> {
-        let mut topic_rx = self.listen_topic().await?;
-        let mut peers_rx = self.listen_peers(other_peers.clone()).await?;
+        config: Config,
+    ) -> Result<Self> {
+        let mut topic_rx = transport.listen_on_topic(DKG_TOPIC).await?;
+        let mut peers_rx = transport.listen_on_peers(other_peers.clone()).await?;
+
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
         let num_peers = Self::calculate_num_peers(&peers);
-        let threshold = self.config.threshold_counter.call(num_peers);
-        let (vss, self_shares) = Self::generate_shares::<H>(threshold, num_peers);
+        let threshold = config.threshold_counter.call(num_peers);
+        let (vss, self_shares) = Self::generate_shares::<Sha256>(threshold, num_peers);
 
-        Self::publish_verifiable_ss(&self.transport, &vss).await?;
-        Self::send_shares(&self.transport, &peers, &self_shares).await?;
+        Self::publish_verifiable_ss(&transport, &vss).await?;
+        Self::send_shares(&transport, &peers, &self_shares).await?;
 
         let self_index = Self::self_index(&self_peer, &peers);
-        let collected = timeout(self.config.timeout, async {
+        let collected = timeout(config.timeout, async {
             let nums = num_peers - 1;
-            Self::collect_data::<H>(&mut topic_rx, &mut peers_rx, nums).await
+            Self::collect_data::<Sha256>(&mut topic_rx, &mut peers_rx, nums).await
         })
         .await
         .map_err(|_| Error::Timeout)??;
@@ -155,31 +127,10 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             .collect::<Vec<PublicKey<E>>>();
         let pub_key = PublicKey::aggrege(&pub_keys);
         let pri_key: Secret<E> = shares.iter().sum();
+
         let keypair = Keypair::new(pub_key, pri_key);
-        let pub_key = keypair.public_key().clone();
-        self.pub_key = Some(pub_key.clone());
 
-        let mut signer = Signer::new(keypair, self.config.threshold_counter.clone_box());
-        signer.add_peers(peers);
-
-        Ok((signer, topic_rx))
-    }
-
-    async fn listen_topic(&self) -> Result<Receiver<Message>> {
-        self.transport
-            .listen_on_topic(DKG_TOPIC)
-            .await
-            .map_err(Error::from)
-    }
-
-    async fn listen_peers(
-        &self,
-        peers: impl IntoIterator<Item = PeerId> + Send,
-    ) -> Result<Receiver<Message>> {
-        self.transport
-            .listen_on_peers(peers.into_iter().collect())
-            .await
-            .map_err(Error::from)
+        Ok(Self { keypair })
     }
 
     fn generate_full_peers(
@@ -206,7 +157,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         VerifiableSS::<E, H>::share(threshold, nums, &secret)
     }
 
-    async fn publish_verifiable_ss<H: Digest + Clone>(
+    async fn publish_verifiable_ss<T: Transport, H: Digest + Clone>(
         transport: &Arc<T>,
         verifiable_ss: &VerifiableSS<E, H>,
     ) -> Result<()> {
@@ -216,7 +167,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         Ok(())
     }
 
-    async fn send_shares(
+    async fn send_shares<T: Transport>(
         transport: &Arc<T>,
         peers: &HashMap<PeerId, u16>,
         shares: &SecretShares<E>,
@@ -296,101 +247,6 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
             })
             .collect()
     }
-
-    async fn receive<H: Digest + Clone>(
-        &mut self,
-        mut signer: Signer<E>,
-        mut topic_rx: Receiver<Message>,
-    ) -> JoinHandle<()> {
-        const CHANNEL_SIZE: usize = 1000;
-        let (to_self_tx, mut to_self_rx) = channel(CHANNEL_SIZE);
-
-        let transport = self.transport.clone();
-        let completed = self.completed.clone();
-        let self_peer = self
-            .peer
-            .expect("Self peer is missing, this should never happen");
-        self.to_self_tx = Some(to_self_tx);
-
-        tokio::spawn(async move {
-            let mut callback_tx: Option<oneshot::Sender<Signature<E>>> = None;
-
-            loop {
-                tokio::select! {
-                    Some(msg) = topic_rx.recv() => {
-                        // New DkG Generation
-                        if let Some((message_id, _, msg_to_sign)) = Payload::get_dkg_sign(msg.clone()) {
-                            let signature = signer.sign::<H>(message_id.to_string().as_bytes(), &msg_to_sign);
-                            let payload = Payload::DkgSignResponse(signature.clone().into());
-                            Self::publish(&transport, payload).await;
-                            if let Some(signature) = signer.update::<H>(signature, self_peer) {
-                                if let Some(tx) = callback_tx.take() {
-                                    if let Err(e) = tx.send(signature.clone()) {
-                                        error!("Failed to send signature to self: {:?}", e);
-                                    }
-                                }
-                                Self::publish_final_signature(&transport, signature, completed.clone()).await;
-                            }
-                        }
-
-                        // Collect existing DKG Generation
-                        if let Some((peer, signature)) = Payload::get_dkg_sign_response(msg) {
-                            let signature = Signature::from(signature.as_slice());
-                            if let Some(signature) = signer.update::<H>(signature, peer) {
-                                if let Some(tx) = callback_tx.take() {
-                                    if let Err(e) = tx.send(signature.clone()) {
-                                        error!("Failed to send signature to self: {:?}", e);
-                                    }
-                                }
-                                Self::publish_final_signature(&transport, signature, completed.clone()).await;
-                            }
-                        }
-                    }
-                    // New DKG Generation from self
-                    Some((msg_id, msg_to_sign, tx)) = to_self_rx.recv() => {
-                        callback_tx = Some(tx);
-                        let signature = signer.sign::<H>(msg_id.to_string().as_bytes(), &msg_to_sign);
-                        let payload = Payload::DkgSign(msg_to_sign);
-                        Self::publish(&transport, payload).await;
-                        if let Some(signature) = signer.update::<H>(signature, self_peer) {
-                            if let Some(tx) = callback_tx.take() {
-                                if let Err(e) = tx.send(signature.clone()) {
-                                    error!("Failed to send signature to self: {:?}", e);
-                                }
-                            }
-                            Self::publish_final_signature(&transport, signature, completed.clone()).await;
-                        }
-                    }
-                    else => {
-                        error!("Channel is closed");
-                        break;
-                    }
-                }
-            }
-        })
-    }
-
-    async fn publish(transport: &Arc<T>, payload: Payload) {
-        if let Err(e) = transport.publish(DKG_TOPIC, payload).await {
-            error!("Failed to publish payload: {:?}", e);
-        }
-    }
-
-    async fn publish_final_signature(
-        transport: &Arc<T>,
-        signature: Signature<E>,
-        completed: Arc<Mutex<HashMap<Vec<u8>, Signature<E>>>>,
-    ) {
-        let r_pub_key = signature
-            .random_pub_key()
-            .expect("Random public key is missing");
-        let payload = Payload::DkgSignFinal(signature.clone().into());
-        Self::publish(transport, payload).await;
-        completed
-            .lock()
-            .await
-            .insert(r_pub_key.to_bytes(), signature);
-    }
 }
 
 fn to_order_map<T, N, I>(iter: I, capacity: N) -> std::result::Result<HashMap<T, N>, ()>
@@ -418,69 +274,15 @@ where
     Ok(map)
 }
 
-impl<T: Transport + 'static, E: Curve> Dkg<T> for Classic<T, E> {
+impl<E: Curve> Dkg for Classic<E> {
     type Error = Error;
 
-    async fn start(
-        &mut self,
-        self_peer: PeerId,
-        other_peers: HashSet<PeerId>,
-    ) -> std::result::Result<(), Self::Error> {
-        self.peer = Some(self_peer);
-        let (signer, topic_rx) = self.init_signer::<Sha256>(self_peer, other_peers).await?;
-        let handle = self.receive::<Sha256>(signer, topic_rx).await;
-        self.handle = Some(handle);
-
-        Ok(())
+    fn sign(&self, seed: &[u8], msg: &[u8]) -> Data {
+        self.keypair.sign(seed, msg).into()
     }
 
-    fn stop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-
-            self.to_self_tx = None;
-        }
-    }
-
-    async fn sign(&self, msg_to_sign: Vec<u8>) -> std::result::Result<Data, Self::Error> {
-        let payload = Payload::DkgSign(msg_to_sign.clone());
-        let message_id = self
-            .transport
-            .publish(DKG_TOPIC, payload.clone())
-            .await
-            .map_err(Error::from)?;
-        let (tx, rx) = oneshot::channel();
-
-        if let Some(to_self_tx) = &self.to_self_tx {
-            to_self_tx
-                .send((message_id, msg_to_sign, tx))
-                .await
-                .map_err(|e| Error::Send(e.to_string()))?;
-        }
-
-        match timeout(self.config.timeout, rx).await {
-            Ok(Ok(signature)) => Ok(Data::Classic(signature.into())),
-            Ok(Err(e)) => Err(Error::from(e)),
-            Err(_) => Err(Error::Timeout),
-        }
-    }
-
-    fn validate(
-        &self,
-        msg_to_sign: Vec<u8>,
-        signature: Data,
-    ) -> std::result::Result<bool, Self::Error> {
-        Ok(signature.validate(&msg_to_sign, &self.pub_key.as_ref().unwrap().to_bytes()))
-    }
-
-    fn public_key(&self) -> Option<Vec<u8>> {
-        self.pub_key
-            .as_ref()
-            .map(|pub_key| pub_key.to_bytes())
-            .or_else(|| {
-                error!("Public key is missing");
-                None
-            })
+    fn validate(&self, msg: &[u8], sig: &Data) -> bool {
+        sig.validate(msg, &self.keypair.public_key().to_bytes())
     }
 }
 
@@ -619,7 +421,7 @@ mod tests {
         (2 * n / 3) + 1
     }
 
-    async fn create_classic(n: u16) -> (Classic<MockTransport, E>, PeerId, HashSet<PeerId>) {
+    async fn create_classic(n: u16) -> Classic<E> {
         let (topic_tx, topic_rx) = channel((n - 1).into());
         let (peer_tx, peer_rx) = channel((n - 1).into());
 
@@ -637,7 +439,9 @@ mod tests {
         let mut other_peers: HashSet<_> = peers.into_iter().collect();
         other_peers.remove(&self_peer);
         let config = create_config();
-        (Classic::new(transport, config), self_peer, other_peers)
+        Classic::new(transport, self_peer, other_peers, config)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -659,18 +463,13 @@ mod tests {
         let mut other_peers: HashSet<_> = peers.into_iter().collect();
         other_peers.remove(&self_peer);
         let config = create_config();
-        let mut classic = Classic::<_, E>::new(transport, config);
 
-        let result = classic.start(self_peer, other_peers).await;
+        let result = Classic::<E>::new(transport, self_peer, other_peers, config).await;
 
         assert!(
             result.is_ok(),
             "Failed to create classic DKG instance: {:?}",
             result.err()
-        );
-        assert!(
-            classic.handle.is_some(),
-            "Classic DKG instance is not running"
         );
     }
 
@@ -686,9 +485,7 @@ mod tests {
         other_peers.remove(&self_peer);
         let config = create_config_with_timeout(Duration::from_millis(1)); // Very short timeout
 
-        let result = Classic::<_, E>::new(Arc::new(transport), config)
-            .start(self_peer, other_peers)
-            .await;
+        let result = Classic::<E>::new(Arc::new(transport), self_peer, other_peers, config).await;
 
         assert!(
             result.is_err(),
@@ -697,34 +494,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop() {
-        let (mut classic, self_peer, other_peers) = create_classic(NUM_PEERS).await;
-
-        classic.start(self_peer, other_peers).await.unwrap();
-        classic.stop();
-
-        assert!(
-            classic.handle.is_none(),
-            "Classic DKG instance is still running"
-        );
-    }
-
-    #[tokio::test]
-    async fn sign() {
+    async fn return_signature_invalid() {
+        const SEED: &[u8] = b"SEED";
         const MESSAGE: &[u8] = b"MESSAGE";
 
-        let (mut classic, self_peer, other_peers) = create_classic(NUM_PEERS).await;
-        // We use it because we only have 1
-        // real peer in the test, if we use the default threshold_counter, the test will fail
-        classic.config.threshold_counter = Box::new(|_| 1);
+        let classic = create_classic(NUM_PEERS).await;
 
-        classic.start(self_peer, other_peers).await.unwrap();
-        let result = classic.sign(MESSAGE.to_vec()).await;
+        let result = classic.sign(SEED, MESSAGE);
 
         assert!(
-            result.is_ok(),
-            "Failed to sign message: {:?}",
-            result.err().unwrap()
+            !classic.validate(MESSAGE, &result),
+            "Signature should be invalid, because it is partial"
         );
     }
 }

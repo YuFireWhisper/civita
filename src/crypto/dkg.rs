@@ -1,7 +1,7 @@
-use crate::network::transport::{MockTransport, Transport};
-use std::{collections::HashSet, future::Future};
+use crate::MockError;
+use std::error::Error;
 
-use libp2p::PeerId;
+use async_trait::async_trait;
 use mockall::automock;
 
 pub mod classic;
@@ -9,25 +9,19 @@ pub mod signature;
 
 pub use signature::{Data, Scheme};
 
-#[automock(type Error=String;)]
-pub trait Dkg<T: Transport + 'static> {
-    type Error;
+#[automock(type Error=MockError;)]
+pub trait Dkg {
+    type Error: Error;
 
-    fn start(
-        &mut self,
-        self_peer: PeerId,
-        other_peers: HashSet<PeerId>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-    fn stop(&mut self);
-    fn sign(&self, msg_to_sign: Vec<u8>) -> impl Future<Output = Result<Data, Self::Error>> + Send;
-    fn validate(&self, msg_to_sign: Vec<u8>, signature: Data) -> Result<bool, Self::Error>;
-    fn public_key(&self) -> Option<Vec<u8>>;
+    fn sign(&self, seed: &[u8], msg: &[u8]) -> Data;
+    fn validate(&self, msg: &[u8], sig: &Data) -> bool;
 }
 
-#[automock(type T=MockTransport; type D=MockDkg<MockTransport>;)]
+#[automock(type Dkg=MockDkg; type Error=MockError;)]
+#[async_trait]
 pub trait DkgFactory {
-    type T: Transport + 'static;
-    type D: Dkg<Self::T>;
+    type Error: Error;
+    type Dkg: Dkg;
 
-    fn create(&self) -> Self::D;
+    async fn create(&self) -> Result<Self::Dkg, Self::Error>;
 }
