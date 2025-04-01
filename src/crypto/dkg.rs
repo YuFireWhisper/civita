@@ -1,14 +1,16 @@
+use crate::network::transport::libp2p_transport::mock_transport::MockTransport;
+use crate::network::transport::Transport;
 use std::{collections::HashSet, future::Future};
 
 use libp2p::PeerId;
-
-use crate::network::transport::Transport;
+use mockall::automock;
 
 pub mod classic;
 pub mod signature;
 
 pub use signature::{Data, Scheme};
 
+#[automock(type Error=String;)]
 pub trait Dkg<T: Transport + 'static> {
     type Error;
 
@@ -23,6 +25,7 @@ pub trait Dkg<T: Transport + 'static> {
     fn public_key(&self) -> Option<Vec<u8>>;
 }
 
+#[automock(type T=MockTransport; type D=MockDkg<MockTransport>;)]
 pub trait DkgFactory {
     type T: Transport + 'static;
     type D: Dkg<Self::T>;

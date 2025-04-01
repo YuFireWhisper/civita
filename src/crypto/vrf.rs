@@ -7,9 +7,11 @@ use std::sync::Arc;
 use dvrf::{crypto, messager, processes};
 use libp2p::gossipsub::MessageId;
 use libp2p::identity;
+use mockall::automock;
 use thiserror::Error;
 
 use crate::network::transport::libp2p_transport::protocols;
+use crate::MockError;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -47,6 +49,7 @@ impl From<messager::Error> for Error {
     }
 }
 
+#[automock]
 pub trait Vrf: Send + Sync {
     fn new_random(self: Arc<Self>)
         -> Pin<Box<dyn Future<Output = Result<[u8; 32], Error>> + Send>>;
@@ -61,9 +64,10 @@ pub trait VrfCallback: Send + Sync {
         F: Fn(MessageId) + Send + Sync + 'static;
 }
 
+#[automock(type E=MockError; type V=MockVrf;)]
 pub trait VrfFactory: Send + Sync {
-    type E;
-    type T: Vrf;
+    type E: std::error::Error;
+    type V: Vrf;
 
-    fn create(&mut self) -> impl Future<Output = Result<Arc<Self::T>, Self::E>> + Send;
+    fn create(&mut self) -> impl Future<Output = Result<Arc<Self::V>, Self::E>> + Send;
 }

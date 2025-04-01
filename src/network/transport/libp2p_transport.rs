@@ -560,7 +560,6 @@ pub mod test_transport {
     }
 }
 
-#[cfg(test)]
 pub mod mock_transport {
     use std::{collections::VecDeque, future::Future, pin::Pin, sync::Mutex};
 

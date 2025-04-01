@@ -97,9 +97,9 @@ impl<T: Transport + 'static> Factory<T> {
 
 impl<T: Transport + 'static> VrfFactory for Factory<T> {
     type E = Error;
-    type T = DVrf<T>;
+    type V = DVrf<T>;
 
-    async fn create(&mut self) -> Result<Arc<Self::T>, Self::E> {
+    async fn create(&mut self) -> Result<Arc<Self::V>, Self::E> {
         let service = self.create_service().await?;
         Ok(service)
     }
