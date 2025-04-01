@@ -52,6 +52,7 @@ pub mod keypair;
 pub mod peer_share;
 pub mod signature;
 pub mod signer;
+pub mod factory;
 
 pub use curve_type::CurveType;
 pub use keypair::PublicKey;

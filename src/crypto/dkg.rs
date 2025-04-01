@@ -22,3 +22,10 @@ pub trait Dkg<T: Transport + 'static> {
     fn validate(&self, msg_to_sign: Vec<u8>, signature: Data) -> Result<bool, Self::Error>;
     fn public_key(&self) -> Option<Vec<u8>>;
 }
+
+pub trait DkgFactory {
+    type T: Transport + 'static;
+    type D: Dkg<Self::T>;
+
+    fn create(&self) -> Self::D;
+}

@@ -43,3 +43,17 @@ impl Default for Config {
         }
     }
 }
+
+impl Clone for Config {
+    fn clone(&self) -> Self {
+        let timeout = self.timeout;
+        let sign_timeout = self.sign_timeout;
+        let threshold_counter = self.threshold_counter.clone_box();
+
+        Self {
+            timeout,
+            sign_timeout,
+            threshold_counter,
+        }
+    }
+}
