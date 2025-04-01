@@ -3,7 +3,7 @@ use std::sync::Arc;
 use libp2p::PeerId;
 
 use crate::{
-    crypto::vrf::{Error, Vrf, VrfFactory},
+    crypto::vrf::{Error, VrfFactory},
     network::transport::Transport,
 };
 
@@ -96,8 +96,11 @@ impl<T: Transport + 'static> Factory<T> {
 }
 
 impl<T: Transport + 'static> VrfFactory for Factory<T> {
-    async fn create_vrf(&mut self) -> Result<Arc<dyn Vrf>, Error> {
+    type E = Error;
+    type T = DVrf<T>;
+
+    async fn create(&mut self) -> Result<Arc<Self::T>, Self::E> {
         let service = self.create_service().await?;
-        Ok(service as Arc<dyn Vrf>)
+        Ok(service)
     }
 }
