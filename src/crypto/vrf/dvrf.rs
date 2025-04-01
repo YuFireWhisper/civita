@@ -283,66 +283,23 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use libp2p::{gossipsub::MessageId, PeerId};
-    use mockall::mock;
     use tokio::sync::mpsc::channel;
-    use tokio::time::{Duration, Instant};
+    use tokio::time::Instant;
 
     use super::config::Config;
-    use super::crypto::Crypto;
+
     use super::{Components, DVrf};
-    use crate::crypto::vrf::dvrf::consensus_process::ProcessStatus;
-    use crate::crypto::vrf::dvrf::proof::Proof;
-    use crate::crypto::vrf::dvrf::{
-        consensus_process::{
-            ConsensusProcess, ConsensusProcessFactory, Error as ConsensusProcessError,
-        },
-        crypto::Error as CryptoError,
+    use crate::crypto::vrf::dvrf::consensus_process::{
+        MockConsensusProcess, MockConsensusProcessFactory, ProcessStatus,
     };
+    use crate::crypto::vrf::dvrf::crypto::MockCrypto;
+    use crate::crypto::vrf::dvrf::proof::Proof;
     use crate::crypto::vrf::VrfCallback;
     use crate::network::transport::MockTransport;
 
     const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
     const TEST_OUTPUT: [u8; 32] = [1; 32];
     const TEST_PFOOF: [u8; 32] = [1; 32];
-
-    mock! {
-        pub ConsensusProcessFactory {}
-        impl ConsensusProcessFactory for ConsensusProcessFactory {
-            fn create(&self, proof_duration: Duration, vote_duration: Duration) -> Box<dyn ConsensusProcess>;
-        }
-    }
-
-    mock! {
-        pub ConsensusProcess {}
-        impl ConsensusProcess for ConsensusProcess {
-            fn insert_voter(&mut self, peer_id: PeerId) -> Result<(), ConsensusProcessError>;
-            fn insert_output(&mut self, proof: Vec<u8>) -> Result<(), ConsensusProcessError>;
-            fn calculate_consensus(&self) -> Result<[u8; 32], ConsensusProcessError>;
-            fn insert_completion_vote(
-                &mut self,
-                peer_id: PeerId,
-                random: [u8; 32],
-            ) -> Result<Option<[u8; 32]>, ConsensusProcessError>;
-            fn insert_failure_vote(&mut self, peer_id: PeerId) -> Result<bool, ConsensusProcessError>;
-            fn is_proof_timeout(&self) -> bool;
-            fn is_vote_timeout(&self) -> bool;
-            fn status(&self) -> ProcessStatus;
-            fn update_status(&mut self) -> ProcessStatus;
-            fn proof_deadline(&self) -> Instant;
-            fn vote_deadline(&self) -> Instant;
-            fn random(&self) -> Option<[u8; 32]>;
-            fn elect(&self, num: usize) -> Result<Vec<PeerId>, ConsensusProcessError>;
-        }
-    }
-
-    mock! {
-        pub Crypto {}
-        impl Crypto for Crypto {
-            fn generate_proof(&self, seed: &[u8]) -> Result<Proof, CryptoError>;
-            fn verify_proof(&self, public_key: &[u8], proof: &[u8], message_id: &[u8]) -> Result<Vec<u8>, CryptoError>;
-            fn public_key(&self) -> &[u8];
-        }
-    }
 
     fn create_components() -> Components<MockTransport> {
         let mut transport = MockTransport::new();

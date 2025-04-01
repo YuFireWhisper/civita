@@ -1,6 +1,7 @@
 pub mod process;
 
 use libp2p::PeerId;
+use mockall::automock;
 use thiserror::Error;
 use tokio::time::{Duration, Instant};
 
@@ -37,6 +38,7 @@ pub enum ProcessStatus {
     Failed,
 }
 
+#[automock]
 pub trait ConsensusProcess: Send + Sync {
     fn insert_voter(&mut self, peer_id: PeerId) -> Result<(), Error>;
     fn insert_output(&mut self, output: Vec<u8>) -> Result<(), Error>;
@@ -57,6 +59,7 @@ pub trait ConsensusProcess: Send + Sync {
     fn elect(&self, num: usize) -> Result<Vec<PeerId>, Error>;
 }
 
+#[automock]
 pub trait ConsensusProcessFactory: Send + Sync {
     fn create(
         &self,

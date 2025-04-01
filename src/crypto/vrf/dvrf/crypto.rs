@@ -1,3 +1,4 @@
+use mockall::automock;
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use rand_core::OsRng;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -19,6 +20,7 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[automock]
 pub trait Crypto: Send + Sync {
     fn generate_proof(&self, seed: &[u8]) -> Result<Proof>;
     fn verify_proof(&self, public_key: &[u8], proof: &[u8], seed: &[u8]) -> Result<Vec<u8>>;
