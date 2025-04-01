@@ -1,5 +1,4 @@
-use crate::network::transport::libp2p_transport::mock_transport::MockTransport;
-use crate::network::transport::Transport;
+use crate::network::transport::{MockTransport, Transport};
 use std::{collections::HashSet, future::Future};
 
 use libp2p::PeerId;

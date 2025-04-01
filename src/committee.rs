@@ -51,7 +51,7 @@ mod tests {
             dkg::{MockDkg, MockDkgFactory},
             vrf::{MockVrf, MockVrfFactory},
         },
-        network::transport::libp2p_transport::mock_transport::MockTransport,
+        network::transport::MockTransport,
     };
 
     #[tokio::test]

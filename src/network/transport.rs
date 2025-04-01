@@ -1,13 +1,15 @@
 pub mod libp2p_transport;
 
-use std::{future::Future, io, pin::Pin};
+use std::{collections::HashSet, io};
 
+use async_trait::async_trait;
 use libp2p::{
     gossipsub::{MessageId, PublishError, SubscriptionError},
     swarm::DialError,
     Multiaddr, PeerId, TransportError,
 };
 use libp2p_transport::behaviour;
+use mockall::automock;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
@@ -45,28 +47,12 @@ pub enum Error {
     NoPeerListen(String),
 }
 
+#[automock]
+#[async_trait]
 pub trait Transport: Send + Sync {
-    fn dial(
-        &self,
-        peer_id: PeerId,
-        addr: Multiaddr,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
-    fn listen_on_topic<'a>(
-        &'a self,
-        topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + 'a>>;
-    fn listen_on_peers<'a>(
-        &'a self,
-        peers: impl IntoIterator<Item = PeerId> + Send + 'a,
-    ) -> Pin<Box<dyn Future<Output = Result<Receiver<Message>, Error>> + Send + 'a>>;
-    fn publish<'a>(
-        &'a self,
-        topic: &'a str,
-        payload: gossipsub::Payload,
-    ) -> Pin<Box<dyn Future<Output = Result<MessageId, Error>> + Send + 'a>>;
-    fn request<'a>(
-        &'a self,
-        peer_id: PeerId,
-        request: Request,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
+    async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> Result<(), Error>;
+    async fn listen_on_topic(&self, topic: &str) -> Result<Receiver<Message>, Error>;
+    async fn listen_on_peers(&self, peers: HashSet<PeerId>) -> Result<Receiver<Message>, Error>;
+    async fn publish(&self, topic: &str, payload: gossipsub::Payload) -> Result<MessageId, Error>;
+    async fn request(&self, peer_id: PeerId, request: Request) -> Result<(), Error>;
 }

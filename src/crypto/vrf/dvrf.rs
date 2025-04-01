@@ -299,7 +299,7 @@ mod tests {
         crypto::Error as CryptoError,
     };
     use crate::crypto::vrf::VrfCallback;
-    use crate::network::transport::libp2p_transport::mock_transport::MockTransport;
+    use crate::network::transport::MockTransport;
 
     const TEST_MESSAGE_ID: &str = "TEST_MESSAGE_ID";
     const TEST_OUTPUT: [u8; 32] = [1; 32];
@@ -345,10 +345,11 @@ mod tests {
     }
 
     fn create_components() -> Components<MockTransport> {
-        let transport = MockTransport::new().with_listen_on_topic_cb(|_| {
+        let mut transport = MockTransport::new();
+        transport.expect_listen_on_topic().returning(|_| {
             let (_, rx) = channel(100);
-            rx
-        }, 1);
+            Ok(rx)
+        });
 
         let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);
@@ -406,18 +407,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_random_success() {
-        let mut crypto = MockCrypto::new();
-        let transport = MockTransport::new()
-            .with_listen_on_topic_cb_once(|_| {
-                let (_, rx) = channel(100);
-                rx
-            })
-            .with_listen_on_peers_cb(|_| {
-                let (_, rx) = channel(100);
-                rx
-            }, 1)
-            .with_publish_cb(|_, _| MessageId::from(TEST_MESSAGE_ID), 3);
+        let mut transport = MockTransport::new();
+        transport.expect_listen_on_topic().returning(|_| {
+            let (_, rx) = channel(100);
+            Ok(rx)
+        });
+        transport.expect_listen_on_peers().returning(|_| {
+            let (_, rx) = channel(100);
+            Ok(rx)
+        });
+        transport
+            .expect_publish()
+            .returning(|_, _| Ok(MessageId::from(TEST_MESSAGE_ID)));
 
+        let mut crypto = MockCrypto::new();
         crypto.expect_public_key().return_const(vec![0u8; 32]);
         crypto
             .expect_generate_proof()

@@ -48,11 +48,11 @@ use crate::{
 
 pub mod config;
 pub mod curve_type;
+pub mod factory;
 pub mod keypair;
 pub mod peer_share;
 pub mod signature;
 pub mod signer;
-pub mod factory;
 
 pub use curve_type::CurveType;
 pub use keypair::PublicKey;
@@ -177,7 +177,7 @@ impl<T: Transport + 'static, E: Curve> Classic<T, E> {
         peers: impl IntoIterator<Item = PeerId> + Send,
     ) -> Result<Receiver<Message>> {
         self.transport
-            .listen_on_peers(peers)
+            .listen_on_peers(peers.into_iter().collect())
             .await
             .map_err(Error::from)
     }
@@ -500,15 +500,19 @@ mod tests {
     };
 
     use crate::{
-        crypto::dkg::classic::{config::Config, Classic, DKG_TOPIC},
-        crypto::dkg::Dkg,
-        network::transport::libp2p_transport::{
-            message::Message,
-            mock_transport::MockTransport,
-            protocols::{
-                gossipsub::{self, Payload},
-                request_response::{self, payload::Request},
+        crypto::dkg::{
+            classic::{config::Config, Classic, DKG_TOPIC},
+            Dkg,
+        },
+        network::transport::{
+            libp2p_transport::{
+                message::Message,
+                protocols::{
+                    gossipsub::{self, Payload},
+                    request_response::{self, payload::Request},
+                },
             },
+            MockTransport,
         },
     };
 
@@ -579,11 +583,19 @@ mod tests {
         topic_rx: Receiver<Message>,
         peer_rx: Receiver<Message>,
     ) -> MockTransport {
-        MockTransport::new()
-            .with_listen_on_topic_cb_once(|_| topic_rx)
-            .with_listen_on_peers_cb_once(|_| peer_rx)
-            .with_publish_cb(|_, _| MessageId::from(MESSAGE_ID), 4)
-            .with_request_cb(|_, _| (), 3)
+        let mut transport = MockTransport::new();
+        transport
+            .expect_listen_on_topic()
+            .return_once(move |_| Ok(topic_rx));
+        transport
+            .expect_listen_on_peers()
+            .return_once(move |_| Ok(peer_rx));
+        transport
+            .expect_publish()
+            .returning(|_, _| Ok(MessageId::from(MESSAGE_ID)));
+        transport.expect_request().returning(|_, _| Ok(()));
+
+        transport
     }
 
     fn create_config() -> Config {
