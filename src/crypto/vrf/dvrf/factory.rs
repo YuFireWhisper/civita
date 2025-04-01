@@ -4,7 +4,7 @@ use libp2p::PeerId;
 
 use crate::{
     crypto::vrf::{Error, Vrf, VrfFactory},
-    network::transport::libp2p_transport::Libp2pTransport,
+    network::transport::Transport,
 };
 
 use super::{
@@ -14,18 +14,18 @@ use super::{
     Components, DVrf,
 };
 
-pub struct Factory {
-    transport: Arc<Libp2pTransport>,
+pub struct Factory<T: Transport + 'static> {
+    transport: Arc<T>,
     config: Option<Config>,
     process_factory: Option<Arc<dyn ConsensusProcessFactory>>,
     crypto: Option<Arc<dyn Crypto>>,
     peer_id: PeerId,
 }
 
-impl Factory {
+impl<T: Transport + 'static> Factory<T> {
     const DEFAULT_FACTORY: ProcessFactory = ProcessFactory;
 
-    pub fn new(transport: Arc<Libp2pTransport>, peer_id: PeerId) -> Self {
+    pub fn new(transport: Arc<T>, peer_id: PeerId) -> Self {
         Self {
             transport,
             config: None,
@@ -53,7 +53,7 @@ impl Factory {
         self
     }
 
-    pub async fn create_service(&mut self) -> Result<Arc<DVrf<Libp2pTransport>>, Error> {
+    pub async fn create_service(&mut self) -> Result<Arc<DVrf<T>>, Error> {
         let transport = Arc::clone(&self.transport);
         let config = self.get_config();
         let peer_id = self.peer_id;
@@ -95,7 +95,7 @@ impl Factory {
     }
 }
 
-impl VrfFactory for Factory {
+impl<T: Transport + 'static> VrfFactory for Factory<T> {
     async fn create_vrf(&mut self) -> Result<Arc<dyn Vrf>, Error> {
         let service = self.create_service().await?;
         Ok(service as Arc<dyn Vrf>)
