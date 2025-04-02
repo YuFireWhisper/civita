@@ -39,16 +39,6 @@ impl Listener {
         self.topics.insert(topic.into(), tx.clone());
     }
 
-    pub fn add_topics(
-        &mut self,
-        topics: impl IntoIterator<Item = impl Into<String>>,
-        tx: &Sender<Message>,
-    ) {
-        topics
-            .into_iter()
-            .for_each(|topic| self.add_topic(topic, tx));
-    }
-
     pub fn add_peer(&mut self, peer: PeerId, tx: &Sender<Message>) {
         self.peers.insert(peer, tx.clone());
     }
@@ -97,17 +87,6 @@ mod tests {
         listener.add_topic(topic, &tx);
 
         assert_eq!(listener.topics.len(), 1);
-    }
-
-    #[test]
-    fn add_topics_success() {
-        let mut listener = Listener::new();
-        let topics = vec!["topic1", "topic2"];
-        let (tx, _) = channel(1);
-
-        listener.add_topics(topics, &tx);
-
-        assert_eq!(listener.topics.len(), 2);
     }
 
     #[test]
