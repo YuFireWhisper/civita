@@ -8,8 +8,9 @@ use libp2p::PeerId;
 use crate::common::transport::TransportInfo;
 
 pub async fn generate_classic_nodes<E: Curve>(
-    infos: Vec<TransportInfo>,
+    mut infos: Vec<TransportInfo>,
 ) -> Result<Vec<Classic<E>>, String> {
+    infos.sort_by_key(|info| info.peer_id);
     let all_peers: Vec<PeerId> = infos.iter().map(|info| info.peer_id).collect();
 
     let node_futures = infos.iter().enumerate().map(|(index, info)| {

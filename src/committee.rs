@@ -10,6 +10,8 @@ use crate::{
     network::transport::Transport,
 };
 
+pub mod timer;
+
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]

@@ -32,15 +32,14 @@ async fn valid_sign() {
     let infos = generate_connected_transports(NUM_NODES).await;
     let nodes = generate_classic_nodes::<E>(infos).await.unwrap();
 
-    let partial_signatures = nodes
+    let (indices, partial_signatures) = nodes
         .iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(i, node)| {
             let Data::Classic(data) = node.sign(SEED, MESSAGE);
-            data.into()
+            ((i + 1) as u16, data.into())
         })
-        .collect::<Vec<Signature<E>>>();
-
-    let indices: Vec<u16> = (0..NUM_NODES).collect();
+        .collect::<(Vec<u16>, Vec<Signature<E>>)>();
 
     let aggregated_signature = Signature::aggregate::<H>(&indices, partial_signatures.into_iter());
 
@@ -48,5 +47,5 @@ async fn valid_sign() {
 
     let is_valid = nodes.iter().all(|node| node.validate(MESSAGE, &data));
 
-    assert!(is_valid, "signature validation failed: {:?}", is_valid);
+    assert!(is_valid, "Signature validation failed");
 }
