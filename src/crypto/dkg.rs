@@ -10,11 +10,12 @@ pub mod signature;
 pub use signature::{Data, Scheme};
 
 #[automock(type Error=MockError;)]
-pub trait Dkg {
+pub trait Dkg: Send + Sync {
     type Error: Error;
 
     fn sign(&self, seed: &[u8], msg: &[u8]) -> Data;
     fn validate(&self, msg: &[u8], sig: &Data) -> bool;
+    fn aggregate(&self, indices: &[u16], sigs: Vec<Data>) -> Result<Data, Self::Error>;
 }
 
 #[automock(type Dkg=MockDkg; type Error=MockError;)]

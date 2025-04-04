@@ -302,6 +302,14 @@ impl<E: Curve> From<Signature<E>> for Data {
     }
 }
 
+impl<E: Curve> From<Data> for Signature<E> {
+    fn from(value: Data) -> Self {
+        match value {
+            Data::Classic(bytes) => Signature::from(bytes),
+        }
+    }
+}
+
 #[cfg(test)]
 mod signature_tests {
     use curv::elliptic::curves::Secp256k1;

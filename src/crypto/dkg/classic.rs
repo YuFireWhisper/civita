@@ -75,6 +75,10 @@ pub enum Error {
     Timeout,
     #[error("Channel is closed")]
     ChannelClosed,
+    #[error("Datas is empty")]
+    DataEmpty,
+    #[error("Datas type is not classic")]
+    DataTypeClassic,
 }
 
 pub struct Classic<E: Curve> {
@@ -282,6 +286,17 @@ impl<E: Curve> Dkg for Classic<E> {
 
     fn validate(&self, msg: &[u8], sig: &Data) -> bool {
         sig.validate(msg, &self.keypair.public_key().to_bytes())
+    }
+
+    fn aggregate(&self, indices: &[u16], datas: Vec<Data>) -> Result<Data> {
+        let sigs = datas
+            .into_iter()
+            .map(|data| match data {
+                Data::Classic(sig) => Ok(sig.into()),
+            })
+            .collect::<Result<Vec<Signature<E>>>>()?;
+        let sig = Signature::aggregate::<Sha256>(indices, sigs);
+        Ok(Data::Classic(sig.into()))
     }
 }
 
