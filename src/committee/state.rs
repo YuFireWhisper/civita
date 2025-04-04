@@ -8,21 +8,34 @@ use crate::{
     network::transport::libp2p_transport::protocols::kad,
 };
 
-#[derive(Default)]
-pub(super) struct State {
+pub struct State {
     members: HashSet<PeerId>,
     pub_key: Option<Vec<u8>>,
     processing: HashMap<MessageId, SignatureCollector>,
+    threshold: u16,
+    threshold_counter: Box<dyn ThresholdCounter>,
 }
 
 impl State {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(threshold_counter: Box<dyn ThresholdCounter>) -> Self {
+        let members = HashSet::new();
+        let pub_key = None;
+        let processing = HashMap::new();
+        let threshold = 0;
+
+        Self {
+            members,
+            pub_key,
+            processing,
+            threshold,
+            threshold_counter,
+        }
     }
 
     pub fn update_members(&mut self, members: HashSet<PeerId>) {
         self.members.clear();
         self.members.extend(members);
+        self.threshold = self.get_threshold(&*self.threshold_counter);
     }
 
     pub fn set_pub_key(&mut self, pub_key: Vec<u8>) {
@@ -40,33 +53,41 @@ impl State {
         threshold_counter.call(self.members.len() as u16)
     }
 
-    pub fn process_signature(
+    pub fn add_signature(
         &mut self,
-        msg_id: &MessageId,
-        payload: kad::Payload,
+        msg_id: MessageId,
         index: u16,
         signature: Data,
-        threshold: u16,
     ) -> Option<SignatureResult> {
-        let collector = self.track_signature_request(msg_id, payload, threshold);
+        let collector = self.track_signature_request(msg_id.clone());
         let result = collector.add_signature(index, signature);
 
         if result.is_some() {
-            self.processing.remove(msg_id);
+            self.processing.remove(&msg_id);
         }
 
         result
     }
 
-    fn track_signature_request(
+    pub fn set_payload(
         &mut self,
-        msg_id: &MessageId,
+        msg_id: MessageId,
         payload: kad::Payload,
-        threshold: u16,
-    ) -> &mut SignatureCollector {
-        match self.processing.entry(msg_id.clone()) {
+    ) -> Option<SignatureResult> {
+        let collector = self.track_signature_request(msg_id.clone());
+        let result = collector.set_payload(payload);
+
+        if result.is_some() {
+            self.processing.remove(&msg_id);
+        }
+
+        result
+    }
+
+    fn track_signature_request(&mut self, msg_id: MessageId) -> &mut SignatureCollector {
+        match self.processing.entry(msg_id) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(SignatureCollector::new(payload, threshold)),
+            Entry::Vacant(entry) => entry.insert(SignatureCollector::new(self.threshold)),
         }
     }
 }
