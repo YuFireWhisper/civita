@@ -1,10 +1,7 @@
-pub mod behaviour;
-pub mod config;
-pub mod listener;
-pub mod message;
-pub mod protocols;
-
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use behaviour::{Behaviour, Event};
@@ -13,6 +10,7 @@ use libp2p::{
     core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version},
     gossipsub::{IdentTopic, MessageId, TopicHash},
     identity::Keypair,
+    kad::{self, GetRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey},
     noise,
     swarm::{self, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
@@ -21,25 +19,45 @@ use log::error;
 use tokio::{
     sync::{
         mpsc::{channel, Receiver},
-        Mutex, MutexGuard, RwLock,
+        oneshot, Mutex, MutexGuard, RwLock,
     },
     time::{interval, sleep, timeout, Duration, Interval},
 };
 
-use crate::network::transport::{
-    libp2p_transport::{
-        config::Config,
-        listener::Listener,
-        message::Message,
-        protocols::{
-            gossipsub,
-            request_response::{self, payload::Request},
+use crate::{
+    crypto::dkg::Data,
+    network::transport::{
+        libp2p_transport::{
+            config::Config,
+            listener::Listener,
+            protocols::{
+                gossipsub,
+                kad::PEER_INFO_KEY,
+                request_response::{self, payload::Request},
+            },
         },
+        Error, Transport,
     },
-    Error, Transport,
 };
 
+pub mod behaviour;
+pub mod config;
+pub mod listener;
+pub mod message;
+pub mod protocols;
+
+pub use message::Message;
+
 type Result<T> = std::result::Result<T, Error>;
+
+#[allow(dead_code)]
+enum KadResult {
+    PutSuccess,
+    PutFailure(Vec<u8>),
+    GetSuccess(Vec<u8>),
+    GetFailure(Vec<u8>),
+    GetNotFound,
+}
 
 #[derive(Clone)]
 pub struct Libp2pTransport {
@@ -48,6 +66,8 @@ pub struct Libp2pTransport {
     listener: Arc<RwLock<Listener>>,
     config: Config,
     subscribed_topics: Arc<Mutex<HashSet<TopicHash>>>,
+    self_peer: PeerId,
+    processing_kad: Arc<Mutex<HashMap<QueryId, oneshot::Sender<KadResult>>>>,
 }
 
 impl Libp2pTransport {
@@ -68,6 +88,8 @@ impl Libp2pTransport {
         let keypair = Arc::new(keypair);
         let listener = Arc::new(RwLock::new(Listener::new()));
         let subscribed_topics = Arc::new(Mutex::new(HashSet::new()));
+        let self_peer = peer_id;
+        let processing_kad = Arc::new(Mutex::new(HashMap::new()));
 
         let transport = Self {
             swarm,
@@ -75,6 +97,8 @@ impl Libp2pTransport {
             listener,
             config,
             subscribed_topics,
+            self_peer,
+            processing_kad,
         };
 
         transport.receive().await;
@@ -163,17 +187,67 @@ impl Libp2pTransport {
             }
         }
 
+        if let Event::Kad(event) = &event {
+            return self.process_kad_event(event.clone()).await;
+        }
+
         match Message::try_from(event)? {
-            Message::Gossipsub(msg) => self.handle_gossipsub_event(msg).await,
+            Message::Gossipsub(msg) => self.handle_gossipsub_message(msg).await,
             Message::Kad(msg) => {
-                Self::handle_kad_event(msg);
+                Self::handle_kad_message(msg);
                 Ok(())
             }
-            Message::RequestResponse(msg) => self.handle_request_response_event(msg).await,
+            Message::RequestResponse(msg) => self.handle_request_response_message(msg).await,
         }
     }
 
-    async fn handle_gossipsub_event(self: Arc<Self>, message: gossipsub::Message) -> Result<()> {
+    async fn process_kad_event(self: Arc<Self>, event: kad::Event) -> Result<()> {
+        if let libp2p::kad::Event::OutboundQueryProgressed { id, result, .. } = event {
+            let mut processing_kad = self.processing_kad.lock().await;
+            if let Some(sender) = processing_kad.remove(&id) {
+                match result {
+                    QueryResult::PutRecord(Ok(_)) => {
+                        if sender.send(KadResult::PutSuccess).is_err() {
+                            error!("Failed to send success signal");
+                        }
+                    }
+                    QueryResult::PutRecord(Err(e)) => {
+                        if sender
+                            .send(KadResult::PutFailure(e.to_string().into_bytes()))
+                            .is_err()
+                        {
+                            error!("Failed to send failure signal");
+                        }
+                    }
+                    QueryResult::GetRecord(Ok(result)) => {
+                        if let GetRecordOk::FoundRecord(record) = result {
+                            if sender
+                                .send(KadResult::GetSuccess(record.record.value))
+                                .is_err()
+                            {
+                                error!("Failed to send success signal: {:?}", id);
+                            }
+                        } else if sender.send(KadResult::GetNotFound).is_err() {
+                            error!("Failed to send not found signal: {:?}", id);
+                        }
+                    }
+                    QueryResult::GetRecord(Err(e)) => {
+                        if sender
+                            .send(KadResult::GetFailure(e.to_string().into_bytes()))
+                            .is_err()
+                        {
+                            error!("Failed to send failure signal");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_gossipsub_message(self: Arc<Self>, message: gossipsub::Message) -> Result<()> {
         let topic = message.topic.clone();
         let msg = Message::Gossipsub(message);
         self.listener
@@ -183,11 +257,11 @@ impl Libp2pTransport {
             .map_err(Error::from)
     }
 
-    fn handle_kad_event(message: protocols::kad::Message) {
-        println!("Kademlia event: {:?}", message);
+    fn handle_kad_message(message: protocols::kad::Message) {
+        println!("Received Kademlia message: {:?}", message);
     }
 
-    async fn handle_request_response_event(
+    async fn handle_request_response_message(
         self: Arc<Self>,
         message: request_response::Message,
     ) -> Result<()> {
@@ -224,6 +298,16 @@ impl Libp2pTransport {
         match timeout(self.config.get_swarm_lock_timeout, self.swarm.lock()).await {
             Ok(guard) => Ok(guard),
             Err(_) => Err(Error::LockContention),
+        }
+    }
+
+    fn generate_kad_key(payload: &protocols::kad::Payload) -> RecordKey {
+        match payload {
+            protocols::kad::Payload::PeerInfo { peer_id, .. } => {
+                let str = format!("{PEER_INFO_KEY}/{peer_id}");
+                RecordKey::new(&str)
+            }
+            _ => panic!("Invalid payload type for Kademlia key generation"),
         }
     }
 }
@@ -279,6 +363,41 @@ impl Transport for Libp2pTransport {
             .request_response_mut()
             .send_request(&peer_id, request);
         Ok(())
+    }
+
+    async fn put(&self, payload: protocols::kad::Payload, signature: Data) -> Result<()> {
+        const QUORUM: Quorum = Quorum::All;
+
+        let key = Self::generate_kad_key(&payload);
+        let value = protocols::kad::Message::new(payload, signature);
+        let record = Record::new(key, value.to_vec()?);
+
+        let mut swarm = self.swarm().await?;
+        let query_id = swarm
+            .behaviour_mut()
+            .kad_mut()
+            .put_record(record.clone(), QUORUM)?;
+
+        let (tx, rx) = oneshot::channel();
+        let mut processing_kad = self.processing_kad.lock().await;
+        processing_kad.insert(query_id, tx);
+
+        let result = timeout(self.config.wait_for_kad_result_timeout, rx).await;
+        match result {
+            Ok(Ok(result)) => match result {
+                KadResult::PutSuccess => Ok(()),
+                KadResult::PutFailure(e) => {
+                    Err(Error::KadPut(String::from_utf8_lossy(&e).to_string()))
+                }
+                _ => panic!("Unexpected Kademlia result"),
+            },
+            Ok(Err(_)) => Err(Error::ChannelClosed),
+            Err(_) => Err(Error::KadPutTimeout),
+        }
+    }
+
+    fn self_peer(&self) -> PeerId {
+        self.self_peer
     }
 }
 

@@ -5,6 +5,7 @@ use std::{collections::HashSet, io};
 use async_trait::async_trait;
 use libp2p::{
     gossipsub::{MessageId, PublishError, SubscriptionError},
+    kad::store,
     swarm::DialError,
     Multiaddr, PeerId, TransportError,
 };
@@ -13,10 +14,13 @@ use mockall::automock;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-use crate::network::transport::libp2p_transport::{
-    listener,
-    message::{self, Message},
-    protocols::{gossipsub, request_response::payload::Request},
+use crate::{
+    crypto::dkg::Data,
+    network::transport::libp2p_transport::{
+        listener,
+        message::{self, Message},
+        protocols::{gossipsub, kad, request_response::payload::Request},
+    },
 };
 
 #[derive(Debug, Error)]
@@ -37,6 +41,8 @@ pub enum Error {
     Message(#[from] message::Error),
     #[error("{0}")]
     Listener(#[from] listener::Error),
+    #[error("{0}")]
+    KadMessage(#[from] kad::message::Error),
     #[error("Listener failed: {0}")]
     ListenerFailed(String),
     #[error("Failed to bind to address within timeout")]
@@ -45,6 +51,14 @@ pub enum Error {
     LockContention,
     #[error("No any peer listen on the topic: {0}")]
     NoPeerListen(String),
+    #[error("Store error: {0}")]
+    Store(#[from] store::Error),
+    #[error("Put error: {0}")]
+    KadPut(String),
+    #[error("Chnnel closed")]
+    ChannelClosed,
+    #[error("Kad put timeout")]
+    KadPutTimeout,
 }
 
 #[automock]
@@ -55,4 +69,6 @@ pub trait Transport: Send + Sync {
     async fn listen_on_peers(&self, peers: HashSet<PeerId>) -> Result<Receiver<Message>, Error>;
     async fn publish(&self, topic: &str, payload: gossipsub::Payload) -> Result<MessageId, Error>;
     async fn request(&self, peer_id: PeerId, request: Request) -> Result<(), Error>;
+    async fn put(&self, payload: kad::Payload, signature: Data) -> Result<(), Error>;
+    fn self_peer(&self) -> PeerId;
 }
