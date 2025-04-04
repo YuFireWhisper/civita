@@ -1,4 +1,5 @@
-use bincode::{config, encode_to_vec, error::EncodeError, Decode, Encode};
+use bincode::{config, error::EncodeError, serde::encode_to_vec};
+use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -14,22 +15,29 @@ pub enum Error {
 #[derive(Debug)]
 #[derive(Clone)]
 #[derive(Eq, PartialEq)]
-#[derive(Encode, Decode)]
 #[derive(Serialize, Deserialize)]
 pub enum Payload {
-    Raw(Vec<u8>), // For testing
+    PeerInfo { peer_id: PeerId, pub_key: Vec<u8> },
+    // For testing
+    Raw(Vec<u8>),
 }
 
 impl Payload {
-    pub fn to_vec(self) -> Result<Vec<u8>> {
+    pub fn to_vec(&self) -> Result<Vec<u8>> {
         self.try_into().map_err(Error::from)
     }
 }
 
-impl TryFrom<Payload> for Vec<u8> {
+impl Default for Payload {
+    fn default() -> Self {
+        Payload::Raw(vec![])
+    }
+}
+
+impl TryFrom<&Payload> for Vec<u8> {
     type Error = EncodeError;
 
-    fn try_from(payload: Payload) -> std::result::Result<Self, Self::Error> {
+    fn try_from(payload: &Payload) -> std::result::Result<Self, Self::Error> {
         encode_to_vec(payload, config::standard())
     }
 }

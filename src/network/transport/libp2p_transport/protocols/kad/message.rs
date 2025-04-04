@@ -29,6 +29,10 @@ impl Message {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         bytes.try_into()
     }
+
+    pub fn to_vec(self) -> Result<Vec<u8>> {
+        self.try_into()
+    }
 }
 
 impl TryFrom<&[u8]> for Message {
@@ -36,6 +40,14 @@ impl TryFrom<&[u8]> for Message {
 
     fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
         serde_json::from_slice(value).map_err(Error::from)
+    }
+}
+
+impl TryFrom<Message> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(message: Message) -> std::result::Result<Self, Self::Error> {
+        serde_json::to_vec(&message).map_err(Error::from)
     }
 }
 
