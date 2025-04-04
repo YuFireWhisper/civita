@@ -1,7 +1,13 @@
+use std::collections::HashSet;
+
 use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
-use crate::{extract_variant, network::transport::libp2p_transport::message::Message};
+use crate::{
+    crypto::dkg::Data,
+    extract_variant,
+    network::transport::libp2p_transport::{message::Message, protocols::kad},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {
@@ -19,9 +25,22 @@ pub enum Payload {
     DkgVSS(Vec<u8>),
     // Raw message, for other node checks
     DkgSign(Vec<u8>),
-    DkgSignResponse(Vec<u8>), // Signature object
-    DkgSignFinal(Vec<u8>),    // Signature object
-    Raw(Vec<u8>),             // For testing
+    // Signature object
+    DkgSignResponse(Vec<u8>),
+    // Signature object
+    DkgSignFinal(Vec<u8>),
+    CommitteeSignatureRequest(kad::Payload),
+    CommitteeSignatureResponse {
+        request_msg_id: MessageId,
+        partial_sig: Data,
+    },
+    CommitteeChange {
+        new_members: HashSet<PeerId>,
+        new_committee_pub_key: Vec<u8>,
+        signature: Data,
+    },
+    // For testing
+    Raw(Vec<u8>),
 }
 
 impl Payload {
@@ -59,6 +78,10 @@ impl Payload {
             Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
             Payload::DkgSignResponse(v) => (gossipsub_msg.source, v)
         )
+    }
+
+    pub fn to_vec(self) -> Result<Vec<u8>, serde_json::Error> {
+        self.try_into()
     }
 }
 
