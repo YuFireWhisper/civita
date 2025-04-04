@@ -11,14 +11,16 @@ pub struct SignatureResult {
 
 #[derive(Debug)]
 pub struct SignatureCollector {
-    payload: kad::Payload,
+    payload: Option<kad::Payload>,
     partial_signatures: HashMap<u16, Data>,
     threshold: u16,
 }
 
 impl SignatureCollector {
-    pub fn new(payload: kad::Payload, threshold: u16) -> Self {
+    pub fn new(threshold: u16) -> Self {
+        let payload = None;
         let partial_signatures = HashMap::new();
+
         Self {
             payload,
             partial_signatures,
@@ -26,10 +28,18 @@ impl SignatureCollector {
         }
     }
 
+    pub fn set_payload(&mut self, payload: kad::Payload) -> Option<SignatureResult> {
+        self.payload = Some(payload);
+        self.check_threshold()
+    }
+
     pub fn add_signature(&mut self, index: u16, signature: Data) -> Option<SignatureResult> {
         self.partial_signatures.insert(index, signature);
+        self.check_threshold()
+    }
 
-        if self.partial_signatures.len() >= self.threshold as usize {
+    fn check_threshold(&mut self) -> Option<SignatureResult> {
+        if self.partial_signatures.len() >= self.threshold as usize && self.payload.is_some() {
             let signatures = mem::take(&mut self.partial_signatures);
             let (indices, signatures): (Vec<u16>, Vec<Data>) = signatures.into_iter().unzip();
             let payload = mem::take(&mut self.payload);
@@ -37,7 +47,7 @@ impl SignatureCollector {
             Some(SignatureResult {
                 indices,
                 signatures,
-                payload,
+                payload: payload.expect("Payload should be present"),
             })
         } else {
             None
@@ -67,13 +77,11 @@ mod tests {
     fn create() {
         const THRESHOLD: u16 = 3;
 
-        let payload = create_payload();
-        let threshold = 3;
-        let collector = SignatureCollector::new(payload.clone(), THRESHOLD);
+        let collector = SignatureCollector::new(THRESHOLD);
 
-        assert_eq!(collector.payload, payload);
+        assert!(collector.payload.is_none());
         assert_eq!(collector.partial_signatures.len(), 0);
-        assert_eq!(collector.threshold, threshold);
+        assert_eq!(collector.threshold, THRESHOLD);
     }
 
     #[test]
@@ -81,11 +89,13 @@ mod tests {
         const THRESHOLD: u16 = 3;
 
         let payload = create_payload();
-        let mut collector = SignatureCollector::new(payload.clone(), THRESHOLD);
+        let mut collector = SignatureCollector::new(THRESHOLD);
+        collector.set_payload(payload);
 
         for i in 1..THRESHOLD {
             let signature = create_data();
-            collector.add_signature(i, signature.clone());
+            let result = collector.add_signature(i, signature.clone());
+            assert!(result.is_none());
             assert_eq!(collector.partial_signatures.len(), i as usize);
             assert_eq!(collector.partial_signatures.get(&i), Some(&signature));
         }
@@ -96,18 +106,27 @@ mod tests {
         const THRESHOLD: u16 = 3;
 
         let payload = create_payload();
-        let mut collector = SignatureCollector::new(payload, THRESHOLD);
+        let mut collector = SignatureCollector::new(THRESHOLD);
+        collector.set_payload(payload);
 
-        let mut is_none = true;
         for i in 1..THRESHOLD {
             let signature = create_data();
             let result = collector.add_signature(i, signature.clone());
-            if result.is_some() {
-                is_none = false;
-            }
+            assert!(result.is_none());
         }
+    }
 
-        assert!(is_none);
+    #[test]
+    fn none_no_payload() {
+        const THRESHOLD: u16 = 3;
+
+        let mut collector = SignatureCollector::new(THRESHOLD);
+
+        for i in 1..=THRESHOLD {
+            let signature = create_data();
+            let result = collector.add_signature(i, signature.clone());
+            assert!(result.is_none());
+        }
     }
 
     #[test]
@@ -115,23 +134,47 @@ mod tests {
         const THRESHOLD: u16 = 3;
 
         let payload = create_payload();
-        let mut collector = SignatureCollector::new(payload.clone(), THRESHOLD);
+        let mut collector = SignatureCollector::new(THRESHOLD);
+        collector.set_payload(payload.clone());
 
         for i in 1..THRESHOLD {
             let signature = create_data();
-            collector.add_signature(i, signature.clone());
+            let result = collector.add_signature(i, signature.clone());
+            assert!(result.is_none());
         }
 
         let signature = create_data();
         let result = collector.add_signature(THRESHOLD, signature);
-
         assert!(result.is_some());
-        let result = result.unwrap();
 
+        let result = result.unwrap();
         assert!(collector.partial_signatures.is_empty());
         assert_eq!(result.payload, payload);
         assert_eq!(result.indices.len(), THRESHOLD as usize);
         assert_eq!(result.signatures.len(), THRESHOLD as usize);
         assert_eq!(result.indices.len(), result.signatures.len());
+    }
+
+    #[test]
+    fn set_payload_triggers_result() {
+        const THRESHOLD: u16 = 3;
+
+        let payload = create_payload();
+        let mut collector = SignatureCollector::new(THRESHOLD);
+
+        for i in 1..=THRESHOLD {
+            let signature = create_data();
+            collector.add_signature(i, signature);
+        }
+
+        let result = collector.set_payload(payload.clone());
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        assert!(collector.partial_signatures.is_empty());
+        assert!(collector.payload.is_none());
+        assert_eq!(result.payload, payload);
+        assert_eq!(result.indices.len(), THRESHOLD as usize);
+        assert_eq!(result.signatures.len(), THRESHOLD as usize);
     }
 }
