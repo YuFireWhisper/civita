@@ -12,7 +12,7 @@ use libp2p::{
     identity::Keypair,
     kad::{self, GetRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey},
     noise,
-    swarm::{self, SwarmEvent},
+    swarm::SwarmEvent,
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use log::error;
@@ -46,6 +46,7 @@ pub mod listener;
 pub mod message;
 pub mod protocols;
 mod dispatcher;
+mod swarm_wrapper;
 
 pub use message::Message;
 
@@ -80,7 +81,7 @@ impl Libp2pTransport {
             transport,
             behaviour,
             peer_id,
-            swarm::Config::with_tokio_executor(),
+            libp2p::swarm::Config::with_tokio_executor(),
         );
 
         Self::listen_on(&mut swarm, listen_addr, config.check_listen_timeout).await?;
