@@ -6,7 +6,7 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::{self, protocols::gossipsub::Payload};
+use crate::network::transport::libp2p_transport::{self, dispatcher::Keyed, protocols::gossipsub::Payload};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -29,7 +29,19 @@ pub struct Message {
     pub sequence_number: u64,
 }
 
-impl TryFrom<Event> for Message {
+impl Message {
+    pub fn try_from_gossipsub_event(event: Event) -> Result<Self> {
+        Self::try_from(event)
+    }
+}
+
+impl Keyed<String> for Message {
+    fn key(&self) -> &String {
+        &self.topic
+    }
+}
+
+impl TryFrom<libp2p::gossipsub::Event> for Message {
     type Error = Error;
 
     fn try_from(event: Event) -> Result<Self> {
