@@ -45,6 +45,7 @@ pub mod config;
 pub mod listener;
 pub mod message;
 pub mod protocols;
+mod dispatcher;
 
 pub use message::Message;
 
