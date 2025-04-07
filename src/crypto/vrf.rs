@@ -1,5 +1,4 @@
 use curv::{arithmetic::Converter, elliptic::curves::Scalar};
-use p256::ecdsa::signature::digest::Digest;
 
 use crate::crypto::{vrf::proof::Proof, Keypair};
 
@@ -24,7 +23,7 @@ impl<E: curv::elliptic::curves::Curve> Vrf<E> {
         Self::default()
     }
 
-    pub fn proof<D: Digest>(&self, alpha: &[u8]) -> Output<E> {
+    pub fn proof<D: sha2::Digest>(&self, alpha: &[u8]) -> Output<E> {
         use curv::elliptic::curves::{Point, Scalar};
 
         let h_point = Self::hash_to_curve::<D>(alpha);
@@ -50,7 +49,7 @@ impl<E: curv::elliptic::curves::Curve> Vrf<E> {
         Output::new(value, Proof::new(gamma, c, s))
     }
 
-    fn hash_to_curve<D: Digest>(alpha: &[u8]) -> curv::elliptic::curves::Point<E> {
+    fn hash_to_curve<D: sha2::Digest>(alpha: &[u8]) -> curv::elliptic::curves::Point<E> {
         use curv::elliptic::curves::{Point, Scalar};
 
         let mut counter = 0u8;
@@ -77,7 +76,7 @@ impl<E: curv::elliptic::curves::Curve> Vrf<E> {
         }
     }
 
-    fn hash_to_challenge<D: Digest>(
+    fn hash_to_challenge<D: sha2::Digest>(
         g: &curv::elliptic::curves::Generator<E>,
         h: &curv::elliptic::curves::Point<E>,
         y: &curv::elliptic::curves::Point<E>,
@@ -104,7 +103,7 @@ impl<E: curv::elliptic::curves::Curve> Vrf<E> {
         })
     }
 
-    fn gamma_to_hash<D: Digest>(gamma: &curv::elliptic::curves::Point<E>) -> Vec<u8> {
+    fn gamma_to_hash<D: sha2::Digest>(gamma: &curv::elliptic::curves::Point<E>) -> Vec<u8> {
         const VRF_OUTPUT: &[u8] = b"VRF_OUTPUT";
 
         let mut hasher = D::new();
