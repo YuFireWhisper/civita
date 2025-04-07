@@ -3,42 +3,49 @@ use std::collections::HashSet;
 use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    crypto::dkg::Data,
-    extract_variant,
-    network::transport::libp2p_transport::{message::Message, protocols::kad},
-};
+use crate::{crypto::dkg::Data, network::transport::libp2p_transport::protocols::kad};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Payload {
     VrfRequest,
+
     VrfProof {
         message_id: MessageId,
         public_key: Vec<u8>,
         proof: Vec<u8>,
     },
+
     VrfConsensus {
         message_id: MessageId,
         random: [u8; 32],
     },
+
     VrfProcessFailure(MessageId),
+
     DkgVSS(Vec<u8>),
+
     // Raw message, for other node checks
     DkgSign(Vec<u8>),
+
     // Signature object
     DkgSignResponse(Vec<u8>),
+
     // Signature object
     DkgSignFinal(Vec<u8>),
+
     CommitteeSignatureRequest(kad::Payload),
+
     CommitteeSignatureResponse {
         request_msg_id: MessageId,
         partial_sig: Data,
     },
+
     CommitteeChange {
         new_members: HashSet<PeerId>,
         new_committee_pub_key: Vec<u8>,
         signature: Data,
     },
+
     // For testing
     Raw(Vec<u8>),
 }
@@ -54,30 +61,6 @@ impl Payload {
 
     pub fn create_vrf_consensus(message_id: MessageId, random: [u8; 32]) -> Payload {
         Payload::VrfConsensus { message_id, random }
-    }
-
-    pub fn get_dkg_vss(msg: Message) -> Option<(PeerId, Vec<u8>)> {
-        extract_variant!(
-            msg,
-            Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
-            Payload::DkgVSS(v) => (gossipsub_msg.source, v)
-        )
-    }
-
-    pub fn get_dkg_sign(msg: Message) -> Option<(MessageId, PeerId, Vec<u8>)> {
-        extract_variant!(
-            msg,
-            Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
-            Payload::DkgSign(v) => (gossipsub_msg.message_id, gossipsub_msg.source, v)
-        )
-    }
-
-    pub fn get_dkg_sign_response(msg: Message) -> Option<(PeerId, Vec<u8>)> {
-        extract_variant!(
-            msg,
-            Message::Gossipsub(gossipsub_msg) => gossipsub_msg.payload,
-            Payload::DkgSignResponse(v) => (gossipsub_msg.source, v)
-        )
     }
 
     pub fn to_vec(self) -> Result<Vec<u8>, serde_json::Error> {
@@ -107,10 +90,7 @@ mod tests {
 
     use crate::{
         crypto::vrf::dvrf::proof::Proof,
-        network::transport::libp2p_transport::{
-            message::Message,
-            protocols::gossipsub::{self, message::mock_message::create_message, Payload},
-        },
+        network::transport::libp2p_transport::protocols::gossipsub::Payload,
     };
 
     const MESSAGE_ID: &str = "MESSAGE_ID";
@@ -129,20 +109,6 @@ mod tests {
 
     fn create_proof() -> Proof {
         Proof::new(OUTPUT.to_vec(), PROOF.to_vec())
-    }
-
-    fn create_network_msg(msg: gossipsub::Message) -> Message {
-        Message::Gossipsub(msg)
-    }
-
-    fn create_gossipsub_msg(payload: Payload) -> gossipsub::Message {
-        let mut msg = create_message();
-        msg.payload = payload;
-        msg
-    }
-
-    fn create_dkg_vss_payload() -> Payload {
-        Payload::DkgVSS(OUTPUT.to_vec())
     }
 
     #[test]
@@ -181,17 +147,5 @@ mod tests {
             "Expected: {:?}, got: {:?}",
             expected, result
         );
-    }
-
-    #[test]
-    fn return_vec_for_dkg_vss() {
-        let payload = create_dkg_vss_payload();
-        let gossipsub_msg = create_gossipsub_msg(payload);
-        let peer = gossipsub_msg.source;
-        let network_msg = create_network_msg(gossipsub_msg);
-
-        let result = Payload::get_dkg_vss(network_msg);
-
-        assert_eq!(result, Some((peer, OUTPUT.to_vec())));
     }
 }

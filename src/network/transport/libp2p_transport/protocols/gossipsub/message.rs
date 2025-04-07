@@ -6,7 +6,9 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::{self, dispatcher::Keyed, protocols::gossipsub::Payload};
+use crate::network::transport::libp2p_transport::{
+    dispatcher::Keyed, protocols::gossipsub::Payload,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -67,17 +69,6 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
             })
         } else {
             Err(Error::InvalidMessage)
-        }
-    }
-}
-
-impl TryFrom<libp2p_transport::Message> for Message {
-    type Error = ();
-
-    fn try_from(msg: libp2p_transport::Message) -> std::result::Result<Self, Self::Error> {
-        match msg {
-            libp2p_transport::Message::Gossipsub(msg) => Ok(msg),
-            _ => Err(()),
         }
     }
 }

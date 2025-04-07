@@ -22,12 +22,9 @@ use crate::{
 
 pub mod behaviour;
 pub mod config;
-pub mod message;
 pub mod protocols;
 
 mod dispatcher;
-
-pub use message::Message;
 
 type Result<T> = std::result::Result<T, Error>;
 
