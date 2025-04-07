@@ -1,7 +1,7 @@
 use curv::{arithmetic::Converter, elliptic::curves::Scalar};
 use p256::ecdsa::signature::digest::Digest;
 
-use crate::crypto::{dkg::classic::keypair::Keypair, vrf::proof::Proof};
+use crate::crypto::{vrf::proof::Proof, Keypair};
 
 pub mod proof;
 

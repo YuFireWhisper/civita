@@ -23,9 +23,12 @@ use tokio::{
 };
 
 use crate::{
-    crypto::dkg::{
-        classic::{config::Config, keypair::Keypair, peer_share::PeerShare},
-        Data, Dkg,
+    crypto::{
+        dkg::{
+            classic::{config::Config, peer_share::PeerShare},
+            Data, Dkg,
+        },
+        keypair::Keypair,
     },
     network::transport::{
         libp2p_transport::protocols::{
@@ -39,7 +42,6 @@ use crate::{
 pub mod config;
 pub mod curve_type;
 pub mod factory;
-pub mod keypair;
 pub mod peer_share;
 pub mod signature;
 

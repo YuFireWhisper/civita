@@ -9,9 +9,9 @@ use curv::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::crypto::dkg::{
-    classic::{keypair::Keypair, CurveType},
-    Data, Scheme,
+use crate::crypto::{
+    dkg::{classic::CurveType, Data, Scheme},
+    Keypair,
 };
 
 #[derive(Clone)]
@@ -369,7 +369,7 @@ mod signature_tests {
     use curv::elliptic::curves::Secp256k1;
     use sha2::Sha256;
 
-    use crate::crypto::dkg::classic::{keypair::Keypair, Signature};
+    use crate::crypto::{dkg::classic::Signature, Keypair};
 
     type E = Secp256k1;
     type H = Sha256;
