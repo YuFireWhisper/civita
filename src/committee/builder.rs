@@ -1,14 +1,10 @@
 use std::sync::Arc;
 
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 use crate::{
     committee::{self, Committee, Config},
-    crypto::{
-        dkg::{Dkg, DkgFactory},
-        vrf::{Vrf, VrfFactory},
-    },
+    crypto::dkg::{Dkg, DkgFactory},
     network::transport::Transport,
 };
 
@@ -19,8 +15,6 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("Missing transport")]
     TransportMissing,
-    #[error("Missing VRF factory")]
-    VrfFactoryMissing,
     #[error("Missing DKG factory")]
     DkgFactoryMissing,
     #[error("Failed to create VRF: {0}")]
@@ -32,35 +26,30 @@ pub enum Error {
 }
 
 #[derive(Debug)]
-pub(super) struct Component<T, V, D>
+pub(super) struct Component<T, D>
 where
     T: Transport + Send + Sync + 'static,
-    V: Vrf + Send + Sync + 'static,
     D: Dkg + Send + Sync + 'static,
 {
     pub transport: Arc<T>,
-    pub vrf: Arc<V>,
     pub dkg: D,
     pub config: Config,
 }
 
 #[derive(Debug)]
-pub struct Builder<T, VF, DF>
+pub struct Builder<T, DF>
 where
     T: Transport + Send + Sync + 'static,
-    VF: VrfFactory + Send + Sync + 'static,
     DF: DkgFactory + Send + Sync + 'static,
 {
     transport: Option<Arc<T>>,
-    vrf_factory: Option<Mutex<VF>>,
     dkg_factory: Option<DF>,
     config: Option<Config>,
 }
 
-impl<T, VF, DF> Builder<T, VF, DF>
+impl<T, DF> Builder<T, DF>
 where
     T: Transport + Send + Sync + 'static,
-    VF: VrfFactory + Send + Sync + 'static,
     DF: DkgFactory + Send + Sync + 'static,
 {
     pub fn new() -> Self {
@@ -69,11 +58,6 @@ where
 
     pub fn with_transport(mut self, transport: Arc<T>) -> Self {
         self.transport = Some(transport);
-        self
-    }
-
-    pub fn with_vrf_factory(mut self, vrf_factory: VF) -> Self {
-        self.vrf_factory = Some(Mutex::new(vrf_factory));
         self
     }
 
@@ -87,15 +71,13 @@ where
         self
     }
 
-    pub async fn build(self) -> Result<Arc<Committee<T, VF::V, DF::Dkg>>> {
+    pub async fn build(self) -> Result<Arc<Committee<T, DF::Dkg>>> {
         let transport = self.transport()?;
-        let vrf = self.vrf().await?;
         let dkg = self.dkg().await?;
         let config = self.config();
 
         let component = Component {
             transport,
-            vrf,
             dkg,
             config,
         };
@@ -112,17 +94,6 @@ where
             .cloned()
     }
 
-    async fn vrf(&self) -> Result<Arc<VF::V>> {
-        self.vrf_factory
-            .as_ref()
-            .ok_or(Error::VrfFactoryMissing)?
-            .lock()
-            .await
-            .create()
-            .await
-            .map_err(|e| Error::Vrf(e.to_string()))
-    }
-
     async fn dkg(&self) -> Result<DF::Dkg> {
         self.dkg_factory
             .as_ref()
@@ -137,21 +108,18 @@ where
     }
 }
 
-impl<T, VF, DF> Default for Builder<T, VF, DF>
+impl<T, DF> Default for Builder<T, DF>
 where
     T: Transport + Send + Sync + 'static,
-    VF: VrfFactory + Send + Sync + 'static,
     DF: DkgFactory + Send + Sync + 'static,
 {
     fn default() -> Self {
         let transport = None;
-        let vrf_factory = None;
         let dkg_factory = None;
         let config = None;
 
         Self {
             transport,
-            vrf_factory,
             dkg_factory,
             config,
         }
@@ -162,19 +130,15 @@ where
 mod tests {
     use super::*;
     use crate::{
-        crypto::{
-            dkg::{MockDkg, MockDkgFactory},
-            vrf::{MockVrf, MockVrfFactory},
-        },
+        crypto::dkg::{MockDkg, MockDkgFactory},
         network::transport::MockTransport,
     };
 
     #[tokio::test]
     async fn create() {
-        let builder: Builder<MockTransport, MockVrfFactory, MockDkgFactory> = Builder::new();
+        let builder: Builder<MockTransport, MockDkgFactory> = Builder::new();
 
         assert!(builder.transport.is_none());
-        assert!(builder.vrf_factory.is_none());
         assert!(builder.dkg_factory.is_none());
         assert!(builder.config.is_none());
     }
@@ -182,18 +146,15 @@ mod tests {
     #[tokio::test]
     async fn same_items() {
         let transport = Arc::new(MockTransport::new());
-        let vrf_factory = MockVrfFactory::new();
         let dkg_factory = MockDkgFactory::new();
         let config = Config::default();
 
-        let builder = Builder::<MockTransport, MockVrfFactory, MockDkgFactory>::new()
+        let builder = Builder::<MockTransport, MockDkgFactory>::new()
             .with_transport(transport.clone())
-            .with_vrf_factory(vrf_factory)
             .with_dkg_factory(dkg_factory)
             .with_config(config.clone());
 
         assert!(builder.transport.is_some());
-        assert!(builder.vrf_factory.is_some());
         assert!(builder.dkg_factory.is_some());
         assert!(builder.config.is_some());
     }
@@ -204,17 +165,12 @@ mod tests {
     async fn success_build() {
         let transport = MockTransport::new();
         let transport = Arc::new(transport);
-        let mut vrf_factory = MockVrfFactory::new();
-        vrf_factory
-            .expect_create()
-            .returning(|| Box::pin(async { Ok(Arc::new(MockVrf::new())) }));
         let mut dkg_factory = MockDkgFactory::new();
         dkg_factory.expect_create().returning(|| Ok(MockDkg::new()));
         let config = Config::default();
 
-        let builder: Builder<MockTransport, MockVrfFactory, MockDkgFactory> = Builder::new()
+        let builder: Builder<MockTransport, MockDkgFactory> = Builder::new()
             .with_transport(transport.clone())
-            .with_vrf_factory(vrf_factory)
             .with_dkg_factory(dkg_factory)
             .with_config(config);
 
@@ -223,12 +179,10 @@ mod tests {
 
     #[tokio::test]
     async fn return_error_missing_transport() {
-        let vrf_factory = MockVrfFactory::new();
         let dkg_factory = MockDkgFactory::new();
         let config = Config::default();
 
-        let builder: Builder<MockTransport, MockVrfFactory, MockDkgFactory> = Builder::new()
-            .with_vrf_factory(vrf_factory)
+        let builder: Builder<MockTransport, MockDkgFactory> = Builder::new()
             .with_dkg_factory(dkg_factory)
             .with_config(config);
 
@@ -239,35 +193,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn return_error_missing_vrf_factory() {
-        let transport = Arc::new(MockTransport::new());
-        let dkg_factory = MockDkgFactory::new();
-        let config = Config::default();
-
-        let builder: Builder<MockTransport, MockVrfFactory, MockDkgFactory> = Builder::new()
-            .with_transport(transport.clone())
-            .with_dkg_factory(dkg_factory)
-            .with_config(config);
-
-        let result = builder.build().await;
-
-        assert!(result.is_err());
-        assert!(matches!(result, Err(Error::VrfFactoryMissing)));
-    }
-
-    #[tokio::test]
     async fn return_error_missing_dkg_factory() {
         let transport = Arc::new(MockTransport::new());
-        let mut vrf_factory = MockVrfFactory::new();
-        vrf_factory
-            .expect_create()
-            .returning(|| Box::pin(async { Ok(Arc::new(MockVrf::new())) }));
-
         let config = Config::default();
 
-        let builder: Builder<MockTransport, MockVrfFactory, MockDkgFactory> = Builder::new()
+        let builder: Builder<MockTransport, MockDkgFactory> = Builder::new()
             .with_transport(transport.clone())
-            .with_vrf_factory(vrf_factory)
             .with_config(config);
 
         let result = builder.build().await;

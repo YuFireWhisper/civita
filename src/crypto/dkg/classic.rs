@@ -24,11 +24,7 @@ use tokio::{
 
 use crate::{
     crypto::dkg::{
-        classic::{
-            config::Config,
-            keypair::{Keypair, Secret},
-            peer_share::PeerShare,
-        },
+        classic::{config::Config, keypair::Keypair, peer_share::PeerShare},
         Data, Dkg,
     },
     network::transport::{
@@ -48,7 +44,6 @@ pub mod peer_share;
 pub mod signature;
 
 pub use curve_type::CurveType;
-pub use keypair::PublicKey;
 pub use signature::Signature;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -125,7 +120,7 @@ impl<E: Curve> Classic<E> {
         .map_err(|_| Error::Timeout)??;
 
         let mut shares = Self::validate_data(&collected, self_index)?;
-        shares.push(self_shares[(self_index - 1) as usize].clone().into());
+        shares.push(self_shares[(self_index - 1) as usize].to_owned());
 
         let pub_keys = collected
             .into_values()
@@ -137,12 +132,11 @@ impl<E: Curve> Classic<E> {
                     .into_iter()
                     .next()
                     .expect("Commitment is missing")
-                    .into()
             })
-            .chain(once(vss.commitments.into_iter().next().unwrap().into()))
-            .collect::<Vec<PublicKey<E>>>();
-        let pub_key = PublicKey::aggrege(&pub_keys);
-        let pri_key: Secret<E> = shares.iter().sum();
+            .chain(once(vss.commitments.into_iter().next().unwrap()))
+            .collect::<Vec<_>>();
+        let pub_key = pub_keys.iter().sum();
+        let pri_key = shares.iter().sum();
 
         let keypair = Keypair::new(pub_key, pri_key);
 
@@ -252,14 +246,14 @@ impl<E: Curve> Classic<E> {
     fn validate_data<H: Digest + Clone>(
         data: &HashMap<PeerId, PeerShare<E, H>>,
         self_index: u16,
-    ) -> Result<Vec<Secret<E>>> {
+    ) -> Result<Vec<Scalar<E>>> {
         data.iter()
             .map(|(peer, peer_share)| {
                 if peer_share.validate(self_index) {
                     let scalar = peer_share
                         .scalar()
                         .expect("Scalar is missing, this should never happen");
-                    Ok(Secret::from(scalar.clone()))
+                    Ok(scalar.clone())
                 } else {
                     error!("Failed to validate share from peer: {:?}", peer);
                     Err(Error::ValidateShare(*peer))
@@ -302,7 +296,7 @@ impl<E: Curve> Dkg for Classic<E> {
     }
 
     fn validate(&self, msg: &[u8], sig: &Data) -> bool {
-        sig.validate(msg, &self.keypair.public_key().to_bytes())
+        sig.validate(msg, &self.keypair.public_key().to_bytes(true))
     }
 
     fn aggregate(&self, indices: &[u16], datas: Vec<Data>) -> Result<Data> {

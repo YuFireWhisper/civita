@@ -17,10 +17,7 @@ use crate::{
         builder::Component, message_channels::MessageChannels,
         signature_collector::SignatureResult, state::State, timer::Timer,
     },
-    crypto::{
-        dkg::{Data, Dkg},
-        vrf::Vrf,
-    },
+    crypto::dkg::{Data, Dkg},
     network::transport::{
         libp2p_transport::protocols::{
             gossipsub::{Message, Payload},
@@ -48,8 +45,6 @@ pub const SIGNATURE_REQUEST_TOPIC: &str = "signature_request";
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Failed to create VRF: {0}")]
-    Vrf(String),
     #[error("Failed to create DKG: {0}")]
     Dkg(String),
     #[error("{0}")]
@@ -82,15 +77,12 @@ enum Action {
     Stop,
 }
 
-pub struct Committee<T, V, D>
+pub struct Committee<T, D>
 where
     T: Transport + Send + Sync + 'static,
-    V: Vrf + Send + Sync + 'static,
     D: Dkg + Send + Sync + 'static,
 {
     transport: Arc<T>,
-    #[allow(dead_code)]
-    vrf: Arc<V>,
     dkg: D,
     config: Config,
     state: Mutex<State>,
@@ -100,15 +92,13 @@ where
     self_peer: PeerId,
 }
 
-impl<T, V, D> Committee<T, V, D>
+impl<T, D> Committee<T, D>
 where
     T: Transport + Send + Sync + 'static,
-    V: Vrf + Send + Sync + 'static,
     D: Dkg + Send + Sync + 'static,
 {
-    async fn from_component(component: Component<T, V, D>) -> Result<Arc<Self>> {
+    async fn from_component(component: Component<T, D>) -> Result<Arc<Self>> {
         let transport = component.transport;
-        let vrf = component.vrf;
         let dkg = component.dkg;
         let config = component.config;
 
@@ -129,7 +119,6 @@ where
 
         let committee = Arc::new(Self {
             transport,
-            vrf,
             dkg,
             config,
             state,

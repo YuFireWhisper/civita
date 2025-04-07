@@ -10,10 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::dkg::{
-    classic::{
-        keypair::{Keypair, PublicKey, Secret},
-        CurveType,
-    },
+    classic::{keypair::Keypair, CurveType},
     Data, Scheme,
 };
 
@@ -22,8 +19,8 @@ use crate::crypto::dkg::{
 #[derive(Serialize, Deserialize)]
 #[derive(PartialEq, Eq)]
 pub struct Signature<E: Curve> {
-    signature: Option<Secret<E>>,
-    random_pub_key: Option<PublicKey<E>>,
+    signature: Option<Scalar<E>>,
+    random_pub_key: Option<Point<E>>,
 }
 
 #[derive(Clone)]
@@ -47,8 +44,8 @@ impl<E: Curve> Signature<E> {
         let global_pub_key = keypair.public_key();
         let challenge = Self::compute_challenge::<H>(
             message,
-            &random_pub_key.to_bytes(),
-            &global_pub_key.to_bytes(),
+            &random_pub_key.to_bytes(true),
+            &global_pub_key.to_bytes(true),
         );
         let signature = Self::calculate_signature(challenge.clone(), &nonce, keypair.private_key());
 
@@ -68,8 +65,8 @@ impl<E: Curve> Signature<E> {
         Scalar::from_bigint(&b)
     }
 
-    fn calculate_random_public_key(nonce: &Scalar<E>) -> PublicKey<E> {
-        (Point::generator() * nonce).into()
+    fn calculate_random_public_key(nonce: &Scalar<E>) -> Point<E> {
+        Point::generator() * nonce
     }
 
     fn compute_challenge<H: Digest + Clone>(
@@ -96,9 +93,9 @@ impl<E: Curve> Signature<E> {
     fn calculate_signature(
         challenge: Scalar<E>,
         nonce: &Scalar<E>,
-        private_key: &Secret<E>,
-    ) -> Secret<E> {
-        (nonce - &(challenge * private_key)).into()
+        private_key: &Scalar<E>,
+    ) -> Scalar<E> {
+        nonce - &(challenge * private_key)
     }
 
     pub fn aggregate<H: Digest + Clone>(
@@ -128,7 +125,7 @@ impl<E: Curve> Signature<E> {
             .map(|s| s.signature.clone().expect("Missing signature"))
             .collect::<Vec<_>>();
 
-        let sig = Secret::lagrange_interpolation(indices, &shares);
+        let sig = lagrange_interpolation(indices, &shares);
 
         Self {
             signature: Some(sig),
@@ -136,7 +133,7 @@ impl<E: Curve> Signature<E> {
         }
     }
 
-    pub fn validate<H: Digest + Clone>(&self, message: &[u8], public_key: &PublicKey<E>) -> bool {
+    pub fn validate<H: Digest + Clone>(&self, message: &[u8], public_key: &Point<E>) -> bool {
         let sig = match &self.signature {
             Some(sig) => sig,
             None => return false,
@@ -147,8 +144,11 @@ impl<E: Curve> Signature<E> {
             None => return false,
         };
 
-        let challenge =
-            Self::compute_challenge::<H>(message, &r_pub_key.to_bytes(), &public_key.to_bytes());
+        let challenge = Self::compute_challenge::<H>(
+            message,
+            &r_pub_key.to_bytes(true),
+            &public_key.to_bytes(true),
+        );
 
         let left = Point::generator() * sig;
         let right = r_pub_key - &(public_key * &challenge);
@@ -156,13 +156,13 @@ impl<E: Curve> Signature<E> {
         left == right
     }
 
-    pub fn random_pub_key(&self) -> Option<&PublicKey<E>> {
+    pub fn random_pub_key(&self) -> Option<&Point<E>> {
         self.random_pub_key.as_ref()
     }
 
     pub fn random() -> Self {
-        let signature = Secret::random();
-        let random_pub_key = PublicKey::random();
+        let signature = Scalar::random();
+        let random_pub_key = Point::generator() * &signature;
 
         let signature = Some(signature);
         let random_pub_key = Some(random_pub_key);
@@ -172,6 +172,43 @@ impl<E: Curve> Signature<E> {
             random_pub_key,
         }
     }
+}
+
+pub fn lagrange_interpolation<E: curv::elliptic::curves::Curve>(
+    indices: &[u16],
+    shares: &[curv::elliptic::curves::Scalar<E>],
+) -> curv::elliptic::curves::Scalar<E> {
+    assert_eq!(
+        indices.len(),
+        shares.len(),
+        "Indices and shares must have the same length"
+    );
+
+    let points = indices
+        .iter()
+        .map(|p| (*p).into())
+        .collect::<Vec<curv::elliptic::curves::Scalar<E>>>();
+
+    let mut result = curv::elliptic::curves::Scalar::<E>::zero();
+
+    for (i, (xi, yi)) in points.iter().zip(shares.iter()).enumerate() {
+        let mut lagrange_coeff = curv::elliptic::curves::Scalar::<E>::from(1);
+
+        for (j, xj) in points.iter().enumerate() {
+            if i != j {
+                let numerator = curv::elliptic::curves::Scalar::<E>::zero() - xj;
+                let denominator = xi.clone() - xj;
+                if !denominator.is_zero() {
+                    let term = numerator * &denominator.invert().unwrap();
+                    lagrange_coeff = lagrange_coeff * &term;
+                }
+            }
+        }
+
+        result = result + (lagrange_coeff * yi);
+    }
+
+    result
 }
 
 impl SignatureBytes {
@@ -191,22 +228,39 @@ impl SignatureBytes {
         }
     }
 
-    fn validate_with_established_curve<E: Curve>(&self, message: &[u8], key: &[u8]) -> bool {
-        let sig = match &self.signature {
-            Some(sig) => Secret::<E>::from_bytes(sig),
+    fn validate_with_established_curve<E: Curve>(&self, message: &[u8], key_bytes: &[u8]) -> bool {
+        let r_pub_key_bytes = match &self.random_pub_key {
+            Some(r_pub_key) => r_pub_key,
             None => return false,
         };
-        let r_pub_key = match &self.random_pub_key {
-            Some(r_pub_key) => PublicKey::<E>::from_bytes(r_pub_key),
-            None => return false,
-        };
-        let public_key = PublicKey::from_bytes(key);
 
-        let challenge = Signature::<E>::compute_challenge::<Sha256>(
-            message,
-            &r_pub_key.to_bytes(),
-            &public_key.to_bytes(),
-        );
+        let challenge =
+            Signature::<E>::compute_challenge::<Sha256>(message, r_pub_key_bytes, key_bytes);
+
+        let sig = match &self.signature {
+            Some(sig) => Scalar::<E>::from_bytes(sig),
+            None => return false,
+        };
+
+        if sig.is_err() {
+            return false;
+        }
+        let sig = sig.unwrap();
+
+        let r_pub_key = match &self.random_pub_key {
+            Some(r_pub_key) => Point::<E>::from_bytes(r_pub_key),
+            None => return false,
+        };
+        if r_pub_key.is_err() {
+            return false;
+        }
+        let r_pub_key = r_pub_key.unwrap();
+
+        let public_key = Point::from_bytes(key_bytes);
+        if public_key.is_err() {
+            return false;
+        }
+        let public_key = public_key.unwrap();
 
         let left = Point::generator() * &sig;
         let right = &r_pub_key - &(&public_key * &challenge);
@@ -218,8 +272,8 @@ impl SignatureBytes {
         let curve_type = CurveType::from_type::<Secp256k1>();
         let sig = Signature::<Secp256k1>::random();
 
-        let signature = sig.signature.map(|s| s.to_bytes());
-        let random_pub_key = sig.random_pub_key.map(|p| p.to_bytes());
+        let signature = sig.signature.map(|s| s.to_bytes().to_vec());
+        let random_pub_key = sig.random_pub_key.map(|p| p.to_bytes(true).to_vec());
 
         Self {
             curve_type,
@@ -273,8 +327,8 @@ impl<E: Curve> From<&[u8]> for Signature<E> {
 impl<E: Curve> From<Signature<E>> for SignatureBytes {
     fn from(value: Signature<E>) -> Self {
         let curve_type = CurveType::from_type::<E>();
-        let signature = value.signature.map(|s| s.to_bytes());
-        let random_pub_key = value.random_pub_key.map(|p| p.to_bytes());
+        let signature = value.signature.map(|s| s.to_bytes().to_vec());
+        let random_pub_key = value.random_pub_key.map(|p| p.to_bytes(true).to_vec());
 
         Self {
             curve_type,
@@ -286,8 +340,8 @@ impl<E: Curve> From<Signature<E>> for SignatureBytes {
 
 impl<E: Curve> From<SignatureBytes> for Signature<E> {
     fn from(value: SignatureBytes) -> Self {
-        let signature = value.signature.map(|s| Secret::from_bytes(&s));
-        let random_pub_key = value.random_pub_key.map(|p| PublicKey::from_bytes(&p));
+        let signature = value.signature.map(|s| Scalar::from_bytes(&s).unwrap());
+        let random_pub_key = value.random_pub_key.map(|p| Point::from_bytes(&p).unwrap());
 
         Self {
             signature,

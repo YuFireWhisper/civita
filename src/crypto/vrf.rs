@@ -1,73 +1,115 @@
-pub mod dvrf;
+use curv::{arithmetic::Converter, elliptic::curves::Scalar};
+use p256::ecdsa::signature::digest::Digest;
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
+use crate::crypto::{dkg::classic::keypair::Keypair, vrf::proof::Proof};
 
-use dvrf::{crypto, messager, processes};
-use libp2p::gossipsub::MessageId;
-use libp2p::identity;
-use mockall::automock;
-use thiserror::Error;
+pub mod proof;
 
-use crate::network::transport::libp2p_transport::protocols;
-use crate::MockError;
+pub use proof::Output;
 
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("{0}")]
-    Crypto(#[from] crypto::Error),
-    #[error("{0}")]
-    Messager(String),
-    #[error("{0}")]
-    Processes(#[from] processes::Error),
-    #[error("{0}")]
-    Gossipsub(#[from] protocols::gossipsub::message::Error),
-    #[error("Timeout waiting for VRF process: {0}")]
-    Timeout(MessageId),
-    #[error("Process not found: {0}")]
-    ProcessNotFound(MessageId),
-    #[error("Process failed: {0}")]
-    ProcessFailed(MessageId),
-    #[error("Failed to verify VRF proof")]
-    VerifyVrfProof,
-    #[error("PeerId parsing error: {0}")]
-    PeerId(#[from] identity::ParseError),
-    #[error("Message ID not available")]
-    MessageId,
-    #[error("Process error: {0}")]
-    Process(String),
-    #[error("Invalid message type")]
-    InvalidMessageType,
-    #[error("Invalid payload")]
-    InvalidPayload,
+pub struct Vrf<E: curv::elliptic::curves::Curve> {
+    keypair: Keypair<E>,
 }
 
-impl From<messager::Error> for Error {
-    fn from(err: messager::Error) -> Self {
-        Error::Messager(err.to_string())
+impl<E: curv::elliptic::curves::Curve> Default for Vrf<E> {
+    fn default() -> Self {
+        Self {
+            keypair: Keypair::random(),
+        }
     }
 }
 
-#[automock]
-pub trait Vrf: Send + Sync {
-    fn new_random(self: Arc<Self>)
-        -> Pin<Box<dyn Future<Output = Result<[u8; 32], Error>> + Send>>;
-}
+impl<E: curv::elliptic::curves::Curve> Vrf<E> {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-pub trait VrfCallback: Send + Sync {
-    fn set_result_callback<F>(&self, callback: F)
-    where
-        F: Fn(MessageId, &[u8]) + Send + Sync + 'static;
-    fn set_failure_callback<F>(&self, callback: F)
-    where
-        F: Fn(MessageId) + Send + Sync + 'static;
-}
+    pub fn proof<D: Digest>(&self, alpha: &[u8]) -> Output<E> {
+        use curv::elliptic::curves::{Point, Scalar};
 
-#[automock(type E=MockError; type V=MockVrf;)]
-pub trait VrfFactory: Send + Sync {
-    type E: std::error::Error;
-    type V: Vrf;
+        let h_point = Self::hash_to_curve::<D>(alpha);
+        let gamma = &h_point * self.keypair.private_key();
 
-    fn create(&mut self) -> impl Future<Output = Result<Arc<Self::V>, Self::E>> + Send;
+        let k = Scalar::random();
+        let k_base = Point::generator() * &k;
+        let k_hash = &h_point * &k;
+
+        let c = Self::hash_to_challenge::<D>(
+            &Point::generator(),
+            &h_point,
+            self.keypair.public_key(),
+            &gamma,
+            &k_base,
+            &k_hash,
+        );
+
+        let cx = &c * self.keypair.private_key();
+        let s = &k - &cx;
+
+        let value = Self::gamma_to_hash::<D>(&gamma);
+        Output::new(value, Proof::new(gamma, c, s))
+    }
+
+    fn hash_to_curve<D: Digest>(alpha: &[u8]) -> curv::elliptic::curves::Point<E> {
+        use curv::elliptic::curves::{Point, Scalar};
+
+        let mut counter = 0u8;
+        loop {
+            let mut hasher = D::new();
+            hasher.update(alpha);
+            hasher.update([counter]);
+            let digest = hasher.finalize();
+
+            if let Ok(point) = Point::<E>::from_bytes(&digest) {
+                return point;
+            }
+
+            counter += 1;
+            if counter == 0 {
+                let mut hasher = D::new();
+                hasher.update(alpha);
+                hasher.update(b"final_attempt");
+                let digest = hasher.finalize();
+                let scalar =
+                    Scalar::<E>::from_bytes(&digest).unwrap_or_else(|_| Scalar::<E>::random());
+                return Point::<E>::generator() * &scalar;
+            }
+        }
+    }
+
+    fn hash_to_challenge<D: Digest>(
+        g: &curv::elliptic::curves::Generator<E>,
+        h: &curv::elliptic::curves::Point<E>,
+        y: &curv::elliptic::curves::Point<E>,
+        gamma: &curv::elliptic::curves::Point<E>,
+        u: &curv::elliptic::curves::Point<E>,
+        v: &curv::elliptic::curves::Point<E>,
+    ) -> Scalar<E> {
+        let mut hasher = D::new();
+
+        hasher.update(g.to_bytes(true));
+        hasher.update(h.to_bytes(true));
+        hasher.update(y.to_bytes(true));
+        hasher.update(gamma.to_bytes(true));
+        hasher.update(u.to_bytes(true));
+        hasher.update(v.to_bytes(true));
+
+        let digest = hasher.finalize();
+
+        Scalar::<E>::from_bytes(&digest).unwrap_or_else(|_| {
+            let big_int = curv::BigInt::from_bytes(&digest);
+            let order = Scalar::<E>::group_order();
+            let reduced = big_int % order;
+            Scalar::<E>::from(&reduced)
+        })
+    }
+
+    fn gamma_to_hash<D: Digest>(gamma: &curv::elliptic::curves::Point<E>) -> Vec<u8> {
+        const VRF_OUTPUT: &[u8] = b"VRF_OUTPUT";
+
+        let mut hasher = D::new();
+        hasher.update(VRF_OUTPUT);
+        hasher.update(gamma.to_bytes(true));
+        hasher.finalize().to_vec()
+    }
 }
