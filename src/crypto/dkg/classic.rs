@@ -58,25 +58,35 @@ const DKG_TOPIC: &str = "dkg";
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
-    Transport(#[from] crate::network::transport::Error),
+    Transport(String),
+
     #[error("Residents length is exceeding the maximum, max: {0}")]
     ResidentsSize(u16),
+
     #[error("Serde error: {0}")]
     Serde(#[from] serde_json::Error),
+
     #[error("Send error: {0}")]
     Send(String),
+
     #[error("Failed to receive: {0}")]
     Receive(#[from] RecvError),
+
     #[error("Curv deserialization error: {0}")]
     Deserialization(#[from] curv::elliptic::curves::error::DeserializationError),
+
     #[error("Validate share failed, peer: {0}")]
     ValidateShare(PeerId),
+
     #[error("Timeout")]
     Timeout,
+
     #[error("Channel is closed")]
     ChannelClosed,
+
     #[error("Datas is empty")]
     DataEmpty,
+
     #[error("Datas type is not classic")]
     DataTypeClassic,
 }
@@ -92,7 +102,10 @@ impl<E: Curve> Classic<E> {
         other_peers: HashSet<PeerId>,
         config: Config,
     ) -> Result<Self> {
-        let mut topic_rx = transport.listen_on_topic(DKG_TOPIC).await?;
+        let mut topic_rx = transport
+            .listen_on_topic(DKG_TOPIC)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
         let mut peers_rx = transport.listen_on_peers(other_peers.clone()).await;
 
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
@@ -166,7 +179,10 @@ impl<E: Curve> Classic<E> {
     ) -> Result<()> {
         let bytes = serde_json::to_string(verifiable_ss)?;
         let request = Payload::DkgVSS(bytes.into());
-        transport.publish(DKG_TOPIC, request).await?;
+        transport
+            .publish(DKG_TOPIC, request)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
         Ok(())
     }
 

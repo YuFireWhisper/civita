@@ -5,7 +5,6 @@ use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
 use crate::network::transport::{
-    self,
     libp2p_transport::protocols::gossipsub::{Message, Payload},
     Transport,
 };
@@ -18,12 +17,6 @@ pub enum Error {
     Transport(String),
     #[error("Failed to get message ID")]
     MessageId,
-}
-
-impl From<transport::Error> for Error {
-    fn from(err: transport::Error) -> Self {
-        Error::Transport(err.to_string())
-    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -56,7 +49,11 @@ impl<T: Transport> Messager<T> {
     }
 
     async fn send(&self, payload: Payload) -> Result<MessageId> {
-        let message_id = self.transport.publish(&self.topic, payload).await?;
+        let message_id = self
+            .transport
+            .publish(&self.topic, payload)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
         Ok(message_id)
     }
 }
@@ -66,7 +63,7 @@ impl<T: Transport> MessagerEngine for Messager<T> {
         self.transport
             .listen_on_topic(&self.topic)
             .await
-            .map_err(Error::from)
+            .map_err(|e| Error::Transport(e.to_string()))
     }
 
     async fn send_vrf_request(&self) -> Result<MessageId> {

@@ -22,7 +22,6 @@ use crate::{
         vrf::Vrf,
     },
     network::transport::{
-        self,
         libp2p_transport::protocols::{
             gossipsub::{Message, Payload},
             kad,
@@ -53,7 +52,7 @@ pub enum Error {
     #[error("Failed to create DKG: {0}")]
     Dkg(String),
     #[error("{0}")]
-    Transport(#[from] transport::Error),
+    Transport(String),
     #[error("{0}")]
     KadPayload(#[from] kad::payload::Error),
     #[error("Failed to decode public key: {0}")]
@@ -115,8 +114,14 @@ where
         let state = Mutex::new(State::new(config.threshold_counter.clone_box()));
         let (timer, timer_rx) = Timer::new().await;
         let timer = Mutex::new(timer);
-        let committee_rx = transport.listen_on_topic(COMMITTEE_TOPIC).await?;
-        let sig_req_rx = transport.listen_on_topic(SIGNATURE_REQUEST_TOPIC).await?;
+        let committee_rx = transport
+            .listen_on_topic(COMMITTEE_TOPIC)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        let sig_req_rx = transport
+            .listen_on_topic(SIGNATURE_REQUEST_TOPIC)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
         let channels = Mutex::new(MessageChannels::new(committee_rx, sig_req_rx, timer_rx));
         let is_member = AtomicBool::new(false);
         let self_peer = transport.self_peer();
@@ -291,7 +296,7 @@ where
         self.transport
             .publish(SIGNATURE_REQUEST_TOPIC, payload)
             .await
-            .map_err(Error::Transport)?;
+            .map_err(|e| Error::Transport(e.to_string()))?;
         Ok(())
     }
 
@@ -329,7 +334,7 @@ where
         self.transport
             .put(result.payload, aggregated_signature)
             .await
-            .map_err(Error::Transport)
+            .map_err(|e| Error::Transport(e.to_string()))
     }
 
     async fn process_signature_response(

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, io, sync::Arc};
 
 use futures::StreamExt;
 use libp2p::PeerId;
@@ -16,7 +16,7 @@ use crate::{
                 Gossipsub, Kad, RequestResponse,
             },
         },
-        Error, Transport,
+        Transport,
     },
 };
 
@@ -30,6 +30,37 @@ mod dispatcher;
 pub use message::Message;
 
 type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Behaviour(#[from] behaviour::Error),
+
+    #[error("{0}")]
+    Gossipsub(#[from] gossipsub::Error),
+
+    #[error("{0}")]
+    Kad(#[from] kad::Error),
+
+    #[error("{0}")]
+    RequestResponse(#[from] request_response::Error),
+
+    #[error("Timeout")]
+    Timeout(#[from] tokio::time::error::Elapsed),
+
+    #[error("Lock contention")]
+    LockContention,
+
+    #[error("Listener error: {0}")]
+    Listener(#[from] io::Error),
+
+    #[error("Transport error: {0}")]
+    Transport(#[from] libp2p::TransportError<io::Error>),
+
+    #[error("Dial error: {0}")]
+    Dial(#[from] libp2p::swarm::DialError),
+}
 
 #[allow(dead_code)]
 enum KadResult {
@@ -125,14 +156,14 @@ impl Libp2pTransport {
                 match swarm.select_next_some().await {
                     SwarmEvent::NewListenAddr { .. } => return Ok(()),
                     SwarmEvent::ListenerError { error, .. } => {
-                        return Err(Error::ListenerFailed(error.to_string()))
+                        return Err(Error::from(error));
                     }
                     _ => continue,
                 }
             }
         })
-        .await
-        .map_err(|_| Error::BindTimeout)?
+        .await??;
+        Ok(())
     }
 
     async fn receive(&self) {
@@ -190,6 +221,8 @@ impl Libp2pTransport {
 
 #[async_trait::async_trait]
 impl Transport for Libp2pTransport {
+    type Error = Error;
+
     async fn dial(&self, peer_id: PeerId, addr: libp2p::Multiaddr) -> Result<()> {
         let mut swarm = self.swarm().await?;
         swarm
