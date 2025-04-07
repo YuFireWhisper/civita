@@ -23,7 +23,7 @@ use processes::Processes;
 use tokio::time::{sleep, sleep_until};
 
 use crate::network::transport::{
-    libp2p_transport::{message::Message, protocols::gossipsub::Payload},
+    libp2p_transport::protocols::gossipsub::{Message, Payload},
     Transport,
 };
 
@@ -94,13 +94,7 @@ impl<T: Transport> DVrf<T> {
         Ok(())
     }
 
-    async fn handle_message(&self, message: Message) -> Result<()> {
-        let Message::Gossipsub(msg) = message else {
-            return Err(Error::InvalidMessageType);
-        };
-
-        // TODO: Validate sequence number of the message
-
+    async fn handle_message(&self, msg: Message) -> Result<()> {
         match msg.payload {
             Payload::VrfRequest => self.handle_vrf_request(msg.message_id).await,
             Payload::VrfProof {
@@ -371,7 +365,7 @@ mod tests {
         });
         transport.expect_listen_on_peers().returning(|_| {
             let (_, rx) = channel(100);
-            Ok(rx)
+            rx
         });
         transport
             .expect_publish()

@@ -23,12 +23,9 @@ use crate::{
     },
     network::transport::{
         self,
-        libp2p_transport::{
-            protocols::{
-                gossipsub::{self, Payload},
-                kad,
-            },
-            Message,
+        libp2p_transport::protocols::{
+            gossipsub::{Message, Payload},
+            kad,
         },
         Transport,
     },
@@ -175,11 +172,7 @@ where
     }
 
     async fn handle_committee_message(self: &Arc<Self>, msg: Message) -> Result<()> {
-        let gossip_msg = gossipsub::Message::try_from(msg).map_err(|_| {
-            Error::DecodePayload("Invalid gossip message".to_string(), PeerId::random())
-        })?;
-
-        match gossip_msg.payload {
+        match msg.payload {
             Payload::CommitteeChange {
                 new_members,
                 new_committee_pub_key,
@@ -225,24 +218,16 @@ where
             return Ok(());
         }
 
-        let gossip_msg = match gossipsub::Message::try_from(msg) {
-            Ok(msg) => msg,
-            Err(_) => {
-                error!("Failed to decode signature request message");
-                return Ok(());
-            }
-        };
-
-        match gossip_msg.payload {
+        match msg.payload {
             Payload::CommitteeSignatureRequest(payload) => {
-                self.process_signature_reqeust(gossip_msg.message_id, payload)
+                self.process_signature_reqeust(msg.message_id, payload)
                     .await?;
             }
             Payload::CommitteeSignatureResponse {
                 request_msg_id,
                 partial_sig,
             } => {
-                self.process_signature_response(request_msg_id, gossip_msg.source, partial_sig)
+                self.process_signature_response(request_msg_id, msg.source, partial_sig)
                     .await?;
             }
             _ => {}

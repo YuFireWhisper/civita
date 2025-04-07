@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::network::transport::{
     self,
-    libp2p_transport::{message::Message, protocols::gossipsub::Payload},
+    libp2p_transport::protocols::gossipsub::{Message, Payload},
     Transport,
 };
 

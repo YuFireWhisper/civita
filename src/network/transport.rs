@@ -1,38 +1,29 @@
-pub mod libp2p_transport;
-
 use std::{collections::HashSet, io};
-
-use async_trait::async_trait;
-use libp2p::{
-    gossipsub::{MessageId, PublishError, SubscriptionError},
-    kad::store,
-    swarm::DialError,
-    Multiaddr, PeerId, TransportError,
-};
-use libp2p_transport::behaviour;
-use mockall::automock;
-use thiserror::Error;
-use tokio::sync::mpsc::Receiver;
 
 use crate::{
     crypto::dkg::Data,
     network::transport::libp2p_transport::{
-        listener,
-        message::{self, Message},
-        protocols::{gossipsub, kad, request_response::payload::Request},
+        behaviour, message,
+        protocols::{
+            gossipsub, kad,
+            request_response::{self, payload::Request},
+        },
     },
 };
 
-#[derive(Debug, Error)]
+pub mod libp2p_transport;
+
+#[derive(Debug)]
+#[derive(thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
-    Transport(#[from] TransportError<io::Error>),
+    Transport(#[from] libp2p::TransportError<io::Error>),
     #[error("{0}")]
-    Dial(#[from] DialError),
+    Dial(#[from] libp2p::swarm::DialError),
     #[error("{0}")]
-    Subscribe(#[from] SubscriptionError),
+    Subscribe(#[from] libp2p::gossipsub::SubscriptionError),
     #[error("{0}")]
-    Publish(#[from] PublishError),
+    Publish(#[from] libp2p::gossipsub::PublishError),
     #[error("{0}")]
     Behaviour(#[from] behaviour::Error),
     #[error("{0}")]
@@ -40,9 +31,13 @@ pub enum Error {
     #[error("{0}")]
     Message(#[from] message::Error),
     #[error("{0}")]
-    Listener(#[from] listener::Error),
-    #[error("{0}")]
     KadMessage(#[from] kad::message::Error),
+    #[error("Gossipsub error: {0}")]
+    Gossipsub(#[from] gossipsub::Error),
+    #[error("Kademlia error: {0}")]
+    Kademlia(#[from] kad::Error),
+    #[error("Request Response error: {0}")]
+    RequestResponse(#[from] request_response::Error),
     #[error("Listener failed: {0}")]
     ListenerFailed(String),
     #[error("Failed to bind to address within timeout")]
@@ -52,7 +47,7 @@ pub enum Error {
     #[error("No any peer listen on the topic: {0}")]
     NoPeerListen(String),
     #[error("Store error: {0}")]
-    Store(#[from] store::Error),
+    Store(#[from] libp2p::kad::store::Error),
     #[error("Put error: {0}")]
     KadPut(String),
     #[error("Chnnel closed")]
@@ -61,14 +56,24 @@ pub enum Error {
     KadPutTimeout,
 }
 
-#[automock]
-#[async_trait]
+#[mockall::automock]
+#[async_trait::async_trait]
 pub trait Transport: Send + Sync {
-    async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> Result<(), Error>;
-    async fn listen_on_topic(&self, topic: &str) -> Result<Receiver<Message>, Error>;
-    async fn listen_on_peers(&self, peers: HashSet<PeerId>) -> Result<Receiver<Message>, Error>;
-    async fn publish(&self, topic: &str, payload: gossipsub::Payload) -> Result<MessageId, Error>;
-    async fn request(&self, peer_id: PeerId, request: Request) -> Result<(), Error>;
+    async fn dial(&self, peer_id: libp2p::PeerId, addr: libp2p::Multiaddr) -> Result<(), Error>;
+    async fn listen_on_topic(
+        &self,
+        topic: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<gossipsub::Message>, Error>;
+    async fn listen_on_peers(
+        &self,
+        peers: HashSet<libp2p::PeerId>,
+    ) -> tokio::sync::mpsc::Receiver<request_response::Message>;
+    async fn publish(
+        &self,
+        topic: &str,
+        payload: gossipsub::Payload,
+    ) -> Result<libp2p::gossipsub::MessageId, Error>;
+    async fn request(&self, peer_id: &libp2p::PeerId, request: Request);
     async fn put(&self, payload: kad::Payload, signature: Data) -> Result<(), Error>;
-    fn self_peer(&self) -> PeerId;
+    fn self_peer(&self) -> libp2p::PeerId;
 }

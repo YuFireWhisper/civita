@@ -45,6 +45,41 @@ pub struct Config {
     pub quorum: libp2p::kad::Quorum,
 }
 
+#[derive(Debug)]
+#[derive(Default)]
+pub struct ConfigBuilder {
+    wait_for_kad_result_timeout: Option<tokio::time::Duration>,
+    quorum: Option<libp2p::kad::Quorum>,
+}
+
+impl ConfigBuilder {
+    const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+    const DEFAULT_QUORUM: libp2p::kad::Quorum = libp2p::kad::Quorum::All;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn wait_for_kad_result_timeout(mut self, timeout: tokio::time::Duration) -> Self {
+        self.wait_for_kad_result_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_quorum(mut self, quorum: libp2p::kad::Quorum) -> Self {
+        self.quorum = Some(quorum);
+        self
+    }
+
+    pub fn build(self) -> Config {
+        Config {
+            wait_for_kad_result_timeout: self
+                .wait_for_kad_result_timeout
+                .unwrap_or(Self::DEFAULT_TIMEOUT),
+            quorum: self.quorum.unwrap_or(Self::DEFAULT_QUORUM),
+        }
+    }
+}
+
 pub struct Kad {
     swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
     waiting_put_queries: DashMap<libp2p::kad::QueryId, tokio::sync::oneshot::Sender<Result<()>>>,
@@ -110,7 +145,7 @@ impl Kad {
         }
     }
 
-    pub async fn put_record(&self, payload: Payload, signture: dkg::Data) -> Result<()> {
+    pub async fn put(&self, payload: Payload, signture: dkg::Data) -> Result<()> {
         let record_key = Self::generate_key(&payload)?;
         let record_value = Message::new(payload, signture).to_vec()?;
         let record = libp2p::kad::Record::new(record_key, record_value);
@@ -136,14 +171,14 @@ impl Kad {
     fn generate_key(payload: &Payload) -> Result<libp2p::kad::RecordKey> {
         match payload {
             Payload::PeerInfo { peer_id, .. } => {
-                let str = format!("{PEER_INFO_KEY}/{peer_id}");
+                let str = format!("{}/{}", PEER_INFO_KEY, peer_id);
                 Ok(libp2p::kad::RecordKey::new(&str))
             }
             _ => Err(Error::InvalidPayloadType),
         }
     }
 
-    pub async fn get_record(
+    pub async fn get(
         &self,
         key: libp2p::kad::RecordKey,
     ) -> Result<Option<libp2p::kad::PeerRecord>> {
@@ -159,18 +194,6 @@ impl Kad {
                 self.waiting_get_queries.remove(&query_id);
                 Err(Error::Timeout(self.config.wait_for_kad_result_timeout))
             }
-        }
-    }
-}
-
-const DEFAULT_KAD_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
-const DEFAULT_QUORUM: libp2p::kad::Quorum = libp2p::kad::Quorum::All;
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            wait_for_kad_result_timeout: DEFAULT_KAD_TIMEOUT,
-            quorum: DEFAULT_QUORUM,
         }
     }
 }

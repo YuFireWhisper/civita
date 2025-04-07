@@ -19,12 +19,6 @@ use crate::network::transport::libp2p_transport::{
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
-pub struct Config {
-    pub waiting_subscription_timeout: tokio::time::Duration,
-    pub channel_size: usize,
-}
-
-#[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
@@ -44,6 +38,50 @@ pub enum Error {
 
     #[error("Oneshot error: {0}")]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
+}
+
+#[derive(Debug)]
+pub struct Config {
+    pub waiting_subscription_timeout: tokio::time::Duration,
+    pub channel_size: usize,
+}
+
+#[derive(Debug)]
+#[derive(Default)]
+pub struct ConfigBuilder {
+    waiting_subscription_timeout: Option<tokio::time::Duration>,
+    channel_size: Option<usize>,
+}
+
+impl ConfigBuilder {
+    const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+    const DEFAULT_CHANNEL_SIZE: usize = 1000;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_waiting_subscription_timeout(mut self, timeout: tokio::time::Duration) -> Self {
+        self.waiting_subscription_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_channel_size(mut self, size: usize) -> Self {
+        self.channel_size = Some(size);
+        self
+    }
+
+    pub fn build(self) -> Config {
+        let waiting_subscription_timeout = self
+            .waiting_subscription_timeout
+            .unwrap_or(Self::DEFAULT_TIMEOUT);
+        let channel_size = self.channel_size.unwrap_or(Self::DEFAULT_CHANNEL_SIZE);
+
+        Config {
+            waiting_subscription_timeout,
+            channel_size,
+        }
+    }
 }
 
 pub struct Gossipsub {
@@ -87,11 +125,10 @@ impl Gossipsub {
     }
 
     pub async fn subscribe(
-        &mut self,
-        topic: String,
+        &self,
+        topic: impl Into<String>,
     ) -> Result<tokio::sync::mpsc::Receiver<Message>> {
         let topic = IdentTopic::new(topic);
-        self.subscribed_topics.write().await.insert(topic.hash());
 
         self.swarm
             .lock()
@@ -108,9 +145,9 @@ impl Gossipsub {
     }
 
     pub async fn publish(
-        &mut self,
-        topic: String,
-        payload: Payload,
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<Payload>,
     ) -> Result<libp2p::gossipsub::MessageId> {
         let topic = IdentTopic::new(topic);
 
@@ -123,6 +160,7 @@ impl Gossipsub {
                 .map_err(|_| Error::NoPeerSubscribed(topic.to_string()))??;
         }
 
+        let payload: Payload = payload.into();
         let payload_bytes = payload.to_vec()?;
         self.swarm
             .lock()

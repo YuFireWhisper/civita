@@ -9,6 +9,7 @@ const DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_TIMEOUT: Duration = Duration::from_secs(10
 const DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_WAIT_NEXT_EVENT_TIMEOUT: Duration = Duration::from_millis(10);
 const DEFAULT_WAIT_FOR_KAD_RESULT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_RECEIVE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -21,6 +22,7 @@ pub struct Config {
     pub wait_for_gossipsub_peer_interval: Duration,
     pub wait_next_event_timeout: Duration,
     pub wait_for_kad_result_timeout: Duration,
+    pub receive_interval: Duration,
 }
 
 impl Default for Config {
@@ -34,6 +36,7 @@ impl Default for Config {
         let wait_for_gossipsub_peer_interval = DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_INTERVAL;
         let wait_next_event_timeout = DEFAULT_WAIT_NEXT_EVENT_TIMEOUT;
         let wait_for_kad_result_timeout = DEFAULT_WAIT_FOR_KAD_RESULT_TIMEOUT;
+        let receive_interval = DEFAULT_RECEIVE_INTERVAL;
 
         Self {
             check_listen_timeout,
@@ -45,6 +48,7 @@ impl Default for Config {
             wait_for_gossipsub_peer_interval,
             wait_next_event_timeout,
             wait_for_kad_result_timeout,
+            receive_interval,
         }
     }
 }

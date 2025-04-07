@@ -32,9 +32,9 @@ use crate::{
         Data, Dkg,
     },
     network::transport::{
-        libp2p_transport::{
-            message::Message,
-            protocols::{gossipsub::Payload, request_response::payload::Request},
+        libp2p_transport::protocols::{
+            gossipsub::{self, Payload},
+            request_response::{self, payload::Request},
         },
         Transport,
     },
@@ -93,7 +93,7 @@ impl<E: Curve> Classic<E> {
         config: Config,
     ) -> Result<Self> {
         let mut topic_rx = transport.listen_on_topic(DKG_TOPIC).await?;
-        let mut peers_rx = transport.listen_on_peers(other_peers.clone()).await?;
+        let mut peers_rx = transport.listen_on_peers(other_peers.clone()).await;
 
         let peers = Self::generate_full_peers(self_peer, other_peers)?;
         let num_peers = Self::calculate_num_peers(&peers);
@@ -184,14 +184,14 @@ impl<E: Curve> Classic<E> {
                 )
             });
             let request = Request::DkgScalar(share.to_bytes().to_vec());
-            transport.request(*peer, request).await?;
+            transport.request(peer, request).await;
         }
         Ok(())
     }
 
     async fn collect_data<H: Digest + Clone>(
-        topic_rx: &mut Receiver<Message>,
-        peers_rx: &mut Receiver<Message>,
+        topic_rx: &mut Receiver<gossipsub::Message>,
+        peers_rx: &mut Receiver<request_response::Message>,
         expected: u16,
     ) -> Result<HashMap<PeerId, PeerShare<E, H>>> {
         let mut collected: HashMap<PeerId, PeerShare<E, H>> =
@@ -201,7 +201,8 @@ impl<E: Curve> Classic<E> {
         while complete_count < expected {
             tokio::select! {
                 Some(msg) = topic_rx.recv() => {
-                    if let Some((peer, vss_bytes)) = Payload::get_dkg_vss(msg) {
+                    if let Payload::DkgVSS(vss_bytes) = msg.payload {
+                        let peer = msg.source;
                         let vss: VerifiableSS<E, H> = serde_json::from_slice(&vss_bytes)?;
                         let entry = collected.entry(peer).or_default();
                         if entry.update_vss(vss) {
@@ -211,9 +212,9 @@ impl<E: Curve> Classic<E> {
                 }
 
                 Some(msg) = peers_rx.recv() => {
-                    if let Some((peer, scalar_bytes)) = Request::get_dkg_scalar(msg) {
+                    if let request_response::Payload::Request(Request::DkgScalar(scalar_bytes)) = msg.payload {
                         let scalar = Scalar::from_bytes(scalar_bytes.as_slice())?;
-                        let entry = collected.entry(peer).or_default();
+                        let entry = collected.entry(msg.peer).or_default();
                         if entry.update_scalar(scalar) {
                             complete_count += 1;
                         }
@@ -321,12 +322,9 @@ mod tests {
             Dkg,
         },
         network::transport::{
-            libp2p_transport::{
-                message::Message,
-                protocols::{
-                    gossipsub::{self, Payload},
-                    request_response::{self, payload::Request},
-                },
+            libp2p_transport::protocols::{
+                gossipsub::{self, Payload},
+                request_response::{self, payload::Request},
             },
             MockTransport,
         },
@@ -359,13 +357,13 @@ mod tests {
             }
         }
 
-        async fn send_v_ss(&self, topic_tx: &Sender<Message>) {
+        async fn send_v_ss(&self, topic_tx: &Sender<gossipsub::Message>) {
             let payload = Payload::DkgVSS(serde_json::to_string(&self.v_ss).unwrap().into());
             let msg = create_gossipsub_message(self.peer, DKG_TOPIC, payload);
             topic_tx.send(msg).await.unwrap();
         }
 
-        async fn send_shares(&self, peer_tx: &Sender<Message>) {
+        async fn send_shares(&self, peer_tx: &Sender<request_response::Message>) {
             let share = &self.shares[self.target_index as usize - 1];
             let payload = Request::DkgScalar(share.to_bytes().to_vec());
             let msg = create_request_message(self.peer, payload);
@@ -377,27 +375,31 @@ mod tests {
         (0..n).map(|_| PeerId::random()).collect()
     }
 
-    fn create_gossipsub_message(source: PeerId, topic: &str, payload: Payload) -> Message {
+    fn create_gossipsub_message(
+        source: PeerId,
+        topic: &str,
+        payload: Payload,
+    ) -> gossipsub::Message {
         let message_id = MessageId::from(MESSAGE_ID);
         let sequence_number = 1;
         let topic = topic.to_string();
-        Message::Gossipsub(gossipsub::Message {
+        gossipsub::Message {
             message_id,
             source,
             topic,
             payload,
             sequence_number,
-        })
+        }
     }
 
-    fn create_request_message(peer: PeerId, payload: Request) -> Message {
+    fn create_request_message(peer: PeerId, payload: Request) -> request_response::Message {
         let payload = request_response::Payload::Request(payload);
-        Message::RequestResponse(request_response::Message { peer, payload })
+        request_response::Message { peer, payload }
     }
 
     fn create_mock_transport(
-        topic_rx: Receiver<Message>,
-        peer_rx: Receiver<Message>,
+        topic_rx: Receiver<gossipsub::Message>,
+        peer_rx: Receiver<request_response::Message>,
     ) -> MockTransport {
         let mut transport = MockTransport::new();
         transport
@@ -405,11 +407,11 @@ mod tests {
             .return_once(move |_| Ok(topic_rx));
         transport
             .expect_listen_on_peers()
-            .return_once(move |_| Ok(peer_rx));
+            .return_once(move |_| peer_rx);
         transport
             .expect_publish()
             .returning(|_, _| Ok(MessageId::from(MESSAGE_ID)));
-        transport.expect_request().returning(|_, _| Ok(()));
+        transport.expect_request().returning(|_, _| {});
 
         transport
     }

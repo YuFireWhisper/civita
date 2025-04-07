@@ -1,6 +1,8 @@
 use tokio::sync::{mpsc::Receiver, Mutex, MutexGuard};
 
-use crate::{committee::Action, network::transport::libp2p_transport::Message};
+use crate::{
+    committee::Action, network::transport::libp2p_transport::protocols::gossipsub::Message,
+};
 
 pub struct MessageChannels {
     committee_rx: Mutex<Receiver<Message>>,

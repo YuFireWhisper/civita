@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use futures::StreamExt;
 use libp2p::PeerId;
@@ -12,11 +9,11 @@ use crate::{
         libp2p_transport::{
             behaviour::Behaviour,
             config::Config,
-            listener::Listener,
             protocols::{
                 gossipsub,
-                kad::{self, PEER_INFO_KEY},
+                kad::{self},
                 request_response::{self, payload::Request},
+                Gossipsub, Kad, RequestResponse,
             },
         },
         Error, Transport,
@@ -25,12 +22,10 @@ use crate::{
 
 pub mod behaviour;
 pub mod config;
-pub mod listener;
 pub mod message;
 pub mod protocols;
 
 mod dispatcher;
-mod swarm_wrapper;
 
 pub use message::Message;
 
@@ -45,17 +40,14 @@ enum KadResult {
     GetNotFound,
 }
 
-#[derive(Clone)]
 pub struct Libp2pTransport {
     swarm: Arc<tokio::sync::Mutex<libp2p::Swarm<Behaviour>>>,
+    gossipsub: Arc<Gossipsub>,
+    kad: Arc<Kad>,
+    request_response: Arc<RequestResponse>,
     keypair: Arc<libp2p::identity::Keypair>,
-    listener: Arc<tokio::sync::RwLock<Listener>>,
     config: Config,
-    subscribed_topics: Arc<tokio::sync::Mutex<HashSet<libp2p::gossipsub::TopicHash>>>,
     self_peer: PeerId,
-    processing_kad: Arc<
-        tokio::sync::Mutex<HashMap<libp2p::kad::QueryId, tokio::sync::oneshot::Sender<KadResult>>>,
-    >,
 }
 
 impl Libp2pTransport {
@@ -67,30 +59,39 @@ impl Libp2pTransport {
         let transport = Self::create_transport(keypair.clone());
         let behaviour = Behaviour::new(keypair.clone())?;
         let peer_id = PeerId::from_public_key(&keypair.public());
-        let mut swarm = libp2p::Swarm::new(
-            transport,
-            behaviour,
-            peer_id,
-            libp2p::swarm::Config::with_tokio_executor(),
-        );
+        let swarm_config = libp2p::swarm::Config::with_tokio_executor();
+        let mut swarm = libp2p::Swarm::new(transport, behaviour, peer_id, swarm_config);
 
         Self::listen_on(&mut swarm, listen_addr, config.check_listen_timeout).await?;
 
         let swarm = Arc::new(tokio::sync::Mutex::new(swarm));
+        let gossipsub_config = gossipsub::ConfigBuilder::new()
+            .with_waiting_subscription_timeout(config.wait_for_gossipsub_peer_timeout)
+            .with_channel_size(config.channel_capacity)
+            .build();
+        let gossipsub = Gossipsub::new(swarm.clone(), gossipsub_config);
+
+        let kad_config = kad::ConfigBuilder::new()
+            .wait_for_kad_result_timeout(config.wait_for_kad_result_timeout)
+            .build();
+        let kad = Kad::new(swarm.clone(), kad_config);
+
+        let request_response_config = request_response::ConfigBuilder::new()
+            .with_channel_size(config.channel_capacity)
+            .build();
+        let request_response = RequestResponse::new(swarm.clone(), request_response_config);
+
         let keypair = Arc::new(keypair);
-        let listener = Arc::new(tokio::sync::RwLock::new(Listener::new()));
-        let subscribed_topics = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
         let self_peer = peer_id;
-        let processing_kad = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let transport = Self {
             swarm,
+            gossipsub: Arc::new(gossipsub),
+            kad: Arc::new(kad),
+            request_response: Arc::new(request_response),
             keypair,
-            listener,
             config,
-            subscribed_topics,
             self_peer,
-            processing_kad,
         };
 
         transport.receive().await;
@@ -135,179 +136,54 @@ impl Libp2pTransport {
     }
 
     async fn receive(&self) {
-        let arc_self = Arc::new(self.clone());
-        tokio::spawn(async move {
-            let mut cleanup_tick = tokio::time::interval(arc_self.config.cleanup_channel_interval);
+        let swarm = self.swarm.clone();
+        let gossipsub = self.gossipsub.clone();
+        let kad = self.kad.clone();
+        let request_response = self.request_response.clone();
+        let receive_interval = self.config.receive_interval;
 
+        tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = arc_self.clone().cleanup_channels(&mut cleanup_tick) => {},
-                    event = arc_self.clone().next_behaviour_event() => {
-                        if let Err(e) = arc_self.clone().process_event(event).await {
-                            log::error!("Failed to process event: {:?}", e);
+                    event = Self::next_behaviour_event(&swarm) => {
+                        match event {
+                            behaviour::Event::Gossipsub(event) => {
+                                if let Err(e) = gossipsub.handle_event(*event).await {
+                                    log::error!("Error handling gossipsub event: {:?}", e);
+                                }
+                            },
+                            behaviour::Event::Kad(event) => {
+                                kad.handle_event(event);
+                            },
+                            behaviour::Event::RequestResponse(event) => {
+                                if let Err(e) = request_response.handle_event(event) {
+                                    log::error!("Error handling request-response event: {:?}", e);
+                                }
+                            },
                         }
                     },
-                    _ = async { tokio::time::sleep(arc_self.config.wait_for_gossipsub_peer_interval).await } => {},
+                    _ = async { tokio::time::sleep(receive_interval).await } => {},
                 }
             }
         });
     }
 
-    async fn cleanup_channels(self: Arc<Self>, interval: &mut tokio::time::Interval) {
-        interval.tick().await;
-        self.listener.write().await.remove_dead_channels();
-    }
-
-    async fn next_behaviour_event(self: Arc<Self>) -> behaviour::Event {
-        use libp2p::swarm::SwarmEvent;
-
+    async fn next_behaviour_event(
+        swarm: &Arc<tokio::sync::Mutex<libp2p::Swarm<Behaviour>>>,
+    ) -> behaviour::Event {
         loop {
-            match self.swarm_without_timeout().await.select_next_some().await {
-                SwarmEvent::Behaviour(event) => return event,
-                _ => continue,
+            if let libp2p::swarm::SwarmEvent::Behaviour(event) =
+                swarm.lock().await.select_next_some().await
+            {
+                return event;
             }
         }
-    }
-
-    async fn swarm_without_timeout(
-        self: &Arc<Self>,
-    ) -> tokio::sync::MutexGuard<'_, libp2p::Swarm<Behaviour>> {
-        self.swarm.lock().await
-    }
-
-    async fn process_event(self: Arc<Self>, event: behaviour::Event) -> Result<()> {
-        use behaviour::Event;
-
-        if let Event::Gossipsub(event) = &event {
-            if let libp2p::gossipsub::Event::Subscribed { topic, .. } = &**event {
-                self.subscribed_topics.lock().await.insert(topic.clone());
-                return Ok(());
-            }
-        }
-
-        if let Event::Kad(event) = &event {
-            return self.process_kad_event(event.clone()).await;
-        }
-
-        match Message::try_from(event)? {
-            Message::Gossipsub(msg) => self.handle_gossipsub_message(msg).await,
-            Message::Kad(msg) => {
-                Self::handle_kad_message(msg);
-                Ok(())
-            }
-            Message::RequestResponse(msg) => self.handle_request_response_message(msg).await,
-        }
-    }
-
-    async fn process_kad_event(self: Arc<Self>, event: libp2p::kad::Event) -> Result<()> {
-        use libp2p::kad::QueryResult;
-
-        if let libp2p::kad::Event::OutboundQueryProgressed { id, result, .. } = event {
-            let mut processing_kad = self.processing_kad.lock().await;
-            if let Some(sender) = processing_kad.remove(&id) {
-                match result {
-                    QueryResult::PutRecord(Ok(_)) => {
-                        if sender.send(KadResult::PutSuccess).is_err() {
-                            log::error!("Failed to send success signal");
-                        }
-                    }
-                    QueryResult::PutRecord(Err(e)) => {
-                        if sender
-                            .send(KadResult::PutFailure(e.to_string().into_bytes()))
-                            .is_err()
-                        {
-                            log::error!("Failed to send failure signal");
-                        }
-                    }
-                    QueryResult::GetRecord(Ok(result)) => {
-                        if let libp2p::kad::GetRecordOk::FoundRecord(record) = result {
-                            if sender
-                                .send(KadResult::GetSuccess(record.record.value))
-                                .is_err()
-                            {
-                                log::error!("Failed to send success signal: {:?}", id);
-                            }
-                        } else if sender.send(KadResult::GetNotFound).is_err() {
-                            log::error!("Failed to send not found signal: {:?}", id);
-                        }
-                    }
-                    QueryResult::GetRecord(Err(e)) => {
-                        if sender
-                            .send(KadResult::GetFailure(e.to_string().into_bytes()))
-                            .is_err()
-                        {
-                            log::error!("Failed to send failure signal");
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_gossipsub_message(self: Arc<Self>, message: gossipsub::Message) -> Result<()> {
-        let topic = message.topic.clone();
-        let msg = Message::Gossipsub(message);
-        self.listener
-            .read()
-            .await
-            .broadcast_to_topic(&topic, msg)
-            .map_err(Error::from)
-    }
-
-    fn handle_kad_message(message: kad::Message) {
-        println!("Received Kademlia message: {:?}", message);
-    }
-
-    async fn handle_request_response_message(
-        self: Arc<Self>,
-        message: request_response::Message,
-    ) -> Result<()> {
-        let peer = message.peer;
-        let msg = Message::RequestResponse(message);
-        self.listener
-            .read()
-            .await
-            .broadcast_to_peer(&peer, msg)
-            .map_err(Error::from)
-    }
-
-    async fn wait_for_gossipsub_subscription(&self, topic: &libp2p::gossipsub::TopicHash) -> bool {
-        tokio::time::timeout(self.config.wait_for_gossipsub_peer_timeout, async {
-            loop {
-                if self.subscribed_topics.lock().await.contains(topic) {
-                    return true;
-                }
-                tokio::time::sleep(self.config.wait_for_gossipsub_peer_interval).await;
-            }
-        })
-        .await
-        .unwrap_or(false)
-    }
-
-    async fn subscribe(&self, topic: &str) -> Result<()> {
-        let topic = libp2p::gossipsub::IdentTopic::new(topic);
-        let mut swarm = self.swarm.lock().await;
-        swarm.behaviour_mut().gossipsub_mut().subscribe(&topic)?;
-        Ok(())
     }
 
     pub async fn swarm(&self) -> Result<tokio::sync::MutexGuard<'_, libp2p::Swarm<Behaviour>>> {
         match tokio::time::timeout(self.config.get_swarm_lock_timeout, self.swarm.lock()).await {
             Ok(guard) => Ok(guard),
             Err(_) => Err(Error::LockContention),
-        }
-    }
-
-    fn generate_kad_key(payload: &kad::Payload) -> libp2p::kad::RecordKey {
-        match payload {
-            kad::Payload::PeerInfo { peer_id, .. } => {
-                let str = format!("{}/{}", PEER_INFO_KEY, peer_id);
-                libp2p::kad::RecordKey::new(&str)
-            }
-            _ => panic!("Invalid payload type for Kademlia key generation"),
         }
     }
 }
@@ -325,23 +201,18 @@ impl Transport for Libp2pTransport {
         Ok(())
     }
 
-    async fn listen_on_topic(&self, topic: &str) -> Result<tokio::sync::mpsc::Receiver<Message>> {
-        self.subscribe(topic).await?;
-        let (tx, rx) = tokio::sync::mpsc::channel(self.config.channel_capacity);
-        self.listener
-            .write()
-            .await
-            .add_topic(topic.to_string(), &tx);
-        Ok(rx)
+    async fn listen_on_topic(
+        &self,
+        topic: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<gossipsub::Message>> {
+        self.gossipsub.subscribe(topic).await.map_err(Error::from)
     }
 
     async fn listen_on_peers(
         &self,
         peers: HashSet<PeerId>,
-    ) -> Result<tokio::sync::mpsc::Receiver<Message>> {
-        let (tx, rx) = tokio::sync::mpsc::channel(self.config.channel_capacity);
-        self.listener.write().await.add_peers(peers, &tx);
-        Ok(rx)
+    ) -> tokio::sync::mpsc::Receiver<request_response::Message> {
+        self.request_response.listen(peers)
     }
 
     async fn publish(
@@ -349,58 +220,18 @@ impl Transport for Libp2pTransport {
         topic: &str,
         payload: gossipsub::Payload,
     ) -> Result<libp2p::gossipsub::MessageId> {
-        let topic = libp2p::gossipsub::IdentTopic::new(topic);
-        if !self.wait_for_gossipsub_subscription(&topic.hash()).await {
-            return Err(Error::NoPeerListen(topic.to_string()));
-        }
-
-        let data: Vec<u8> = payload.try_into()?;
-        let mut swarm = self.swarm().await?;
-        swarm
-            .behaviour_mut()
-            .gossipsub_mut()
-            .publish(topic.clone(), data.clone())
+        self.gossipsub
+            .publish(topic, payload)
+            .await
             .map_err(Error::from)
     }
 
-    async fn request(&self, peer_id: PeerId, request: Request) -> Result<()> {
-        let mut swarm = self.swarm().await?;
-        swarm
-            .behaviour_mut()
-            .request_response_mut()
-            .send_request(&peer_id, request);
-        Ok(())
+    async fn request(&self, peer_id: &PeerId, request: Request) {
+        self.request_response.request(peer_id, request).await;
     }
 
     async fn put(&self, payload: kad::Payload, signature: Data) -> Result<()> {
-        const QUORUM: libp2p::kad::Quorum = libp2p::kad::Quorum::All;
-
-        let key = Self::generate_kad_key(&payload);
-        let value = kad::Message::new(payload, signature);
-        let record = libp2p::kad::Record::new(key, value.to_vec()?);
-
-        let mut swarm = self.swarm().await?;
-        let query_id = swarm
-            .behaviour_mut()
-            .kad_mut()
-            .put_record(record.clone(), QUORUM)?;
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut processing_kad = self.processing_kad.lock().await;
-        processing_kad.insert(query_id, tx);
-
-        let result = tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await;
-        match result {
-            Ok(Ok(result)) => match result {
-                KadResult::PutSuccess => Ok(()),
-                KadResult::PutFailure(e) => {
-                    Err(Error::KadPut(String::from_utf8_lossy(&e).to_string()))
-                }
-                _ => panic!("Unexpected Kademlia result"),
-            },
-            Ok(Err(_)) => Err(Error::ChannelClosed),
-            Err(_) => Err(Error::KadPutTimeout),
-        }
+        self.kad.put(payload, signature).await.map_err(Error::from)
     }
 
     fn self_peer(&self) -> PeerId {
@@ -429,7 +260,6 @@ mod tests {
     use crate::network::transport::{
         libp2p_transport::{
             config::Config,
-            message::Message,
             protocols::{
                 gossipsub,
                 request_response::{payload::Request, Payload},
@@ -518,17 +348,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listen_on_peers_success() {
-        let ctx = TestContext::connected().await;
-
-        let peers = HashSet::from([ctx.t2.peer_id]);
-
-        let result = ctx.t1.p2p.listen_on_peers(peers).await;
-
-        assert!(result.is_ok(), "Failed to listen on peers: {:?}", result);
-    }
-
-    #[tokio::test]
     async fn test_publish() {
         use gossipsub::Payload;
 
@@ -543,16 +362,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request() {
-        let ctx = TestContext::connected().await;
-        let request = Request::Raw(PAYLOAD.to_vec());
-
-        let result = ctx.t1.p2p.request(ctx.t2.peer_id, request.clone()).await;
-
-        assert!(result.is_ok(), "Failed to send request: {:?}", result);
-    }
-
-    #[tokio::test]
     async fn test_receive_gossipsub() {
         use gossipsub::Payload;
 
@@ -564,12 +373,7 @@ mod tests {
 
         let result = timeout(WAIT_MESSAGE_TIMEOUT, async {
             let msg = rx.recv().await.unwrap();
-
-            if let Message::Gossipsub(msg) = msg {
-                msg.payload == payload
-            } else {
-                false
-            }
+            msg.payload == payload
         })
         .await
         .unwrap();
@@ -583,22 +387,14 @@ mod tests {
 
         let peers = HashSet::from([ctx.t1.peer_id]);
 
-        let mut rx = ctx.t2.p2p.listen_on_peers(peers).await.unwrap();
+        let mut rx = ctx.t2.p2p.listen_on_peers(peers).await;
 
         let request = Request::Raw(PAYLOAD.to_vec());
-        ctx.t1
-            .p2p
-            .request(ctx.t2.peer_id, request.clone())
-            .await
-            .unwrap();
+        ctx.t1.p2p.request(&ctx.t2.peer_id, request.clone()).await;
 
         let result = timeout(WAIT_MESSAGE_TIMEOUT, async {
             let msg = rx.recv().await.unwrap();
-            if let Message::RequestResponse(msg) = msg {
-                msg.payload == Payload::Request(request)
-            } else {
-                false
-            }
+            msg.payload == Payload::Request(request)
         })
         .await
         .unwrap();
