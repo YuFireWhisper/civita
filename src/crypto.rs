@@ -1,3 +1,4 @@
+pub mod core;
 pub mod dkg;
 pub mod keypair;
 pub mod vrf;

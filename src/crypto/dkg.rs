@@ -6,6 +6,8 @@ use mockall::automock;
 
 pub mod classic;
 pub mod signature;
+pub mod joint_feldman;
+pub mod vss;
 
 pub use signature::{Data, Scheme};
 

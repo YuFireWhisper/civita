@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Encode, Decode)]
 pub enum Request {
     DkgScalar(Vec<u8>),
+    DkgShare(Vec<u8>),
     Raw(Vec<u8>), // For testing
 }
 
