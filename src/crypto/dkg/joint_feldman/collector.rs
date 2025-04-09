@@ -11,14 +11,7 @@ use crate::{
         request_response::{self, payload::Request},
     },
 };
-use std::{
-    collections::HashMap,
-    marker::PhantomData,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::{collections::HashMap, marker::PhantomData};
 use thiserror::Error;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -26,7 +19,10 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Collection timed out")]
-    Timeout,
+    Timeout(#[from] tokio::time::error::Elapsed),
+
+    #[error("Recv error: {0}")]
+    Recv(#[from] tokio::sync::oneshot::error::RecvError),
 
     #[error("Channel closed")]
     ChannelClosed,
@@ -36,6 +32,9 @@ pub enum Error {
 
     #[error("Send error: {0}")]
     Send(String),
+
+    #[error("Duplicate query")]
+    DuplicateQuery,
 }
 
 struct PartialPair<SK: Secret, PK: Public> {
@@ -177,12 +176,13 @@ where
             let mut done = HashMap::<Vec<u8>, Vec<CompletePair<SK, PK>>>::new();
             let mut queries =
                 HashMap::<Vec<u8>, tokio::sync::oneshot::Sender<Vec<CompletePair<SK, PK>>>>::new();
+            let mut queried_ids = std::collections::HashSet::<Vec<u8>>::new();
 
             loop {
                 tokio::select! {
                     Some(msg) = request_rx.recv() => {
                         if let request_response::Payload::Request(Request::VSSShare { id, share }) = msg.payload {
-                            if !index_map.contains_key(&msg.peer) || done.contains_key(&id) {
+                            if !index_map.contains_key(&msg.peer) || queried_ids.contains(&id) {
                                 continue;
                             }
                             let share = SK::from_bytes(&share);
@@ -191,17 +191,17 @@ where
                             if let Some(pairs) = manager.add_share(own_index, share) {
                                 pending.remove(&id);
                                 if let Some(tx) = queries.remove(&id) {
-                                    let _ = tx.send(pairs.clone());
+                                    let _ = tx.send(pairs);
+                                    queried_ids.insert(id);
                                 } else {
-                                    log::warn!("No query for id: {:?}", id);
+                                    done.insert(id, pairs);
                                 }
-                                done.insert(id, pairs);
                             }
                         }
                     }
                     Some(msg) = gossipsub_rx.recv() => {
                         if let gossipsub::Payload::VSSCommitments { id, commitments } = msg.payload {
-                            if !index_map.contains_key(&msg.source) || done.contains_key(&id) {
+                            if !index_map.contains_key(&msg.source) || queried_ids.contains(&id) {
                                 continue;
                             }
                             let commitments = commitments.iter()
@@ -211,19 +211,20 @@ where
                             if let Some(pairs) = manager.add_commitments(index_map[&msg.source], commitments) {
                                 pending.remove(&id);
                                 if let Some(tx) = queries.remove(&id) {
-                                    let _ = tx.send(pairs.clone());
+                                    let _ = tx.send(pairs);
+                                    queried_ids.insert(id);
                                 } else {
-                                    log::warn!("No query for id: {:?}", id);
+                                    done.insert(id, pairs);
                                 }
-                                done.insert(id, pairs);
                             }
                         }
                     }
                     Some((id, responder)) = rx.recv() => {
-                        if let Some(results) = done.get_mut(&id) {
-                            let mut batch = Vec::with_capacity(results.len());
-                            std::mem::swap(results, &mut batch);
-                            let _ = responder.send(batch);
+                        if queried_ids.contains(&id) {
+                            let _ = responder.send(Vec::new());
+                        } else if let Some(results) = done.remove(&id) {
+                            let _ = responder.send(results);
+                            queried_ids.insert(id);
                         } else {
                             queries.insert(id, responder);
                         }
@@ -250,10 +251,13 @@ where
             .send((request_id.clone(), tx))
             .await
             .map_err(|e| Error::Send(e.to_string()))?;
-        tokio::time::timeout(self.timeout, rx)
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::ChannelClosed)
+        let result = tokio::time::timeout(self.timeout, rx).await??;
+
+        if result.is_empty() {
+            Err(Error::DuplicateQuery)
+        } else {
+            Ok(result)
+        }
     }
 }
 
