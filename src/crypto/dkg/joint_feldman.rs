@@ -2,7 +2,7 @@ use std::{collections::HashSet, iter, sync::Arc};
 
 use crate::{
     crypto::{
-        dkg::joint_feldman::{collector::Collector, distributor::Distributor},
+        dkg::{joint_feldman::{collector::Collector, distributor::Distributor}, Dkg_},
         primitives::{
             algebra::element::{Public, Secret},
             vss::Vss,
@@ -91,7 +91,7 @@ where
         })
     }
 
-    pub async fn set_ids(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<()> {
+    pub async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<()> {
         assert!(peers.len() > 1, "ids length must be greater than 1");
         assert!(
             peers.len() <= u16::MAX as usize,
@@ -169,5 +169,24 @@ where
         let secret = SK::random();
         let threshold = self.config.threshold_counter.call(nums);
         VSS::share(&secret, threshold, nums).map_err(|e| Error::Vss(e.to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl<T, SK, PK, VSS> Dkg_<SK, PK> for JointFeldman<T, SK, PK, VSS>
+where
+    T: Transport + Send + Sync + 'static,
+    SK: Secret + 'static,
+    PK: Public + 'static,
+    VSS: Vss<SK, PK> + 'static,
+{
+    type Error = Error;
+
+    async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<()> {
+        self.set_peers(peers).await
+    }
+
+    async fn generate(&mut self, id: Vec<u8>) -> Result<(Vec<SK>, Vec<PK>)> {
+        self.generate(id).await
     }
 }
