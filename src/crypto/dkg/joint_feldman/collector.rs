@@ -127,7 +127,7 @@ where
     id: libp2p::PeerId,
     timeout: tokio::time::Duration,
     threshold_counter: ThresholdCounter,
-    is_active: Arc<AtomicBool>,
+    handle: Option<tokio::task::JoinHandle<()>>,
     query_sender: Option<QuerySender<SK, PK>>,
     _marker: PhantomData<V>,
 }
@@ -147,7 +147,7 @@ where
             id,
             timeout,
             threshold_counter,
-            is_active: Arc::new(AtomicBool::new(false)),
+            handle: None,
             query_sender: None,
             _marker: PhantomData,
         }
@@ -161,9 +161,7 @@ where
     ) {
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
         self.query_sender = Some(tx);
-        self.is_active.store(true, Ordering::SeqCst);
 
-        let active_flag = self.is_active.clone();
         let threshold = self.threshold_counter.call(peers.len() as u16);
         let index_map: HashMap<libp2p::PeerId, u16> = peers
             .iter()
@@ -174,13 +172,13 @@ where
             .get(&self.id)
             .expect("Self peer not found in peers list");
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut pending = HashMap::<Vec<u8>, PairManager<SK, PK, V>>::new();
             let mut done = HashMap::<Vec<u8>, Vec<CompletePair<SK, PK>>>::new();
             let mut queries =
                 HashMap::<Vec<u8>, tokio::sync::oneshot::Sender<Vec<CompletePair<SK, PK>>>>::new();
 
-            while active_flag.load(Ordering::SeqCst) {
+            loop {
                 tokio::select! {
                     Some(msg) = request_rx.recv() => {
                         if let request_response::Payload::Request(Request::VSSShare { id, share }) = msg.payload {
@@ -234,10 +232,15 @@ where
                 }
             }
         });
+
+        self.handle = Some(handle);
     }
 
-    pub fn stop(&self) {
-        self.is_active.store(false, Ordering::SeqCst);
+    pub fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+        self.query_sender = None;
     }
 
     pub async fn query(&self, request_id: Vec<u8>) -> Result<Vec<CompletePair<SK, PK>>> {
