@@ -1,6 +1,6 @@
 use tokio::time::Duration;
 
-use crate::crypto::core::threshold_counter::ThresholdCounter;
+use crate::crypto::primitives::threshold;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_SIGN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -10,14 +10,14 @@ const DEFAULT_SIGN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Config {
     pub timeout: Duration,
     pub sign_timeout: Duration,
-    pub threshold_counter: ThresholdCounter,
+    pub threshold_counter: threshold::ThresholdCounter,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let timeout = DEFAULT_TIMEOUT;
         let sign_timeout = DEFAULT_SIGN_TIMEOUT;
-        let threshold_counter = ThresholdCounter::default();
+        let threshold_counter = threshold::ThresholdCounter::default();
 
         Self {
             timeout,

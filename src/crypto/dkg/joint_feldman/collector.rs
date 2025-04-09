@@ -1,10 +1,8 @@
 use crate::{
-    crypto::{
-        core::threshold_counter::ThresholdCounter,
-        primitives::{
-            algebra::element::{Public, Secret},
-            vss::Vss,
-        },
+    crypto::primitives::{
+        algebra::element::{Public, Secret},
+        threshold,
+        vss::Vss,
     },
     network::transport::libp2p_transport::protocols::{
         gossipsub,
@@ -125,7 +123,7 @@ where
 {
     id: libp2p::PeerId,
     timeout: tokio::time::Duration,
-    threshold_counter: ThresholdCounter,
+    threshold_counter: threshold::ThresholdCounter,
     handle: Option<tokio::task::JoinHandle<()>>,
     query_sender: Option<QuerySender<SK, PK>>,
     _marker: PhantomData<V>,
@@ -140,7 +138,7 @@ where
     pub fn new(
         id: libp2p::PeerId,
         timeout: tokio::time::Duration,
-        threshold_counter: ThresholdCounter,
+        threshold_counter: threshold::ThresholdCounter,
     ) -> Self {
         Self {
             id,

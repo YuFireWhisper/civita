@@ -1,6 +1,6 @@
 use std::iter::Sum;
 
-pub trait Element: Sum {
+pub trait Element: Sum + Clone + Sync + Send {
     fn random() -> Self;
 }
 
@@ -12,7 +12,7 @@ pub trait Secret: Element {
     fn from_bytes(bytes: &[u8]) -> Self;
 }
 
-pub trait Public: Element + Clone {
+pub trait Public: Element {
     type Secret: Secret<PublicKey = Self>;
 
     fn to_vec(&self) -> Vec<u8>;

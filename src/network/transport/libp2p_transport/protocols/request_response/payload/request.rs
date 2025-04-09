@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
     DkgScalar(Vec<u8>),
     DkgShare(Vec<u8>),
+    VSSShare { id: Vec<u8>, share: Vec<u8> },
     Raw(Vec<u8>), // For testing
 }
 

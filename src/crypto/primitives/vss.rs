@@ -1,16 +1,8 @@
-use crate::crypto::core::element::{Public, Secret};
 use std::error::Error;
 
-pub struct Shares<SK, PK>
-where
-    SK: Secret,
-    PK: Public,
-{
-    pub shares: Vec<SK>,
-    pub commitments: Vec<PK>,
-}
+use crate::crypto::primitives::algebra::element::{Public, Secret};
 
-pub trait Vss<SK, PK>
+pub trait Vss<SK, PK>: Send + Sync + Send
 where
     SK: Secret,
     PK: Public,

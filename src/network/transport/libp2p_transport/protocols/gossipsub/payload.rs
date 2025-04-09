@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{crypto::dkg::Data, network::transport::libp2p_transport::protocols::kad};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
 pub enum Payload {
     VrfRequest,
 
@@ -23,6 +26,12 @@ pub enum Payload {
     VrfProcessFailure(MessageId),
 
     DkgVSS(Vec<u8>),
+
+    VSSCommitments {
+        id: Vec<u8>,
+        commitments: Vec<Vec<u8>>,
+    },
+
     DkgVSS_(Vec<Vec<u8>>),
 
     // Raw message, for other node checks
