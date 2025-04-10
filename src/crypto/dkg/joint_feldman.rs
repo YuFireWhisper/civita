@@ -2,7 +2,10 @@ use std::{collections::HashSet, iter, sync::Arc};
 
 use crate::{
     crypto::{
-        dkg::{joint_feldman::{collector::Collector, distributor::Distributor}, Dkg_},
+        dkg::{
+            joint_feldman::{collector::Collector, distributor::Distributor},
+            Dkg_, GenerateOutput,
+        },
         primitives::{
             algebra::element::{Public, Secret},
             vss::Vss,
@@ -113,13 +116,13 @@ where
             .expect("Self peer not found in peers list");
 
         self.collector.stop();
-        self.collector.start(topic_rx, peers_rx, &peers);
+        self.collector.start(topic_rx, peers_rx, peers.clone());
         self.peers = Some(peers);
         self.own_index = Some(own_index as u16 + 1);
         Ok(())
     }
 
-    pub async fn generate(&mut self, id: Vec<u8>) -> Result<(Vec<SK>, Vec<PK>)> {
+    pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>> {
         assert!(self.peers.is_some(), "Peers is empty");
 
         let peers = self
@@ -140,29 +143,29 @@ where
             .publish_commitments(VSS_COMMITMENTS_ID, &commitments)
             .await?;
 
-        let verified_pairs = self.collector.query(id).await?;
-
-        let (full_shares, full_commitments) = verified_pairs
+        let result = self.collector.query(id).await?;
+        let mut full_shares = result.shares;
+        full_shares.push(own_shares);
+        let full_commitments = result
+            .commitments
             .into_iter()
-            .map(|pair| {
-                let share = pair.share.to_owned();
-                let commitment = pair
-                    .commitments
-                    .into_iter()
-                    .next()
-                    .expect("Commitment not found");
-                (share, commitment)
-            })
-            .chain(iter::once((
-                own_shares,
+            .map(|commitment| commitment.into_iter().next().expect("Commitment not found"))
+            .chain(iter::once(
                 commitments
                     .into_iter()
                     .next()
                     .expect("Commitment not found"),
-            )))
-            .collect::<(Vec<_>, Vec<_>)>();
+            ))
+            .collect::<Vec<_>>();
 
-        Ok((full_shares, full_commitments))
+        let secret = full_shares.into_iter().sum();
+        let public = full_commitments.into_iter().sum();
+
+        Ok(GenerateOutput {
+            secret,
+            public,
+            participants: result.participants,
+        })
     }
 
     fn generate_shares(&self, nums: u16) -> Result<(Vec<SK>, Vec<PK>)> {
@@ -186,7 +189,7 @@ where
         self.set_peers(peers).await
     }
 
-    async fn generate(&mut self, id: Vec<u8>) -> Result<(Vec<SK>, Vec<PK>)> {
+    async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>> {
         self.generate(id).await
     }
 }
