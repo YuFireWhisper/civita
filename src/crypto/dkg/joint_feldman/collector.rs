@@ -189,7 +189,7 @@ where
 {
     own_peer: libp2p::PeerId,
     timeout: tokio::time::Duration,
-    threshold_counter: threshold::ThresholdCounter,
+    threshold_counter: threshold::Counter,
     handle: Option<tokio::task::JoinHandle<()>>,
     query_sender: Option<QuerySender<SK, PK>>,
     _marker: PhantomData<V>,
@@ -204,7 +204,7 @@ where
     pub fn new(
         id: libp2p::PeerId,
         timeout: tokio::time::Duration,
-        threshold_counter: threshold::ThresholdCounter,
+        threshold_counter: threshold::Counter,
     ) -> Self {
         Self {
             own_peer: id,

@@ -2,11 +2,11 @@ use std::fmt::Debug;
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
-pub struct ThresholdCounter {
+pub struct Counter {
     counter_fn: fn(u16) -> u16,
 }
 
-impl ThresholdCounter {
+impl Counter {
     pub fn new(f: fn(u16) -> u16) -> Self {
         Self { counter_fn: f }
     }
@@ -16,7 +16,7 @@ impl ThresholdCounter {
     }
 }
 
-impl Default for ThresholdCounter {
+impl Default for Counter {
     fn default() -> Self {
         Self::new(|n| 2 * n / 3 + 1)
     }

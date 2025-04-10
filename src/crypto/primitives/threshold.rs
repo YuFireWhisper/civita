@@ -1,3 +1,3 @@
 pub mod counter;
 
-pub use counter::ThresholdCounter;
+pub use counter::Counter;
