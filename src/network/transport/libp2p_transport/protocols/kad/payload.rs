@@ -10,6 +10,9 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("Failed to encode payload: {0}")]
     Encode(#[from] EncodeError),
+
+    #[error("Serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
 }
 
 #[derive(Debug)]
@@ -39,5 +42,13 @@ impl TryFrom<&Payload> for Vec<u8> {
 
     fn try_from(payload: &Payload) -> std::result::Result<Self, Self::Error> {
         encode_to_vec(payload, config::standard())
+    }
+}
+
+impl TryFrom<libp2p::kad::Record> for Payload {
+    type Error = Error;
+
+    fn try_from(record: libp2p::kad::Record) -> std::result::Result<Self, Self::Error> {
+        Ok(serde_json::from_slice(&record.value)?)
     }
 }

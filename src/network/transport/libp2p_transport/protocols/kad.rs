@@ -1,14 +1,17 @@
+use std::sync::Arc;
+
+use dashmap::DashMap;
+
+use crate::{crypto::dkg, network::transport::libp2p_transport::behaviour::Behaviour};
+
+pub mod key;
 pub mod message;
 pub mod payload;
 pub mod validated_store;
 
-use std::sync::Arc;
-
-use dashmap::DashMap;
+pub use key::Key;
 pub use message::Message;
 pub use payload::Payload;
-
-use crate::{crypto::dkg, network::transport::libp2p_transport::behaviour::Behaviour};
 
 pub const PEER_INFO_KEY: &str = "peer";
 
@@ -27,7 +30,7 @@ pub enum Error {
     InvalidPayloadType,
 
     #[error("Waiting for Kademlia operation timed out after {0:?}")]
-    Timeout(tokio::time::Duration),
+    Timeout(#[from] tokio::time::error::Elapsed),
 
     #[error("{0}")]
     Message(#[from] message::Error),
@@ -37,6 +40,12 @@ pub enum Error {
 
     #[error("Store error: {0}")]
     Store(#[from] libp2p::kad::store::Error),
+
+    #[error("{0}")]
+    Key(#[from] key::Error),
+
+    #[error("Payload error: {0}")]
+    Payload(#[from] payload::Error),
 }
 
 #[derive(Debug)]
@@ -159,41 +168,36 @@ impl Kad {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_put_queries.insert(query_id, tx);
 
-        match tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await {
-            Ok(result) => result?,
-            Err(_) => {
-                self.waiting_put_queries.remove(&query_id);
-                Err(Error::Timeout(self.config.wait_for_kad_result_timeout))
-            }
-        }
+        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
+            .await??
+            .map_err(Error::from)
     }
 
     fn generate_key(payload: &Payload) -> Result<libp2p::kad::RecordKey> {
-        match payload {
-            Payload::PeerInfo { peer_id, .. } => {
-                let str = format!("{}/{}", PEER_INFO_KEY, peer_id);
-                Ok(libp2p::kad::RecordKey::new(&str))
-            }
-            _ => Err(Error::InvalidPayloadType),
-        }
+        let key = match payload {
+            Payload::PeerInfo { peer_id, .. } => Key::PeerInfo(*peer_id),
+            _ => return Err(Error::InvalidPayloadType),
+        };
+
+        Ok(key.to_storage_key()?)
     }
 
-    pub async fn get(
-        &self,
-        key: libp2p::kad::RecordKey,
-    ) -> Result<Option<libp2p::kad::PeerRecord>> {
+    pub async fn get(&self, key: Key) -> Result<Option<Payload>> {
         let mut swarm = self.swarm.lock().await;
+        let key = key.to_storage_key()?;
         let query_id = swarm.behaviour_mut().kad_mut().get_record(key);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_get_queries.insert(query_id, tx);
 
-        match tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await {
-            Ok(result) => result?,
-            Err(_) => {
-                self.waiting_get_queries.remove(&query_id);
-                Err(Error::Timeout(self.config.wait_for_kad_result_timeout))
+        let peer_record_opt =
+            tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
+        match peer_record_opt {
+            Some(peer_record) => {
+                let payload = Payload::try_from(peer_record.record)?;
+                Ok(Some(payload))
             }
+            None => Ok(None),
         }
     }
 }

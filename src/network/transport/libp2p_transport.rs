@@ -264,6 +264,10 @@ impl Transport for Libp2pTransport {
         self.kad.put(payload, signature).await.map_err(Error::from)
     }
 
+    async fn get(&self, key: kad::Key) -> Result<Option<kad::Payload>> {
+        self.kad.get(key).await.map_err(Error::from)
+    }
+
     fn self_peer(&self) -> PeerId {
         self.self_peer
     }
