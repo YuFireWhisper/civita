@@ -271,6 +271,10 @@ impl Transport for Libp2pTransport {
     fn self_peer(&self) -> PeerId {
         self.self_peer
     }
+
+    fn keypair(&self) -> &libp2p::identity::Keypair {
+        self.keypair.as_ref()
+    }
 }
 
 impl std::fmt::Debug for Libp2pTransport {

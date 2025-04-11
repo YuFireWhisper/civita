@@ -40,4 +40,5 @@ pub trait Transport: Send + Sync {
     async fn put(&self, payload: kad::Payload, signature: Data) -> Result<(), Self::Error>;
     async fn get(&self, key: kad::Key) -> Result<Option<kad::Payload>, Self::Error>;
     fn self_peer(&self) -> libp2p::PeerId;
+    fn keypair(&self) -> &libp2p::identity::Keypair;
 }
