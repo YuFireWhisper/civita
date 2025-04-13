@@ -120,15 +120,18 @@ mod tests {
 
     #[test]
     fn different_keys() {
+        const MESSAGE: &[u8] = b"Hello, world!";
+
         let (sk1, pk1) = super::generate_keypair();
         let (sk2, pk2) = super::generate_keypair();
 
         assert_ne!(sk1.as_bytes(), sk2.as_bytes());
         assert_ne!(pk1.as_bytes(), pk2.as_bytes());
 
-        let ciphertext = pk1.encrypt(b"Hello").expect("Encryption failed");
-        let decrypted = sk2.decrypt(&ciphertext).expect("Decryption failed");
-
-        assert_ne!(decrypted, b"Hello");
+        let ciphertext = pk1.encrypt(MESSAGE).expect("Encryption failed");
+        assert!(
+            sk2.decrypt(&ciphertext).is_err(),
+            "Decryption should fail with different keys"
+        );
     }
 }
