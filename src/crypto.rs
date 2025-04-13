@@ -1,4 +1,5 @@
 pub mod dkg;
+pub mod keypair;
 pub mod keypair_;
 pub mod primitives;
 pub mod tss;
