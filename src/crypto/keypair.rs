@@ -17,6 +17,7 @@ pub enum Error {
     Secpk1(#[from] secp256k1::Error),
 }
 
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 pub enum SecretKey {
