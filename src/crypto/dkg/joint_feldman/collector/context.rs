@@ -30,6 +30,13 @@ pub enum Error {
     EventNotFound(String),
 }
 
+#[derive(Debug)]
+pub struct EventOutput {
+    pub invalid_peers: HashSet<libp2p::PeerId>,
+    // If invalid_peers isn's empty, shares will be None
+    pub shares: Option<HashMap<libp2p::PeerId, Shares>>,
+}
+
 pub enum VerificationResult {
     AccusedFailed,
     PlaintiffFailed,
@@ -167,12 +174,12 @@ impl Context {
     }
 
     pub fn verify<SK: Secret, PK: Public, V: Vss<SK, PK>>(
-        &self,
+        &mut self,
         id: Vec<u8>,
         accused_peer: libp2p::PeerId,
         plaintiff_peer: libp2p::PeerId,
         accused_raw_share: &[u8],
-    ) -> Result<VerificationResult> {
+    ) -> Result<()> {
         let accused_index = self.peer_index(accused_peer)?;
         let plaintiff_index = self.peer_index(plaintiff_peer)?;
         let plaintiff_public_key = self.peer_public_key(&plaintiff_peer)?;
@@ -180,12 +187,23 @@ impl Context {
             String::from_utf8_lossy(&id).to_string(),
         ))?;
 
-        event.verify::<SK, PK, V>(
+        let result = event.verify::<SK, PK, V>(
             accused_index,
             plaintiff_index,
             accused_raw_share,
             plaintiff_public_key,
-        )
+        )?;
+
+        match result {
+            VerificationResult::AccusedFailed => {
+                self.invalid_peers.insert(accused_peer);
+            }
+            VerificationResult::PlaintiffFailed => {
+                self.invalid_peers.insert(plaintiff_peer);
+            }
+        }
+
+        Ok(())
     }
 
     fn peer_public_key(&self, peer: &libp2p::PeerId) -> Result<&PublicKey> {
@@ -193,6 +211,31 @@ impl Context {
             .get(peer)
             .map(|peer_info| &peer_info.public_key)
             .ok_or(Error::PeerNotFound(*peer))
+    }
+
+    pub fn output(&mut self, id: Vec<u8>) -> Result<EventOutput> {
+        if !self.invalid_peers.is_empty() {
+            return Ok(EventOutput {
+                invalid_peers: self.invalid_peers.clone(),
+                shares: None,
+            });
+        }
+
+        let event = self.events.remove(&id).ok_or(Error::EventNotFound(
+            String::from_utf8_lossy(&id).to_string(),
+        ))?;
+
+        let mut shares_map = HashMap::new();
+        for (peer_id, peer_info) in &self.peers {
+            if let Ok(shares) = event.share(peer_info.index) {
+                shares_map.insert(*peer_id, shares.clone());
+            }
+        }
+
+        Ok(EventOutput {
+            invalid_peers: HashSet::new(),
+            shares: Some(shares_map),
+        })
     }
 }
 
