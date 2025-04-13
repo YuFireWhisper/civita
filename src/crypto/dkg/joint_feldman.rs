@@ -1,14 +1,19 @@
-use std::{collections::HashSet, iter, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    iter,
+    sync::Arc,
+};
 
 use crate::{
     crypto::{
         dkg::{
-            joint_feldman::{collector::Collector, distributor::Distributor},
+            joint_feldman::{collector::Collector, distributor::Distributor, peer_info::PeerInfo},
             Dkg_, GenerateOutput,
         },
+        keypair::PublicKey,
         primitives::{
             algebra::element::{Public, Secret},
-            vss::Vss,
+            vss::{Shares, Vss},
         },
     },
     network::transport::Transport,
@@ -17,6 +22,7 @@ use crate::{
 mod collector;
 mod config;
 mod distributor;
+mod peer_info;
 
 pub use config::Config;
 
@@ -65,7 +71,7 @@ where
     config: Config,
     collector: Collector<SK, PK, VSS>,
     distributor: Distributor<T, SK, PK>,
-    peers: Option<Vec<libp2p::PeerId>>,
+    peers: Option<HashMap<libp2p::PeerId, PeerInfo>>,
     own_index: Option<u16>,
 }
 
@@ -94,7 +100,7 @@ where
         })
     }
 
-    pub async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<()> {
+    pub async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         assert!(peers.len() > 1, "ids length must be greater than 1");
         assert!(
             peers.len() <= u16::MAX as usize,
@@ -106,19 +112,21 @@ where
             .listen_on_topic(DKG_TOPIC)
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
-        let peers_rx = self.transport.listen_on_peers(peers.clone()).await;
-        let mut peers = peers.into_iter().collect::<Vec<_>>();
-        peers.sort_unstable();
+        let peer_set = peers.keys().copied().collect::<HashSet<_>>();
+        let peers_rx = self.transport.listen_on_peers(peer_set.clone()).await;
 
-        let own_index = peers
-            .iter()
-            .position(|peer| peer == &self.transport.self_peer())
-            .expect("Self peer not found in peers list");
+        let peer_info_map = PeerInfo::from_map(peers);
+        let own_index = peer_info_map
+            .get(&self.transport.self_peer())
+            .expect("Own peer not found")
+            .index;
+
+        let peer_vec = peer_set.iter().cloned().collect::<Vec<_>>();
 
         self.collector.stop();
-        self.collector.start(topic_rx, peers_rx, peers.clone());
-        self.peers = Some(peers);
-        self.own_index = Some(own_index as u16 + 1);
+        self.collector.start(topic_rx, peers_rx, peer_vec);
+        self.peers = Some(peer_info_map);
+        self.own_index = Some(own_index);
         Ok(())
     }
 
@@ -133,15 +141,19 @@ where
             .len()
             .try_into()
             .expect("Peers length is exceeding the maximum, it should checked before");
-        let (mut shares, commitments) = self.generate_shares(nums)?;
-        let own_shares = shares.remove((self.own_index.expect("Own index is empty") - 1) as usize);
+        let mut shares = self.generate_shares(nums)?;
+        let own_share = shares
+            .shares
+            .remove(&self.own_index.expect("Own index is empty"))
+            .expect("Own share not found");
+        let own_shares = SK::from_bytes(&own_share);
+        let own_commitment = shares
+            .commitments
+            .first()
+            .map(|commitment| PK::from_bytes(commitment))
+            .expect("Own commitment not found");
 
-        self.distributor
-            .send_shares(peers, VSS_SHARES_ID, &shares)
-            .await;
-        self.distributor
-            .publish_commitments(VSS_COMMITMENTS_ID, &commitments)
-            .await?;
+        self.distributor.send_shares(peers, shares).await?;
 
         let result = self.collector.query(id).await?;
         let mut full_shares = result.shares;
@@ -150,12 +162,7 @@ where
             .commitments
             .into_iter()
             .map(|commitment| commitment.into_iter().next().expect("Commitment not found"))
-            .chain(iter::once(
-                commitments
-                    .into_iter()
-                    .next()
-                    .expect("Commitment not found"),
-            ))
+            .chain(iter::once(own_commitment))
             .collect::<Vec<_>>();
 
         let secret = full_shares.into_iter().sum();
@@ -168,7 +175,7 @@ where
         })
     }
 
-    fn generate_shares(&self, nums: u16) -> Result<(Vec<SK>, Vec<PK>)> {
+    fn generate_shares(&self, nums: u16) -> Result<Shares> {
         let secret = SK::random();
         let threshold = self.config.threshold_counter.call(nums);
         VSS::share(&secret, threshold, nums).map_err(|e| Error::Vss(e.to_string()))
@@ -185,7 +192,7 @@ where
 {
     type Error = Error;
 
-    async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<()> {
+    async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         self.set_peers(peers).await
     }
 

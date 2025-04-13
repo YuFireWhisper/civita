@@ -13,6 +13,7 @@ use std::{collections::HashMap, marker::PhantomData};
 use thiserror::Error;
 
 pub mod config;
+mod context;
 
 type Result<T> = std::result::Result<T, Error>;
 

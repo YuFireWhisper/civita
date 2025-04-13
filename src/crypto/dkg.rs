@@ -1,8 +1,11 @@
 use crate::{
-    crypto::primitives::algebra::element::{Public, Secret},
+    crypto::{
+        keypair::PublicKey,
+        primitives::algebra::element::{Public, Secret},
+    },
     MockError,
 };
-use std::{collections::HashSet, error::Error};
+use std::{collections::HashMap, error::Error};
 
 use async_trait::async_trait;
 use mockall::automock;
@@ -45,6 +48,9 @@ where
 pub trait Dkg_<SK: Secret, PK: Public> {
     type Error: Error;
 
-    async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<(), Self::Error>;
+    async fn set_peers(
+        &mut self,
+        peers: HashMap<libp2p::PeerId, PublicKey>,
+    ) -> Result<(), Self::Error>;
     async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>, Self::Error>;
 }

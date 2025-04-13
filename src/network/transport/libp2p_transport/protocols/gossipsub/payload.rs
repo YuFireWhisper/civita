@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
-use crate::{crypto::dkg::Data, network::transport::libp2p_transport::protocols::kad};
+use crate::{
+    crypto::{dkg::Data, primitives::vss::Shares},
+    network::transport::libp2p_transport::protocols::kad,
+};
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -26,6 +29,8 @@ pub enum Payload {
     VrfProcessFailure(MessageId),
 
     DkgVSS(Vec<u8>),
+
+    VSSShares(Shares),
 
     VSSCommitments {
         id: Vec<u8>,

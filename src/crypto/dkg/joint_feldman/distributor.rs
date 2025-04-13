@@ -1,12 +1,12 @@
-use std::marker::PhantomData;
 use std::sync::Arc;
+use std::{collections::HashMap, marker::PhantomData};
 
+use crate::crypto;
+use crate::crypto::dkg::joint_feldman::peer_info::PeerInfo;
+use crate::crypto::primitives::vss::Shares;
 use crate::{
     crypto::primitives::algebra::element::{Public, Secret},
-    network::transport::{
-        libp2p_transport::protocols::{gossipsub, request_response::payload::Request},
-        Transport,
-    },
+    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -16,6 +16,12 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("{0}")]
     Transport(String),
+
+    #[error("Keypair error: {0}")]
+    Keypair(#[from] crypto::keypair::Error),
+
+    #[error("Share not found for peer index: {0}")]
+    ShareNotFound(u16),
 }
 
 pub struct Distributor<T, SK, PK>
@@ -43,33 +49,33 @@ where
         }
     }
 
-    pub async fn send_shares(&self, peers: &[libp2p::PeerId], id: &[u8], shares: &[SK]) {
-        assert_eq!(peers.len(), shares.len(), "IDs and shares length mismatch");
+    pub async fn send_shares(
+        &self,
+        peers: &HashMap<libp2p::PeerId, PeerInfo>,
+        mut shares: Shares,
+    ) -> Result<()> {
+        assert_eq!(
+            peers.len(),
+            shares.shares.len(),
+            "Number of peers must match the number of shares"
+        );
 
-        for (peer, share) in peers.iter().zip(shares.iter()) {
-            let request = Request::VSSShare {
-                id: id.to_vec(),
-                share: share.to_vec(),
-            };
-            self.transport.request(peer, request).await;
-        }
-    }
-
-    pub async fn publish_commitments(&self, id: &[u8], commitments: &[PK]) -> Result<()> {
-        let commitments_bytes = commitments
-            .iter()
-            .map(|commitment| commitment.to_vec())
-            .collect::<Vec<_>>();
-
-        let payload = gossipsub::Payload::VSSCommitments {
-            id: id.to_vec(),
-            commitments: commitments_bytes,
-        };
+        shares.shares = peers
+            .values()
+            .map(|peer_info| {
+                let share = shares
+                    .shares
+                    .get(&peer_info.index)
+                    .ok_or(Error::ShareNotFound(peer_info.index))?;
+                Ok((peer_info.index, peer_info.public_key.encrypt(share)?))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
 
         self.transport
-            .publish(&self.topic, payload)
+            .publish(&self.topic, gossipsub::Payload::VSSShares(shares))
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
+
         Ok(())
     }
 }
