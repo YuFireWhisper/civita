@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::crypto::{
     dkg::{classic::CurveType, Data, Scheme},
-    Keypair,
+    Keypair_,
 };
 
 #[derive(Clone)]
@@ -35,7 +35,7 @@ pub struct SignatureBytes {
 }
 
 impl<E: Curve> Signature<E> {
-    pub fn generate<H: Digest + Clone>(seed: &[u8], message: &[u8], keypair: &Keypair<E>) -> Self {
+    pub fn generate<H: Digest + Clone>(seed: &[u8], message: &[u8], keypair: &Keypair_<E>) -> Self {
         assert!(!seed.is_empty(), "Seed is empty");
         assert!(!message.is_empty(), "Message is empty");
 
@@ -285,7 +285,7 @@ impl SignatureBytes {
 
 impl<E: Curve> Scheme for Signature<E> {
     type Error = ();
-    type Keypair = Keypair<E>;
+    type Keypair = Keypair_<E>;
 
     fn sign(seed: &[u8], message: &[u8], keypair: &Self::Keypair) -> Result<Data, Self::Error> {
         let signature = Self::generate::<Sha256>(seed, message, keypair);
@@ -369,7 +369,7 @@ mod signature_tests {
     use curv::elliptic::curves::Secp256k1;
     use sha2::Sha256;
 
-    use crate::crypto::{dkg::classic::Signature, Keypair};
+    use crate::crypto::{dkg::classic::Signature, Keypair_};
 
     type E = Secp256k1;
     type H = Sha256;
@@ -381,7 +381,7 @@ mod signature_tests {
 
     #[test]
     fn signature_validates_with_correct_message_and_key() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let signature = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
 
         assert!(signature.validate::<H>(MESSAGE, keypair.public_key()));
@@ -389,7 +389,7 @@ mod signature_tests {
 
     #[test]
     fn signature_fails_with_different_message() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let signature = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
 
         assert!(!signature.validate::<H>(DIFFERENT_MESSAGE, keypair.public_key()));
@@ -397,8 +397,8 @@ mod signature_tests {
 
     #[test]
     fn signature_fails_with_different_public_key() {
-        let keypair = Keypair::<E>::random();
-        let different_keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
+        let different_keypair = Keypair_::<E>::random();
         let signature = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
 
         assert!(!signature.validate::<H>(MESSAGE, different_keypair.public_key()));
@@ -406,7 +406,7 @@ mod signature_tests {
 
     #[test]
     fn default_signature_is_invalid() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let default_signature = Signature::<E>::default();
 
         assert!(!default_signature.validate::<H>(MESSAGE, keypair.public_key()));
@@ -414,7 +414,7 @@ mod signature_tests {
 
     #[test]
     fn signatures_with_same_input_are_identical() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let signature1 = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
         let signature2 = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
 
@@ -424,7 +424,7 @@ mod signature_tests {
 
     #[test]
     fn signatures_with_different_seeds_are_different() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let signature1 = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
         let signature2 = Signature::<E>::generate::<H>(ANOTHER_SEED, MESSAGE, &keypair);
 
@@ -434,7 +434,7 @@ mod signature_tests {
 
     #[test]
     fn serialization_deserialization_preserves_signature() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let original = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
 
         let serialized: Vec<u8> = original.clone().into();
@@ -448,7 +448,7 @@ mod signature_tests {
     fn aggregated_signature_validates_correctly() {
         const NUM_SIGNERS: u16 = 3;
 
-        let keypairs = Keypair::<E>::related_random::<H, _>(NUM_SIGNERS, |n| 2 * n / 3);
+        let keypairs = Keypair_::<E>::related_random::<H, _>(NUM_SIGNERS, |n| 2 * n / 3);
 
         let indices: Vec<u16> = (1..NUM_SIGNERS + 1).collect();
 
@@ -473,14 +473,14 @@ mod signature_tests {
     #[test]
     #[should_panic(expected = "Seed is empty")]
     fn empty_seed_causes_panic() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let _signature = Signature::<E>::generate::<H>(&[], MESSAGE, &keypair);
     }
 
     #[test]
     #[should_panic(expected = "Message is empty")]
     fn empty_message_causes_panic() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let _signature = Signature::<E>::generate::<H>(SEED, &[], &keypair);
     }
 
@@ -494,7 +494,7 @@ mod signature_tests {
     #[test]
     #[should_panic(expected = "Indices and signatures must have the same length")]
     fn aggregate_mismatched_indices_causes_panic() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let signature = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
         let signatures = vec![signature];
         let indices = [1, 2];
@@ -504,7 +504,7 @@ mod signature_tests {
 
     #[test]
     fn random_pub_key_returns_correct_value() {
-        let keypair = Keypair::<E>::random();
+        let keypair = Keypair_::<E>::random();
         let signature = Signature::<E>::generate::<H>(SEED, MESSAGE, &keypair);
 
         assert!(signature.random_pub_key().is_some());
