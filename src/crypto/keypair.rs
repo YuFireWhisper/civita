@@ -65,7 +65,8 @@ impl TryFrom<&[u8]> for Keypair {
     type Error = Error;
 
     fn try_from(slice: &[u8]) -> Result<Self> {
-        Self::from_slice(slice)
+        bincode::decode_from_slice(slice, bincode::config::standard())
+            .map_err(Error::from).map(|(keypair, _)| keypair)
     }
 }
 
