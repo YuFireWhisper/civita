@@ -28,6 +28,9 @@ pub enum Error {
 
     #[error("Event with ID {0} not found")]
     EventNotFound(String),
+
+    #[error("Event with ID {0} already output")]
+    EventAlreadyOutput(String),
 }
 
 #[derive(Debug)]
@@ -55,6 +58,7 @@ pub struct Context {
     secret_key: SecretKey,
     own_index: u16,
     events: HashMap<Vec<u8>, Event>,
+    is_output: HashSet<Vec<u8>>,
 }
 
 impl Event {
@@ -140,6 +144,7 @@ impl Context {
             secret_key,
             own_index,
             events: HashMap::new(),
+            is_output: HashSet::new(),
         }
     }
 
@@ -151,6 +156,12 @@ impl Context {
     ) -> Result<()> {
         if self.invalid_peers.contains(&source) || !self.peers.contains_key(&source) {
             return Ok(());
+        }
+
+        if self.is_output.contains(&id) {
+            return Err(Error::EventAlreadyOutput(
+                String::from_utf8_lossy(&id).to_string(),
+            ));
         }
 
         if shares.verify::<SK, PK, V>(&self.own_index, &self.secret_key)? {
@@ -180,6 +191,18 @@ impl Context {
         plaintiff_peer: libp2p::PeerId,
         accused_raw_share: &[u8],
     ) -> Result<()> {
+        if self.invalid_peers.contains(&accused_peer)
+            || self.invalid_peers.contains(&plaintiff_peer)
+        {
+            return Ok(());
+        }
+
+        if self.is_output.contains(&id) {
+            return Err(Error::EventAlreadyOutput(
+                String::from_utf8_lossy(&id).to_string(),
+            ));
+        }
+
         let accused_index = self.peer_index(accused_peer)?;
         let plaintiff_index = self.peer_index(plaintiff_peer)?;
         let plaintiff_public_key = self.peer_public_key(&plaintiff_peer)?;
@@ -214,6 +237,12 @@ impl Context {
     }
 
     pub fn output(&mut self, id: Vec<u8>) -> Result<EventOutput> {
+        if self.is_output.contains(&id) {
+            return Err(Error::EventAlreadyOutput(
+                String::from_utf8_lossy(&id).to_string(),
+            ));
+        }
+
         if !self.invalid_peers.is_empty() {
             return Ok(EventOutput {
                 invalid_peers: self.invalid_peers.clone(),
@@ -231,6 +260,8 @@ impl Context {
                 shares_map.insert(*peer_id, shares.clone());
             }
         }
+
+        self.is_output.insert(id);
 
         Ok(EventOutput {
             invalid_peers: HashSet::new(),
