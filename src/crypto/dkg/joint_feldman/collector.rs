@@ -12,6 +12,8 @@ use crate::{
 use std::{collections::HashMap, marker::PhantomData};
 use thiserror::Error;
 
+pub mod config;
+
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
