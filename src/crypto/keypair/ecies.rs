@@ -66,8 +66,8 @@ impl Ecies {
         }
     }
 
-    pub fn secret_key(&self) -> Option<&Vec<u8>> {
-        self.secret_key.as_ref()
+    pub fn secret_key(&self) -> Option<&[u8]> {
+        self.secret_key.as_deref()
     }
 
     pub fn public_key(&self) -> &[u8] {
