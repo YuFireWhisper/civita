@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::crypto::keypair::PublicKey;
 
+#[derive(Debug)]
 pub struct PeerInfo {
     pub index: u16,
     pub public_key: PublicKey,

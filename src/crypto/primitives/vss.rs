@@ -26,7 +26,7 @@ pub struct Shares {
     pub commitments: Vec<Vec<u8>>,
 }
 
-pub trait Vss<SK, PK>: Send + Sync + Send
+pub trait Vss<SK, PK>: Send + Sync
 where
     SK: Secret,
     PK: Public,
@@ -49,7 +49,7 @@ impl Shares {
     pub fn verify<SK: Secret, PK: Public, V: Vss<SK, PK>>(
         &self,
         index: &u16,
-        secret_key: SecretKey,
+        secret_key: &SecretKey,
     ) -> Result<bool, SharesError> {
         let encrypted_share = self
             .shares
