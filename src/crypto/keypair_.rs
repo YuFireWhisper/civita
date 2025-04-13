@@ -9,12 +9,12 @@ use crate::crypto::dkg::classic::{config::ThresholdCounter, Signature};
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 #[derive(PartialEq, Eq)]
-pub struct Keypair<E: curv::elliptic::curves::Curve> {
+pub struct Keypair_<E: curv::elliptic::curves::Curve> {
     public_key: curv::elliptic::curves::Point<E>,
     private_key: curv::elliptic::curves::Scalar<E>,
 }
 
-impl<E: curv::elliptic::curves::Curve> Keypair<E> {
+impl<E: curv::elliptic::curves::Curve> Keypair_<E> {
     pub fn new(
         public_key: curv::elliptic::curves::Point<E>,
         private_key: curv::elliptic::curves::Scalar<E>,
@@ -72,14 +72,14 @@ impl<E: curv::elliptic::curves::Curve> Keypair<E> {
         }
 
         let pub_key = pub_key_shares.iter().sum::<Point<E>>();
-        let mut keypairs: Vec<Keypair<E>> = Vec::with_capacity(num as usize);
+        let mut keypairs: Vec<Keypair_<E>> = Vec::with_capacity(num as usize);
 
         while keypairs.len() < num as usize {
             let pri_key_share = pri_key_shares
                 .remove(&(keypairs.len() as u16))
                 .expect("Missing private key share");
             let pri_key: Scalar<E> = pri_key_share.iter().sum();
-            let keypair = Keypair::new(pub_key.clone(), pri_key);
+            let keypair = Keypair_::new(pub_key.clone(), pri_key);
             keypairs.push(keypair);
         }
 

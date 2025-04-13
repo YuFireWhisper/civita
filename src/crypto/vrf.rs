@@ -1,17 +1,17 @@
-use crate::crypto::{vrf::proof::Proof, Keypair};
+use crate::crypto::{vrf::proof::Proof, Keypair_};
 
 pub mod proof;
 
 pub use proof::Output;
 
 pub struct Vrf<E: curv::elliptic::curves::Curve> {
-    keypair: Keypair<E>,
+    keypair: Keypair_<E>,
 }
 
 impl<E: curv::elliptic::curves::Curve> Default for Vrf<E> {
     fn default() -> Self {
         Self {
-            keypair: Keypair::random(),
+            keypair: Keypair_::random(),
         }
     }
 }

@@ -1,7 +1,5 @@
 use crate::crypto::primitives::algebra::element::{Public, Secret};
 
-pub mod schnorr;
-
 pub trait Tss<SK, PK>
 where
     SK: Secret,

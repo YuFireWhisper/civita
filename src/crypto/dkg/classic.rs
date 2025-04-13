@@ -28,7 +28,7 @@ use crate::{
             classic::{config::Config, peer_share::PeerShare},
             Data, Dkg,
         },
-        keypair::Keypair,
+        keypair_::Keypair_,
     },
     network::transport::{
         libp2p_transport::protocols::{
@@ -89,7 +89,7 @@ pub enum Error {
 }
 
 pub struct Classic<E: Curve> {
-    keypair: Keypair<E>,
+    keypair: Keypair_<E>,
 }
 
 impl<E: Curve> Classic<E> {
@@ -140,7 +140,7 @@ impl<E: Curve> Classic<E> {
         let pub_key = pub_keys.iter().sum();
         let pri_key = shares.iter().sum();
 
-        let keypair = Keypair::new(pub_key, pri_key);
+        let keypair = Keypair_::new(pub_key, pri_key);
 
         Ok(Self { keypair })
     }
