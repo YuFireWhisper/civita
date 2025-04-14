@@ -1,13 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::{collections::HashMap, marker::PhantomData};
 
 use crate::crypto;
 use crate::crypto::dkg::joint_feldman::peer_info::PeerRegistry;
 use crate::crypto::primitives::vss::Shares;
-use crate::{
-    crypto::primitives::algebra::element::{Public, Secret},
-    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
-};
+use crate::network::transport::{libp2p_transport::protocols::gossipsub, Transport};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -27,28 +24,16 @@ pub enum Error {
     PublicKeyNotFound(u16),
 }
 
-pub struct Distributor<T, SK, PK>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret,
-    PK: Public,
-{
+pub struct Distributor<T: Transport + 'static> {
     transport: Arc<T>,
     topic: String,
-    _marker: PhantomData<(SK, PK)>,
 }
 
-impl<T, SK, PK> Distributor<T, SK, PK>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret,
-    PK: Public,
-{
+impl<T: Transport + 'static> Distributor<T> {
     pub fn new(transport: Arc<T>, topic: &str) -> Self {
         Self {
             transport,
             topic: topic.to_string(),
-            _marker: PhantomData,
         }
     }
 

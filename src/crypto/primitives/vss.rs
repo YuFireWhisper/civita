@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
     keypair::{self, SecretKey},
-    primitives::algebra::element::{Public, Secret},
+    primitives::algebra::element::{self, Point, Scalar},
 };
 
 #[derive(Debug)]
@@ -15,6 +15,9 @@ pub enum SharesError {
 
     #[error("Keypair error: {0}")]
     Keypair(#[from] keypair::Error),
+
+    #[error("Element error: {0}")]
+    Element(#[from] element::Error),
 }
 
 #[derive(Clone)]
@@ -26,16 +29,12 @@ pub struct Shares {
     pub commitments: Vec<Vec<u8>>,
 }
 
-pub trait Vss<SK, PK>: Send + Sync
-where
-    SK: Secret,
-    PK: Public,
-{
+pub trait Vss: Send + Sync {
     type Error: Error;
 
-    fn share(secret: &SK, threshold: u16, num_shares: u16) -> Result<Shares, Self::Error>;
-    fn verify(index: &u16, share: &SK, commitments: &[PK]) -> bool;
-    fn reconstruct(shares: &[(u16, SK)], threshold: u16) -> Result<SK, Self::Error>;
+    fn share(secret: &Scalar, threshold: u16, num_shares: u16) -> Result<Shares, Self::Error>;
+    fn verify(index: &u16, share: &Scalar, commitments: &[Point]) -> bool;
+    fn reconstruct(shares: &[(u16, Scalar)], threshold: u16) -> Result<Scalar, Self::Error>;
 }
 
 impl Shares {
@@ -46,22 +45,18 @@ impl Shares {
         }
     }
 
-    pub fn verify<SK: Secret, PK: Public, V: Vss<SK, PK>>(
-        &self,
-        index: &u16,
-        secret_key: &SecretKey,
-    ) -> Result<bool, SharesError> {
+    pub fn verify<V: Vss>(&self, index: &u16, secret_key: &SecretKey) -> Result<bool, SharesError> {
         let encrypted_share = self
             .shares
             .get(index)
             .ok_or(SharesError::ShareNotFound(*index))?;
         let decrypted_share = secret_key.decrypt(encrypted_share)?;
-        let share = SK::from_bytes(&decrypted_share);
+        let share = Scalar::from_slice(&decrypted_share)?;
         let commitments = self
             .commitments
             .iter()
-            .map(|c| PK::from_bytes(c))
-            .collect::<Vec<_>>();
+            .map(|c| Point::from_slice(c))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(V::verify(index, &share, &commitments))
     }

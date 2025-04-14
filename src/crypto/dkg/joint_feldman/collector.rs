@@ -14,7 +14,7 @@ use crate::{
         },
         keypair::SecretKey,
         primitives::{
-            algebra::element::{Public, Secret},
+            algebra::element::{self, Point, Scalar},
             vss::{Shares, Vss},
         },
     },
@@ -41,12 +41,15 @@ pub enum Error {
 
     #[error("Channel closed")]
     ChannelClosed,
+
+    #[error("Element error: {0}")]
+    Element(#[from] element::Error),
 }
 
-pub enum CollectionResult<SK, PK> {
+pub enum CollectionResult {
     Success {
-        own_shares: Vec<SK>,
-        partial_public: HashMap<libp2p::PeerId, PK>,
+        own_shares: Vec<Scalar>,
+        partial_public: HashMap<libp2p::PeerId, Point>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,
@@ -68,32 +71,26 @@ struct Query {
     callback: oneshot::Sender<EventResult>,
 }
 
-pub struct Collector<T, SK, PK, V>
+pub struct Collector<T, V>
 where
     T: Transport + 'static,
-    SK: Secret + 'static,
-    PK: Public + 'static,
-    V: Vss<SK, PK> + 'static,
+    V: Vss + 'static,
 {
     transport: Arc<T>,
     secret_key: SecretKey,
     config: Config,
     command_tx: Option<mpsc::Sender<Command>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
-    _marker: PhantomData<(SK, PK, V)>,
+    _marker: PhantomData<V>,
 }
 
-impl<SK, PK> CollectionResult<SK, PK>
-where
-    SK: Secret,
-    PK: Public,
-{
+impl CollectionResult {
     pub fn from_shares(
         shares: HashMap<libp2p::PeerId, Shares>,
         own_index: u16,
         secret_key: &SecretKey,
-    ) -> Self {
-        let (own_shares, partial_public): (Vec<_>, HashMap<_, _>) = shares
+    ) -> Result<Self> {
+        let (own_shares, partial_public) = shares
             .into_iter()
             .map(|(peer, share)| {
                 let encrypted_share = share.shares.get(&own_index).expect("Own share not found");
@@ -101,27 +98,23 @@ where
                     .decrypt(encrypted_share)
                     .expect("Decryption failed");
                 let partial_public = share.commitments[0].to_owned();
-
-                (
-                    SK::from_bytes(&decrypted_share),
-                    (peer, PK::from_bytes(&partial_public)),
-                )
+                let share = Scalar::from_slice(&decrypted_share)?;
+                let partial_public = Point::from_slice(&partial_public)?;
+                Ok((share, (peer, partial_public)))
             })
-            .collect();
+            .collect::<Result<(Vec<_>, HashMap<_, _>)>>()?;
 
-        CollectionResult::Success {
+        Ok(CollectionResult::Success {
             own_shares,
             partial_public,
-        }
+        })
     }
 }
 
-impl<T, SK, PK, V> Collector<T, SK, PK, V>
+impl<T, V> Collector<T, V>
 where
     T: Transport + 'static,
-    SK: Secret + 'static,
-    PK: Public + 'static,
-    V: Vss<SK, PK> + 'static,
+    V: Vss + 'static,
 {
     pub fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Self {
         Self {
@@ -261,7 +254,7 @@ where
     ) -> Result<()> {
         match msg.payload {
             gossipsub::Payload::VSSShares { id, shares } => {
-                ctx.add_event::<SK, PK, V>(id, msg.source, shares)?;
+                ctx.add_event::<V>(id, msg.source, shares)?;
             }
             gossipsub::Payload::VSSReport { id, reported } => {
                 if reported == transport.self_peer() {
@@ -283,12 +276,7 @@ where
                 let reported = msg.source;
 
                 for peer in ctx.get_reporters_of(&id, reported) {
-                    ctx.add_report_response::<SK, PK, V>(
-                        id.clone(),
-                        peer,
-                        reported,
-                        raw_share.clone(),
-                    )?;
+                    ctx.add_report_response::<V>(id.clone(), peer, reported, raw_share.clone())?;
                 }
             }
             _ => {}
@@ -334,7 +322,7 @@ where
         }
     }
 
-    pub async fn query(&self, id: Vec<u8>, raw_share: Vec<u8>) -> Result<CollectionResult<SK, PK>> {
+    pub async fn query(&self, id: Vec<u8>, raw_share: Vec<u8>) -> Result<CollectionResult> {
         let (tx, rx) = oneshot::channel();
 
         let cmd_tx = self
@@ -358,7 +346,7 @@ where
                 shares,
                 own_index,
                 &self.secret_key,
-            )),
+            )?),
             EventResult::Failure { invalid_peers } => {
                 Ok(CollectionResult::Failure { invalid_peers })
             }
@@ -376,13 +364,7 @@ where
     }
 }
 
-impl<T, SK, PK, V> Drop for Collector<T, SK, PK, V>
-where
-    T: Transport,
-    SK: Secret,
-    PK: Public,
-    V: Vss<SK, PK>,
-{
+impl<T: Transport, V: Vss> Drop for Collector<T, V> {
     fn drop(&mut self) {
         self.stop();
     }

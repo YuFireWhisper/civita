@@ -1,10 +1,4 @@
-use crate::crypto::primitives::algebra::element::{Public, Secret};
-
-pub trait Tss<SK, PK>
-where
-    SK: Secret,
-    PK: Public,
-{
+pub trait Tss {
     type Error;
     type Signature;
 

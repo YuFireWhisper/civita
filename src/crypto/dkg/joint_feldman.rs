@@ -12,7 +12,7 @@ use crate::{
         },
         keypair::{PublicKey, SecretKey},
         primitives::{
-            algebra::element::{Public, Secret},
+            algebra::element::Scalar,
             vss::{Shares, Vss},
         },
     },
@@ -60,27 +60,15 @@ pub enum Error {
     Distributor(#[from] distributor::Error),
 }
 
-pub struct JointFeldman<T, SK, PK, VSS>
-where
-    T: Transport + 'static,
-    SK: Secret + 'static,
-    PK: Public + 'static,
-    VSS: Vss<SK, PK> + 'static,
-{
+pub struct JointFeldman<T: Transport + 'static, V: Vss + 'static> {
     transport: Arc<T>,
     config: Config,
-    collector: Collector<T, SK, PK, VSS>,
-    distributor: Distributor<T, SK, PK>,
+    collector: Collector<T, V>,
+    distributor: Distributor<T>,
     peers: Option<PeerRegistry>,
 }
 
-impl<T, SK, PK, VSS> JointFeldman<T, SK, PK, VSS>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret + 'static,
-    PK: Public + 'static,
-    VSS: Vss<SK, PK> + 'static,
-{
+impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
     pub async fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Result<Self> {
         let collector_config = collector::Config {
             timeout: config.timeout,
@@ -115,7 +103,7 @@ where
         Ok(())
     }
 
-    pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult<SK, PK>> {
+    pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult> {
         assert!(self.peers.is_some(), "Peers is empty");
 
         let peers = self
@@ -163,27 +151,21 @@ where
     }
 
     fn generate_shares(&self, nums: u16) -> Result<Shares> {
-        let secret = SK::random();
+        let secret = Scalar::random(&self.config.crypto_scheme);
         let threshold = self.config.threshold_counter.call(nums);
-        VSS::share(&secret, threshold, nums).map_err(|e| Error::Vss(e.to_string()))
+        V::share(&secret, threshold, nums).map_err(|e| Error::Vss(e.to_string()))
     }
 }
 
 #[async_trait::async_trait]
-impl<T, SK, PK, VSS> Dkg_<SK, PK> for JointFeldman<T, SK, PK, VSS>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret + 'static,
-    PK: Public + 'static,
-    VSS: Vss<SK, PK> + 'static,
-{
+impl<T: Transport + 'static, V: Vss + 'static> Dkg_ for JointFeldman<T, V> {
     type Error = Error;
 
     async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         self.set_peers(peers).await
     }
 
-    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult<SK, PK>> {
+    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult> {
         self.generate(id).await
     }
 }

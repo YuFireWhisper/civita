@@ -4,7 +4,7 @@ use crate::crypto::{
     dkg::joint_feldman::peer_info::PeerRegistry,
     keypair::{self, PublicKey, SecretKey},
     primitives::{
-        algebra::element::{Public, Secret},
+        algebra::element::{self, Point, Scalar},
         vss::{Shares, SharesError, Vss},
     },
 };
@@ -14,9 +14,6 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("{0}")]
-    Shares(#[from] SharesError),
-
     #[error("Keypair operation failed: {0}")]
     Keypair(#[from] keypair::Error),
 
@@ -37,6 +34,12 @@ pub enum Error {
 
     #[error("Report already exists for reporter {0} against reported {1}")]
     ReportAlreadyExists(String, String),
+
+    #[error("Element error: {0}")]
+    Element(#[from] element::Error),
+
+    #[error("Share error: {0}")]
+    Share(#[from] SharesError),
 }
 
 pub enum EventResult {
@@ -139,7 +142,7 @@ impl Event {
         self.pending_self_reports.remove(reporter);
     }
 
-    pub fn respond_to_report<SK: Secret, PK: Public, V: Vss<SK, PK>>(
+    pub fn respond_to_report<V: Vss>(
         &mut self,
         reporter: libp2p::PeerId,
         reported: libp2p::PeerId,
@@ -174,12 +177,12 @@ impl Event {
             return Ok(());
         }
 
-        let share = SK::from_bytes(&raw_share);
-        let commitments: Vec<_> = accused_share
+        let share = Scalar::from_slice(&raw_share)?;
+        let commitments = accused_share
             .commitments
             .iter()
-            .map(|c| PK::from_bytes(c))
-            .collect();
+            .map(|c| Point::from_slice(c))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         if V::verify(&reporter_index, &share, &commitments) {
             report.result = VerificationResult::ReporterPeerMalicious;
@@ -244,7 +247,7 @@ impl Context {
         }
     }
 
-    pub fn add_event<SK: Secret, PK: Public, V: Vss<SK, PK>>(
+    pub fn add_event<V: Vss>(
         &mut self,
         id: Vec<u8>,
         source: libp2p::PeerId,
@@ -260,7 +263,7 @@ impl Context {
             ));
         }
 
-        if shares.verify::<SK, PK, V>(&self.own_index, &self.secret_key)? {
+        if shares.verify::<V>(&self.own_index, &self.secret_key)? {
             let index = self
                 .peer_index(source)
                 .expect("unrechable: index not found");
@@ -348,7 +351,7 @@ impl Context {
         Ok(())
     }
 
-    pub fn add_report_response<SK: Secret, PK: Public, V: Vss<SK, PK>>(
+    pub fn add_report_response<V: Vss>(
         &mut self,
         id: Vec<u8>,
         reporter: libp2p::PeerId,
@@ -379,7 +382,7 @@ impl Context {
             .events
             .get_mut(&id)
             .expect("unreachable: event not found");
-        event.respond_to_report::<SK, PK, V>(
+        event.respond_to_report::<V>(
             reporter,
             reported,
             raw_share,

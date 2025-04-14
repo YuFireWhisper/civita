@@ -1,7 +1,7 @@
 use crate::{
     crypto::{
         keypair::PublicKey,
-        primitives::algebra::element::{Public, Secret},
+        primitives::algebra::element::{Point, Scalar},
     },
     MockError,
 };
@@ -37,11 +37,11 @@ pub trait DkgFactory {
     async fn create(&self) -> Result<Self::Dkg, Self::Error>;
 }
 
-pub enum GenerateResult<SK: Secret, PK: Public> {
+pub enum GenerateResult {
     Success {
-        secret: SK,
-        public: PK,
-        partial_public: HashMap<libp2p::PeerId, PK>,
+        secret: Scalar,
+        public: Point,
+        partial_public: HashMap<libp2p::PeerId, Point>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,
@@ -49,12 +49,12 @@ pub enum GenerateResult<SK: Secret, PK: Public> {
 }
 
 #[async_trait::async_trait]
-pub trait Dkg_<SK: Secret, PK: Public> {
+pub trait Dkg_ {
     type Error: Error;
 
     async fn set_peers(
         &mut self,
         peers: HashMap<libp2p::PeerId, PublicKey>,
     ) -> Result<(), Self::Error>;
-    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult<SK, PK>, Self::Error>;
+    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult, Self::Error>;
 }
