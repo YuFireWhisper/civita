@@ -1,350 +1,285 @@
-use crate::{
-    crypto::primitives::{
-        algebra::element::{Public, Secret},
-        threshold,
-        vss::Vss,
-    },
-    network::transport::libp2p_transport::protocols::{
-        gossipsub,
-        request_response::{self, payload::Request},
-    },
+use std::{
+    collections::{HashMap, VecDeque},
+    marker::PhantomData,
+    sync::Arc,
 };
-use std::{collections::HashMap, marker::PhantomData};
-use thiserror::Error;
+
+use tokio::sync::{mpsc, oneshot};
+
+use crate::{
+    crypto::{
+        dkg::joint_feldman::{
+            collector::context::{Context, EventOutput},
+            peer_info::PeerInfo,
+        },
+        keypair::SecretKey,
+        primitives::{
+            algebra::element::{Public, Secret},
+            vss::Vss,
+        },
+    },
+    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+};
 
 pub mod config;
 mod context;
 
-type Result<T> = std::result::Result<T, Error>;
+pub use config::Config;
 
-#[derive(Debug, Error)]
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("Collection timed out")]
-    Timeout(#[from] tokio::time::error::Elapsed),
+    #[error("Transport error: {0}")]
+    Transport(String),
 
-    #[error("Recv error: {0}")]
-    Recv(#[from] tokio::sync::oneshot::error::RecvError),
+    #[error("Query error: {0}")]
+    Query(String),
+
+    #[error("Context error: {0}")]
+    Context(String),
 
     #[error("Channel closed")]
     ChannelClosed,
-
-    #[error("Validation failed for peer {0}")]
-    ValidationFailed(libp2p::PeerId),
-
-    #[error("Send error: {0}")]
-    Send(String),
-
-    #[error("Duplicate query")]
-    DuplicateQuery,
 }
 
-struct PartialPair<SK: Secret, PK: Public> {
-    share: Option<SK>,
-    commitments: Option<Vec<PK>>,
+enum Command {
+    Query {
+        id: Vec<u8>,
+        callback: oneshot::Sender<EventOutput>,
+    },
+    ProcessMessage(gossipsub::Message),
+    Shutdown,
 }
 
-#[derive(Clone)]
-pub struct CompletePair<SK: Secret, PK: Public> {
-    pub share: SK,
-    pub commitments: Vec<PK>,
-    pub peer: libp2p::PeerId,
+struct Query {
+    id: Vec<u8>,
+    interval: tokio::time::Interval,
+    callback: oneshot::Sender<EventOutput>,
 }
 
-#[derive(Clone)]
-pub struct CollectionResult<SK: Secret, PK: Public> {
-    pub shares: Vec<SK>,
-    pub commitments: Vec<Vec<PK>>,
-    pub participants: Vec<libp2p::PeerId>,
-}
-
-pub struct CollectionContext<SK: Secret, PK: Public, V: Vss<SK, PK>> {
-    pending: HashMap<u16, PartialPair<SK, PK>>,
-    collected: Vec<CompletePair<SK, PK>>,
-    required: usize,
-    index_map: HashMap<libp2p::PeerId, u16>,
-    own_index: u16,
-    _marker: PhantomData<V>,
-}
-
-impl<SK: Secret, PK: Public, V: Vss<SK, PK>> CollectionContext<SK, PK, V> {
-    pub fn new(threshold: u16, peers: &[libp2p::PeerId], own_peer: libp2p::PeerId) -> Self {
-        let index_map: HashMap<libp2p::PeerId, u16> = peers
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (*p, (i + 1) as u16))
-            .collect();
-        let own_index = *index_map
-            .get(&own_peer)
-            .expect("Own peer not found in index map");
-
-        Self {
-            pending: HashMap::with_capacity(threshold as usize),
-            collected: Vec::with_capacity(threshold as usize),
-            required: threshold as usize,
-            index_map,
-            own_index,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn add_share(
-        &mut self,
-        peer: libp2p::PeerId,
-        share: SK,
-    ) -> Option<CollectionResult<SK, PK>> {
-        if self.index_map.contains_key(&peer) {
-            self.insert(Some(share), None, peer)
-        } else {
-            None
-        }
-    }
-
-    pub fn add_commitments(
-        &mut self,
-        peer: libp2p::PeerId,
-        commitments: Vec<PK>,
-    ) -> Option<CollectionResult<SK, PK>> {
-        if self.index_map.contains_key(&peer) {
-            self.insert(None, Some(commitments), peer)
-        } else {
-            None
-        }
-    }
-
-    fn insert(
-        &mut self,
-        share: Option<SK>,
-        commitments: Option<Vec<PK>>,
-        peer: libp2p::PeerId,
-    ) -> Option<CollectionResult<SK, PK>> {
-        let index = self
-            .index_map
-            .get(&peer)
-            .copied()
-            .expect("Peer not found in index map");
-        let entry = self.pending.entry(index).or_default();
-        if let Some(s) = share {
-            entry.share = Some(s);
-        }
-        if let Some(c) = commitments {
-            entry.commitments = Some(c);
-        }
-
-        if let (Some(s), Some(c)) = (entry.share.take(), entry.commitments.take()) {
-            self.pending.remove(&index);
-            if let Some(valid) = CompletePair::verify::<V>(self.own_index, s, c, peer) {
-                self.collected.push(valid);
-            } else {
-                self.index_map.remove(&peer);
-            }
-        }
-
-        if self.collected.len() >= self.required {
-            let collected = std::mem::take(&mut self.collected);
-
-            let shares = collected.iter().map(|pair| pair.share.clone()).collect();
-            let commitments = collected
-                .iter()
-                .map(|pair| pair.commitments.clone())
-                .collect();
-            let participants = collected.iter().map(|pair| pair.peer).collect();
-
-            Some(CollectionResult {
-                shares,
-                commitments,
-                participants,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn is_peer_valid(&self, peer: &libp2p::PeerId) -> bool {
-        self.index_map.contains_key(peer)
-    }
-}
-
-impl<SK: Secret, PK: Public> CompletePair<SK, PK> {
-    pub fn verify<V: Vss<SK, PK>>(
-        index: u16,
-        share: SK,
-        commitments: Vec<PK>,
-        peer: libp2p::PeerId,
-    ) -> Option<Self> {
-        V::verify(&index, &share, &commitments).then(|| Self {
-            share,
-            commitments,
-            peer,
-        })
-    }
-}
-
-type QuerySender<SK, PK> = tokio::sync::mpsc::Sender<(
-    Vec<u8>,
-    tokio::sync::oneshot::Sender<Option<CollectionResult<SK, PK>>>,
-)>;
-
-pub struct Collector<SK, PK, V>
+pub struct Collector<T, SK, PK, V>
 where
-    SK: Secret,
-    PK: Public,
-    V: Vss<SK, PK>,
-{
-    own_peer: libp2p::PeerId,
-    timeout: tokio::time::Duration,
-    threshold_counter: threshold::Counter,
-    handle: Option<tokio::task::JoinHandle<()>>,
-    query_sender: Option<QuerySender<SK, PK>>,
-    _marker: PhantomData<V>,
-}
-
-impl<SK, PK, V> Collector<SK, PK, V>
-where
+    T: Transport + 'static,
     SK: Secret + 'static,
     PK: Public + 'static,
     V: Vss<SK, PK> + 'static,
 {
-    pub fn new(
-        id: libp2p::PeerId,
-        timeout: tokio::time::Duration,
-        threshold_counter: threshold::Counter,
-    ) -> Self {
+    transport: Arc<T>,
+    secret_key: SecretKey,
+    config: Config,
+    command_tx: Option<mpsc::Sender<Command>>,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
+    _marker: PhantomData<(SK, PK, V)>,
+}
+
+impl<T, SK, PK, V> Collector<T, SK, PK, V>
+where
+    T: Transport + 'static,
+    SK: Secret + 'static,
+    PK: Public + 'static,
+    V: Vss<SK, PK> + 'static,
+{
+    pub fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Self {
         Self {
-            own_peer: id,
-            timeout,
-            threshold_counter,
-            handle: None,
-            query_sender: None,
+            transport,
+            secret_key,
+            config,
+            command_tx: None,
+            worker_handle: None,
             _marker: PhantomData,
         }
     }
 
-    pub fn start(
-        &mut self,
-        mut gossipsub_rx: tokio::sync::mpsc::Receiver<gossipsub::Message>,
-        mut request_rx: tokio::sync::mpsc::Receiver<request_response::Message>,
-        peers: Vec<libp2p::PeerId>,
+    pub async fn start(&mut self, peers: HashMap<libp2p::PeerId, PeerInfo>) -> Result<()> {
+        let (command_tx, command_rx) = mpsc::channel(self.config.query_channel_size);
+        self.command_tx = Some(command_tx);
+
+        let gossipsub_rx = self
+            .transport
+            .listen_on_topic(&self.config.gossipsub_topic)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let secret_key = self.secret_key.clone();
+        let transport = self.transport.clone();
+        let topic = self.config.gossipsub_topic.clone();
+
+        let handle = tokio::spawn(Self::run_worker(
+            peers,
+            secret_key,
+            transport,
+            topic,
+            command_rx,
+            gossipsub_rx,
+        ));
+
+        self.worker_handle = Some(handle);
+        Ok(())
+    }
+
+    async fn run_worker(
+        peers: HashMap<libp2p::PeerId, PeerInfo>,
+        secret_key: SecretKey,
+        transport: Arc<T>,
+        topic: String,
+        mut command_rx: mpsc::Receiver<Command>,
+        mut gossipsub_rx: mpsc::Receiver<gossipsub::Message>,
     ) {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-        self.query_sender = Some(tx);
+        let mut ctx = Context::new(peers, secret_key, transport.self_peer());
+        let mut pending_queries: VecDeque<Query> = VecDeque::new();
 
-        let threshold = self.threshold_counter.call(peers.len() as u16);
-        let own_peer = self.own_peer;
+        loop {
+            tokio::select! {
+                Some(msg) = gossipsub_rx.recv() => {
+                    if let Err(e) = Self::process_message(&mut ctx, &transport, &topic, msg).await {
+                        log::error!("Failed to process message: {}", e);
+                    }
+                }
 
-        let handle = tokio::spawn(async move {
-            let mut contexts = HashMap::<Vec<u8>, CollectionContext<SK, PK, V>>::new();
-            let mut done = HashMap::<Vec<u8>, CollectionResult<SK, PK>>::new();
-            let mut queries = HashMap::<
-                Vec<u8>,
-                tokio::sync::oneshot::Sender<Option<CollectionResult<SK, PK>>>,
-            >::new();
-            let mut queried_ids = std::collections::HashSet::<Vec<u8>>::new();
-
-            loop {
-                tokio::select! {
-                    Some(msg) = request_rx.recv() => {
-                        if let request_response::Payload::Request(Request::VSSShare { id, share }) = msg.payload {
-                            if queried_ids.contains(&id) {
-                                continue;
-                            }
-
-                            let ctx = contexts
-                                .entry(id.clone())
-                                .or_insert_with(|| CollectionContext::new(threshold, &peers, own_peer));
-
-                            if !ctx.is_peer_valid(&msg.peer) {
-                                continue;
-                            }
-
-                            let share = SK::from_bytes(&share);
-
-                            if let Some(result) = ctx.add_share(msg.peer, share) {
-                                contexts.remove(&id);
-                                if let Some(tx) = queries.remove(&id) {
-                                    let _ = tx.send(Some(result));
-                                    queried_ids.insert(id);
-                                } else {
-                                    done.insert(id, result);
-                                }
+                Some(cmd) = command_rx.recv() => {
+                    match cmd {
+                        Command::Query { id, callback } => {
+                            let interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                            pending_queries.push_back(Query { id, interval, callback });
+                        }
+                        Command::ProcessMessage(msg) => {
+                            if let Err(e) = Self::process_message(&mut ctx, &transport, &topic, msg).await {
+                                log::error!("Failed to process message: {}", e);
                             }
                         }
+                        Command::Shutdown => break,
                     }
-                    Some(msg) = gossipsub_rx.recv() => {
-                        if let gossipsub::Payload::VSSCommitments { id, commitments } = msg.payload {
-                            if queried_ids.contains(&id) {
-                                continue;
-                            }
+                }
 
-                            let ctx = contexts
-                                .entry(id.clone())
-                                .or_insert_with(|| CollectionContext::new(threshold, &peers, own_peer));
-
-                            if !ctx.is_peer_valid(&msg.source) {
-                                continue;
-                            }
-
-                            let commitments = commitments
-                                .iter()
-                                .map(|c| PK::from_bytes(c))
-                                .collect::<Vec<_>>();
-
-                            if let Some(result) = ctx.add_commitments(msg.source, commitments) {
-                                contexts.remove(&id);
-                                if let Some(tx) = queries.remove(&id) {
-                                    let _ = tx.send(Some(result));
-                                    queried_ids.insert(id);
-                                } else {
-                                    done.insert(id, result);
-                                }
-                            }
-                        }
+                _ = async {
+                    if let Some(query) = pending_queries.front_mut() {
+                        query.interval.tick().await;
+                        Some(query)
+                    } else {
+                        std::future::pending::<()>().await;
+                        None
                     }
-                    Some((id, responder)) = rx.recv() => {
-                        if queried_ids.contains(&id) {
-                            let _ = responder.send(None);
-                        } else if let Some(result) = done.remove(&id) {
-                            let _ = responder.send(Some(result));
-                        } else {
-                            queries.insert(id, responder);
-                        }
+                } => {
+                    if let Some(query) = pending_queries.pop_front() {
+                        Self::process_query(query, &mut ctx);
                     }
-                    else => break,
+                }
+
+                else => break,
+            }
+        }
+
+        log::info!("Collector worker stopped");
+    }
+
+    async fn process_message(
+        ctx: &mut Context,
+        transport: &Arc<T>,
+        topic: &str,
+        msg: gossipsub::Message,
+    ) -> Result<()> {
+        match msg.payload {
+            gossipsub::Payload::VSSShares { id, shares } => {
+                ctx.add_event::<SK, PK, V>(id, msg.source, shares);
+            }
+            gossipsub::Payload::VSSReport { id, reported } => {
+                if reported == transport.self_peer() {
+                    Self::handle_report_to_self(ctx, transport, id, msg.source, topic).await?;
+                } else {
+                    ctx.add_report_peer(id, reported, msg.source);
                 }
             }
-        });
+            gossipsub::Payload::VSSReportResponse {
+                id,
+                reporter,
+                raw_share,
+            } => {
+                ctx.add_report_response::<SK, PK, V>(id, reporter, msg.source, raw_share);
+            }
+            _ => {}
+        }
 
-        self.handle = Some(handle);
+        Ok(())
+    }
+
+    async fn handle_report_to_self(
+        ctx: &mut Context,
+        transport: &Arc<T>,
+        id: Vec<u8>,
+        reporter: libp2p::PeerId,
+        topic: &str,
+    ) -> Result<()> {
+        let own_share = match ctx.own_share_clone(&id) {
+            Ok(Some(share)) => share,
+            Ok(None) => return Ok(()), // No share yet, ignore
+            Err(e) => return Err(Error::Context(e.to_string())),
+        };
+
+        let payload = gossipsub::Payload::VSSReportResponse {
+            id,
+            reporter,
+            raw_share: own_share,
+        };
+
+        transport
+            .publish(topic, payload)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn process_query(query: Query, ctx: &mut Context) {
+        let result = match ctx.output(query.id.clone()) {
+            Ok(output) => output,
+            Err(e) => {
+                log::error!("Failed to get output: {}", e);
+                return;
+            }
+        };
+
+        if let Err(_) = query.callback.send(result) {
+            log::error!("Failed to send callback, receiver dropped");
+        }
+    }
+
+    pub async fn query(&self, id: Vec<u8>) -> Result<EventOutput> {
+        let (tx, rx) = oneshot::channel();
+
+        let cmd_tx = self
+            .command_tx
+            .as_ref()
+            .ok_or_else(|| Error::Query("Collector not started".to_string()))?;
+
+        cmd_tx
+            .send(Command::Query { id, callback: tx })
+            .await
+            .map_err(|_| Error::ChannelClosed)?;
+
+        rx.await.map_err(|_| Error::ChannelClosed)
     }
 
     pub fn stop(&mut self) {
-        if let Some(handle) = self.handle.take() {
+        if let Some(cmd_tx) = self.command_tx.take() {
+            let _ = cmd_tx.try_send(Command::Shutdown);
+        }
+
+        if let Some(handle) = self.worker_handle.take() {
             handle.abort();
         }
-        self.query_sender = None;
-    }
-
-    pub async fn query(&self, request_id: Vec<u8>) -> Result<CollectionResult<SK, PK>> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let sender = self.query_sender.as_ref().expect("Collector not started");
-        sender
-            .send((request_id.clone(), tx))
-            .await
-            .map_err(|e| Error::Send(e.to_string()))?;
-        tokio::time::timeout(self.timeout, rx)
-            .await??
-            .ok_or(Error::DuplicateQuery)
     }
 }
 
-impl<SK, PK> Default for PartialPair<SK, PK>
+impl<T, SK, PK, V> Drop for Collector<T, SK, PK, V>
 where
+    T: Transport,
     SK: Secret,
     PK: Public,
+    V: Vss<SK, PK>,
 {
-    fn default() -> Self {
-        Self {
-            share: None,
-            commitments: None,
-        }
+    fn drop(&mut self) {
+        self.stop();
     }
 }
+
