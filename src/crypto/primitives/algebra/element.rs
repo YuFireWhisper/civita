@@ -2,8 +2,6 @@ use std::iter::Sum;
 
 use serde::{Deserialize, Serialize};
 
-pub mod ecc;
-
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
