@@ -30,11 +30,24 @@ pub enum Payload {
 
     DkgVSS(Vec<u8>),
 
-    VSSShares(Shares),
+    VSSShares {
+        id: Vec<u8>,
+        shares: Shares,
+    },
 
     VSSCommitments {
         id: Vec<u8>,
         commitments: Vec<Vec<u8>>,
+    },
+
+    VSSReport {
+        id: Vec<u8>,
+        reported: libp2p::PeerId,
+    },
+
+    VSSReportResponse {
+        id: Vec<u8>,
+        raw_share: Vec<u8>,
     },
 
     DkgVSS_(Vec<Vec<u8>>),

@@ -1,16 +1,16 @@
-use std::{
-    collections::{HashMap, HashSet},
-    iter,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     crypto::{
         dkg::{
-            joint_feldman::{collector::Collector, distributor::Distributor, peer_info::PeerInfo},
-            Dkg_, GenerateOutput,
+            joint_feldman::{
+                collector::{CollectionResult, Collector},
+                distributor::Distributor,
+                peer_info::PeerRegistry,
+            },
+            Dkg_, GenerateResult,
         },
-        keypair::PublicKey,
+        keypair::{PublicKey, SecretKey},
         primitives::{
             algebra::element::{Public, Secret},
             vss::{Shares, Vss},
@@ -62,17 +62,16 @@ pub enum Error {
 
 pub struct JointFeldman<T, SK, PK, VSS>
 where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret,
-    PK: Public,
-    VSS: Vss<SK, PK>,
+    T: Transport + 'static,
+    SK: Secret + 'static,
+    PK: Public + 'static,
+    VSS: Vss<SK, PK> + 'static,
 {
     transport: Arc<T>,
     config: Config,
-    collector: Collector<SK, PK, VSS>,
+    collector: Collector<T, SK, PK, VSS>,
     distributor: Distributor<T, SK, PK>,
-    peers: Option<HashMap<libp2p::PeerId, PeerInfo>>,
-    own_index: Option<u16>,
+    peers: Option<PeerRegistry>,
 }
 
 impl<T, SK, PK, VSS> JointFeldman<T, SK, PK, VSS>
@@ -82,12 +81,14 @@ where
     PK: Public + 'static,
     VSS: Vss<SK, PK> + 'static,
 {
-    pub async fn new(transport: Arc<T>, config: Config) -> Result<Self> {
-        let collector = Collector::new(
-            transport.self_peer(),
-            config.timeout,
-            config.threshold_counter,
-        );
+    pub async fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Result<Self> {
+        let collector_config = collector::Config {
+            timeout: config.timeout,
+            gossipsub_topic: config.gossipsub_topic.clone(),
+            query_channel_size: config.channel_size,
+        };
+
+        let collector = Collector::new(transport.clone(), secret_key, collector_config);
         let distributor = Distributor::new(transport.clone(), DKG_TOPIC);
 
         Ok(Self {
@@ -96,7 +97,6 @@ where
             collector,
             distributor,
             peers: None,
-            own_index: None,
         })
     }
 
@@ -107,30 +107,15 @@ where
             "ids length is exceeding the maximum"
         );
 
-        let topic_rx = self
-            .transport
-            .listen_on_topic(DKG_TOPIC)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-        let peer_set = peers.keys().copied().collect::<HashSet<_>>();
-        let peers_rx = self.transport.listen_on_peers(peer_set.clone()).await;
-
-        let peer_info_map = PeerInfo::from_map(peers);
-        let own_index = peer_info_map
-            .get(&self.transport.self_peer())
-            .expect("Own peer not found")
-            .index;
-
-        let peer_vec = peer_set.iter().cloned().collect::<Vec<_>>();
+        let peers = PeerRegistry::new(peers);
 
         self.collector.stop();
-        self.collector.start(topic_rx, peers_rx, peer_vec);
-        self.peers = Some(peer_info_map);
-        self.own_index = Some(own_index);
+        self.collector.start(peers.clone()).await?;
+        self.peers = Some(peers);
         Ok(())
     }
 
-    pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>> {
+    pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult<SK, PK>> {
         assert!(self.peers.is_some(), "Peers is empty");
 
         let peers = self
@@ -144,35 +129,37 @@ where
         let mut shares = self.generate_shares(nums)?;
         let own_share = shares
             .shares
-            .remove(&self.own_index.expect("Own index is empty"))
-            .expect("Own share not found");
-        let own_shares = SK::from_bytes(&own_share);
-        let own_commitment = shares
-            .commitments
-            .first()
-            .map(|commitment| PK::from_bytes(commitment))
-            .expect("Own commitment not found");
+            .remove(
+                &peers
+                    .get_index(&self.transport.self_peer())
+                    .expect("unreachable: own peer id"),
+            )
+            .expect("unreachable: own share not found");
 
-        self.distributor.send_shares(peers, shares).await?;
+        self.distributor
+            .send_shares(id.clone(), peers, shares)
+            .await?;
 
-        let result = self.collector.query(id).await?;
-        let mut full_shares = result.shares;
-        full_shares.push(own_shares);
-        let full_commitments = result
-            .commitments
-            .into_iter()
-            .map(|commitment| commitment.into_iter().next().expect("Commitment not found"))
-            .chain(iter::once(own_commitment))
-            .collect::<Vec<_>>();
+        let result = self.collector.query(id, own_share).await?;
 
-        let secret = full_shares.into_iter().sum();
-        let public = full_commitments.into_iter().sum();
+        match result {
+            CollectionResult::Success {
+                own_shares,
+                partial_public,
+            } => {
+                let secret = own_shares.into_iter().sum();
+                let public = partial_public.values().cloned().sum();
 
-        Ok(GenerateOutput {
-            secret,
-            public,
-            participants: result.participants,
-        })
+                Ok(GenerateResult::Success {
+                    secret,
+                    public,
+                    partial_public,
+                })
+            }
+            CollectionResult::Failure { invalid_peers } => {
+                Ok(GenerateResult::Failure { invalid_peers })
+            }
+        }
     }
 
     fn generate_shares(&self, nums: u16) -> Result<Shares> {
@@ -196,7 +183,7 @@ where
         self.set_peers(peers).await
     }
 
-    async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>> {
+    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult<SK, PK>> {
         self.generate(id).await
     }
 }

@@ -5,7 +5,10 @@ use crate::{
     },
     MockError,
 };
-use std::{collections::HashMap, error::Error};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+};
 
 use async_trait::async_trait;
 use mockall::automock;
@@ -34,14 +37,15 @@ pub trait DkgFactory {
     async fn create(&self) -> Result<Self::Dkg, Self::Error>;
 }
 
-pub struct GenerateOutput<SK, PK>
-where
-    SK: Secret,
-    PK: Public,
-{
-    pub secret: SK,
-    pub public: PK,
-    pub participants: Vec<libp2p::PeerId>,
+pub enum GenerateResult<SK: Secret, PK: Public> {
+    Success {
+        secret: SK,
+        public: PK,
+        partial_public: HashMap<libp2p::PeerId, PK>,
+    },
+    Failure {
+        invalid_peers: HashSet<libp2p::PeerId>,
+    },
 }
 
 #[async_trait::async_trait]
@@ -52,5 +56,5 @@ pub trait Dkg_<SK: Secret, PK: Public> {
         &mut self,
         peers: HashMap<libp2p::PeerId, PublicKey>,
     ) -> Result<(), Self::Error>;
-    async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>, Self::Error>;
+    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult<SK, PK>, Self::Error>;
 }

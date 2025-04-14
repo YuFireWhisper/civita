@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 
 use crate::crypto;
-use crate::crypto::dkg::joint_feldman::peer_info::PeerInfo;
+use crate::crypto::dkg::joint_feldman::peer_info::PeerRegistry;
 use crate::crypto::primitives::vss::Shares;
 use crate::{
     crypto::primitives::algebra::element::{Public, Secret},
@@ -22,6 +22,9 @@ pub enum Error {
 
     #[error("Share not found for peer index: {0}")]
     ShareNotFound(u16),
+
+    #[error("Public key not found for peer index: {0}")]
+    PublicKeyNotFound(u16),
 }
 
 pub struct Distributor<T, SK, PK>
@@ -51,28 +54,34 @@ where
 
     pub async fn send_shares(
         &self,
-        peers: &HashMap<libp2p::PeerId, PeerInfo>,
+        id: Vec<u8>,
+        peers: &PeerRegistry,
         mut shares: Shares,
     ) -> Result<()> {
         assert_eq!(
-            peers.len(),
+            peers.len() - 1, // Exclude self
             shares.shares.len(),
             "Number of peers must match the number of shares"
         );
 
         shares.shares = peers
-            .values()
-            .map(|peer_info| {
+            .indices()
+            .map(|index| {
                 let share = shares
                     .shares
-                    .get(&peer_info.index)
-                    .ok_or(Error::ShareNotFound(peer_info.index))?;
-                Ok((peer_info.index, peer_info.public_key.encrypt(share)?))
+                    .get(index)
+                    .ok_or(Error::ShareNotFound(*index))?;
+
+                let public_key = peers
+                    .get_public_key_by_index(*index)
+                    .ok_or(Error::PublicKeyNotFound(*index))?;
+
+                Ok((*index, public_key.encrypt(share)?))
             })
             .collect::<Result<HashMap<_, _>>>()?;
 
         self.transport
-            .publish(&self.topic, gossipsub::Payload::VSSShares(shares))
+            .publish(&self.topic, gossipsub::Payload::VSSShares { id, shares })
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
 
