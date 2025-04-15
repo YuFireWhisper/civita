@@ -1,7 +1,7 @@
 use crate::{
     crypto::{
         keypair::PublicKey,
-        primitives::algebra::element::{Point, Scalar},
+        primitives::algebra::{Point, Scalar},
     },
     MockError,
 };

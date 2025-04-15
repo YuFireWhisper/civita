@@ -7,7 +7,7 @@ use crate::{
     crypto::{
         dkg::Data,
         primitives::{
-            algebra::element::{Point, Scalar},
+            algebra::{Point, Scalar},
             vss::encrypted_share::EncryptedShares,
         },
     },

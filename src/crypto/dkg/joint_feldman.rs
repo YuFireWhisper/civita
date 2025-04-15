@@ -5,13 +5,14 @@ use crate::{
         dkg::{
             joint_feldman::{
                 collector::{CollectionResult, Collector},
-                distributor::Distributor, peer_registry::PeerRegistry,
+                distributor::Distributor,
+                peer_registry::PeerRegistry,
             },
             Dkg_, GenerateResult,
         },
         keypair::{PublicKey, SecretKey},
         primitives::{
-            algebra::element::{Point, Scalar},
+            algebra::{self, Point, Scalar},
             vss::{
                 decrypted_share::{self, DecryptedShares},
                 Vss,
@@ -71,6 +72,9 @@ pub enum Error {
 
     #[error("Decrypted shares error: {0}")]
     DecryptedShares(#[from] decrypted_share::Error),
+
+    #[error("Algebra error: {0}")]
+    Algebra(#[from] algebra::Error),
 }
 
 pub struct JointFeldman<T: Transport + 'static, V: Vss + 'static> {
@@ -135,11 +139,12 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
                 own_shares,
                 partial_public,
             } => {
-                let secret = own_shares.into_iter().sum();
-                let public = partial_public
-                    .values()
-                    .map(|ps| ps.first().expect("Partial public share is empty").clone())
-                    .sum();
+                let secret = Scalar::sum(own_shares.into_iter())?;
+                let public = Point::sum(
+                    partial_public
+                        .values()
+                        .map(|ps| ps.first().expect("Partial public share is empty").clone()),
+                )?;
 
                 Ok(GenerateResult::Success {
                     secret,

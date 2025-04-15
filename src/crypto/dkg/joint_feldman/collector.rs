@@ -14,7 +14,7 @@ use crate::{
         },
         keypair::{self, SecretKey},
         primitives::{
-            algebra::element::{self, Point, Scalar},
+            algebra::{self, Point, Scalar},
             vss::{encrypted_share::EncryptedShares, Vss},
         },
     },
@@ -42,8 +42,8 @@ pub enum Error {
     #[error("Channel closed")]
     ChannelClosed,
 
-    #[error("Element error: {0}")]
-    Element(#[from] element::Error),
+    #[error("Algebra error: {0}")]
+    Algebra(#[from] algebra::Error),
 
     #[error("Share not found")]
     ShareNotFound,

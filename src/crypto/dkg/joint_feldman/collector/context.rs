@@ -4,7 +4,7 @@ use crate::crypto::{
     dkg::joint_feldman::peer_registry::PeerRegistry,
     keypair::{self, PublicKey, SecretKey},
     primitives::{
-        algebra::element::{self, Point, Scalar},
+        algebra::{self, Point, Scalar},
         vss::{
             encrypted_share::{self, EncryptedShare, EncryptedShares},
             Vss,
@@ -37,8 +37,8 @@ pub enum Error {
     #[error("Report already exists for reporter {0} against reported {1}")]
     ReportAlreadyExists(String, String),
 
-    #[error("Element error: {0}")]
-    Element(#[from] element::Error),
+    #[error("Algebra error: {0}")]
+    Algebra(#[from] algebra::Error),
 
     #[error("Encrypted share error: {0}")]
     EncryptedShare(#[from] encrypted_share::Error),

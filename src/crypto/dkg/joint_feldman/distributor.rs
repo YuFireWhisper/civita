@@ -5,7 +5,7 @@ use crate::{
         dkg::joint_feldman::peer_registry::PeerRegistry,
         keypair,
         primitives::{
-            algebra::element::Point,
+            algebra::Point,
             vss::{
                 decrypted_share::DecryptedShares,
                 encrypted_share::{self, EncryptedShares},

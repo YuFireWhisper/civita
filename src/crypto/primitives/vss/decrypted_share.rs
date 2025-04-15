@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::{
     keypair::{self, SecretKey},
     primitives::{
-        algebra::element::{self, Point, Scalar},
+        algebra::{self, Point, Scalar},
         vss::{
             encrypted_share::{self, EncryptedShares},
             Vss,
@@ -20,9 +20,9 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("Keypair error: {0}")]
     Keypair(#[from] keypair::Error),
-
-    #[error("Element error: {0}")]
-    Element(#[from] element::Error),
+    
+    #[error("Algebra error: {0}")]
+    Algebra(#[from] algebra::Error),
 
     #[error("Encrypted share error: {0}")]
     EncryptedShare(#[from] encrypted_share::Error),

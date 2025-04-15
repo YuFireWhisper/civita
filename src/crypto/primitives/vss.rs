@@ -1,10 +1,10 @@
-use crate::crypto::primitives::algebra::element::{Point, Scalar};
-
 pub mod decrypted_share;
 pub mod encrypted_share;
 
 pub use decrypted_share::DecryptedShares;
 pub use encrypted_share::EncryptedShares;
+
+use crate::crypto::primitives::algebra::{Point, Scalar};
 
 pub trait Vss: Send + Sync {
     type Error: std::error::Error;
