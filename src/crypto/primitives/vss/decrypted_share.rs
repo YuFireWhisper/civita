@@ -6,10 +6,7 @@ use crate::crypto::{
     keypair::{self, SecretKey},
     primitives::{
         algebra::{self, Point, Scalar},
-        vss::{
-            encrypted_share::{self, EncryptedShares},
-            Vss,
-        },
+        vss::encrypted_share::{self, EncryptedShares},
     },
 };
 
@@ -20,7 +17,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("Keypair error: {0}")]
     Keypair(#[from] keypair::Error),
-    
+
     #[error("Algebra error: {0}")]
     Algebra(#[from] algebra::Error),
 
@@ -40,6 +37,29 @@ pub struct DecryptedShares(HashMap<u16, Scalar>);
 impl DecryptedShares {
     pub fn empty() -> Self {
         Self(HashMap::new())
+    }
+
+    pub fn from_scalars<I, T>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Scalar>,
+    {
+        let mut shares = HashMap::new();
+        let mut first = None;
+        for (index, scalar) in iter.into_iter().enumerate() {
+            let share: Scalar = scalar.into();
+
+            if let Some(first) = &first {
+                if !share.is_same_type(first) {
+                    panic!("All shares must be of the same type");
+                }
+            } else {
+                first = Some(share.clone());
+            }
+
+            shares.insert(index as u16, share);
+        }
+        Self(shares)
     }
 
     pub fn from_encrypted(
@@ -75,10 +95,10 @@ impl DecryptedShares {
         self.0.iter().map(|(k, v)| (*k, v))
     }
 
-    pub fn verify<V: Vss>(&self, index: &u16, commitments: Vec<Point>) -> Result<bool> {
+    pub fn verify(&self, index: &u16, commitments: Vec<Point>) -> Result<bool> {
         let share = self.get(index).ok_or(Error::ShareNotFound(*index))?;
 
-        Ok(V::verify(index, share, &commitments))
+        Ok(share.verify(*index, &commitments)?)
     }
 
     pub fn remove(&mut self, index: &u16) -> Result<Scalar> {

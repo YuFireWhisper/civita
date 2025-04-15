@@ -77,15 +77,15 @@ pub enum Error {
     Algebra(#[from] algebra::Error),
 }
 
-pub struct JointFeldman<T: Transport + 'static, V: Vss + 'static> {
+pub struct JointFeldman<T: Transport + 'static> {
     transport: Arc<T>,
     config: Config,
-    collector: Collector<T, V>,
+    collector: Collector<T>,
     distributor: Distributor<T>,
     peers: Option<PeerRegistry>,
 }
 
-impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
+impl<T: Transport + 'static> JointFeldman<T> {
     pub async fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Result<Self> {
         let collector_config = collector::Config {
             timeout: config.timeout,
@@ -124,7 +124,9 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
         assert!(self.peers.is_some(), "Peers is empty");
 
         let peers_len = self.peers_len()?;
-        let (mut decrypted_shares, commitments) = self.generate_shares(peers_len)?;
+        let threshold = self.config.threshold_counter.call(peers_len);
+        let (mut decrypted_shares, commitments) =
+            Vss::share(&self.config.crypto_scheme, threshold, peers_len);
         let own_share = self.remove_own_share(&mut decrypted_shares)?;
 
         let peers = self.peers()?;
@@ -176,16 +178,10 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
     fn peers(&self) -> Result<&PeerRegistry> {
         self.peers.as_ref().ok_or(Error::PeersNotSet)
     }
-
-    fn generate_shares(&self, nums: u16) -> Result<(DecryptedShares, Vec<Point>)> {
-        let secret = Scalar::random(&self.config.crypto_scheme);
-        let threshold = self.config.threshold_counter.call(nums);
-        V::share(&secret, threshold, nums).map_err(|e| Error::Vss(e.to_string()))
-    }
 }
 
 #[async_trait::async_trait]
-impl<T: Transport + 'static, V: Vss + 'static> Dkg_ for JointFeldman<T, V> {
+impl<T: Transport + 'static> Dkg_ for JointFeldman<T> {
     type Error = Error;
 
     async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {

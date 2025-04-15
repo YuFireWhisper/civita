@@ -1,11 +1,11 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    marker::PhantomData,
     sync::Arc,
 };
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::crypto::primitives::vss::encrypted_share::EncryptedShares;
 use crate::{
     crypto::{
         dkg::joint_feldman::{
@@ -13,10 +13,7 @@ use crate::{
             peer_registry::PeerRegistry,
         },
         keypair::{self, SecretKey},
-        primitives::{
-            algebra::{self, Point, Scalar},
-            vss::{encrypted_share::EncryptedShares, Vss},
-        },
+        primitives::algebra::{self, Point, Scalar},
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
@@ -83,17 +80,12 @@ struct WorkerContext<T: Transport> {
     topic: String,
 }
 
-pub struct Collector<T, V>
-where
-    T: Transport + 'static,
-    V: Vss + 'static,
-{
+pub struct Collector<T: Transport + 'static> {
     transport: Arc<T>,
     secret_key: SecretKey,
     config: Config,
     command_tx: Option<mpsc::Sender<Command>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
-    _marker: PhantomData<V>,
 }
 
 impl CollectionResult {
@@ -110,11 +102,7 @@ impl CollectionResult {
     }
 }
 
-impl<T, V> Collector<T, V>
-where
-    T: Transport + 'static,
-    V: Vss + 'static,
-{
+impl<T: Transport + 'static> Collector<T> {
     pub fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Self {
         Self {
             transport,
@@ -122,7 +110,6 @@ where
             config,
             command_tx: None,
             worker_handle: None,
-            _marker: PhantomData,
         }
     }
 
@@ -339,7 +326,7 @@ where
         raw_share: Scalar,
     ) -> Result<()> {
         for peer in worker_ctx.context.get_reporters_of(&id, reported) {
-            worker_ctx.context.add_report_response::<V>(
+            worker_ctx.context.add_report_response(
                 id.clone(),
                 peer,
                 reported,
@@ -423,7 +410,7 @@ where
     }
 }
 
-impl<T: Transport, V: Vss> Drop for Collector<T, V> {
+impl<T: Transport> Drop for Collector<T> {
     fn drop(&mut self) {
         self.stop();
     }

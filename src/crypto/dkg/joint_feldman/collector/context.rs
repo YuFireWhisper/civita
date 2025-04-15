@@ -5,10 +5,7 @@ use crate::crypto::{
     keypair::{self, PublicKey, SecretKey},
     primitives::{
         algebra::{self, Point, Scalar},
-        vss::{
-            encrypted_share::{self, EncryptedShare, EncryptedShares},
-            Vss,
-        },
+        vss::encrypted_share::{self, EncryptedShare, EncryptedShares},
     },
 };
 
@@ -159,7 +156,7 @@ impl Event {
         self.pending_self_reports.remove(reporter);
     }
 
-    pub fn respond_to_report<V: Vss>(
+    pub fn respond_to_report(
         &mut self,
         reporter: libp2p::PeerId,
         reported: libp2p::PeerId,
@@ -181,7 +178,7 @@ impl Event {
             .get(&reported_index)
             .ok_or(Error::ShareNotFound(reported_index))?;
 
-        Self::verify_and_update_report::<V>(
+        Self::verify_and_update_report(
             report,
             &raw_share,
             accused_share,
@@ -192,7 +189,7 @@ impl Event {
         Ok(())
     }
 
-    fn verify_and_update_report<V: Vss>(
+    fn verify_and_update_report(
         report: &mut Report,
         reported_raw_share: &Scalar,
         reported_bundle: &Bundle,
@@ -212,15 +209,11 @@ impl Event {
             return Ok(());
         }
 
-        report.result = if V::verify(
-            &reporter_index,
-            reported_raw_share,
-            &reported_bundle.commitments,
-        ) {
-            VerificationResult::ReporterPeerMalicious
-        } else {
-            VerificationResult::ReportedPeerMalicious
-        };
+        report.result =
+            match reported_raw_share.verify(reporter_index, &reported_bundle.commitments)? {
+                true => VerificationResult::ReporterPeerMalicious,
+                false => VerificationResult::ReportedPeerMalicious,
+            };
 
         Ok(())
     }
@@ -421,7 +414,7 @@ impl Context {
             .ok_or_else(|| Error::EventNotFound(String::from_utf8_lossy(id).to_string()))
     }
 
-    pub fn add_report_response<V: Vss>(
+    pub fn add_report_response(
         &mut self,
         id: Vec<u8>,
         reporter: libp2p::PeerId,
@@ -440,7 +433,7 @@ impl Context {
         let reporter_public_key = self.peer_public_key(&reporter)?;
 
         let event = self.get_event_mut(&id)?;
-        event.respond_to_report::<V>(
+        event.respond_to_report(
             reporter,
             reported,
             raw_share,

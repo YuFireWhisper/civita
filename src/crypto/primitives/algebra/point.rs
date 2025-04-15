@@ -70,3 +70,9 @@ impl Point {
         Ok(sum)
     }
 }
+
+impl From<CurvPoint<CurvSecp256k1>> for Point {
+    fn from(point: CurvPoint<CurvSecp256k1>) -> Self {
+        Point::Secp256k1(point)
+    }
+}

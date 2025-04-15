@@ -37,6 +37,10 @@ impl Scalar {
         Scalar::Secp256k1(curv::elliptic::curves::Scalar::zero())
     }
 
+    pub fn from_curv_secp256k1(scalar: CurvScalar<CurvSecp256k1>) -> Self {
+        Scalar::Secp256k1(scalar)
+    }
+
     pub fn is_same_type(&self, other: &Self) -> bool {
         match (self, other) {
             (Scalar::Secp256k1(_), Scalar::Secp256k1(_)) => true,
@@ -47,6 +51,16 @@ impl Scalar {
         match (self, other) {
             (Scalar::Secp256k1(_), Point::Secp256k1(_)) => true,
         }
+    }
+
+    pub fn get_secp256k1_raw(&self) -> Result<&CurvScalar<CurvSecp256k1>> {
+        match self {
+            Scalar::Secp256k1(scalar) => Ok(scalar),
+        }
+    }
+
+    pub fn is_secp256k1(&self) -> bool {
+        matches!(self, Scalar::Secp256k1(_))
     }
 
     pub fn verify(&self, index: u16, commitments: &[Point]) -> Result<bool> {
@@ -117,5 +131,11 @@ impl Scalar {
             }
         }
         Ok(sum)
+    }
+}
+
+impl From<CurvScalar<CurvSecp256k1>> for Scalar {
+    fn from(scalar: CurvScalar<CurvSecp256k1>) -> Self {
+        Scalar::Secp256k1(scalar)
     }
 }
