@@ -5,13 +5,13 @@ use std::{
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::crypto::primitives::vss::encrypted_share::EncryptedShares;
+use crate::crypto::{
+    dkg::joint_feldman::collector::event::EventResult,
+    primitives::vss::encrypted_share::EncryptedShares,
+};
 use crate::{
     crypto::{
-        dkg::joint_feldman::{
-            collector::context::{Context, EventResult},
-            peer_registry::PeerRegistry,
-        },
+        dkg::joint_feldman::{collector::context::Context, peer_registry::PeerRegistry},
         keypair::{self, SecretKey},
         primitives::algebra::{self, Point, Scalar},
     },
@@ -20,6 +20,7 @@ use crate::{
 
 pub mod config;
 mod context;
+mod event;
 
 pub use config::Config;
 
