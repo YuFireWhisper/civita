@@ -5,8 +5,7 @@ use crate::{
         dkg::{
             joint_feldman::{
                 collector::{CollectionResult, Collector},
-                distributor::Distributor,
-                peer_info::PeerRegistry,
+                distributor::Distributor, peer_registry::PeerRegistry,
             },
             Dkg_, GenerateResult,
         },
@@ -25,7 +24,7 @@ use crate::{
 mod collector;
 mod config;
 mod distributor;
-mod peer_info;
+mod peer_registry;
 
 pub use config::Config;
 

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     crypto::{
-        dkg::joint_feldman::peer_info::PeerRegistry,
+        dkg::joint_feldman::peer_registry::PeerRegistry,
         keypair,
         primitives::{
             algebra::element::Point,

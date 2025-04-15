@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::crypto::{
-    dkg::joint_feldman::peer_info::PeerRegistry,
+    dkg::joint_feldman::peer_registry::PeerRegistry,
     keypair::{self, PublicKey, SecretKey},
     primitives::{
         algebra::element::{self, Point, Scalar},

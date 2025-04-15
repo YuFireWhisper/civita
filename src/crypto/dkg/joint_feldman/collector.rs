@@ -10,7 +10,7 @@ use crate::{
     crypto::{
         dkg::joint_feldman::{
             collector::context::{Context, EventResult},
-            peer_info::PeerRegistry,
+            peer_registry::PeerRegistry,
         },
         keypair::{self, SecretKey},
         primitives::{
