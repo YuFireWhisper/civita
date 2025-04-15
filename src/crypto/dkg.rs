@@ -1,8 +1,14 @@
 use crate::{
-    crypto::primitives::algebra::element::{Public, Secret},
+    crypto::{
+        keypair::PublicKey,
+        primitives::algebra::{Point, Scalar},
+    },
     MockError,
 };
-use std::{collections::HashSet, error::Error};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+};
 
 use async_trait::async_trait;
 use mockall::automock;
@@ -31,20 +37,24 @@ pub trait DkgFactory {
     async fn create(&self) -> Result<Self::Dkg, Self::Error>;
 }
 
-pub struct GenerateOutput<SK, PK>
-where
-    SK: Secret,
-    PK: Public,
-{
-    pub secret: SK,
-    pub public: PK,
-    pub participants: Vec<libp2p::PeerId>,
+pub enum GenerateResult {
+    Success {
+        secret: Scalar,
+        public: Point,
+        partial_public: HashMap<libp2p::PeerId, Vec<Point>>,
+    },
+    Failure {
+        invalid_peers: HashSet<libp2p::PeerId>,
+    },
 }
 
 #[async_trait::async_trait]
-pub trait Dkg_<SK: Secret, PK: Public> {
+pub trait Dkg_ {
     type Error: Error;
 
-    async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<(), Self::Error>;
-    async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>, Self::Error>;
+    async fn set_peers(
+        &mut self,
+        peers: HashMap<libp2p::PeerId, PublicKey>,
+    ) -> Result<(), Self::Error>;
+    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult, Self::Error>;
 }

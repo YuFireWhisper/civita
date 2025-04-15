@@ -1,19 +1,41 @@
-use std::error::Error;
+use curv::{
+    cryptographic_primitives::secret_sharing::feldman_vss::VerifiableSS,
+    elliptic::curves::{secp256_k1::Secp256k1 as CurvSecp256k1, Scalar as CurvScalar},
+};
+use sha2::Sha256;
 
-use crate::crypto::primitives::algebra::element::{Public, Secret};
+use crate::crypto::primitives::algebra::{Point, Scheme};
 
-pub trait Vss<SK, PK>: Send + Sync + Send
-where
-    SK: Secret,
-    PK: Public,
-{
-    type Error: Error;
+pub mod decrypted_share;
+pub mod encrypted_share;
 
-    fn share(
-        secret: &SK,
+pub use decrypted_share::DecryptedShares;
+pub use encrypted_share::EncryptedShares;
+
+pub struct Vss;
+
+impl Vss {
+    pub fn share(
+        scheme: &Scheme,
         threshold: u16,
         num_shares: u16,
-    ) -> Result<(Vec<SK>, Vec<PK>), Self::Error>;
-    fn verify(index: &u16, share: &SK, commitments: &[PK]) -> bool;
-    fn reconstruct(shares: &[(u16, SK)], threshold: u16) -> Result<SK, Self::Error>;
+    ) -> (DecryptedShares, Vec<Point>) {
+        match scheme {
+            Scheme::Secp256k1 => Self::generate_secp256k1(threshold, num_shares),
+        }
+    }
+
+    fn generate_secp256k1(threshold: u16, num_shares: u16) -> (DecryptedShares, Vec<Point>) {
+        let raw_secret = CurvScalar::<CurvSecp256k1>::random();
+        let (vss, raw_shares) =
+            VerifiableSS::<_, Sha256>::share(threshold, num_shares, &raw_secret);
+        let derived_shares = DecryptedShares::from_scalars(raw_shares.iter().map(|s| s.to_owned()));
+        let commitments = vss
+            .commitments
+            .into_iter()
+            .map(Point::from)
+            .collect::<Vec<Point>>();
+
+        (derived_shares, commitments)
+    }
 }

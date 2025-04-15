@@ -1,12 +1,18 @@
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::{
-    crypto::primitives::algebra::element::{Public, Secret},
-    network::transport::{
-        libp2p_transport::protocols::{gossipsub, request_response::payload::Request},
-        Transport,
+    crypto::{
+        dkg::joint_feldman::peer_registry::PeerRegistry,
+        keypair,
+        primitives::{
+            algebra::Point,
+            vss::{
+                decrypted_share::DecryptedShares,
+                encrypted_share::{self, EncryptedShares},
+            },
+        },
     },
+    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -16,60 +22,53 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("{0}")]
     Transport(String),
+
+    #[error("Keypair error: {0}")]
+    Keypair(#[from] keypair::Error),
+
+    #[error("Encrypted share error: {0}")]
+    EncryptedShare(#[from] encrypted_share::Error),
 }
 
-pub struct Distributor<T, SK, PK>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret,
-    PK: Public,
-{
+pub struct Distributor<T: Transport + 'static> {
     transport: Arc<T>,
     topic: String,
-    _marker: PhantomData<(SK, PK)>,
 }
 
-impl<T, SK, PK> Distributor<T, SK, PK>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret,
-    PK: Public,
-{
+impl<T: Transport + 'static> Distributor<T> {
     pub fn new(transport: Arc<T>, topic: &str) -> Self {
         Self {
             transport,
             topic: topic.to_string(),
-            _marker: PhantomData,
         }
     }
 
-    pub async fn send_shares(&self, peers: &[libp2p::PeerId], id: &[u8], shares: &[SK]) {
-        assert_eq!(peers.len(), shares.len(), "IDs and shares length mismatch");
+    pub async fn send_shares(
+        &self,
+        id: Vec<u8>,
+        peers: &PeerRegistry,
+        decrypted_shares: &DecryptedShares,
+        commitments: Vec<Point>,
+    ) -> Result<()> {
+        assert_eq!(
+            peers.len() - 1, // Exclude self
+            decrypted_shares.len(),
+            "Number of peers (excluding self) must match the number of shares"
+        );
 
-        for (peer, share) in peers.iter().zip(shares.iter()) {
-            let request = Request::VSSShare {
-                id: id.to_vec(),
-                share: share.to_vec(),
-            };
-            self.transport.request(peer, request).await;
-        }
-    }
-
-    pub async fn publish_commitments(&self, id: &[u8], commitments: &[PK]) -> Result<()> {
-        let commitments_bytes = commitments
-            .iter()
-            .map(|commitment| commitment.to_vec())
-            .collect::<Vec<_>>();
-
-        let payload = gossipsub::Payload::VSSCommitments {
-            id: id.to_vec(),
-            commitments: commitments_bytes,
+        let encrypted_shares =
+            EncryptedShares::from_decrypted(decrypted_shares, peers.iter_index_keys())?;
+        let payload = gossipsub::Payload::VSSBundle {
+            id,
+            encrypted_shares,
+            commitments,
         };
 
         self.transport
             .publish(&self.topic, payload)
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
+
         Ok(())
     }
 }

@@ -17,12 +17,14 @@ pub enum Error {
     Secpk1(#[from] secp256k1::Error),
 }
 
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 pub enum SecretKey {
     Secp256k1(secp256k1::SecretKey),
 }
 
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 pub enum PublicKey {

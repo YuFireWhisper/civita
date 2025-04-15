@@ -27,10 +27,12 @@ pub enum Error {
     Decryption(String),
 }
 
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 pub struct SecretKey([u8; SECRET_KEY_LENGTH]);
 
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);

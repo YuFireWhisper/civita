@@ -1,14 +1,22 @@
-use std::{collections::HashSet, iter, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     crypto::{
         dkg::{
-            joint_feldman::{collector::Collector, distributor::Distributor},
-            Dkg_, GenerateOutput,
+            joint_feldman::{
+                collector::{CollectionResult, Collector},
+                distributor::Distributor,
+                peer_registry::PeerRegistry,
+            },
+            Dkg_, GenerateResult,
         },
+        keypair::{PublicKey, SecretKey},
         primitives::{
-            algebra::element::{Public, Secret},
-            vss::Vss,
+            algebra::{self, Point, Scalar},
+            vss::{
+                decrypted_share::{self, DecryptedShares},
+                Vss,
+            },
         },
     },
     network::transport::Transport,
@@ -17,10 +25,10 @@ use crate::{
 mod collector;
 mod config;
 mod distributor;
+mod peer_registry;
 
 pub use config::Config;
 
-const DKG_TOPIC: &str = "dkg";
 pub const VSS_SHARES_ID: &[u8] = b"vss_shares";
 pub const VSS_COMMITMENTS_ID: &[u8] = b"vss_commitments";
 
@@ -52,37 +60,41 @@ pub enum Error {
 
     #[error("{0}")]
     Distributor(#[from] distributor::Error),
+
+    #[error("Own index not found")]
+    IndexNotFound,
+
+    #[error("Own share not found")]
+    OwnShareNotFound,
+
+    #[error("Peers not set")]
+    PeersNotSet,
+
+    #[error("Decrypted shares error: {0}")]
+    DecryptedShares(#[from] decrypted_share::Error),
+
+    #[error("Algebra error: {0}")]
+    Algebra(#[from] algebra::Error),
 }
 
-pub struct JointFeldman<T, SK, PK, VSS>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret,
-    PK: Public,
-    VSS: Vss<SK, PK>,
-{
+pub struct JointFeldman<T: Transport + 'static> {
     transport: Arc<T>,
     config: Config,
-    collector: Collector<SK, PK, VSS>,
-    distributor: Distributor<T, SK, PK>,
-    peers: Option<Vec<libp2p::PeerId>>,
-    own_index: Option<u16>,
+    collector: Collector<T>,
+    distributor: Distributor<T>,
+    peers: Option<PeerRegistry>,
 }
 
-impl<T, SK, PK, VSS> JointFeldman<T, SK, PK, VSS>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret + 'static,
-    PK: Public + 'static,
-    VSS: Vss<SK, PK> + 'static,
-{
-    pub async fn new(transport: Arc<T>, config: Config) -> Result<Self> {
-        let collector = Collector::new(
-            transport.self_peer(),
-            config.timeout,
-            config.threshold_counter,
-        );
-        let distributor = Distributor::new(transport.clone(), DKG_TOPIC);
+impl<T: Transport + 'static> JointFeldman<T> {
+    pub async fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Result<Self> {
+        let collector_config = collector::Config {
+            timeout: config.timeout,
+            gossipsub_topic: config.gossipsub_topic.clone(),
+            query_channel_size: config.channel_size,
+        };
+
+        let collector = Collector::new(transport.clone(), secret_key, collector_config);
+        let distributor = Distributor::new(transport.clone(), &config.gossipsub_topic);
 
         Ok(Self {
             transport,
@@ -90,106 +102,93 @@ where
             collector,
             distributor,
             peers: None,
-            own_index: None,
         })
     }
 
-    pub async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<()> {
+    pub async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         assert!(peers.len() > 1, "ids length must be greater than 1");
         assert!(
             peers.len() <= u16::MAX as usize,
             "ids length is exceeding the maximum"
         );
 
-        let topic_rx = self
-            .transport
-            .listen_on_topic(DKG_TOPIC)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-        let peers_rx = self.transport.listen_on_peers(peers.clone()).await;
-        let mut peers = peers.into_iter().collect::<Vec<_>>();
-        peers.sort_unstable();
-
-        let own_index = peers
-            .iter()
-            .position(|peer| peer == &self.transport.self_peer())
-            .expect("Self peer not found in peers list");
+        let peers = PeerRegistry::new(peers);
 
         self.collector.stop();
-        self.collector.start(topic_rx, peers_rx, peers.clone());
+        self.collector.start(peers.clone()).await?;
         self.peers = Some(peers);
-        self.own_index = Some(own_index as u16 + 1);
         Ok(())
     }
 
-    pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>> {
+    pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult> {
         assert!(self.peers.is_some(), "Peers is empty");
 
-        let peers = self
-            .peers
-            .as_ref()
-            .expect("Peers is empty, it should be set");
-        let nums: u16 = peers
-            .len()
-            .try_into()
-            .expect("Peers length is exceeding the maximum, it should checked before");
-        let (mut shares, commitments) = self.generate_shares(nums)?;
-        let own_shares = shares.remove((self.own_index.expect("Own index is empty") - 1) as usize);
+        let peers_len = self.peers_len()?;
+        let threshold = self.config.threshold_counter.call(peers_len);
+        let (mut decrypted_shares, commitments) =
+            Vss::share(&self.config.crypto_scheme, threshold, peers_len);
+        let own_share = self.remove_own_share(&mut decrypted_shares)?;
 
+        let peers = self.peers()?;
         self.distributor
-            .send_shares(peers, VSS_SHARES_ID, &shares)
-            .await;
-        self.distributor
-            .publish_commitments(VSS_COMMITMENTS_ID, &commitments)
+            .send_shares(id.clone(), peers, &decrypted_shares, commitments)
             .await?;
 
-        let result = self.collector.query(id).await?;
-        let mut full_shares = result.shares;
-        full_shares.push(own_shares);
-        let full_commitments = result
-            .commitments
-            .into_iter()
-            .map(|commitment| commitment.into_iter().next().expect("Commitment not found"))
-            .chain(iter::once(
-                commitments
-                    .into_iter()
-                    .next()
-                    .expect("Commitment not found"),
-            ))
-            .collect::<Vec<_>>();
+        let result = self.collector.query(id, own_share).await?;
 
-        let secret = full_shares.into_iter().sum();
-        let public = full_commitments.into_iter().sum();
+        match result {
+            CollectionResult::Success {
+                own_shares,
+                partial_public,
+            } => {
+                let secret = Scalar::sum(own_shares.into_iter())?;
+                let public = Point::sum(
+                    partial_public
+                        .values()
+                        .map(|ps| ps.first().expect("Partial public share is empty").clone()),
+                )?;
 
-        Ok(GenerateOutput {
-            secret,
-            public,
-            participants: result.participants,
-        })
+                Ok(GenerateResult::Success {
+                    secret,
+                    public,
+                    partial_public,
+                })
+            }
+            CollectionResult::Failure { invalid_peers } => {
+                Ok(GenerateResult::Failure { invalid_peers })
+            }
+        }
     }
 
-    fn generate_shares(&self, nums: u16) -> Result<(Vec<SK>, Vec<PK>)> {
-        let secret = SK::random();
-        let threshold = self.config.threshold_counter.call(nums);
-        VSS::share(&secret, threshold, nums).map_err(|e| Error::Vss(e.to_string()))
+    fn peers_len(&self) -> Result<u16> {
+        self.peers
+            .as_ref()
+            .map(|peers| peers.len())
+            .ok_or(Error::PeersNotSet)
+    }
+
+    fn remove_own_share(&self, decrypted_shares: &mut DecryptedShares) -> Result<Scalar> {
+        let peers = self.peers()?;
+        let own_index = peers
+            .get_index(&self.transport.self_peer())
+            .ok_or(Error::IndexNotFound)?;
+        decrypted_shares.remove(&own_index).map_err(Error::from)
+    }
+
+    fn peers(&self) -> Result<&PeerRegistry> {
+        self.peers.as_ref().ok_or(Error::PeersNotSet)
     }
 }
 
 #[async_trait::async_trait]
-impl<T, SK, PK, VSS> Dkg_<SK, PK> for JointFeldman<T, SK, PK, VSS>
-where
-    T: Transport + Send + Sync + 'static,
-    SK: Secret + 'static,
-    PK: Public + 'static,
-    VSS: Vss<SK, PK> + 'static,
-{
+impl<T: Transport + 'static> Dkg_ for JointFeldman<T> {
     type Error = Error;
 
-    async fn set_peers(&mut self, peers: HashSet<libp2p::PeerId>) -> Result<()> {
+    async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         self.set_peers(peers).await
     }
 
-    async fn generate(&self, id: Vec<u8>) -> Result<GenerateOutput<SK, PK>> {
+    async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult> {
         self.generate(id).await
     }
 }
