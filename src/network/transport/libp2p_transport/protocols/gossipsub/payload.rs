@@ -36,7 +36,7 @@ pub enum Payload {
 
     DkgVSS(Vec<u8>),
 
-    VSSSBundle {
+    VSSBundle {
         id: Vec<u8>,
         encrypted_shares: EncryptedShares,
         commitments: Vec<Point>,

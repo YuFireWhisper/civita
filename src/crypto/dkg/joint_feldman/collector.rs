@@ -277,7 +277,7 @@ where
         msg: gossipsub::Message,
     ) -> Result<()> {
         match msg.payload {
-            gossipsub::Payload::VSSSBundle {
+            gossipsub::Payload::VSSBundle {
                 id,
                 encrypted_shares,
                 commitments,
