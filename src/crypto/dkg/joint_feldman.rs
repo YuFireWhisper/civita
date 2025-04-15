@@ -26,7 +26,6 @@ mod peer_info;
 
 pub use config::Config;
 
-const DKG_TOPIC: &str = "dkg";
 pub const VSS_SHARES_ID: &[u8] = b"vss_shares";
 pub const VSS_COMMITMENTS_ID: &[u8] = b"vss_commitments";
 
@@ -77,7 +76,7 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
         };
 
         let collector = Collector::new(transport.clone(), secret_key, collector_config);
-        let distributor = Distributor::new(transport.clone(), DKG_TOPIC);
+        let distributor = Distributor::new(transport.clone(), &config.gossipsub_topic);
 
         Ok(Self {
             transport,
