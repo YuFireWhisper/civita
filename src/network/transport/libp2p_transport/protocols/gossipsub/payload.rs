@@ -42,11 +42,6 @@ pub enum Payload {
         commitments: Vec<Point>,
     },
 
-    VSSCommitments {
-        id: Vec<u8>,
-        commitments: Vec<Vec<u8>>,
-    },
-
     VSSReport {
         id: Vec<u8>,
         reported: libp2p::PeerId,
@@ -56,17 +51,6 @@ pub enum Payload {
         id: Vec<u8>,
         raw_share: Scalar,
     },
-
-    DkgVSS_(Vec<Vec<u8>>),
-
-    // Raw message, for other node checks
-    DkgSign(Vec<u8>),
-
-    // Signature object
-    DkgSignResponse(Vec<u8>),
-
-    // Signature object
-    DkgSignFinal(Vec<u8>),
 
     CommitteeSignatureRequest(kad::Payload),
 
@@ -133,17 +117,10 @@ mod tests {
     use crate::network::transport::libp2p_transport::protocols::gossipsub::Payload;
 
     const MESSAGE_ID: &str = "MESSAGE_ID";
-    const PUBLIC_KEY: &[u8] = b"PUBLIC_KEY";
-    const PROOF: &[u8] = b"PROOF";
-    const OUTPUT: &[u8] = b"OUTPUT";
     const RANDOM: [u8; 32] = [1; 32];
 
     fn create_message_id() -> MessageId {
         MessageId::from(MESSAGE_ID)
-    }
-
-    fn create_public_key() -> Vec<u8> {
-        PUBLIC_KEY.to_vec()
     }
 
     #[test]
