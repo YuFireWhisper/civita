@@ -53,7 +53,7 @@ impl<T: Transport + 'static> Distributor<T> {
         assert_eq!(
             peers.len() - 1, // Exclude self
             decrypted_shares.len(),
-            "Number of peers must match the number of shares"
+            "Number of peers (excluding self) must match the number of shares"
         );
 
         let encrypted_shares =

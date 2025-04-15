@@ -139,7 +139,7 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
                 let secret = own_shares.into_iter().sum();
                 let public = partial_public
                     .values()
-                    .map(|ps| ps.first().unwrap().clone())
+                    .map(|ps| ps.first().expect("Partial public share is empty").clone())
                     .sum();
 
                 Ok(GenerateResult::Success {
