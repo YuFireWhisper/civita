@@ -12,7 +12,7 @@ use crate::{
             collector::context::{Context, EventResult},
             peer_info::PeerRegistry,
         },
-        keypair::SecretKey,
+        keypair::{self, SecretKey},
         primitives::{
             algebra::element::{self, Point, Scalar},
             vss::{Shares, Vss},
@@ -44,6 +44,12 @@ pub enum Error {
 
     #[error("Element error: {0}")]
     Element(#[from] element::Error),
+
+    #[error("Share not found")]
+    ShareNotFound,
+
+    #[error("Keypair error: {0}")]
+    Keypair(#[from] keypair::Error),
 }
 
 pub enum CollectionResult {
@@ -71,6 +77,12 @@ struct Query {
     callback: oneshot::Sender<EventResult>,
 }
 
+struct WorkerContext<T: Transport> {
+    context: Context,
+    transport: Arc<T>,
+    topic: String,
+}
+
 pub struct Collector<T, V>
 where
     T: Transport + 'static,
@@ -90,19 +102,19 @@ impl CollectionResult {
         own_index: u16,
         secret_key: &SecretKey,
     ) -> Result<Self> {
-        let (own_shares, partial_public) = shares
-            .into_iter()
-            .map(|(peer, share)| {
-                let encrypted_share = share.shares.get(&own_index).expect("Own share not found");
-                let decrypted_share = secret_key
-                    .decrypt(encrypted_share)
-                    .expect("Decryption failed");
-                let partial_public = share.commitments[0].to_owned();
-                let share = Scalar::from_slice(&decrypted_share)?;
-                let partial_public = Point::from_slice(&partial_public)?;
-                Ok((share, (peer, partial_public)))
-            })
-            .collect::<Result<(Vec<_>, HashMap<_, _>)>>()?;
+        let mut own_shares = Vec::with_capacity(shares.len());
+        let mut partial_public = HashMap::with_capacity(shares.len());
+
+        for (peer, share) in shares {
+            let encrypted_share = share.shares.get(&own_index).ok_or(Error::ShareNotFound)?;
+            let decrypted_share = secret_key.decrypt(encrypted_share)?;
+
+            let share_scalar = Scalar::from_slice(&decrypted_share)?;
+            own_shares.push(share_scalar);
+
+            let public_point = Point::from_slice(&share.commitments[0])?;
+            partial_public.insert(peer, public_point);
+        }
 
         Ok(CollectionResult::Success {
             own_shares,
@@ -140,6 +152,7 @@ where
         let secret_key = self.secret_key.clone();
         let transport = self.transport.clone();
         let topic = self.config.gossipsub_topic.clone();
+        let timeout = self.config.timeout;
 
         let handle = tokio::spawn(Self::run_worker(
             peers,
@@ -148,7 +161,7 @@ where
             topic,
             command_rx,
             gossipsub_rx,
-            self.config.timeout,
+            timeout,
         ));
 
         self.worker_handle = Some(handle);
@@ -164,15 +177,19 @@ where
         mut gossipsub_rx: mpsc::Receiver<gossipsub::Message>,
         timeout: tokio::time::Duration,
     ) {
-        let mut ctx = Context::new(peers, secret_key, transport.self_peer());
-        let mut pending_queries: VecDeque<Query> = VecDeque::new();
-
+        let context = Context::new(peers, secret_key, transport.self_peer());
+        let mut worker_ctx = WorkerContext {
+            context,
+            transport,
+            topic,
+        };
+        let mut pending_queries = VecDeque::new();
         let mut check_timer = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
         loop {
             tokio::select! {
                 Some(msg) = gossipsub_rx.recv() => {
-                    if let Err(e) = Self::process_message(&mut ctx, &transport, &topic, msg).await {
+                    if let Err(e) = Self::process_message(&mut worker_ctx, msg).await {
                         log::error!("Failed to process message: {}", e);
                     }
                 }
@@ -180,26 +197,15 @@ where
                 Some(cmd) = command_rx.recv() => {
                     match cmd {
                         Command::Query { id, raw_share, callback } => {
-                            let deadline = tokio::time::Instant::now() + timeout;
-                            pending_queries.push_back(Query { id: id.clone(), deadline, callback });
-
-                            let result = ctx.set_own_share(id.clone(), raw_share).unwrap_or(None);
-                            if let Some(own_share) = result {
-                                for reporter in ctx.get_pending_reports_against_self(&id) {
-                                    Self::send_report_response(&mut ctx, &transport, &topic, id.clone(), reporter, own_share.clone()).await
-                                        .unwrap_or_else(|e| log::error!("Failed to send report response: {}", e));
-                                }
-                            }
-
-                            Self::check_self_reports(&mut ctx, &transport, &topic).await;
+                            Self::handle_query(&mut worker_ctx, id, raw_share, callback, timeout, &mut pending_queries).await;
                         }
                         Command::Shutdown => break,
                     }
                 }
 
                 _ = check_timer.tick() => {
-                    Self::check_queries(&mut pending_queries, &mut ctx);
-                    Self::check_self_reports(&mut ctx, &transport, &topic).await;
+                    Self::process_expired_queries(&mut pending_queries, &mut worker_ctx.context);
+                    Self::respond_to_self_reports(&mut worker_ctx).await;
                 }
 
                 else => break,
@@ -209,13 +215,46 @@ where
         log::info!("Collector worker stopped");
     }
 
-    fn check_queries(pending_queries: &mut VecDeque<Query>, ctx: &mut Context) {
+    async fn handle_query(
+        worker_ctx: &mut WorkerContext<T>,
+        id: Vec<u8>,
+        raw_share: Vec<u8>,
+        callback: oneshot::Sender<EventResult>,
+        timeout: tokio::time::Duration,
+        pending_queries: &mut VecDeque<Query>,
+    ) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        pending_queries.push_back(Query {
+            id: id.clone(),
+            deadline,
+            callback,
+        });
+
+        if let Ok(Some(own_share)) = worker_ctx.context.set_own_share(id.clone(), raw_share) {
+            for reporter in worker_ctx.context.get_pending_reports_against_self(&id) {
+                Self::send_report_response(
+                    &mut worker_ctx.context,
+                    &worker_ctx.transport,
+                    &worker_ctx.topic,
+                    id.clone(),
+                    reporter,
+                    own_share.clone(),
+                )
+                .await
+                .unwrap_or_else(|e| log::error!("Failed to send report response: {}", e));
+            }
+        }
+
+        Self::respond_to_self_reports(worker_ctx).await;
+    }
+
+    fn process_expired_queries(pending_queries: &mut VecDeque<Query>, context: &mut Context) {
         let now = tokio::time::Instant::now();
 
         while let Some(query) = pending_queries.front() {
             if now >= query.deadline {
                 if let Some(query) = pending_queries.pop_front() {
-                    Self::process_query(query, ctx);
+                    Self::complete_query(query, context);
                 }
             } else {
                 break;
@@ -223,16 +262,16 @@ where
         }
     }
 
-    async fn check_self_reports(ctx: &mut Context, transport: &Arc<T>, topic: &str) {
-        for id in ctx.active_event_ids() {
+    async fn respond_to_self_reports(worker_ctx: &mut WorkerContext<T>) {
+        for id in worker_ctx.context.active_event_ids() {
             let id_vec = id.to_vec();
 
-            if let Ok(Some(own_share)) = ctx.own_share_clone(&id) {
-                for reporter in ctx.get_pending_reports_against_self(&id_vec) {
+            if let Ok(Some(own_share)) = worker_ctx.context.own_share_clone(&id) {
+                for reporter in worker_ctx.context.get_pending_reports_against_self(&id_vec) {
                     if let Err(e) = Self::send_report_response(
-                        ctx,
-                        transport,
-                        topic,
+                        &mut worker_ctx.context,
+                        &worker_ctx.transport,
+                        &worker_ctx.topic,
                         id_vec.clone(),
                         reporter,
                         own_share.to_vec(),
@@ -247,37 +286,18 @@ where
     }
 
     async fn process_message(
-        ctx: &mut Context,
-        transport: &Arc<T>,
-        topic: &str,
+        worker_ctx: &mut WorkerContext<T>,
         msg: gossipsub::Message,
     ) -> Result<()> {
         match msg.payload {
             gossipsub::Payload::VSSShares { id, shares } => {
-                ctx.add_event::<V>(id, msg.source, shares)?;
+                Self::handle_vss_shares(worker_ctx, id, msg.source, shares)?
             }
             gossipsub::Payload::VSSReport { id, reported } => {
-                if reported == transport.self_peer() {
-                    if let Ok(Some(share)) = ctx.own_share_clone(&id) {
-                        Self::send_report_response(
-                            ctx,
-                            transport,
-                            topic,
-                            id.clone(),
-                            msg.source,
-                            share,
-                        )
-                        .await?;
-                    }
-                }
-                ctx.add_report_peer(id, msg.source, reported)?;
+                Self::handle_report(worker_ctx, id, msg.source, reported).await?
             }
             gossipsub::Payload::VSSReportResponse { id, raw_share } => {
-                let reported = msg.source;
-
-                for peer in ctx.get_reporters_of(&id, reported) {
-                    ctx.add_report_response::<V>(id.clone(), peer, reported, raw_share.clone())?;
-                }
+                Self::handle_report_response(worker_ctx, id, msg.source, raw_share)?
             }
             _ => {}
         }
@@ -285,8 +305,58 @@ where
         Ok(())
     }
 
+    fn handle_vss_shares(
+        worker_ctx: &mut WorkerContext<T>,
+        id: Vec<u8>,
+        source: libp2p::PeerId,
+        shares: Shares,
+    ) -> Result<()> {
+        worker_ctx.context.add_event::<V>(id, source, shares)?;
+        Ok(())
+    }
+
+    async fn handle_report(
+        worker_ctx: &mut WorkerContext<T>,
+        id: Vec<u8>,
+        reporter: libp2p::PeerId,
+        reported: libp2p::PeerId,
+    ) -> Result<()> {
+        if reported == worker_ctx.transport.self_peer() {
+            if let Ok(Some(share)) = worker_ctx.context.own_share_clone(&id) {
+                Self::send_report_response(
+                    &mut worker_ctx.context,
+                    &worker_ctx.transport,
+                    &worker_ctx.topic,
+                    id.clone(),
+                    reporter,
+                    share,
+                )
+                .await?;
+            }
+        }
+        worker_ctx.context.add_report_peer(id, reporter, reported)?;
+        Ok(())
+    }
+
+    fn handle_report_response(
+        worker_ctx: &mut WorkerContext<T>,
+        id: Vec<u8>,
+        reported: libp2p::PeerId,
+        raw_share: Vec<u8>,
+    ) -> Result<()> {
+        for peer in worker_ctx.context.get_reporters_of(&id, reported) {
+            worker_ctx.context.add_report_response::<V>(
+                id.clone(),
+                peer,
+                reported,
+                raw_share.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
     async fn send_report_response(
-        ctx: &mut Context,
+        context: &mut Context,
         transport: &Arc<T>,
         topic: &str,
         id: Vec<u8>,
@@ -303,22 +373,21 @@ where
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
 
-        ctx.mark_self_report_as_responded(&id, &reporter)?;
+        context.mark_self_report_as_responded(&id, &reporter)?;
 
         Ok(())
     }
 
-    fn process_query(query: Query, ctx: &mut Context) {
-        let result = match ctx.output(query.id.clone()) {
-            Ok(output) => output,
+    fn complete_query(query: Query, context: &mut Context) {
+        match context.output(query.id.clone()) {
+            Ok(output) => {
+                if query.callback.send(output).is_err() {
+                    log::error!("Failed to send callback, receiver dropped");
+                }
+            }
             Err(e) => {
                 log::error!("Failed to get output: {}", e);
-                return;
             }
-        };
-
-        if query.callback.send(result).is_err() {
-            log::error!("Failed to send callback, receiver dropped");
         }
     }
 
@@ -342,11 +411,9 @@ where
         let result = rx.await.map_err(|_| Error::ChannelClosed)?;
 
         match result {
-            EventResult::Success { own_index, shares } => Ok(CollectionResult::from_shares(
-                shares,
-                own_index,
-                &self.secret_key,
-            )?),
+            EventResult::Success { own_index, shares } => {
+                CollectionResult::from_shares(shares, own_index, &self.secret_key)
+            }
             EventResult::Failure { invalid_peers } => {
                 Ok(CollectionResult::Failure { invalid_peers })
             }
@@ -369,3 +436,4 @@ impl<T: Transport, V: Vss> Drop for Collector<T, V> {
         self.stop();
     }
 }
+
