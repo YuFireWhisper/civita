@@ -139,3 +139,168 @@ impl From<CurvScalar<CurvSecp256k1>> for Scalar {
         Scalar::Secp256k1(scalar)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::crypto::primitives::{
+        algebra::{Error, Point, Scalar, Scheme},
+        vss::Vss,
+    };
+
+    const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;
+    const DEFAULT_INDEX: u16 = 0;
+
+    fn create_valid_scalar_and_commitments() -> (Scalar, Vec<Point>) {
+        const NUM_SHARES: u16 = 5;
+        const THRESHOLD: u16 = 3;
+        let (scalars, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_SHARES);
+        (scalars.get(&DEFAULT_INDEX).unwrap().clone(), commitments)
+    }
+
+    #[test]
+    fn secp256k1_scalars_are_randomly_generated() {
+        let scalar1 = Scalar::random(&Scheme::Secp256k1);
+        let scalar2 = Scalar::random(&Scheme::Secp256k1);
+
+        assert_ne!(scalar1, scalar2);
+    }
+
+    #[test]
+    fn secp256k1_zero_creates_additive_identity() {
+        let zero = Scalar::zero(Scheme::Secp256k1);
+        let random = Scalar::random(&Scheme::Secp256k1);
+
+        assert!(zero.is_secp256k1());
+
+        match (zero, random.clone()) {
+            (Scalar::Secp256k1(z), Scalar::Secp256k1(r)) => {
+                let sum = Scalar::Secp256k1(z + r);
+                assert_eq!(sum, random);
+            }
+        }
+    }
+
+    #[test]
+    fn secp256k1_specific_factory_methods_work() {
+        let random = Scalar::secp256k1_random();
+        let zero = Scalar::secp256k1_zero();
+
+        assert!(random.is_secp256k1());
+        assert!(zero.is_secp256k1());
+        assert_ne!(random, zero);
+    }
+
+    #[test]
+    fn curv_secp256k1_scalar_conversion_preserves_value() {
+        let curv_scalar = curv::elliptic::curves::Scalar::random();
+        let scalar = Scalar::from_curv_secp256k1(curv_scalar.clone());
+
+        match scalar {
+            Scalar::Secp256k1(s) => {
+                assert_eq!(s, curv_scalar);
+            }
+        }
+    }
+
+    #[test]
+    fn same_scheme_scalars_match_types() {
+        let scalar1 = Scalar::random(&DEFAULT_SCHEME);
+        let scalar2 = Scalar::random(&DEFAULT_SCHEME);
+
+        assert!(scalar1.is_same_type(&scalar2));
+    }
+
+    #[test]
+    fn same_scheme_scalar_match_point() {
+        let scalar = Scalar::random(&DEFAULT_SCHEME);
+        let point = Point::zero(DEFAULT_SCHEME);
+
+        assert!(scalar.is_same_type_point(&point));
+    }
+
+    #[test]
+    fn secp256k1_raw_accessor_returns_underlying_scalar() {
+        let curv_scalar = curv::elliptic::curves::Scalar::random();
+        let scalar = Scalar::from_curv_secp256k1(curv_scalar.clone());
+
+        let raw = scalar.get_secp256k1_raw().unwrap();
+        assert_eq!(raw, &curv_scalar);
+    }
+
+    #[test]
+    fn secp256k1_type_check_identifies_variant() {
+        let scalar = Scalar::random(&Scheme::Secp256k1);
+        assert!(scalar.is_secp256k1());
+    }
+
+    #[test]
+    fn verification_succeeds_with_valid_commitments() {
+        let (scalar, commitments) = create_valid_scalar_and_commitments();
+        let index = DEFAULT_INDEX + 1; // Because index is 1-based
+
+        let result = scalar.verify(index, &commitments);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn verification_fails_with_invalid_commitments() {
+        let (scalar, _) = create_valid_scalar_and_commitments();
+        let invalid_commitments = vec![Point::zero(Scheme::Secp256k1)];
+
+        let result = scalar.verify(DEFAULT_INDEX, &invalid_commitments);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn serialization_roundtrip_preserves_scalar_value() {
+        let original = Scalar::random(&DEFAULT_SCHEME);
+
+        let bytes = original.to_vec().unwrap();
+        let deserialized = Scalar::from_slice(&bytes).unwrap();
+
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn sum_of_scalars_produces_correct_result() {
+        let scalar1 = Scalar::random(&DEFAULT_SCHEME);
+        let scalar2 = Scalar::random(&DEFAULT_SCHEME);
+        let scalar3 = Scalar::random(&DEFAULT_SCHEME);
+
+        let scalars = vec![scalar1.clone(), scalar2.clone(), scalar3.clone()];
+        let sum = Scalar::sum(scalars.into_iter()).unwrap();
+
+        match (scalar1, scalar2, scalar3) {
+            (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2), Scalar::Secp256k1(s3)) => {
+                let expected_sum = Scalar::Secp256k1(s1 + s2 + s3);
+                assert_eq!(sum, expected_sum);
+            }
+        }
+    }
+
+    #[test]
+    fn sum_with_empty_iterator_returns_error() {
+        let empty_iter: Vec<Scalar> = vec![];
+
+        let result = Scalar::sum(empty_iter.into_iter());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::IteratorEmpty => {}
+            _ => panic!("Expected IteratorEmpty error"),
+        }
+    }
+
+    #[test]
+    fn from_trait_converts_curv_scalar_to_scalar() {
+        let curv_scalar = curv::elliptic::curves::Scalar::random();
+        let scalar: Scalar = curv_scalar.clone().into();
+
+        match scalar {
+            Scalar::Secp256k1(s) => {
+                assert_eq!(s, curv_scalar);
+            }
+        }
+    }
+}
