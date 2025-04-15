@@ -77,11 +77,11 @@ impl Scalar {
 
     pub fn verify(&self, index: u16, commitments: &[Point]) -> Result<bool> {
         match self {
-            Scalar::Secp256k1(scalar) => self.verify_secp255k1(index, scalar, commitments),
+            Scalar::Secp256k1(scalar) => self.verify_secp256k1(index, scalar, commitments),
         }
     }
 
-    fn verify_secp255k1(
+    fn verify_secp256k1(
         &self,
         index: u16,
         scalar: &CurvScalar<CurvSecp256k1>,
