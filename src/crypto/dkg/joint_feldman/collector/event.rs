@@ -35,15 +35,6 @@ pub enum Error {
     Keypair(#[from] keypair::Error),
 }
 
-pub enum EventResult {
-    Success {
-        bundle: HashMap<libp2p::PeerId, (Scalar, Vec<Point>)>,
-    },
-    Failure {
-        invalid_peers: HashSet<libp2p::PeerId>,
-    },
-}
-
 #[derive(Debug)]
 pub struct Bundle {
     pub encrypted_shares: EncryptedShares,
@@ -67,7 +58,7 @@ pub struct Report {
 
 #[derive(Debug)]
 pub struct Event {
-    pairs: HashMap<u16, Bundle>,
+    bundles: HashMap<u16, Bundle>,
     own_peer: libp2p::PeerId,
     own_share: Option<Scalar>,
     // (reporter, reported)
@@ -84,10 +75,29 @@ impl Bundle {
     }
 }
 
+impl Report {
+    pub fn new(reporter: libp2p::PeerId, reported: libp2p::PeerId) -> Self {
+        Self {
+            reporter,
+            reported,
+            raw_share: None,
+            result: VerificationResult::Pending,
+        }
+    }
+
+    pub fn set_raw_share(&mut self, raw_share: Scalar) {
+        self.raw_share = Some(raw_share);
+    }
+
+    pub fn set_result(&mut self, result: VerificationResult) {
+        self.result = result;
+    }
+}
+
 impl Event {
     pub fn new(own_peer: libp2p::PeerId) -> Self {
         Self {
-            pairs: HashMap::new(),
+            bundles: HashMap::new(),
             own_peer,
             own_share: None,
             reports: HashMap::new(),
@@ -96,7 +106,7 @@ impl Event {
     }
 
     pub fn add_pair(&mut self, source_index: u16, bundle: Bundle) {
-        self.pairs.insert(source_index, bundle);
+        self.bundles.insert(source_index, bundle);
     }
 
     pub fn set_own_share(&mut self, own_share: Scalar) {
@@ -112,15 +122,7 @@ impl Event {
             ));
         }
 
-        self.reports.insert(
-            key,
-            Report {
-                reporter,
-                reported,
-                raw_share: None,
-                result: VerificationResult::Pending,
-            },
-        );
+        self.reports.insert(key, Report::new(reporter, reported));
 
         if reported == self.own_peer {
             self.pending_self_reports.insert(reporter);
@@ -149,14 +151,14 @@ impl Event {
         let key = (reporter, reported);
         let report = self.reports.get_mut(&key).ok_or(Error::ReportNotFound)?;
 
-        report.raw_share = Some(raw_share.clone());
+        report.set_raw_share(raw_share.clone());
 
         let accused_share = self
-            .pairs
+            .bundles
             .get(&reported_index)
             .ok_or(Error::ShareNotFound(reported_index))?;
 
-        Self::verify_and_update_report(
+        Self::verify_report(
             report,
             &raw_share,
             accused_share,
@@ -167,7 +169,7 @@ impl Event {
         Ok(())
     }
 
-    fn verify_and_update_report(
+    fn verify_report(
         report: &mut Report,
         reported_raw_share: &Scalar,
         reported_bundle: &Bundle,
@@ -187,17 +189,18 @@ impl Event {
             return Ok(());
         }
 
-        report.result =
+        let result =
             match reported_raw_share.verify(reporter_index, &reported_bundle.commitments)? {
                 true => VerificationResult::ReporterPeerMalicious,
                 false => VerificationResult::ReportedPeerMalicious,
             };
+        report.set_result(result);
 
         Ok(())
     }
 
     pub fn encrypted_shares(&self, index: &u16) -> Result<&EncryptedShares> {
-        self.pairs
+        self.bundles
             .get(index)
             .ok_or(Error::ShareNotFound(*index))
             .map(|pair| &pair.encrypted_shares)
@@ -236,7 +239,7 @@ impl Event {
     }
 
     pub fn commitments(&self, index: &u16) -> Result<&Vec<Point>> {
-        self.pairs
+        self.bundles
             .get(index)
             .ok_or(Error::ShareNotFound(*index))
             .map(|pair| &pair.commitments)

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::crypto::{
     dkg::joint_feldman::{
-        collector::event::{self, Bundle, Event, EventResult},
+        collector::event::{self, Bundle, Event},
         peer_registry::PeerRegistry,
     },
     keypair::{PublicKey, SecretKey},
@@ -36,6 +36,15 @@ pub enum Error {
 
     #[error("Event error: {0}")]
     Event(#[from] event::Error),
+}
+
+pub enum EventResult {
+    Success {
+        bundle: HashMap<libp2p::PeerId, (Scalar, Vec<Point>)>,
+    },
+    Failure {
+        invalid_peers: HashSet<libp2p::PeerId>,
+    },
 }
 
 #[derive(Debug)]

@@ -6,7 +6,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::crypto::{
-    dkg::joint_feldman::collector::event::EventResult,
+    dkg::joint_feldman::collector::context::EventResult,
     primitives::vss::encrypted_share::EncryptedShares,
 };
 use crate::{
