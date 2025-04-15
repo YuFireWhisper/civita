@@ -15,7 +15,7 @@ use crate::{
         keypair::{self, SecretKey},
         primitives::{
             algebra::element::{self, Point, Scalar},
-            vss::{Shares, Vss},
+            vss::{encrypted_share::EncryptedShares, Vss},
         },
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
@@ -55,7 +55,7 @@ pub enum Error {
 pub enum CollectionResult {
     Success {
         own_shares: Vec<Scalar>,
-        partial_public: HashMap<libp2p::PeerId, Point>,
+        partial_public: HashMap<libp2p::PeerId, Vec<Point>>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,
@@ -65,7 +65,7 @@ pub enum CollectionResult {
 enum Command {
     Query {
         id: Vec<u8>,
-        raw_share: Vec<u8>,
+        raw_share: Scalar,
         callback: oneshot::Sender<EventResult>,
     },
     Shutdown,
@@ -97,24 +97,11 @@ where
 }
 
 impl CollectionResult {
-    pub fn from_shares(
-        shares: HashMap<libp2p::PeerId, Shares>,
-        own_index: u16,
-        secret_key: &SecretKey,
-    ) -> Result<Self> {
-        let mut own_shares = Vec::with_capacity(shares.len());
-        let mut partial_public = HashMap::with_capacity(shares.len());
-
-        for (peer, share) in shares {
-            let encrypted_share = share.shares.get(&own_index).ok_or(Error::ShareNotFound)?;
-            let decrypted_share = secret_key.decrypt(encrypted_share)?;
-
-            let share_scalar = Scalar::from_slice(&decrypted_share)?;
-            own_shares.push(share_scalar);
-
-            let public_point = Point::from_slice(&share.commitments[0])?;
-            partial_public.insert(peer, public_point);
-        }
+    pub fn new(bundle: HashMap<libp2p::PeerId, (Scalar, Vec<Point>)>) -> Result<Self> {
+        let (own_shares, partial_public) = bundle
+            .into_iter()
+            .map(|(peer, (share, commitments))| (share, (peer, commitments)))
+            .collect::<(Vec<_>, HashMap<_, _>)>();
 
         Ok(CollectionResult::Success {
             own_shares,
@@ -218,7 +205,7 @@ where
     async fn handle_query(
         worker_ctx: &mut WorkerContext<T>,
         id: Vec<u8>,
-        raw_share: Vec<u8>,
+        raw_share: Scalar,
         callback: oneshot::Sender<EventResult>,
         timeout: tokio::time::Duration,
         pending_queries: &mut VecDeque<Query>,
@@ -274,7 +261,7 @@ where
                         &worker_ctx.topic,
                         id_vec.clone(),
                         reporter,
-                        own_share.to_vec(),
+                        own_share.clone(),
                     )
                     .await
                     {
@@ -290,8 +277,8 @@ where
         msg: gossipsub::Message,
     ) -> Result<()> {
         match msg.payload {
-            gossipsub::Payload::VSSShares { id, shares } => {
-                Self::handle_vss_shares(worker_ctx, id, msg.source, shares)?
+            gossipsub::Payload::VSSSBundle { id, encrypted_shares, commitments } => {
+                Self::handle_vss_shares(worker_ctx, id, msg.source, encrypted_shares, commitments)?;
             }
             gossipsub::Payload::VSSReport { id, reported } => {
                 Self::handle_report(worker_ctx, id, msg.source, reported).await?
@@ -309,9 +296,10 @@ where
         worker_ctx: &mut WorkerContext<T>,
         id: Vec<u8>,
         source: libp2p::PeerId,
-        shares: Shares,
+        encrypted_shares: EncryptedShares,
+        commitments: Vec<Point>,
     ) -> Result<()> {
-        worker_ctx.context.add_event::<V>(id, source, shares)?;
+        worker_ctx.context.add_event::<V>(id, source, encrypted_shares, commitments)?;
         Ok(())
     }
 
@@ -342,7 +330,7 @@ where
         worker_ctx: &mut WorkerContext<T>,
         id: Vec<u8>,
         reported: libp2p::PeerId,
-        raw_share: Vec<u8>,
+        raw_share: Scalar,
     ) -> Result<()> {
         for peer in worker_ctx.context.get_reporters_of(&id, reported) {
             worker_ctx.context.add_report_response::<V>(
@@ -361,7 +349,7 @@ where
         topic: &str,
         id: Vec<u8>,
         reporter: libp2p::PeerId,
-        own_share: Vec<u8>,
+        own_share: Scalar,
     ) -> Result<()> {
         let payload = gossipsub::Payload::VSSReportResponse {
             id: id.clone(),
@@ -391,7 +379,7 @@ where
         }
     }
 
-    pub async fn query(&self, id: Vec<u8>, raw_share: Vec<u8>) -> Result<CollectionResult> {
+    pub async fn query(&self, id: Vec<u8>, raw_share: Scalar) -> Result<CollectionResult> {
         let (tx, rx) = oneshot::channel();
 
         let cmd_tx = self
@@ -411,9 +399,7 @@ where
         let result = rx.await.map_err(|_| Error::ChannelClosed)?;
 
         match result {
-            EventResult::Success { own_index, shares } => {
-                CollectionResult::from_shares(shares, own_index, &self.secret_key)
-            }
+            EventResult::Success { bundle, .. } => CollectionResult::new(bundle),
             EventResult::Failure { invalid_peers } => {
                 Ok(CollectionResult::Failure { invalid_peers })
             }

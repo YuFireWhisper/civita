@@ -5,7 +5,10 @@ use crate::crypto::{
     keypair::{self, PublicKey, SecretKey},
     primitives::{
         algebra::element::{self, Point, Scalar},
-        vss::{Shares, SharesError, Vss},
+        vss::{
+            encrypted_share::{self, EncryptedShare, EncryptedShares},
+            Vss,
+        },
     },
 };
 
@@ -37,14 +40,20 @@ pub enum Error {
     #[error("Element error: {0}")]
     Element(#[from] element::Error),
 
-    #[error("Share error: {0}")]
-    Share(#[from] SharesError),
+    #[error("Encrypted share error: {0}")]
+    EncryptedShare(#[from] encrypted_share::Error),
+}
+
+#[derive(Debug)]
+pub struct Bundle {
+    pub encrypted_shares: EncryptedShares,
+    pub commitments: Vec<Point>,
 }
 
 pub enum EventResult {
     Success {
         own_index: u16,
-        shares: HashMap<libp2p::PeerId, Shares>,
+        bundle: HashMap<libp2p::PeerId, (Scalar, Vec<Point>)>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,
@@ -62,15 +71,15 @@ pub enum VerificationResult {
 struct Report {
     reporter: libp2p::PeerId,
     reported: libp2p::PeerId,
-    raw_share: Option<Vec<u8>>,
+    raw_share: Option<Scalar>,
     result: VerificationResult,
 }
 
 #[derive(Debug)]
 pub struct Event {
-    pairs: HashMap<u16, Shares>,
+    pairs: HashMap<u16, Bundle>,
     own_peer: libp2p::PeerId,
-    own_share: Option<Vec<u8>>,
+    own_share: Option<Scalar>,
     // (reporter, reported)
     reports: HashMap<(libp2p::PeerId, libp2p::PeerId), Report>,
     // Reports against self that need responses
@@ -89,6 +98,15 @@ pub struct Context {
     events_awaiting_own_share: HashSet<Vec<u8>>,
 }
 
+impl Bundle {
+    pub fn new(encrypted_shares: EncryptedShares, commitments: Vec<Point>) -> Self {
+        Self {
+            encrypted_shares,
+            commitments,
+        }
+    }
+}
+
 impl Event {
     pub fn new(own_peer: libp2p::PeerId) -> Self {
         Self {
@@ -100,11 +118,11 @@ impl Event {
         }
     }
 
-    pub fn add_pair(&mut self, source_index: u16, shares: Shares) {
-        self.pairs.insert(source_index, shares);
+    pub fn add_pair(&mut self, source_index: u16, bundle: Bundle) {
+        self.pairs.insert(source_index, bundle);
     }
 
-    pub fn set_own_share(&mut self, own_share: Vec<u8>) {
+    pub fn set_own_share(&mut self, own_share: Scalar) {
         self.own_share = Some(own_share);
     }
 
@@ -146,7 +164,7 @@ impl Event {
         &mut self,
         reporter: libp2p::PeerId,
         reported: libp2p::PeerId,
-        raw_share: Vec<u8>,
+        raw_share: Scalar,
         reporter_index: u16,
         reported_index: u16,
         reporter_public_key: &PublicKey,
@@ -177,12 +195,12 @@ impl Event {
 
     fn verify_and_update_report<V: Vss>(
         report: &mut Report,
-        raw_share: &[u8],
-        accused_share: &Shares,
+        reported_raw_share: &Scalar,
+        reported_bundle: &Bundle,
         reporter_index: u16,
         reporter_public_key: &PublicKey,
     ) -> Result<()> {
-        let encrypted_share = match accused_share.shares.get(&reporter_index) {
+        let encrypted_share = match reported_bundle.encrypted_shares.get(&reporter_index) {
             Some(share) => share,
             None => {
                 report.result = VerificationResult::ReportedPeerMalicious;
@@ -190,19 +208,16 @@ impl Event {
             }
         };
 
-        if !is_share_matching(raw_share, encrypted_share, reporter_public_key)? {
+        if !is_share_matching(reported_raw_share, encrypted_share, reporter_public_key)? {
             report.result = VerificationResult::ReportedPeerMalicious;
             return Ok(());
         }
 
-        let share = Scalar::from_slice(raw_share)?;
-        let commitments = accused_share
-            .commitments
-            .iter()
-            .map(|c| Point::from_slice(c))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        report.result = if V::verify(&reporter_index, &share, &commitments) {
+        report.result = if V::verify(
+            &reporter_index,
+            reported_raw_share,
+            &reported_bundle.commitments,
+        ) {
             VerificationResult::ReporterPeerMalicious
         } else {
             VerificationResult::ReportedPeerMalicious
@@ -211,11 +226,14 @@ impl Event {
         Ok(())
     }
 
-    pub fn share(&self, index: u16) -> Result<&Shares> {
-        self.pairs.get(&index).ok_or(Error::ShareNotFound(index))
+    pub fn encrypted_shares(&self, index: &u16) -> Result<&EncryptedShares> {
+        self.pairs
+            .get(index)
+            .ok_or(Error::ShareNotFound(*index))
+            .map(|pair| &pair.encrypted_shares)
     }
 
-    pub fn own_share_ref(&self) -> Option<&Vec<u8>> {
+    pub fn own_share_ref(&self) -> Option<&Scalar> {
         self.own_share.as_ref()
     }
 
@@ -238,15 +256,31 @@ impl Event {
 
         malicious
     }
+
+    pub fn decrypted_share(&self, index: &u16, secret_key: &SecretKey) -> Result<Scalar> {
+        let encrypted_share = self
+            .encrypted_shares(index)?
+            .get(index)
+            .ok_or(Error::ShareNotFound(*index))?;
+        encrypted_share.to_scalar(secret_key).map_err(Error::from)
+    }
+
+    pub fn commitments(&self, index: &u16) -> Result<&Vec<Point>> {
+        self.pairs
+            .get(index)
+            .ok_or(Error::ShareNotFound(*index))
+            .map(|pair| &pair.commitments)
+    }
 }
 
 fn is_share_matching(
-    raw_share: &[u8],
-    encrypted_share: &[u8],
+    raw_share: &Scalar,
+    encrypted_share: &EncryptedShare,
     public_key: &PublicKey,
 ) -> Result<bool> {
-    let expected_encrypted_share = public_key.encrypt(raw_share)?;
-    Ok(encrypted_share == expected_encrypted_share)
+    let raw_share_bytes = raw_share.to_vec()?;
+    let expected_encrypted_share = public_key.encrypt(&raw_share_bytes)?;
+    Ok(encrypted_share.as_slice() == expected_encrypted_share)
 }
 
 impl Context {
@@ -269,7 +303,8 @@ impl Context {
         &mut self,
         id: Vec<u8>,
         source: libp2p::PeerId,
-        shares: Shares,
+        encrypted_shares: EncryptedShares,
+        commitments: Vec<Point>,
     ) -> Result<()> {
         if !self.is_valid_source(&source) {
             return Ok(());
@@ -277,10 +312,16 @@ impl Context {
 
         self.ensure_event_not_processed(&id)?;
 
-        if shares.verify::<V>(&self.own_index, &self.secret_key)? {
+        let encrypted_share = encrypted_shares
+            .get(&self.own_index)
+            .ok_or(Error::ShareNotFound(self.own_index))?;
+        let own_share = encrypted_share.to_scalar(&self.secret_key)?;
+
+        if own_share.verify(self.own_index, &commitments)? {
             let index = self.peer_index(source)?;
             let event = self.get_or_create_event(&id);
-            event.add_pair(index, shares);
+            let bundle = Bundle::new(encrypted_shares, commitments);
+            event.add_pair(index, bundle);
         } else {
             self.invalid_peers.insert(source);
         }
@@ -307,7 +348,7 @@ impl Context {
             .or_insert_with(|| Event::new(self.own_peer))
     }
 
-    pub fn set_own_share(&mut self, id: Vec<u8>, own_share: Vec<u8>) -> Result<Option<Vec<u8>>> {
+    pub fn set_own_share(&mut self, id: Vec<u8>, own_share: Scalar) -> Result<Option<Scalar>> {
         self.ensure_event_not_processed(&id)?;
 
         if self.events_awaiting_own_share.remove(&id) {
@@ -386,7 +427,7 @@ impl Context {
         id: Vec<u8>,
         reporter: libp2p::PeerId,
         reported: libp2p::PeerId,
-        raw_share: Vec<u8>,
+        raw_share: Scalar,
     ) -> Result<()> {
         if !self.are_peers_valid(&reporter, &reported) {
             return Ok(());
@@ -452,21 +493,24 @@ impl Context {
 
         Ok(EventResult::Success {
             own_index: self.own_index,
-            shares: shares_map,
+            bundle: shares_map,
         })
     }
 
-    fn collect_valid_shares(&self, event: &Event) -> HashMap<libp2p::PeerId, Shares> {
+    fn collect_valid_shares(&self, event: &Event) -> HashMap<libp2p::PeerId, (Scalar, Vec<Point>)> {
         let mut shares_map = HashMap::new();
         for (peer, index) in &self.peers {
-            if let Ok(shares) = event.share(index) {
-                shares_map.insert(peer, shares.clone());
+            if let (Ok(share), Ok(commitments)) = (
+                event.decrypted_share(&index, &self.secret_key),
+                event.commitments(&index),
+            ) {
+                shares_map.insert(peer, (share, commitments.clone()));
             }
         }
         shares_map
     }
 
-    pub fn own_share_clone(&mut self, id: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn own_share_clone(&mut self, id: &[u8]) -> Result<Option<Scalar>> {
         self.ensure_event_not_processed(id)?;
 
         let event = match self.events.get(id) {
@@ -500,4 +544,3 @@ impl Context {
         })
     }
 }
-

@@ -16,8 +16,14 @@ pub struct PeerRegistry {
     index_to_peer: HashMap<u16, libp2p::PeerId>,
 }
 
-pub struct PeerRegistryIterator<'a> {
+pub struct IndexPeerIterator<'a> {
     iter: hash_map::Iter<'a, u16, libp2p::PeerId>,
+    registry: &'a PeerRegistry,
+}
+
+pub struct IndexKeyIterator<'a> {
+    iter: hash_map::Iter<'a, u16, libp2p::PeerId>,
+    registry: &'a PeerRegistry,
 }
 
 impl PeerRegistry {
@@ -69,8 +75,15 @@ impl PeerRegistry {
         self.peer_to_info.contains_key(peer_id)
     }
 
-    pub fn iter(&self) -> PeerRegistryIterator<'_> {
+    pub fn iter_index_peer(&self) -> IndexPeerIterator<'_> {
         self.into_iter()
+    }
+
+    pub fn iter_index_keys(&self) -> IndexKeyIterator<'_> {
+        IndexKeyIterator {
+            iter: self.index_to_peer.iter(),
+            registry: self,
+        }
     }
 
     pub fn peer_ids(&self) -> impl Iterator<Item = &libp2p::PeerId> {
@@ -81,8 +94,11 @@ impl PeerRegistry {
         self.index_to_peer.keys()
     }
 
-    pub fn len(&self) -> usize {
-        self.index_to_peer.len()
+    pub fn len(&self) -> u16 {
+        self.index_to_peer
+            .len()
+            .try_into()
+            .expect("unreachable: length is too large")
     }
 
     pub fn is_empty(&self) -> bool {
@@ -92,16 +108,17 @@ impl PeerRegistry {
 
 impl<'a> IntoIterator for &'a PeerRegistry {
     type Item = (libp2p::PeerId, u16);
-    type IntoIter = PeerRegistryIterator<'a>;
+    type IntoIter = IndexPeerIterator<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        PeerRegistryIterator {
+        IndexPeerIterator {
             iter: self.index_to_peer.iter(),
+            registry: self,
         }
     }
 }
 
-impl<'a> Iterator for PeerRegistryIterator<'a> {
+impl<'a> Iterator for IndexPeerIterator<'a> {
     type Item = (libp2p::PeerId, u16);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -110,5 +127,18 @@ impl<'a> Iterator for PeerRegistryIterator<'a> {
         } else {
             None
         }
+    }
+}
+
+impl<'a> Iterator for IndexKeyIterator<'a> {
+    type Item = (u16, &'a PublicKey);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((index, peer_id)) = self.iter.next() {
+            if let Some(info) = self.registry.peer_to_info.get(peer_id) {
+                return Some((*index, &info.public_key));
+            }
+        }
+        None
     }
 }

@@ -1,10 +1,19 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::crypto;
-use crate::crypto::dkg::joint_feldman::peer_info::PeerRegistry;
-use crate::crypto::primitives::vss::Shares;
-use crate::network::transport::{libp2p_transport::protocols::gossipsub, Transport};
+use crate::{
+    crypto::{
+        dkg::joint_feldman::peer_info::PeerRegistry,
+        keypair,
+        primitives::{
+            algebra::element::Point,
+            vss::{
+                decrypted_share::DecryptedShares,
+                encrypted_share::{self, EncryptedShares},
+            },
+        },
+    },
+    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -15,13 +24,10 @@ pub enum Error {
     Transport(String),
 
     #[error("Keypair error: {0}")]
-    Keypair(#[from] crypto::keypair::Error),
+    Keypair(#[from] keypair::Error),
 
-    #[error("Share not found for peer index: {0}")]
-    ShareNotFound(u16),
-
-    #[error("Public key not found for peer index: {0}")]
-    PublicKeyNotFound(u16),
+    #[error("Encrypted share error: {0}")]
+    EncryptedShare(#[from] encrypted_share::Error),
 }
 
 pub struct Distributor<T: Transport + 'static> {
@@ -41,32 +47,25 @@ impl<T: Transport + 'static> Distributor<T> {
         &self,
         id: Vec<u8>,
         peers: &PeerRegistry,
-        mut shares: Shares,
+        decrypted_shares: &DecryptedShares,
+        commitments: Vec<Point>,
     ) -> Result<()> {
         assert_eq!(
             peers.len() - 1, // Exclude self
-            shares.shares.len(),
+            decrypted_shares.len(),
             "Number of peers must match the number of shares"
         );
 
-        shares.shares = peers
-            .indices()
-            .map(|index| {
-                let share = shares
-                    .shares
-                    .get(index)
-                    .ok_or(Error::ShareNotFound(*index))?;
-
-                let public_key = peers
-                    .get_public_key_by_index(*index)
-                    .ok_or(Error::PublicKeyNotFound(*index))?;
-
-                Ok((*index, public_key.encrypt(share)?))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
+        let encrypted_shares =
+            EncryptedShares::from_decrypted(decrypted_shares, peers.iter_index_keys())?;
+        let payload = gossipsub::Payload::VSSSBundle {
+            id,
+            encrypted_shares,
+            commitments,
+        };
 
         self.transport
-            .publish(&self.topic, gossipsub::Payload::VSSShares { id, shares })
+            .publish(&self.topic, payload)
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
 

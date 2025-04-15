@@ -4,7 +4,13 @@ use libp2p::{gossipsub::MessageId, PeerId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{dkg::Data, primitives::vss::Shares},
+    crypto::{
+        dkg::Data,
+        primitives::{
+            algebra::element::{Point, Scalar},
+            vss::encrypted_share::EncryptedShares,
+        },
+    },
     network::transport::libp2p_transport::protocols::kad,
 };
 
@@ -30,9 +36,10 @@ pub enum Payload {
 
     DkgVSS(Vec<u8>),
 
-    VSSShares {
+    VSSSBundle {
         id: Vec<u8>,
-        shares: Shares,
+        encrypted_shares: EncryptedShares,
+        commitments: Vec<Point>,
     },
 
     VSSCommitments {
@@ -47,7 +54,7 @@ pub enum Payload {
 
     VSSReportResponse {
         id: Vec<u8>,
-        raw_share: Vec<u8>,
+        raw_share: Scalar,
     },
 
     DkgVSS_(Vec<Vec<u8>>),

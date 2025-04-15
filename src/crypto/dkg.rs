@@ -41,7 +41,7 @@ pub enum GenerateResult {
     Success {
         secret: Scalar,
         public: Point,
-        partial_public: HashMap<libp2p::PeerId, Point>,
+        partial_public: HashMap<libp2p::PeerId, Vec<Point>>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,

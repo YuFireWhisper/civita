@@ -12,8 +12,11 @@ use crate::{
         },
         keypair::{PublicKey, SecretKey},
         primitives::{
-            algebra::element::Scalar,
-            vss::{Shares, Vss},
+            algebra::element::{Point, Scalar},
+            vss::{
+                decrypted_share::{self, DecryptedShares},
+                Vss,
+            },
         },
     },
     network::transport::Transport,
@@ -57,6 +60,18 @@ pub enum Error {
 
     #[error("{0}")]
     Distributor(#[from] distributor::Error),
+
+    #[error("Own index not found")]
+    IndexNotFound,
+
+    #[error("Own share not found")]
+    OwnShareNotFound,
+
+    #[error("Peers not set")]
+    PeersNotSet,
+
+    #[error("Decrypted shares error: {0}")]
+    DecryptedShares(#[from] decrypted_share::Error),
 }
 
 pub struct JointFeldman<T: Transport + 'static, V: Vss + 'static> {
@@ -105,26 +120,13 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
     pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult> {
         assert!(self.peers.is_some(), "Peers is empty");
 
-        let peers = self
-            .peers
-            .as_ref()
-            .expect("Peers is empty, it should be set");
-        let nums: u16 = peers
-            .len()
-            .try_into()
-            .expect("Peers length is exceeding the maximum, it should checked before");
-        let mut shares = self.generate_shares(nums)?;
-        let own_share = shares
-            .shares
-            .remove(
-                &peers
-                    .get_index(&self.transport.self_peer())
-                    .expect("unreachable: own peer id"),
-            )
-            .expect("unreachable: own share not found");
+        let peers_len = self.peers_len()?;
+        let (mut decrypted_shares, commitments) = self.generate_shares(peers_len)?;
+        let own_share = self.remove_own_share(&mut decrypted_shares)?;
 
+        let peers = self.peers()?;
         self.distributor
-            .send_shares(id.clone(), peers, shares)
+            .send_shares(id.clone(), peers, &decrypted_shares, commitments)
             .await?;
 
         let result = self.collector.query(id, own_share).await?;
@@ -135,7 +137,10 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
                 partial_public,
             } => {
                 let secret = own_shares.into_iter().sum();
-                let public = partial_public.values().cloned().sum();
+                let public = partial_public
+                    .values()
+                    .map(|ps| ps.first().unwrap().clone())
+                    .sum();
 
                 Ok(GenerateResult::Success {
                     secret,
@@ -149,7 +154,26 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
         }
     }
 
-    fn generate_shares(&self, nums: u16) -> Result<Shares> {
+    fn peers_len(&self) -> Result<u16> {
+        self.peers
+            .as_ref()
+            .map(|peers| peers.len().try_into().expect("length is too large"))
+            .ok_or(Error::PeersNotSet)
+    }
+
+    fn remove_own_share(&self, decrypted_shares: &mut DecryptedShares) -> Result<Scalar> {
+        let peers = self.peers()?;
+        let own_index = peers
+            .get_index(&self.transport.self_peer())
+            .ok_or(Error::IndexNotFound)?;
+        decrypted_shares.remove(&own_index).map_err(Error::from)
+    }
+
+    fn peers(&self) -> Result<&PeerRegistry> {
+        self.peers.as_ref().ok_or(Error::PeersNotSet)
+    }
+
+    fn generate_shares(&self, nums: u16) -> Result<(DecryptedShares, Vec<Point>)> {
         let secret = Scalar::random(&self.config.crypto_scheme);
         let threshold = self.config.threshold_counter.call(nums);
         V::share(&secret, threshold, nums).map_err(|e| Error::Vss(e.to_string()))
