@@ -106,7 +106,7 @@ impl Scalar {
         let mut iter = iter.peekable();
         let mut sum = iter.next().ok_or(Error::IteratorEmpty)?;
 
-        while let Some(scalar) = iter.next() {
+        for scalar in iter {
             if !sum.is_same_type(&scalar) {
                 return Err(Error::InconsistentVariants);
             }

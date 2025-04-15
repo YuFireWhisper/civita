@@ -58,7 +58,7 @@ impl Point {
         let mut iter = iter.peekable();
         let mut sum = iter.next().ok_or(Error::IteratorEmpty)?;
 
-        while let Some(next) = iter.next() {
+        for next in iter {
             if !sum.is_same_type(&next) {
                 return Err(Error::InconsistentVariants);
             }
