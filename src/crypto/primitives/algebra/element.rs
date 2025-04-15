@@ -6,6 +6,8 @@ use curv::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::crypto::primitives::algebra::Scheme;
+
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -26,12 +28,6 @@ pub enum Error {
 
 #[derive(Clone)]
 #[derive(Debug)]
-pub enum CryptoScheme {
-    Secp256k1,
-}
-
-#[derive(Clone)]
-#[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 #[derive(PartialEq, Eq)]
 pub enum Scalar {
@@ -47,15 +43,15 @@ pub enum Point {
 }
 
 impl Scalar {
-    pub fn random(scheme: &CryptoScheme) -> Self {
+    pub fn random(scheme: &Scheme) -> Self {
         match scheme {
-            CryptoScheme::Secp256k1 => Scalar::secp256k1_random(),
+            Scheme::Secp256k1 => Scalar::secp256k1_random(),
         }
     }
 
-    pub fn zero(scheme: CryptoScheme) -> Self {
+    pub fn zero(scheme: Scheme) -> Self {
         match scheme {
-            CryptoScheme::Secp256k1 => Scalar::secp256k1_zero(),
+            Scheme::Secp256k1 => Scalar::secp256k1_zero(),
         }
     }
 
@@ -134,9 +130,9 @@ impl Scalar {
 }
 
 impl Point {
-    pub fn zero(scheme: CryptoScheme) -> Self {
+    pub fn zero(scheme: Scheme) -> Self {
         match scheme {
-            CryptoScheme::Secp256k1 => Point::secp256k1_zero(),
+            Scheme::Secp256k1 => Point::secp256k1_zero(),
         }
     }
 

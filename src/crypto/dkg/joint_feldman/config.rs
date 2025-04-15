@@ -1,12 +1,12 @@
 use tokio::time::Duration;
 
-use crate::crypto::primitives::{algebra::element::CryptoScheme, threshold};
+use crate::crypto::primitives::{algebra::Scheme, threshold};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_SIGN_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_GOSSIPSUB_TOPIC: &str = "DKG";
 const DEFAULT_CHANNEL_SIZE: usize = 100;
-const DEFAULT_CRYPTO_SCHEME: CryptoScheme = CryptoScheme::Secp256k1;
+const DEFAULT_CRYPTO_SCHEME: Scheme = Scheme::Secp256k1;
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -16,7 +16,7 @@ pub struct Config {
     pub threshold_counter: threshold::Counter,
     pub gossipsub_topic: String,
     pub channel_size: usize,
-    pub crypto_scheme: CryptoScheme,
+    pub crypto_scheme: Scheme,
 }
 
 impl Default for Config {
