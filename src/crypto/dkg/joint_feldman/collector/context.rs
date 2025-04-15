@@ -11,8 +11,7 @@ use crate::crypto::{
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug)]
-#[derive(thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Keypair operation failed: {0}")]
     Keypair(#[from] keypair::Error),
@@ -26,8 +25,8 @@ pub enum Error {
     #[error("Event with ID {0} not found")]
     EventNotFound(String),
 
-    #[error("Event with ID {0} already output")]
-    EventAlreadyOutput(String),
+    #[error("Event with ID {0} already processed")]
+    EventAlreadyProcessed(String),
 
     #[error("Report not found for reporter {0} against reported {1}")]
     ReportNotFound(String, String),
@@ -70,12 +69,12 @@ struct Report {
 #[derive(Debug)]
 pub struct Event {
     pairs: HashMap<u16, Shares>,
-    onw_peer: libp2p::PeerId,
+    own_peer: libp2p::PeerId,
     own_share: Option<Vec<u8>>,
     // (reporter, reported)
     reports: HashMap<(libp2p::PeerId, libp2p::PeerId), Report>,
     // Reports against self that need responses
-    pending_self_reports: HashSet<libp2p::PeerId>, // Reporters that need a response
+    pending_self_reports: HashSet<libp2p::PeerId>,
 }
 
 #[derive(Debug)]
@@ -86,20 +85,21 @@ pub struct Context {
     own_peer: libp2p::PeerId,
     own_index: u16,
     events: HashMap<Vec<u8>, Event>,
-    is_output: HashSet<Vec<u8>>,
-    waiting_own_share: HashSet<Vec<u8>>,
+    processed_events: HashSet<Vec<u8>>,
+    events_awaiting_own_share: HashSet<Vec<u8>>,
 }
 
 impl Event {
     pub fn new(own_peer: libp2p::PeerId) -> Self {
         Self {
             pairs: HashMap::new(),
-            onw_peer: own_peer,
+            own_peer,
             own_share: None,
             reports: HashMap::new(),
             pending_self_reports: HashSet::new(),
         }
     }
+
     pub fn add_pair(&mut self, source_index: u16, shares: Shares) {
         self.pairs.insert(source_index, shares);
     }
@@ -127,7 +127,7 @@ impl Event {
             },
         );
 
-        if reported == self.onw_peer {
+        if reported == self.own_peer {
             self.pending_self_reports.insert(reporter);
         }
 
@@ -135,7 +135,7 @@ impl Event {
     }
 
     pub fn pending_reports_against_self(&self) -> Vec<libp2p::PeerId> {
-        self.pending_self_reports.iter().cloned().collect()
+        self.pending_self_reports.iter().copied().collect()
     }
 
     pub fn mark_self_report_as_responded(&mut self, reporter: &libp2p::PeerId) {
@@ -164,6 +164,24 @@ impl Event {
             .get(&reported_index)
             .ok_or(Error::ShareNotFound(reported_index))?;
 
+        Self::verify_and_update_report::<V>(
+            report,
+            &raw_share,
+            accused_share,
+            reporter_index,
+            reporter_public_key,
+        )?;
+
+        Ok(())
+    }
+
+    fn verify_and_update_report<V: Vss>(
+        report: &mut Report,
+        raw_share: &[u8],
+        accused_share: &Shares,
+        reporter_index: u16,
+        reporter_public_key: &PublicKey,
+    ) -> Result<()> {
         let encrypted_share = match accused_share.shares.get(&reporter_index) {
             Some(share) => share,
             None => {
@@ -172,23 +190,23 @@ impl Event {
             }
         };
 
-        if !is_share_matching(&raw_share, encrypted_share, reporter_public_key)? {
+        if !is_share_matching(raw_share, encrypted_share, reporter_public_key)? {
             report.result = VerificationResult::ReportedPeerMalicious;
             return Ok(());
         }
 
-        let share = Scalar::from_slice(&raw_share)?;
+        let share = Scalar::from_slice(raw_share)?;
         let commitments = accused_share
             .commitments
             .iter()
             .map(|c| Point::from_slice(c))
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        if V::verify(&reporter_index, &share, &commitments) {
-            report.result = VerificationResult::ReporterPeerMalicious;
+        report.result = if V::verify(&reporter_index, &share, &commitments) {
+            VerificationResult::ReporterPeerMalicious
         } else {
-            report.result = VerificationResult::ReportedPeerMalicious;
-        }
+            VerificationResult::ReportedPeerMalicious
+        };
 
         Ok(())
     }
@@ -197,8 +215,8 @@ impl Event {
         self.pairs.get(&index).ok_or(Error::ShareNotFound(index))
     }
 
-    pub fn own_share_clone(&self) -> Option<Vec<u8>> {
-        self.own_share.clone()
+    pub fn own_share_ref(&self) -> Option<&Vec<u8>> {
+        self.own_share.as_ref()
     }
 
     pub fn get_malicious_peers(&self) -> HashSet<libp2p::PeerId> {
@@ -242,8 +260,8 @@ impl Context {
             own_peer,
             own_index,
             events: HashMap::new(),
-            is_output: HashSet::new(),
-            waiting_own_share: HashSet::new(),
+            processed_events: HashSet::new(),
+            events_awaiting_own_share: HashSet::new(),
         }
     }
 
@@ -253,21 +271,15 @@ impl Context {
         source: libp2p::PeerId,
         shares: Shares,
     ) -> Result<()> {
-        if self.invalid_peers.contains(&source) || !self.peers.contains(&source) {
+        if !self.is_valid_source(&source) {
             return Ok(());
         }
 
-        if self.is_output.contains(&id) {
-            return Err(Error::EventAlreadyOutput(
-                String::from_utf8_lossy(&id).to_string(),
-            ));
-        }
+        self.ensure_event_not_processed(&id)?;
 
         if shares.verify::<V>(&self.own_index, &self.secret_key)? {
-            let index = self
-                .peer_index(source)
-                .expect("unrechable: index not found");
-            let event = self.events.entry(id).or_insert(Event::new(self.own_peer));
+            let index = self.peer_index(source)?;
+            let event = self.get_or_create_event(&id);
             event.add_pair(index, shares);
         } else {
             self.invalid_peers.insert(source);
@@ -276,21 +288,33 @@ impl Context {
         Ok(())
     }
 
-    /// Set own share for the event
-    ///
-    /// If id in `waiting_own_share`, it will be removed from the set and return it
-    pub fn set_own_share(&mut self, id: Vec<u8>, own_share: Vec<u8>) -> Result<Option<Vec<u8>>> {
-        if self.is_output.contains(&id) {
-            return Err(Error::EventAlreadyOutput(
-                String::from_utf8_lossy(&id).to_string(),
+    fn is_valid_source(&self, source: &libp2p::PeerId) -> bool {
+        !self.invalid_peers.contains(source) && self.peers.contains(source)
+    }
+
+    fn ensure_event_not_processed(&self, id: &[u8]) -> Result<()> {
+        if self.processed_events.contains(id) {
+            return Err(Error::EventAlreadyProcessed(
+                String::from_utf8_lossy(id).to_string(),
             ));
         }
+        Ok(())
+    }
 
-        if self.waiting_own_share.remove(&id) {
+    fn get_or_create_event(&mut self, id: &[u8]) -> &mut Event {
+        self.events
+            .entry(id.to_vec())
+            .or_insert_with(|| Event::new(self.own_peer))
+    }
+
+    pub fn set_own_share(&mut self, id: Vec<u8>, own_share: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        self.ensure_event_not_processed(&id)?;
+
+        if self.events_awaiting_own_share.remove(&id) {
             return Ok(Some(own_share));
         }
 
-        let event = self.events.entry(id).or_insert(Event::new(self.own_peer));
+        let event = self.get_or_create_event(&id);
         event.set_own_share(own_share);
 
         Ok(None)
@@ -308,34 +332,37 @@ impl Context {
         reporter: libp2p::PeerId,
         reported: libp2p::PeerId,
     ) -> Result<()> {
-        if self.invalid_peers.contains(&reporter) || self.invalid_peers.contains(&reported) {
+        if !self.are_peers_valid(&reporter, &reported) {
             return Ok(());
         }
 
-        if self.is_output.contains(&id) {
-            return Err(Error::EventAlreadyOutput(
-                String::from_utf8_lossy(&id).to_string(),
-            ));
-        }
+        self.ensure_event_not_processed(&id)?;
+        self.validate_peers_exist(&reporter, &reported)?;
 
-        self.peer_index(reporter)?;
-        self.peer_index(reported)?;
-
-        let event = self
-            .events
-            .entry(id.clone())
-            .or_insert(Event::new(self.own_peer));
+        let event = self.get_or_create_event(&id);
         event.add_report(reporter, reported)?;
 
         Ok(())
     }
 
+    fn are_peers_valid(&self, reporter: &libp2p::PeerId, reported: &libp2p::PeerId) -> bool {
+        !self.invalid_peers.contains(reporter) && !self.invalid_peers.contains(reported)
+    }
+
+    fn validate_peers_exist(
+        &self,
+        reporter: &libp2p::PeerId,
+        reported: &libp2p::PeerId,
+    ) -> Result<()> {
+        self.peer_index(*reporter)?;
+        self.peer_index(*reported)?;
+        Ok(())
+    }
+
     pub fn get_pending_reports_against_self(&self, id: &[u8]) -> Vec<libp2p::PeerId> {
-        if let Some(event) = self.events.get(id) {
-            event.pending_reports_against_self()
-        } else {
-            Vec::new()
-        }
+        self.events
+            .get(id)
+            .map_or_else(Vec::new, |event| event.pending_reports_against_self())
     }
 
     pub fn mark_self_report_as_responded(
@@ -343,12 +370,15 @@ impl Context {
         id: &[u8],
         reporter: &libp2p::PeerId,
     ) -> Result<()> {
-        let event = self.events.get_mut(id).ok_or(Error::EventNotFound(
-            String::from_utf8_lossy(id).to_string(),
-        ))?;
-
+        let event = self.get_event_mut(id)?;
         event.mark_self_report_as_responded(reporter);
         Ok(())
+    }
+
+    fn get_event_mut(&mut self, id: &[u8]) -> Result<&mut Event> {
+        self.events
+            .get_mut(id)
+            .ok_or_else(|| Error::EventNotFound(String::from_utf8_lossy(id).to_string()))
     }
 
     pub fn add_report_response<V: Vss>(
@@ -358,30 +388,18 @@ impl Context {
         reported: libp2p::PeerId,
         raw_share: Vec<u8>,
     ) -> Result<()> {
-        if self.invalid_peers.contains(&reporter) || self.invalid_peers.contains(&reported) {
+        if !self.are_peers_valid(&reporter, &reported) {
             return Ok(());
         }
 
-        if self.is_output.contains(&id) {
-            return Err(Error::EventAlreadyOutput(
-                String::from_utf8_lossy(&id).to_string(),
-            ));
-        }
-
-        if !self.events.contains_key(&id) {
-            return Err(Error::EventNotFound(
-                String::from_utf8_lossy(&id).to_string(),
-            ));
-        }
+        self.ensure_event_not_processed(&id)?;
+        self.ensure_event_exists(&id)?;
 
         let reporter_index = self.peer_index(reporter)?;
         let reported_index = self.peer_index(reported)?;
-        let reporter_public_key = self.peer_public_key_clone(&reporter)?;
+        let reporter_public_key = self.peer_public_key(&reporter)?;
 
-        let event = self
-            .events
-            .get_mut(&id)
-            .expect("unreachable: event not found");
+        let event = self.get_event_mut(&id)?;
         event.respond_to_report::<V>(
             reporter,
             reported,
@@ -394,7 +412,16 @@ impl Context {
         Ok(())
     }
 
-    fn peer_public_key_clone(&self, peer: &libp2p::PeerId) -> Result<PublicKey> {
+    fn ensure_event_exists(&self, id: &[u8]) -> Result<()> {
+        if !self.events.contains_key(id) {
+            return Err(Error::EventNotFound(
+                String::from_utf8_lossy(id).to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn peer_public_key(&self, peer: &libp2p::PeerId) -> Result<PublicKey> {
         self.peers
             .get_public_key_by_peer_id(peer)
             .cloned()
@@ -402,37 +429,26 @@ impl Context {
     }
 
     pub fn output(&mut self, id: Vec<u8>) -> Result<EventResult> {
-        if self.is_output.contains(&id) {
-            return Err(Error::EventAlreadyOutput(
-                String::from_utf8_lossy(&id).to_string(),
-            ));
-        }
+        self.ensure_event_not_processed(&id)?;
 
-        let event = self.events.remove(&id).ok_or(Error::EventNotFound(
-            String::from_utf8_lossy(&id).to_string(),
-        ))?;
+        let event = self
+            .events
+            .remove(&id)
+            .ok_or_else(|| Error::EventNotFound(String::from_utf8_lossy(&id).to_string()))?;
 
         let mut malicious_peers = event.get_malicious_peers();
-
         malicious_peers.extend(&self.invalid_peers);
+        self.invalid_peers.extend(&malicious_peers);
 
-        self.invalid_peers.extend(malicious_peers.iter());
+        self.processed_events.insert(id);
 
         if !malicious_peers.is_empty() {
-            self.is_output.insert(id);
             return Ok(EventResult::Failure {
                 invalid_peers: malicious_peers,
             });
         }
 
-        let mut shares_map = HashMap::new();
-        for (peer, index) in &self.peers {
-            if let Ok(shares) = event.share(index) {
-                shares_map.insert(peer, shares.clone());
-            }
-        }
-
-        self.is_output.insert(id);
+        let shares_map = self.collect_valid_shares(&event);
 
         Ok(EventResult::Success {
             own_index: self.own_index,
@@ -440,22 +456,28 @@ impl Context {
         })
     }
 
-    pub fn own_share_clone(&mut self, id: &[u8]) -> Result<Option<Vec<u8>>> {
-        if self.is_output.contains(id) {
-            return Err(Error::EventAlreadyOutput(
-                String::from_utf8_lossy(id).to_string(),
-            ));
+    fn collect_valid_shares(&self, event: &Event) -> HashMap<libp2p::PeerId, Shares> {
+        let mut shares_map = HashMap::new();
+        for (peer, index) in &self.peers {
+            if let Ok(shares) = event.share(index) {
+                shares_map.insert(peer, shares.clone());
+            }
         }
+        shares_map
+    }
+
+    pub fn own_share_clone(&mut self, id: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.ensure_event_not_processed(id)?;
 
         let event = match self.events.get(id) {
             Some(event) => event,
             None => {
-                self.events.insert(id.to_vec(), Event::new(self.own_peer));
+                self.events_awaiting_own_share.insert(id.to_vec());
                 return Ok(None);
             }
         };
 
-        Ok(event.own_share_clone())
+        Ok(event.own_share_ref().cloned())
     }
 
     pub fn active_event_ids(&self) -> Vec<Vec<u8>> {
@@ -463,16 +485,19 @@ impl Context {
     }
 
     pub fn get_reporters_of(&self, id: &[u8], reported: libp2p::PeerId) -> Vec<libp2p::PeerId> {
-        if let Some(event) = self.events.get(id) {
-            let mut reporters = Vec::new();
-            for (reporter, reported_peer) in event.reports.keys() {
-                if *reported_peer == reported {
-                    reporters.push(*reporter);
-                }
-            }
-            reporters
-        } else {
-            Vec::new()
-        }
+        self.events.get(id).map_or_else(Vec::new, |event| {
+            event
+                .reports
+                .keys()
+                .filter_map(|(reporter, reported_peer)| {
+                    if *reported_peer == reported {
+                        Some(*reporter)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
     }
 }
+
