@@ -157,7 +157,7 @@ impl<T: Transport + 'static, V: Vss + 'static> JointFeldman<T, V> {
     fn peers_len(&self) -> Result<u16> {
         self.peers
             .as_ref()
-            .map(|peers| peers.len().try_into().expect("length is too large"))
+            .map(|peers| peers.len())
             .ok_or(Error::PeersNotSet)
     }
 

@@ -52,7 +52,6 @@ pub struct Bundle {
 
 pub enum EventResult {
     Success {
-        own_index: u16,
         bundle: HashMap<libp2p::PeerId, (Scalar, Vec<Point>)>,
     },
     Failure {
@@ -299,7 +298,7 @@ impl Context {
         }
     }
 
-    pub fn add_event<V: Vss>(
+    pub fn add_event(
         &mut self,
         id: Vec<u8>,
         source: libp2p::PeerId,
@@ -491,10 +490,7 @@ impl Context {
 
         let shares_map = self.collect_valid_shares(&event);
 
-        Ok(EventResult::Success {
-            own_index: self.own_index,
-            bundle: shares_map,
-        })
+        Ok(EventResult::Success { bundle: shares_map })
     }
 
     fn collect_valid_shares(&self, event: &Event) -> HashMap<libp2p::PeerId, (Scalar, Vec<Point>)> {

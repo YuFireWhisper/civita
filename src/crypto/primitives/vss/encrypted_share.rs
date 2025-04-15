@@ -95,6 +95,10 @@ impl EncryptedShares {
             .expect("unreachable: length is too large")
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn get(&self, index: &u16) -> Option<&EncryptedShare> {
         self.0.get(index)
     }

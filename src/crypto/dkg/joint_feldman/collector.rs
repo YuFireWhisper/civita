@@ -277,7 +277,11 @@ where
         msg: gossipsub::Message,
     ) -> Result<()> {
         match msg.payload {
-            gossipsub::Payload::VSSSBundle { id, encrypted_shares, commitments } => {
+            gossipsub::Payload::VSSSBundle {
+                id,
+                encrypted_shares,
+                commitments,
+            } => {
                 Self::handle_vss_shares(worker_ctx, id, msg.source, encrypted_shares, commitments)?;
             }
             gossipsub::Payload::VSSReport { id, reported } => {
@@ -299,7 +303,9 @@ where
         encrypted_shares: EncryptedShares,
         commitments: Vec<Point>,
     ) -> Result<()> {
-        worker_ctx.context.add_event::<V>(id, source, encrypted_shares, commitments)?;
+        worker_ctx
+            .context
+            .add_event(id, source, encrypted_shares, commitments)?;
         Ok(())
     }
 
@@ -422,4 +428,3 @@ impl<T: Transport, V: Vss> Drop for Collector<T, V> {
         self.stop();
     }
 }
-

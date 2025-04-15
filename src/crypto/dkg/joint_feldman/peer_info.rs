@@ -18,7 +18,6 @@ pub struct PeerRegistry {
 
 pub struct IndexPeerIterator<'a> {
     iter: hash_map::Iter<'a, u16, libp2p::PeerId>,
-    registry: &'a PeerRegistry,
 }
 
 pub struct IndexKeyIterator<'a> {
@@ -113,7 +112,6 @@ impl<'a> IntoIterator for &'a PeerRegistry {
     fn into_iter(self) -> Self::IntoIter {
         IndexPeerIterator {
             iter: self.index_to_peer.iter(),
-            registry: self,
         }
     }
 }
