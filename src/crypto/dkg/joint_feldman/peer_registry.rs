@@ -2,6 +2,9 @@ use std::collections::{hash_map, HashMap};
 
 use crate::crypto::keypair::PublicKey;
 
+#[cfg_attr(test, allow(dead_code))]
+const MAX_PEERS: usize = if cfg!(test) { 10 } else { u16::MAX as usize };
+
 #[derive(Clone)]
 #[derive(Debug)]
 struct PeerInfo {
@@ -28,7 +31,7 @@ pub struct IndexKeyIterator<'a> {
 impl PeerRegistry {
     pub fn new(peers: HashMap<libp2p::PeerId, PublicKey>) -> Self {
         assert!(
-            peers.len() <= u16::MAX as usize,
+            peers.len() <= MAX_PEERS,
             "ids length is exceeding the maximum"
         );
 
@@ -138,5 +141,254 @@ impl<'a> Iterator for IndexKeyIterator<'a> {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::crypto::{
+        dkg::joint_feldman::peer_registry::{PeerRegistry, MAX_PEERS},
+        keypair::{self, PublicKey},
+    };
+
+    const NUM_PEERS: usize = 3;
+
+    fn generate_peers(nums: usize) -> HashMap<libp2p::PeerId, PublicKey> {
+        let mut peers_map = HashMap::new();
+
+        for _ in 0..nums {
+            let peer_id = libp2p::PeerId::random();
+            let public_key = keypair::generate_secp256k1().1;
+            peers_map.insert(peer_id, public_key);
+        }
+
+        peers_map
+    }
+
+    #[test]
+    fn successful_valid_input() {
+        let peers = generate_peers(NUM_PEERS);
+
+        let result = PeerRegistry::new(peers);
+
+        assert_eq!(result.len(), NUM_PEERS as u16);
+    }
+
+    #[test]
+    #[should_panic(expected = "ids length is exceeding the maximum")]
+    fn panic_exceeding_maximum() {
+        let peers = generate_peers(MAX_PEERS + 1);
+        let _ = PeerRegistry::new(peers);
+    }
+
+    #[test]
+    fn return_correct_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let peer = *peers.keys().next().unwrap();
+        let registry = PeerRegistry::new(peers);
+
+        let index = registry.get_index(&peer);
+
+        assert!(index.is_some());
+        assert!(index.unwrap() >= 1 && index.unwrap() <= NUM_PEERS as u16);
+    }
+
+    #[test]
+    fn return_none_for_invalid_peer() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let invalid_peer_id = libp2p::PeerId::random();
+        let index = registry.get_index(&invalid_peer_id);
+
+        assert!(index.is_none());
+    }
+
+    #[test]
+    fn return_correct_public_key_by_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        for i in 1..=NUM_PEERS as u16 {
+            let public_key = registry.get_public_key_by_index(i);
+            assert!(public_key.is_some());
+        }
+    }
+
+    #[test]
+    fn return_none_for_invalid_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let invalid_index = NUM_PEERS as u16 + 1;
+        let public_key = registry.get_public_key_by_index(invalid_index);
+
+        assert!(public_key.is_none());
+    }
+
+    #[test]
+    fn return_correct_public_key_by_peer_id() {
+        let peers = generate_peers(NUM_PEERS);
+        let peer = *peers.keys().next().unwrap();
+        let expected_public_key = peers.get(&peer).unwrap().clone();
+        let registry = PeerRegistry::new(peers);
+
+        let public_key = registry.get_public_key_by_peer_id(&peer);
+
+        assert!(public_key.is_some());
+        assert_eq!(public_key.unwrap(), &expected_public_key);
+    }
+
+    #[test]
+    fn return_none_for_invalid_peer_id() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let invalid_peer_id = libp2p::PeerId::random();
+        let public_key = registry.get_public_key_by_peer_id(&invalid_peer_id);
+
+        assert!(public_key.is_none());
+    }
+
+    #[test]
+    fn true_if_peer_id_exists() {
+        let peers = generate_peers(NUM_PEERS);
+        let peer = *peers.keys().next().unwrap();
+        let registry = PeerRegistry::new(peers);
+
+        assert!(registry.contains(&peer));
+    }
+
+    #[test]
+    fn false_if_peer_id_does_not_exist() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let invalid_peer_id = libp2p::PeerId::random();
+        assert!(!registry.contains(&invalid_peer_id));
+    }
+
+    #[test]
+    fn iter_index_peer_should_iterate_all() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let mut count = 0;
+        for (peer_id, index) in registry.iter_index_peer() {
+            assert!(registry.contains(&peer_id));
+            assert_eq!(registry.get_index(&peer_id), Some(index));
+            count += 1;
+        }
+
+        assert_eq!(count, NUM_PEERS);
+    }
+
+    #[test]
+    fn iter_index_keys_should_iterate_all() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let mut count = 0;
+        for (index, public_key) in registry.iter_index_keys() {
+            assert!(registry.get_public_key_by_index(index).is_some());
+            assert_eq!(registry.get_public_key_by_index(index), Some(public_key));
+            count += 1;
+        }
+
+        assert_eq!(count, NUM_PEERS);
+    }
+
+    #[test]
+    fn peer_ids_should_return_all_peer_ids() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let mut count = 0;
+        for peer_id in registry.peer_ids() {
+            assert!(registry.contains(peer_id));
+            count += 1;
+        }
+
+        assert_eq!(count, NUM_PEERS);
+    }
+
+    #[test]
+    fn indices_should_return_all_indices() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let mut count = 0;
+        for index in registry.indices() {
+            assert!(registry.get_public_key_by_index(*index).is_some());
+            count += 1;
+        }
+
+        assert_eq!(count, NUM_PEERS);
+    }
+
+    #[test]
+    fn len_should_return_correct_number_of_peers() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        assert_eq!(registry.len(), NUM_PEERS as u16);
+    }
+
+    #[test]
+    fn retruns_true_if_empty() {
+        let peers = generate_peers(0);
+        let registry = PeerRegistry::new(peers);
+
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn returns_false_if_not_empty() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn iter_index_peer_should_return_correct_items() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let mut count = 0;
+        for (peer_id, index) in registry.iter_index_peer() {
+            assert!(registry.contains(&peer_id));
+            assert_eq!(registry.get_index(&peer_id), Some(index));
+            count += 1;
+        }
+
+        assert_eq!(count, NUM_PEERS);
+    }
+
+    #[test]
+    fn index_should_sort_by_peer_id() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers.clone());
+
+        let mut sorted_peers: Vec<_> = peers.keys().cloned().collect();
+        sorted_peers.sort();
+
+        for (i, peer_id) in sorted_peers.iter().enumerate() {
+            assert_eq!(registry.get_index(peer_id), Some((i + 1) as u16));
+        }
+    }
+
+    #[test]
+    fn index_should_start_from_1() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let min_index = registry
+            .indices()
+            .min()
+            .expect("Expected at least one index");
+        assert_eq!(*min_index, 1, "Index should start from 1");
     }
 }
