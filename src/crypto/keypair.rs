@@ -20,6 +20,7 @@ pub enum Error {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
+#[derive(Eq, PartialEq)]
 pub enum SecretKey {
     Secp256k1(secp256k1::SecretKey),
 }
@@ -27,6 +28,7 @@ pub enum SecretKey {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
+#[derive(Eq, PartialEq)]
 pub enum PublicKey {
     Secp256k1(secp256k1::PublicKey),
 }
