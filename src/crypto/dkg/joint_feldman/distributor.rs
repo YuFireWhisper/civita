@@ -51,9 +51,9 @@ impl<T: Transport + 'static> Distributor<T> {
         commitments: Vec<Point>,
     ) -> Result<()> {
         assert_eq!(
-            peers.len() - 1, // Exclude self
+            peers.len(),
             decrypted_shares.len(),
-            "Number of peers (excluding self) must match the number of shares"
+            "Number of peers must match the number of shares"
         );
 
         let encrypted_shares =
