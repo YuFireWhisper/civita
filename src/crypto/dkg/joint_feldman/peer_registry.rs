@@ -73,6 +73,10 @@ impl PeerRegistry {
         self.peer_to_info.get(peer_id).map(|info| &info.public_key)
     }
 
+    pub fn get_peer_id_by_index(&self, index: u16) -> Option<&libp2p::PeerId> {
+        self.index_to_peer.get(&index)
+    }
+
     pub fn contains(&self, peer_id: &libp2p::PeerId) -> bool {
         self.peer_to_info.contains_key(peer_id)
     }
@@ -239,6 +243,17 @@ mod tests {
 
         assert!(public_key.is_some());
         assert_eq!(public_key.unwrap(), &expected_public_key);
+    }
+
+    #[test]
+    fn return_correct_peer_id_by_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        for i in 1..=NUM_PEERS as u16 {
+            let peer_id = registry.get_peer_id_by_index(i);
+            assert!(peer_id.is_some());
+        }
     }
 
     #[test]
