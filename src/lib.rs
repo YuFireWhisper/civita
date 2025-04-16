@@ -1,10 +1,15 @@
-use thiserror::Error;
-
 pub mod committee;
 pub mod community;
 pub mod crypto;
 pub mod network;
 
 #[derive(Debug)]
-#[derive(Error)]
-pub enum MockError {}
+pub struct MockError;
+
+impl std::fmt::Display for MockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Mock error")
+    }
+}
+
+impl std::error::Error for MockError {}

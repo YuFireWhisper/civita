@@ -72,3 +72,104 @@ impl<T: Transport + 'static> Distributor<T> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use mockall::predicate::{always, eq};
+
+    use crate::{
+        crypto::{
+            dkg::joint_feldman::{distributor::Distributor, peer_registry::PeerRegistry},
+            keypair,
+            primitives::{algebra::Scheme, vss::Vss},
+        },
+        network::transport::MockTransport,
+        MockError,
+    };
+
+    const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;
+    const TOPIC: &str = "test_topic";
+    const NUM_PEERS: u16 = 3;
+    const THRESHOLD: u16 = 2;
+    const ID: [u8; 32] = [0; 32];
+
+    fn create_message_id() -> libp2p::gossipsub::MessageId {
+        const MESSAGE_ID: [u8; 32] = [0; 32];
+        libp2p::gossipsub::MessageId::from(MESSAGE_ID)
+    }
+
+    fn generate_peers(nums: u16) -> PeerRegistry {
+        let mut peers_map = HashMap::new();
+
+        for _ in 0..nums {
+            let peer_id = libp2p::PeerId::random();
+            let public_key = keypair::generate_secp256k1().1;
+            peers_map.insert(peer_id, public_key);
+        }
+
+        PeerRegistry::new(peers_map)
+    }
+
+    #[tokio::test]
+    async fn send_shares_success_valid_input() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_publish()
+            .with(eq(TOPIC.to_string()), always())
+            .times(1)
+            .returning(|_, _| Ok(create_message_id()));
+
+        let distributor = Distributor::new(Arc::new(transport), TOPIC);
+        let peers = generate_peers(NUM_PEERS);
+        let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
+
+        let result = distributor
+            .send_shares(ID.to_vec(), &peers, &shares, commitments)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Expected send_shares to succeed, but it failed: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Number of peers must match the number of shares")]
+    async fn peers_count_validation_works() {
+        let transport = MockTransport::new();
+        let distributor = Distributor::new(Arc::new(transport), TOPIC);
+
+        let peers = generate_peers(NUM_PEERS - 1);
+        let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
+
+        let _ = distributor
+            .send_shares(ID.to_vec(), &peers, &shares, commitments)
+            .await; // This should panic
+    }
+
+    #[tokio::test]
+    async fn returns_error_transport_error() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_publish()
+            .with(eq(TOPIC.to_string()), always())
+            .times(1)
+            .returning(|_, _| Err(MockError));
+
+        let distributor = Distributor::new(Arc::new(transport), TOPIC);
+        let peers = generate_peers(NUM_PEERS);
+        let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
+
+        let result = distributor
+            .send_shares(ID.to_vec(), &peers, &shares, commitments)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected send_shares to fail, but it succeeded",
+        );
+    }
+}
