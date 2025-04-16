@@ -28,6 +28,11 @@ pub struct IndexKeyIterator<'a> {
     registry: &'a PeerRegistry,
 }
 
+pub struct PeerKeyIterator<'a> {
+    iter: hash_map::Iter<'a, libp2p::PeerId, PeerInfo>,
+    registry: &'a PeerRegistry,
+}
+
 impl PeerRegistry {
     pub fn new(peers: HashMap<libp2p::PeerId, PublicKey>) -> Self {
         assert!(
@@ -94,6 +99,13 @@ impl PeerRegistry {
         }
     }
 
+    pub fn iter_peer_keys(&self) -> PeerKeyIterator<'_> {
+        PeerKeyIterator {
+            iter: self.peer_to_info.iter(),
+            registry: self,
+        }
+    }
+
     pub fn peer_ids(&self) -> impl Iterator<Item = &libp2p::PeerId> {
         self.index_to_peer.values()
     }
@@ -145,6 +157,17 @@ impl<'a> Iterator for IndexKeyIterator<'a> {
             if let Some(info) = self.registry.peer_to_info.get(peer_id) {
                 return Some((*index, &info.public_key));
             }
+        }
+        None
+    }
+}
+
+impl<'a> Iterator for PeerKeyIterator<'a> {
+    type Item = (libp2p::PeerId, u16);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((peer_id, info)) = self.iter.next() {
+            return Some((*peer_id, info.index));
         }
         None
     }
@@ -329,6 +352,21 @@ mod tests {
         for (index, public_key) in registry.iter_index_keys() {
             assert!(registry.get_public_key_by_index(index).is_some());
             assert_eq!(registry.get_public_key_by_index(index), Some(public_key));
+            count += 1;
+        }
+
+        assert_eq!(count, NUM_PEERS);
+    }
+
+    #[test]
+    fn iter_peer_keys_should_iterate_all() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let mut count = 0;
+        for (peer_id, index) in registry.iter_peer_keys() {
+            assert!(registry.contains(&peer_id));
+            assert_eq!(registry.get_index(&peer_id), Some(index));
             count += 1;
         }
 
