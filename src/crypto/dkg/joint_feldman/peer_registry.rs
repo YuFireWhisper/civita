@@ -163,11 +163,11 @@ impl<'a> Iterator for IndexKeyIterator<'a> {
 }
 
 impl<'a> Iterator for PeerKeyIterator<'a> {
-    type Item = (libp2p::PeerId, u16);
+    type Item = (libp2p::PeerId, &'a PublicKey);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((peer_id, info)) = self.iter.next() {
-            return Some((*peer_id, info.index));
+            return Some((*peer_id, &info.public_key));
         }
         None
     }
@@ -366,7 +366,7 @@ mod tests {
         let mut count = 0;
         for (peer_id, index) in registry.iter_peer_keys() {
             assert!(registry.contains(&peer_id));
-            assert_eq!(registry.get_index(&peer_id), Some(index));
+            assert_eq!(registry.get_public_key_by_peer_id(&peer_id), Some(index));
             count += 1;
         }
 
