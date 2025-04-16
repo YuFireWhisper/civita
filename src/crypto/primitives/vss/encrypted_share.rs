@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
     keypair::{self, PublicKey, SecretKey},
-    primitives::{algebra::{self, Scalar}, vss::decrypted_share::DecryptedShares},
+    primitives::{
+        algebra::{self, Scalar},
+        vss::decrypted_share::DecryptedShares,
+    },
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -68,8 +71,8 @@ impl EncryptedShares {
 
         for (index, public_key) in public_keys {
             let share = decrypted_shares
-                .get(&index)
-                .ok_or(Error::ShareNotFound(index))?;
+                .get(&(index - 1))
+                .ok_or(Error::ShareNotFound(index - 1))?;
 
             let encrypted_share = EncryptedShare::from_scalar(share, public_key)?;
             encrypted_shares.insert(index, encrypted_share);
