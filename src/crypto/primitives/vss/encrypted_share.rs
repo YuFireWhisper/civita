@@ -70,9 +70,11 @@ impl EncryptedShares {
         let mut public_keys_len = 0;
 
         for (index, public_key) in public_keys {
+            assert!(index > 0, "Index must be greater than 0, because it is 1-based");
+            let index = index - 1;
             let share = decrypted_shares
-                .get(&(index - 1))
-                .ok_or(Error::ShareNotFound(index - 1))?;
+                .get(&index)
+                .ok_or(Error::ShareNotFound(index))?;
 
             let encrypted_share = EncryptedShare::from_scalar(share, public_key)?;
             encrypted_shares.insert(index, encrypted_share);
