@@ -64,6 +64,7 @@ impl PeerRegistry {
     }
 
     pub fn get_public_key_by_index(&self, index: u16) -> Option<&PublicKey> {
+        assert!(index > 0, "index must be greater than 0, but got {}", index);
         self.index_to_peer
             .get(&index)
             .and_then(|peer_id| self.peer_to_info.get(peer_id).map(|info| &info.public_key))
@@ -74,6 +75,7 @@ impl PeerRegistry {
     }
 
     pub fn get_peer_id_by_index(&self, index: u16) -> Option<&libp2p::PeerId> {
+        assert!(index > 0, "index must be greater than 0, but got {}", index);
         self.index_to_peer.get(&index)
     }
 
@@ -222,6 +224,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "index must be greater than 0, but got 0")]
+    fn panic_for_get_public_key_by_zero_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let _ = registry.get_public_key_by_index(0);
+    }
+
+    #[test]
     fn return_none_for_invalid_index() {
         let peers = generate_peers(NUM_PEERS);
         let registry = PeerRegistry::new(peers);
@@ -254,6 +265,15 @@ mod tests {
             let peer_id = registry.get_peer_id_by_index(i);
             assert!(peer_id.is_some());
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "index must be greater than 0, but got 0")]
+    fn panic_for_get_peer_id_by_zero_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let _ = registry.get_peer_id_by_index(0);
     }
 
     #[test]
