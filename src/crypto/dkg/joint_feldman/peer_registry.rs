@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn retruns_true_if_empty() {
+    fn returns_true_if_empty() {
         let peers = generate_peers(0);
         let registry = PeerRegistry::new(peers);
 
