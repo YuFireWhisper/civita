@@ -8,13 +8,16 @@ use crate::{
                 distributor::Distributor,
             },
             Dkg_, GenerateResult,
-        }, keypair::{PublicKey, SecretKey}, peer_registry::PeerRegistry, primitives::{
+        },
+        keypair::{PublicKey, SecretKey},
+        peer_registry::PeerRegistry,
+        primitives::{
             algebra::{self, Point, Scalar},
             vss::{
                 decrypted_share::{self},
                 Vss,
             },
-        }
+        },
     },
     network::transport::Transport,
 };
@@ -135,11 +138,11 @@ impl<T: Transport + 'static> JointFeldman<T> {
 
         match result {
             event::Output::Success { shares, comms } => {
-                let share = Scalar::sum(shares.into_iter())?;
+                let share = Scalar::sum(shares.iter())?;
                 let public = Point::sum(
                     comms
                         .values()
-                        .map(|p| p.first().expect("Point is not empty").clone()),
+                        .map(|p| p.first().expect("Point is not empty")),
                 )
                 .map_err(Error::from)?;
 

@@ -54,12 +54,12 @@ impl Point {
             .map_err(Error::from)
     }
 
-    pub fn sum<I: Iterator<Item = Self>>(iter: I) -> Result<Self> {
+    pub fn sum<'a, I: Iterator<Item = &'a Self>>(iter: I) -> Result<Self> {
         let mut iter = iter.peekable();
-        let mut sum = iter.next().ok_or(Error::IteratorEmpty)?;
+        let mut sum = iter.next().ok_or(Error::IteratorEmpty)?.clone();
 
         for next in iter {
-            if !sum.is_same_type(&next) {
+            if !sum.is_same_type(next) {
                 return Err(Error::InconsistentVariants);
             }
             sum = match (sum, next) {
@@ -142,7 +142,7 @@ mod tests {
         let point3 = create_random_point();
 
         let points = vec![point1.clone(), point2.clone(), point3.clone()];
-        let sum = Point::sum(points.into_iter()).unwrap();
+        let sum = Point::sum(points.iter()).unwrap();
 
         match (point1, point2, point3) {
             (Point::Secp256k1(p1), Point::Secp256k1(p2), Point::Secp256k1(p3)) => {
@@ -156,7 +156,7 @@ mod tests {
     fn sum_with_empty_iterator_returns_error() {
         let empty_iter: Vec<Point> = vec![];
 
-        let result = Point::sum(empty_iter.into_iter());
+        let result = Point::sum(empty_iter.iter());
         assert!(result.is_err());
     }
 

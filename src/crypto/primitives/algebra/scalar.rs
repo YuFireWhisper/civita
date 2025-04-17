@@ -116,12 +116,12 @@ impl Scalar {
             .map_err(Error::from)
     }
 
-    pub fn sum<I: Iterator<Item = Self>>(iter: I) -> Result<Self> {
+    pub fn sum<'a, I: Iterator<Item = &'a Self>>(iter: I) -> Result<Self> {
         let mut iter = iter.peekable();
-        let mut sum = iter.next().ok_or(Error::IteratorEmpty)?;
+        let mut sum = iter.next().ok_or(Error::IteratorEmpty)?.clone();
 
         for scalar in iter {
-            if !sum.is_same_type(&scalar) {
+            if !sum.is_same_type(scalar) {
                 return Err(Error::InconsistentVariants);
             }
             match (sum, scalar) {
@@ -154,7 +154,10 @@ mod tests {
         const NUM_SHARES: u16 = 5;
         const THRESHOLD: u16 = 3;
         let (scalars, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_SHARES);
-        (scalars.get(&DEFAULT_INDEX_ONE_BASE).unwrap().clone(), commitments)
+        (
+            scalars.get(&DEFAULT_INDEX_ONE_BASE).unwrap().clone(),
+            commitments,
+        )
     }
 
     #[test]
@@ -269,8 +272,8 @@ mod tests {
         let scalar2 = Scalar::random(&DEFAULT_SCHEME);
         let scalar3 = Scalar::random(&DEFAULT_SCHEME);
 
-        let scalars = vec![scalar1.clone(), scalar2.clone(), scalar3.clone()];
-        let sum = Scalar::sum(scalars.into_iter()).unwrap();
+        let scalars = [scalar1.clone(), scalar2.clone(), scalar3.clone()];
+        let sum = Scalar::sum(scalars.iter()).unwrap();
 
         match (scalar1, scalar2, scalar3) {
             (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2), Scalar::Secp256k1(s3)) => {
@@ -284,7 +287,7 @@ mod tests {
     fn sum_with_empty_iterator_returns_error() {
         let empty_iter: Vec<Scalar> = vec![];
 
-        let result = Scalar::sum(empty_iter.into_iter());
+        let result = Scalar::sum(empty_iter.iter());
         assert!(result.is_err());
         match result.unwrap_err() {
             Error::IteratorEmpty => {}

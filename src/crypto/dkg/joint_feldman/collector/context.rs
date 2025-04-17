@@ -163,11 +163,9 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use crate::crypto::{
-        dkg::joint_feldman::{
-            collector::context::{Context, Error},
-            peer_registry::PeerRegistry,
-        },
+        dkg::joint_feldman::collector::context::{Context, Error},
         keypair::{self},
+        peer_registry::PeerRegistry,
         primitives::{
             algebra::Scheme,
             vss::{EncryptedShares, Vss},

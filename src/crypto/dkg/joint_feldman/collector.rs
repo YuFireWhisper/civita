@@ -343,9 +343,9 @@ mod tests {
             dkg::joint_feldman::{
                 collector::{Collector, Config, Error},
                 event,
-                peer_registry::PeerRegistry,
             },
             keypair::{self, SecretKey},
+            peer_registry::PeerRegistry,
             primitives::{
                 algebra::Scheme,
                 vss::{DecryptedShares, Vss},
@@ -411,9 +411,7 @@ mod tests {
             });
 
         let mut collector = Collector::new(Arc::new(transport), secret_key, config);
-        let peers = crate::crypto::dkg::joint_feldman::peer_registry::PeerRegistry::new(
-            std::collections::HashMap::new(),
-        );
+        let peers = PeerRegistry::new(std::collections::HashMap::new());
 
         collector.start(peers).await.unwrap();
 
@@ -434,9 +432,7 @@ mod tests {
             .returning(move |_| Err(MockError));
 
         let mut collector = Collector::new(Arc::new(transport), secret_key, config);
-        let peers = crate::crypto::dkg::joint_feldman::peer_registry::PeerRegistry::new(
-            std::collections::HashMap::new(),
-        );
+        let peers = PeerRegistry::new(std::collections::HashMap::new());
 
         let result = collector.start(peers).await;
 
