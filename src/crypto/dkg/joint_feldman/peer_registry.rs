@@ -7,6 +7,7 @@ const MAX_PEERS: usize = if cfg!(test) { 10 } else { u16::MAX as usize };
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Eq, PartialEq)]
 struct PeerInfo {
     pub index: u16,
     pub public_key: PublicKey,
@@ -14,6 +15,7 @@ struct PeerInfo {
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Eq, PartialEq)]
 pub struct PeerRegistry {
     peer_to_info: HashMap<libp2p::PeerId, PeerInfo>,
     index_to_peer: HashMap<u16, libp2p::PeerId>,
