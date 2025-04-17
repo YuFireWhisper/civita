@@ -87,7 +87,7 @@ impl PeerInfo {
             .collect()
     }
 
-    pub fn set_en_shares_and_comms(
+    pub fn set_componments(
         &mut self,
         en_shares: EncryptedShares,
         comms: Vec<Point>,
@@ -177,6 +177,14 @@ impl PeerInfo {
     pub fn is_got_invalid(&self) -> bool {
         self.got_invalid
     }
+
+    pub fn is_components_set(&self) -> bool {
+        self.en_shares.is_some() && self.comms.is_some()
+    }
+
+    pub fn is_de_shares_set(&self) -> bool {
+        self.de_shares.is_some()
+    }
 }
 
 impl Event {
@@ -258,7 +266,7 @@ impl Event {
                 .peer_registry
                 .get_public_key_by_peer_id(&peer_id)
                 .expect("unreachable: PublicKey not found");
-            peer_info.set_en_shares_and_comms(en_shares, comms, pk)?
+            peer_info.set_componments(en_shares, comms, pk)?
         };
 
         if let Some(indices) = indices {
@@ -374,49 +382,76 @@ impl Event {
     pub fn output(self) -> Output {
         let mut all_invalid_peers = self.invalid_peers.to_owned();
 
-        if let Status::Verifying(reporters) = &self.status {
-            self.detect_malicious_report(&mut all_invalid_peers, reporters);
-        }
+        self.detect_not_set_component_peers(&mut all_invalid_peers);
+        self.detect_not_set_de_shares_peers(&mut all_invalid_peers);
+        self.detect_malicious_report(&mut all_invalid_peers);
 
         if !all_invalid_peers.is_empty() {
-            Output::Failure {
+            println!("Invalid peers: {:?}", all_invalid_peers);
+            return Output::Failure {
                 invalid_peers: all_invalid_peers,
-            }
-        } else {
-            let mut comms = HashMap::new();
-            for (peer_id, peer_info) in &self.peer_infos {
-                if let Some(peer_comms) = &peer_info.comms {
-                    comms.insert(*peer_id, peer_comms.to_owned());
-                }
-            }
-            comms.insert(
-                self.own_peer,
-                self.own_comms
-                    .as_ref()
-                    .expect("Own comms should be set before output")
-                    .to_owned(),
-            );
+            };
+        }
 
-            Output::Success {
-                shares: self.own_shares,
-                comms,
+        let mut comms = self
+            .peer_infos
+            .iter()
+            .filter_map(|(peer_id, peer_info)| {
+                if peer_id == &self.own_peer {
+                    return None;
+                }
+                let comms = peer_info
+                    .comms
+                    .as_ref()
+                    .expect("comms should be set before output");
+                Some((*peer_id, comms.to_owned()))
+            })
+            .collect::<HashMap<_, _>>();
+
+        comms.insert(
+            self.own_peer,
+            self.own_comms
+                .as_ref()
+                .expect("Own comms should be set before output")
+                .to_owned(),
+        );
+
+        Output::Success {
+            shares: self.own_shares,
+            comms,
+        }
+    }
+
+    fn detect_not_set_component_peers(&self, all_invalid_peers: &mut HashSet<libp2p::PeerId>) {
+        for (peer_id, peer_info) in &self.peer_infos {
+            if !peer_info.is_components_set() && peer_id != &self.own_peer {
+                all_invalid_peers.insert(*peer_id);
             }
         }
     }
 
-    fn detect_malicious_report(
-        &self,
-        all_invalid_peers: &mut HashSet<libp2p::PeerId>,
-        reporters: &HashSet<libp2p::PeerId>,
-    ) {
-        for reporter in reporters {
-            let peer_info = self
-                .peer_infos
-                .get(reporter)
-                .expect("unreachable: PeerInfo not found");
+    fn detect_not_set_de_shares_peers(&self, all_invalid_peers: &mut HashSet<libp2p::PeerId>) {
+        if !self.is_verifying() {
+            return;
+        }
 
-            if !peer_info.is_got_invalid() {
-                all_invalid_peers.insert(*reporter);
+        for (peer_id, peer_info) in &self.peer_infos {
+            if !peer_info.is_de_shares_set() && peer_id != &self.own_peer {
+                all_invalid_peers.insert(*peer_id);
+            }
+        }
+    }
+
+    fn detect_malicious_report(&self, all_invalid_peers: &mut HashSet<libp2p::PeerId>) {
+        if let Status::Verifying(reporters) = &self.status {
+            for reporter in reporters {
+                let peer_info = self
+                    .peer_infos
+                    .get(reporter)
+                    .expect("unreachable: PeerInfo not found");
+                if !peer_info.is_got_invalid() {
+                    all_invalid_peers.insert(*reporter);
+                }
             }
         }
     }
@@ -675,42 +710,47 @@ mod tests {
     #[test]
     fn output_some_peers_invalid() {
         const INVALID_PEER_INDEX: usize = 1;
-        const VALID_PEER_INDEX: usize = 2;
 
         let context = TestContext::setup(NUM_PEERS);
         let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
 
-        let invalid_peer_id = context.peers[INVALID_PEER_INDEX].peer_id;
-        let invalid_en_shares =
-            context.peers[INVALID_PEER_INDEX].generate_en_shares(&context.peer_registry);
-        let invalid_comms = context.peers[INVALID_PEER_INDEX].invalid_comms.clone();
+        for i in 0..NUM_PEERS {
+            if i == OWN_INDEX_ZERO_BASE {
+                let own_de_shares = context.peers[i as usize].de_shares.clone();
+                let own_comms = context.peers[i as usize].valid_comms.clone();
 
-        event
-            .add_en_shares_and_comms(invalid_peer_id, invalid_en_shares, invalid_comms)
-            .unwrap();
+                event.set_own_components(own_de_shares, own_comms);
+                continue;
+            }
 
-        let valid_peer_id = context.peers[VALID_PEER_INDEX].peer_id;
-        let valid_en_shares =
-            context.peers[VALID_PEER_INDEX].generate_en_shares(&context.peer_registry);
-        let valid_comms = context.peers[VALID_PEER_INDEX].valid_comms.clone();
-        event
-            .add_en_shares_and_comms(valid_peer_id, valid_en_shares, valid_comms)
-            .unwrap();
+            let peer_id = context.peers[i as usize].peer_id;
+            if i == INVALID_PEER_INDEX as u16 {
+                let en_shares =
+                    context.peers[i as usize].generate_en_shares(&context.peer_registry);
+                let comms = context.peers[i as usize].invalid_comms.clone();
 
-        let own_de_shares = context.peers[OWN_INDEX_ZERO_BASE as usize]
-            .de_shares
-            .clone();
-        let own_comms = context.peers[OWN_INDEX_ZERO_BASE as usize]
-            .valid_comms
-            .clone();
-        event.set_own_components(own_de_shares, own_comms);
+                event
+                    .add_en_shares_and_comms(peer_id, en_shares, comms)
+                    .unwrap();
+                continue;
+            }
+
+            let en_shares = context.peers[i as usize].generate_en_shares(&context.peer_registry);
+            let comms = context.peers[i as usize].valid_comms.clone();
+            event
+                .add_en_shares_and_comms(peer_id, en_shares, comms)
+                .unwrap();
+
+            let de_shares = context.peers[i as usize].de_shares.clone();
+            event.add_decrypted_shares(peer_id, de_shares).unwrap();
+        }
 
         let output = event.output();
 
         match output {
             Output::Failure { invalid_peers } => {
                 assert_eq!(invalid_peers.len(), 1);
-                assert!(invalid_peers.contains(&invalid_peer_id));
+                assert!(invalid_peers.contains(&context.peers[INVALID_PEER_INDEX].peer_id));
             }
             _ => panic!("Expected failure output"),
         }
@@ -736,6 +776,99 @@ mod tests {
     }
 
     #[test]
+    fn detect_not_set_component_peers() {
+        const NOT_SET_COMPONENT_PEER_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        for i in 0..NUM_PEERS {
+            if i == OWN_INDEX_ZERO_BASE {
+                let own_de_shares = context.peers[i as usize].de_shares.clone();
+                let own_comms = context.peers[i as usize].valid_comms.clone();
+
+                event.set_own_components(own_de_shares, own_comms);
+                continue;
+            }
+
+            let peer_id = context.peers[i as usize].peer_id;
+            if i == NOT_SET_COMPONENT_PEER_INDEX as u16 {
+                continue;
+            }
+
+            let en_shares = context.peers[i as usize].generate_en_shares(&context.peer_registry);
+            let comms = context.peers[i as usize].valid_comms.clone();
+            event
+                .add_en_shares_and_comms(peer_id, en_shares, comms)
+                .unwrap();
+        }
+
+        let output = event.output();
+
+        match output {
+            Output::Failure { invalid_peers } => {
+                assert_eq!(invalid_peers.len(), 1);
+                assert!(
+                    invalid_peers.contains(&context.peers[NOT_SET_COMPONENT_PEER_INDEX].peer_id)
+                );
+            }
+            _ => panic!("Expected failure output"),
+        }
+    }
+
+    #[test]
+    fn detect_not_set_de_shares_peers() {
+        const NOT_SET_DE_SHARES_PEER_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        event.set_status_to_verifying();
+
+        for i in 0..NUM_PEERS {
+            if i == OWN_INDEX_ZERO_BASE {
+                let own_de_shares = context.peers[i as usize].de_shares.clone();
+                let own_comms = context.peers[i as usize].valid_comms.clone();
+
+                event.set_own_components(own_de_shares, own_comms);
+                continue;
+            }
+
+            let peer_id = context.peers[i as usize].peer_id;
+            if i == NOT_SET_DE_SHARES_PEER_INDEX as u16 {
+                let en_shares =
+                    context.peers[i as usize].generate_en_shares(&context.peer_registry);
+                let comms = context.peers[i as usize].valid_comms.clone();
+                event
+                    .add_en_shares_and_comms(peer_id, en_shares, comms)
+                    .unwrap();
+                continue;
+            }
+
+            let en_shares = context.peers[i as usize].generate_en_shares(&context.peer_registry);
+            let comms = context.peers[i as usize].valid_comms.clone();
+            let de_shares = context.peers[i as usize].de_shares.clone();
+
+            event
+                .add_en_shares_and_comms(peer_id, en_shares, comms)
+                .unwrap();
+            event.add_decrypted_shares(peer_id, de_shares).unwrap();
+        }
+
+        let output = event.output();
+
+        match output {
+            Output::Failure { invalid_peers } => {
+                assert_eq!(invalid_peers.len(), 1);
+                assert!(
+                    invalid_peers.contains(&context.peers[NOT_SET_DE_SHARES_PEER_INDEX].peer_id)
+                );
+            }
+            _ => panic!("Expected failure output"),
+        }
+    }
+
+    #[test]
     fn detect_malicious_report() {
         const MALICIOUS_REPORTER_INDEX: usize = 1;
 
@@ -752,27 +885,25 @@ mod tests {
             }
 
             let peer_id = context.peers[i as usize].peer_id;
+            if i == MALICIOUS_REPORTER_INDEX as u16 {
+                let en_shares =
+                    context.peers[i as usize].generate_en_shares(&context.peer_registry);
+                let comms = context.peers[i as usize].valid_comms.clone();
+                let de_shares = context.peers[i as usize].de_shares.clone();
+                event
+                    .add_en_shares_and_comms(peer_id, en_shares, comms)
+                    .unwrap();
+                event.add_reporter(peer_id, de_shares).unwrap();
+                continue;
+            }
+
             let en_shares = context.peers[i as usize].generate_en_shares(&context.peer_registry);
             let comms = context.peers[i as usize].valid_comms.clone();
+            let de_shares = context.peers[i as usize].de_shares.clone();
 
             event
                 .add_en_shares_and_comms(peer_id, en_shares, comms)
                 .unwrap();
-        }
-
-        let malicious_peer_id = context.peers[MALICIOUS_REPORTER_INDEX].peer_id;
-        let malicious_de_shares = context.peers[MALICIOUS_REPORTER_INDEX].de_shares.clone();
-        event
-            .add_reporter(malicious_peer_id, malicious_de_shares)
-            .unwrap();
-
-        for i in 0..NUM_PEERS {
-            if i == MALICIOUS_REPORTER_INDEX as u16 {
-                continue;
-            }
-
-            let peer_id = context.peers[i as usize].peer_id;
-            let de_shares = context.peers[i as usize].de_shares.clone();
             event.add_decrypted_shares(peer_id, de_shares).unwrap();
         }
 
@@ -781,7 +912,7 @@ mod tests {
         match output {
             Output::Failure { invalid_peers } => {
                 assert_eq!(invalid_peers.len(), 1);
-                assert!(invalid_peers.contains(&malicious_peer_id));
+                assert!(invalid_peers.contains(&context.peers[MALICIOUS_REPORTER_INDEX].peer_id));
             }
             _ => panic!("Expected failure output"),
         }
