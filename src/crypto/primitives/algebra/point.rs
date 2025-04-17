@@ -1,5 +1,6 @@
 use curv::{
-    elliptic::curves::secp256_k1::Secp256k1 as CurvSecp256k1, elliptic::curves::Point as CurvPoint,
+    elliptic::curves::secp256_k1::Secp256k1 as CurvSecp256k1,
+    elliptic::curves::{Point as CurvPoint, Scalar as CurvScalar},
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,18 @@ pub enum Point {
 }
 
 impl Point {
+    pub fn random(scheme: &Scheme) -> Self {
+        match scheme {
+            Scheme::Secp256k1 => Point::secp256k1_random(),
+        }
+    }
+
+    fn secp256k1_random() -> Self {
+        let random_scalar = CurvScalar::<CurvSecp256k1>::random();
+        let random_point = CurvPoint::<CurvSecp256k1>::generator() * random_scalar;
+        Point::Secp256k1(random_point)
+    }
+
     pub fn zero(scheme: Scheme) -> Self {
         match scheme {
             Scheme::Secp256k1 => Point::secp256k1_zero(),
@@ -83,16 +96,10 @@ mod tests {
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;
 
-    fn create_random_point() -> Point {
-        let random_scalar = curv::elliptic::curves::Scalar::random();
-        let random_point = curv::elliptic::curves::Point::generator() * random_scalar;
-        Point::Secp256k1(random_point)
-    }
-
     #[test]
     fn zero_create_additive_identity() {
         let zero_point = Point::zero(DEFAULT_SCHEME);
-        let random_point = create_random_point();
+        let random_point = Point::random(&DEFAULT_SCHEME);
 
         match (zero_point, random_point.clone()) {
             (Point::Secp256k1(z), Point::Secp256k1(r)) => {
@@ -103,16 +110,24 @@ mod tests {
     }
 
     #[test]
+    fn point_random_are_randomly_generated() {
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
+
+        assert_ne!(point1, point2);
+    }
+
+    #[test]
     fn same_scheme_point_match_type() {
-        let point1 = create_random_point();
-        let point2 = create_random_point();
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
 
         assert!(point1.is_same_type(&point2));
     }
 
     #[test]
     fn same_scheme_point_match_scalar() {
-        let point = create_random_point();
+        let point = Point::random(&DEFAULT_SCHEME);
         let scalar = Scalar::random(&DEFAULT_SCHEME);
 
         assert!(point.is_same_type_scalar(&scalar));
@@ -120,7 +135,7 @@ mod tests {
 
     #[test]
     fn serialization_roundtrip_preserves_point_value() {
-        let point = create_random_point();
+        let point = Point::random(&DEFAULT_SCHEME);
         let serialized = point.to_vec().unwrap();
         let deserialized = Point::from_slice(&serialized).unwrap();
 
@@ -137,9 +152,9 @@ mod tests {
 
     #[test]
     fn sum_of_points() {
-        let point1 = create_random_point();
-        let point2 = create_random_point();
-        let point3 = create_random_point();
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
+        let point3 = Point::random(&DEFAULT_SCHEME);
 
         let points = vec![point1.clone(), point2.clone(), point3.clone()];
         let sum = Point::sum(points.iter()).unwrap();
