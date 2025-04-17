@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::crypto::{
     dkg::joint_feldman::peer_registry::PeerRegistry,
@@ -41,16 +44,16 @@ pub enum Output {
 }
 
 pub enum ActionNeeded {
-    Report,
+    Report(DecryptedShares),
     None,
 }
 
 #[derive(Debug)]
-struct PeerInfo<'a> {
+#[derive(Default)]
+struct PeerInfo {
     en_shares: Option<EncryptedShares>,
     de_shares: Option<DecryptedShares>,
     comms: Option<Vec<Point>>,
-    pk: &'a PublicKey,
     got_invalid: bool,
 }
 
@@ -62,33 +65,43 @@ enum Status {
 }
 
 #[derive(Debug)]
-pub struct Event<'a> {
-    peers: HashMap<libp2p::PeerId, PeerInfo<'a>>,
-    peer_registry: &'a PeerRegistry,
+pub struct Event {
+    peer_infos: HashMap<libp2p::PeerId, PeerInfo>,
+    peer_registry: Arc<PeerRegistry>,
     invalid_peers: HashSet<libp2p::PeerId>,
     own_index_one_base: u16,
     own_shares: Vec<Scalar>,
-    secret_key: &'a SecretKey,
+    own_de_shares: Option<DecryptedShares>,
+    is_reported: bool,
+    secret_key: Arc<SecretKey>,
     status: Status,
 }
 
-impl<'a> PeerInfo<'a> {
+impl PeerInfo {
+    pub fn from_registry(registry: &Arc<PeerRegistry>) -> HashMap<libp2p::PeerId, Self> {
+        registry
+            .peer_ids()
+            .map(|peer_id| (*peer_id, Self::default()))
+            .collect()
+    }
+
     pub fn set_en_shares_and_comms(
         &mut self,
         en_shares: EncryptedShares,
         comms: Vec<Point>,
+        pk: &PublicKey,
     ) -> Result<Option<Vec<u16>>> {
         self.en_shares = Some(en_shares);
         self.comms = Some(comms);
 
         if self.is_complete() {
-            self.verify()
+            self.verify(pk)
         } else {
             Ok(None)
         }
     }
 
-    fn verify(&self) -> Result<Option<Vec<u16>>> {
+    fn verify(&self, pk: &PublicKey) -> Result<Option<Vec<u16>>> {
         assert!(self.is_complete(), "PeerInfo is not complete");
 
         let en_shares = self
@@ -103,7 +116,6 @@ impl<'a> PeerInfo<'a> {
             .comms
             .as_ref()
             .expect("unreachable: commitments is None");
-        let public_key = self.pk;
 
         let mut invalid_indices = Vec::new();
         for (index, en_share) in en_shares.iter() {
@@ -115,17 +127,17 @@ impl<'a> PeerInfo<'a> {
                 }
             };
 
-            Self::verify_de_to_en(de_share, en_share, public_key)?;
+            Self::verify_de_to_en(de_share, en_share, pk)?;
             if !de_share.verify(index, comms)? {
                 invalid_indices.push(index);
             }
         }
 
-        return if invalid_indices.is_empty() {
+        if invalid_indices.is_empty() {
             Ok(None)
         } else {
             Ok(Some(invalid_indices))
-        };
+        }
     }
 
     fn is_complete(&self) -> bool {
@@ -142,11 +154,15 @@ impl<'a> PeerInfo<'a> {
         Ok(en_share.as_slice() == expected_en_share.as_slice())
     }
 
-    pub fn set_de_shares(&mut self, de_shares: DecryptedShares) -> Result<Option<Vec<u16>>> {
+    pub fn set_de_shares(
+        &mut self,
+        de_shares: DecryptedShares,
+        pk: &PublicKey,
+    ) -> Result<Option<Vec<u16>>> {
         self.de_shares = Some(de_shares);
 
         if self.is_complete() {
-            self.verify()
+            self.verify(pk)
         } else {
             Ok(None)
         }
@@ -161,10 +177,10 @@ impl<'a> PeerInfo<'a> {
     }
 }
 
-impl<'a> Event<'a> {
+impl Event {
     pub fn new(
-        peer_registry: &'a PeerRegistry,
-        secret_key: &'a SecretKey,
+        peer_registry: Arc<PeerRegistry>,
+        secret_key: Arc<SecretKey>,
         own_peer: libp2p::PeerId,
     ) -> Self {
         let own_index_one_base = peer_registry
@@ -172,51 +188,68 @@ impl<'a> Event<'a> {
             .expect("Own peer should be in the registry");
 
         Self {
-            peers: peer_registry.into(),
+            peer_infos: PeerInfo::from_registry(&peer_registry),
             peer_registry,
             invalid_peers: HashSet::new(),
             own_index_one_base,
             own_shares: Vec::new(),
+            own_de_shares: None,
+            is_reported: false,
             secret_key,
             status: Status::Pending,
         }
     }
 
-    pub fn set_status_to_verifying(&mut self) {
+    pub fn set_own_de_shares(&mut self, de_shares: DecryptedShares) -> ActionNeeded {
+        if self.is_verifying() && !self.is_reported {
+            self.is_reported = true;
+            return ActionNeeded::Report(de_shares);
+        }
+
+        self.own_de_shares = Some(de_shares);
+
+        ActionNeeded::None
+    }
+
+    fn is_verifying(&self) -> bool {
+        matches!(self.status, Status::Verifying(_))
+    }
+
+    fn set_status_to_verifying(&mut self) {
         if self.status == Status::Pending {
             self.status = Status::Verifying(HashSet::new());
         }
     }
 
-    pub fn set_en_shares_and_comms(
+    pub fn add_en_shares_and_comms(
         &mut self,
         peer_id: libp2p::PeerId,
         en_shares: EncryptedShares,
         comms: Vec<Point>,
     ) -> Result<ActionNeeded> {
-        if !self.peers.contains_key(&peer_id) {
+        if !self.peer_infos.contains_key(&peer_id) {
             return Ok(ActionNeeded::None);
         }
 
         if self.process_own_share(&en_shares, &comms).is_err() {
-            self.invalid_peers.insert(peer_id);
-            self.peers.remove(&peer_id);
-            return Ok(self.check_if_reporting_needed());
+            return Ok(self.handle_invalid_peer(peer_id));
         }
 
         let indices = {
             let peer_info = self
-                .peers
+                .peer_infos
                 .get_mut(&peer_id)
                 .ok_or(Error::PeerNotFound(peer_id))?;
-            peer_info.set_en_shares_and_comms(en_shares, comms)?
+            let pk = self
+                .peer_registry
+                .get_public_key_by_peer_id(&peer_id)
+                .expect("unreachable: PublicKey not found");
+            peer_info.set_en_shares_and_comms(en_shares, comms, pk)?
         };
 
         if let Some(indices) = indices {
             self.mark_peers_by_indices(&indices);
-            self.invalid_peers.insert(peer_id);
-            self.peers.remove(&peer_id);
-            return Ok(self.check_if_reporting_needed());
+            return Ok(self.handle_invalid_peer(peer_id));
         }
 
         Ok(ActionNeeded::None)
@@ -232,7 +265,7 @@ impl<'a> Event<'a> {
             None => return Ok(Err(())),
         };
 
-        let decrypted_share = match encrypted_share.to_scalar(self.secret_key) {
+        let decrypted_share = match encrypted_share.to_scalar(&self.secret_key) {
             Ok(share) => share,
             Err(_) => return Ok(Err(())),
         };
@@ -245,13 +278,19 @@ impl<'a> Event<'a> {
         Ok(Ok(()))
     }
 
-    fn check_if_reporting_needed(&mut self) -> ActionNeeded {
-        if self.status == Status::Pending {
-            self.set_status_to_verifying();
-            ActionNeeded::Report
-        } else {
-            ActionNeeded::None
+    fn handle_invalid_peer(&mut self, peer_id: libp2p::PeerId) -> ActionNeeded {
+        self.set_status_to_verifying();
+        self.invalid_peers.insert(peer_id);
+        self.peer_infos.remove(&peer_id);
+
+        if !self.is_reported {
+            self.is_reported = true;
+            if let Some(de_shares) = self.own_de_shares.take() {
+                return ActionNeeded::Report(de_shares);
+            }
         }
+
+        ActionNeeded::None
     }
 
     fn verify_share(&self, de_share: &Scalar, comms: &[Point]) -> Result<bool> {
@@ -267,54 +306,49 @@ impl<'a> Event<'a> {
                 .get_peer_id_by_index(*index)
                 .expect("unreachable: Peer ID not found");
             let peer_info = self
-                .peers
-                .get_mut(&peer_id)
+                .peer_infos
+                .get_mut(peer_id)
                 .expect("unreachable: PeerInfo not found");
             peer_info.set_got_invalid();
         });
     }
 
-    pub fn set_reporter(
+    pub fn add_reporter(
         &mut self,
         reporter: libp2p::PeerId,
         de_shares: DecryptedShares,
-    ) -> Result<()> {
-        match self.status {
-            Status::Pending => {
-                let mut reporters = HashSet::new();
-                reporters.insert(reporter);
-                self.status = Status::Verifying(reporters);
-            }
-            Status::Verifying(ref mut reporters) => {
-                reporters.insert(reporter);
-            }
+    ) -> Result<ActionNeeded> {
+        self.set_status_to_verifying();
+
+        if let Status::Verifying(ref mut reporters) = self.status {
+            reporters.insert(reporter);
         }
 
-        self.set_decrypted_shares(reporter, de_shares)?;
-
-        Ok(())
+        self.add_decrypted_shares(reporter, de_shares)
     }
 
-    pub fn set_decrypted_shares(
+    pub fn add_decrypted_shares(
         &mut self,
         peer_id: libp2p::PeerId,
         de_shares: DecryptedShares,
-    ) -> Result<()> {
+    ) -> Result<ActionNeeded> {
         let indices = {
             let peer_info = self
-                .peers
+                .peer_infos
                 .get_mut(&peer_id)
                 .ok_or(Error::PeerNotFound(peer_id))?;
-            peer_info.set_de_shares(de_shares.clone())?
+            let pk = self
+                .peer_registry
+                .get_public_key_by_peer_id(&peer_id)
+                .expect("unreachable: PublicKey not found");
+            peer_info.set_de_shares(de_shares, pk)?
         };
 
         if let Some(indices) = indices {
             self.mark_peers_by_indices(&indices);
-            self.invalid_peers.insert(peer_id);
-            self.peers.remove(&peer_id);
         }
 
-        Ok(())
+        Ok(self.handle_invalid_peer(peer_id))
     }
 
     pub fn output(self) -> Output {
@@ -330,9 +364,9 @@ impl<'a> Event<'a> {
             }
         } else {
             let mut comms = HashMap::new();
-            for (peer_id, peer_info) in &self.peers {
+            for (peer_id, peer_info) in &self.peer_infos {
                 if let Some(peer_comms) = &peer_info.comms {
-                    comms.insert(*peer_id, peer_comms.clone());
+                    comms.insert(*peer_id, peer_comms.to_owned());
                 }
             }
 
@@ -350,7 +384,7 @@ impl<'a> Event<'a> {
     ) {
         for reporter in reporters {
             let peer_info = self
-                .peers
+                .peer_infos
                 .get(reporter)
                 .expect("unreachable: PeerInfo not found");
 
@@ -358,24 +392,5 @@ impl<'a> Event<'a> {
                 all_invalid_peers.insert(*reporter);
             }
         }
-    }
-}
-
-impl<'a> From<&'a PeerRegistry> for HashMap<libp2p::PeerId, PeerInfo<'a>> {
-    fn from(peers: &'a PeerRegistry) -> Self {
-        let mut peer_map = HashMap::new();
-        for (peer_id, public_key) in peers.iter_peer_keys() {
-            peer_map.insert(
-                peer_id,
-                PeerInfo {
-                    en_shares: None,
-                    de_shares: None,
-                    comms: None,
-                    pk: public_key,
-                    got_invalid: false,
-                },
-            );
-        }
-        peer_map
     }
 }

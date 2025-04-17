@@ -4,7 +4,7 @@ use crate::{
     crypto::{
         dkg::{
             joint_feldman::{
-                collector::{CollectionResult, Collector},
+                collector::{event, Collector},
                 distributor::Distributor,
                 peer_registry::PeerRegistry,
             },
@@ -14,7 +14,7 @@ use crate::{
         primitives::{
             algebra::{self, Point, Scalar},
             vss::{
-                decrypted_share::{self, DecryptedShares},
+                decrypted_share::{self},
                 Vss,
             },
         },
@@ -78,7 +78,6 @@ pub enum Error {
 }
 
 pub struct JointFeldman<T: Transport + 'static> {
-    transport: Arc<T>,
     config: Config,
     collector: Collector<T>,
     distributor: Distributor<T>,
@@ -93,11 +92,11 @@ impl<T: Transport + 'static> JointFeldman<T> {
             query_channel_size: config.channel_size,
         };
 
+        let secret_key = Arc::new(secret_key);
         let collector = Collector::new(transport.clone(), secret_key, collector_config);
-        let distributor = Distributor::new(transport.clone(), &config.gossipsub_topic);
+        let distributor = Distributor::new(transport, &config.gossipsub_topic);
 
         Ok(Self {
-            transport,
             config,
             collector,
             distributor,
@@ -125,36 +124,33 @@ impl<T: Transport + 'static> JointFeldman<T> {
 
         let peers_len = self.peers_len()?;
         let threshold = self.config.threshold_counter.call(peers_len);
-        let (mut decrypted_shares, commitments) =
+        let (decrypted_shares, commitments) =
             Vss::share(&self.config.crypto_scheme, threshold, peers_len);
-        let own_share = self.remove_own_share(&mut decrypted_shares)?;
 
         let peers = self.peers()?;
         self.distributor
             .send_shares(id.clone(), peers, &decrypted_shares, commitments)
             .await?;
 
-        let result = self.collector.query(id, own_share).await?;
+        let result = self.collector.query(id, decrypted_shares).await?;
 
         match result {
-            CollectionResult::Success {
-                own_shares,
-                partial_public,
-            } => {
-                let secret = Scalar::sum(own_shares.into_iter())?;
+            event::Output::Success { shares, comms } => {
+                let share = Scalar::sum(shares.into_iter())?;
                 let public = Point::sum(
-                    partial_public
+                    comms
                         .values()
-                        .map(|ps| ps.first().expect("Partial public share is empty").clone()),
-                )?;
+                        .map(|p| p.first().expect("Point is not empty").clone()),
+                )
+                .map_err(Error::from)?;
 
                 Ok(GenerateResult::Success {
-                    secret,
+                    secret: share,
                     public,
-                    partial_public,
+                    partial_public: comms,
                 })
             }
-            CollectionResult::Failure { invalid_peers } => {
+            event::Output::Failure { invalid_peers } => {
                 Ok(GenerateResult::Failure { invalid_peers })
             }
         }
@@ -165,14 +161,6 @@ impl<T: Transport + 'static> JointFeldman<T> {
             .as_ref()
             .map(|peers| peers.len())
             .ok_or(Error::PeersNotSet)
-    }
-
-    fn remove_own_share(&self, decrypted_shares: &mut DecryptedShares) -> Result<Scalar> {
-        let peers = self.peers()?;
-        let own_index = peers
-            .get_index(&self.transport.self_peer())
-            .ok_or(Error::IndexNotFound)?;
-        decrypted_shares.remove(&own_index).map_err(Error::from)
     }
 
     fn peers(&self) -> Result<&PeerRegistry> {

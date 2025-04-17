@@ -8,7 +8,7 @@ use crate::{
         dkg::Data,
         primitives::{
             algebra::{Point, Scalar},
-            vss::encrypted_share::EncryptedShares,
+            vss::{encrypted_share::EncryptedShares, DecryptedShares},
         },
     },
     network::transport::libp2p_transport::protocols::kad,
@@ -36,7 +36,7 @@ pub enum Payload {
 
     DkgVSS(Vec<u8>),
 
-    VSSBundle {
+    VSSComponments {
         id: Vec<u8>,
         encrypted_shares: EncryptedShares,
         commitments: Vec<Point>,
@@ -44,12 +44,12 @@ pub enum Payload {
 
     VSSReport {
         id: Vec<u8>,
-        reported: libp2p::PeerId,
+        decrypted_shares: DecryptedShares,
     },
 
     VSSReportResponse {
         id: Vec<u8>,
-        raw_share: Scalar,
+        decrypted_shares: DecryptedShares,
     },
 
     CommitteeSignatureRequest(kad::Payload),

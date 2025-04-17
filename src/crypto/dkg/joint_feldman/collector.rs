@@ -1,26 +1,22 @@
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::crypto::{
-    dkg::joint_feldman::collector::context::EventResult,
-    primitives::vss::encrypted_share::EncryptedShares,
+    dkg::joint_feldman::collector::event::ActionNeeded, primitives::vss::DecryptedShares,
 };
 use crate::{
     crypto::{
         dkg::joint_feldman::{collector::context::Context, peer_registry::PeerRegistry},
         keypair::{self, SecretKey},
-        primitives::algebra::{self, Point, Scalar},
+        primitives::algebra::{self},
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
 
 pub mod config;
 mod context;
-mod event;
+pub(super) mod event;
 
 pub use config::Config;
 
@@ -50,21 +46,11 @@ pub enum Error {
     Keypair(#[from] keypair::Error),
 }
 
-pub enum CollectionResult {
-    Success {
-        own_shares: Vec<Scalar>,
-        partial_public: HashMap<libp2p::PeerId, Vec<Point>>,
-    },
-    Failure {
-        invalid_peers: HashSet<libp2p::PeerId>,
-    },
-}
-
 enum Command {
     Query {
         id: Vec<u8>,
-        raw_share: Scalar,
-        callback: oneshot::Sender<EventResult>,
+        de_shares: DecryptedShares,
+        callback: oneshot::Sender<event::Output>,
     },
     Shutdown,
 }
@@ -72,7 +58,7 @@ enum Command {
 struct Query {
     id: Vec<u8>,
     deadline: tokio::time::Instant,
-    callback: oneshot::Sender<EventResult>,
+    callback: oneshot::Sender<event::Output>,
 }
 
 struct WorkerContext<T: Transport> {
@@ -83,28 +69,14 @@ struct WorkerContext<T: Transport> {
 
 pub struct Collector<T: Transport + 'static> {
     transport: Arc<T>,
-    secret_key: SecretKey,
+    secret_key: Arc<SecretKey>,
     config: Config,
     command_tx: Option<mpsc::Sender<Command>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl CollectionResult {
-    pub fn new(bundle: HashMap<libp2p::PeerId, (Scalar, Vec<Point>)>) -> Result<Self> {
-        let (own_shares, partial_public) = bundle
-            .into_iter()
-            .map(|(peer, (share, commitments))| (share, (peer, commitments)))
-            .collect::<(Vec<_>, HashMap<_, _>)>();
-
-        Ok(CollectionResult::Success {
-            own_shares,
-            partial_public,
-        })
-    }
-}
-
 impl<T: Transport + 'static> Collector<T> {
-    pub fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Self {
+    pub fn new(transport: Arc<T>, secret_key: Arc<SecretKey>, config: Config) -> Self {
         Self {
             transport,
             secret_key,
@@ -129,58 +101,58 @@ impl<T: Transport + 'static> Collector<T> {
         let topic = self.config.gossipsub_topic.clone();
         let timeout = self.config.timeout;
 
-        let handle = tokio::spawn(Self::run_worker(
-            peers,
-            secret_key,
-            transport,
-            topic,
-            command_rx,
-            gossipsub_rx,
-            timeout,
-        ));
+        let handle = tokio::spawn(async move {
+            let context = Context::new(peers, secret_key, transport.self_peer());
+            let worker_ctx = WorkerContext {
+                context,
+                transport,
+                topic,
+            };
+
+            Self::run_worker(worker_ctx, command_rx, gossipsub_rx, timeout).await;
+        });
 
         self.worker_handle = Some(handle);
         Ok(())
     }
 
     async fn run_worker(
-        peers: PeerRegistry,
-        secret_key: SecretKey,
-        transport: Arc<T>,
-        topic: String,
+        worker_ctx: WorkerContext<T>,
         mut command_rx: mpsc::Receiver<Command>,
         mut gossipsub_rx: mpsc::Receiver<gossipsub::Message>,
         timeout: tokio::time::Duration,
     ) {
-        let context = Context::new(peers, secret_key, transport.self_peer());
-        let mut worker_ctx = WorkerContext {
-            context,
-            transport,
-            topic,
-        };
         let mut pending_queries = VecDeque::new();
         let mut check_timer = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
         loop {
             tokio::select! {
                 Some(msg) = gossipsub_rx.recv() => {
-                    if let Err(e) = Self::process_message(&mut worker_ctx, msg).await {
+                    if let Err(e) = Self::process_message(&worker_ctx, msg).await {
                         log::error!("Failed to process message: {}", e);
                     }
                 }
 
                 Some(cmd) = command_rx.recv() => {
                     match cmd {
-                        Command::Query { id, raw_share, callback } => {
-                            Self::handle_query(&mut worker_ctx, id, raw_share, callback, timeout, &mut pending_queries).await;
+                        Command::Query { id, de_shares, callback } => {
+                            if let Err(e) = Self::handle_query(
+                                &worker_ctx,
+                                id,
+                                de_shares,
+                                callback,
+                                timeout,
+                                &mut pending_queries,
+                            ).await {
+                                log::error!("Failed to handle query: {}", e);
+                            }
                         }
                         Command::Shutdown => break,
                     }
                 }
 
                 _ = check_timer.tick() => {
-                    Self::process_expired_queries(&mut pending_queries, &mut worker_ctx.context);
-                    Self::respond_to_self_reports(&mut worker_ctx).await;
+                    Self::process_expired_queries(&mut pending_queries, &worker_ctx.context);
                 }
 
                 else => break,
@@ -190,14 +162,80 @@ impl<T: Transport + 'static> Collector<T> {
         log::info!("Collector worker stopped");
     }
 
-    async fn handle_query(
-        worker_ctx: &mut WorkerContext<T>,
+    async fn process_message(worker_ctx: &WorkerContext<T>, msg: gossipsub::Message) -> Result<()> {
+        let (action_needed, id) = match msg.payload {
+            gossipsub::Payload::VSSComponments {
+                id,
+                encrypted_shares,
+                commitments,
+            } => {
+                let action_needed = worker_ctx.context.handle_componments(
+                    id.clone(),
+                    msg.source,
+                    encrypted_shares,
+                    commitments,
+                )?;
+                (action_needed, id)
+            }
+            gossipsub::Payload::VSSReport {
+                id,
+                decrypted_shares,
+            } => {
+                let action_needed =
+                    worker_ctx
+                        .context
+                        .handle_report(id.clone(), msg.source, decrypted_shares)?;
+                (action_needed, id)
+            }
+            gossipsub::Payload::VSSReportResponse {
+                id,
+                decrypted_shares,
+            } => {
+                let action_needed = worker_ctx.context.handle_report_response(
+                    id.clone(),
+                    msg.source,
+                    decrypted_shares,
+                )?;
+                (action_needed, id)
+            }
+            _ => (ActionNeeded::None, vec![]),
+        };
+
+        if let ActionNeeded::Report(de_share) = action_needed {
+            Self::send_report_response(&worker_ctx.transport, &worker_ctx.topic, id, de_share)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_report_response(
+        transport: &Arc<T>,
+        topic: &str,
         id: Vec<u8>,
-        raw_share: Scalar,
-        callback: oneshot::Sender<EventResult>,
+        de_share: DecryptedShares,
+    ) -> Result<()> {
+        let payload = gossipsub::Payload::VSSReportResponse {
+            id,
+            decrypted_shares: de_share,
+        };
+
+        transport
+            .publish(topic, payload)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn handle_query(
+        worker_ctx: &WorkerContext<T>,
+        id: Vec<u8>,
+        de_share: DecryptedShares,
+        callback: oneshot::Sender<event::Output>,
         timeout: tokio::time::Duration,
         pending_queries: &mut VecDeque<Query>,
-    ) {
+    ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         pending_queries.push_back(Query {
             id: id.clone(),
@@ -205,25 +243,18 @@ impl<T: Transport + 'static> Collector<T> {
             callback,
         });
 
-        if let Ok(Some(own_share)) = worker_ctx.context.set_own_share(id.clone(), raw_share) {
-            for reporter in worker_ctx.context.get_pending_reports_against_self(&id) {
-                Self::send_report_response(
-                    &mut worker_ctx.context,
-                    &worker_ctx.transport,
-                    &worker_ctx.topic,
-                    id.clone(),
-                    reporter,
-                    own_share.clone(),
-                )
+        let action_needed = worker_ctx.context.set_own_de_share(id.clone(), de_share)?;
+
+        if let ActionNeeded::Report(de_share) = action_needed {
+            Self::send_report_response(&worker_ctx.transport, &worker_ctx.topic, id, de_share)
                 .await
-                .unwrap_or_else(|e| log::error!("Failed to send report response: {}", e));
-            }
+                .map_err(|e| Error::Transport(e.to_string()))?;
         }
 
-        Self::respond_to_self_reports(worker_ctx).await;
+        Ok(())
     }
 
-    fn process_expired_queries(pending_queries: &mut VecDeque<Query>, context: &mut Context) {
+    fn process_expired_queries(pending_queries: &mut VecDeque<Query>, context: &Context) {
         let now = tokio::time::Instant::now();
 
         while let Some(query) = pending_queries.front() {
@@ -237,131 +268,8 @@ impl<T: Transport + 'static> Collector<T> {
         }
     }
 
-    async fn respond_to_self_reports(worker_ctx: &mut WorkerContext<T>) {
-        for id in worker_ctx.context.active_event_ids() {
-            let id_vec = id.to_vec();
-
-            if let Ok(Some(own_share)) = worker_ctx.context.own_share_clone(&id) {
-                for reporter in worker_ctx.context.get_pending_reports_against_self(&id_vec) {
-                    if let Err(e) = Self::send_report_response(
-                        &mut worker_ctx.context,
-                        &worker_ctx.transport,
-                        &worker_ctx.topic,
-                        id_vec.clone(),
-                        reporter,
-                        own_share.clone(),
-                    )
-                    .await
-                    {
-                        log::error!("Failed to send report response: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    async fn process_message(
-        worker_ctx: &mut WorkerContext<T>,
-        msg: gossipsub::Message,
-    ) -> Result<()> {
-        match msg.payload {
-            gossipsub::Payload::VSSBundle {
-                id,
-                encrypted_shares,
-                commitments,
-            } => {
-                Self::handle_vss_shares(worker_ctx, id, msg.source, encrypted_shares, commitments)?;
-            }
-            gossipsub::Payload::VSSReport { id, reported } => {
-                Self::handle_report(worker_ctx, id, msg.source, reported).await?
-            }
-            gossipsub::Payload::VSSReportResponse { id, raw_share } => {
-                Self::handle_report_response(worker_ctx, id, msg.source, raw_share)?
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    fn handle_vss_shares(
-        worker_ctx: &mut WorkerContext<T>,
-        id: Vec<u8>,
-        source: libp2p::PeerId,
-        encrypted_shares: EncryptedShares,
-        commitments: Vec<Point>,
-    ) -> Result<()> {
-        worker_ctx
-            .context
-            .add_event(id, source, encrypted_shares, commitments)?;
-        Ok(())
-    }
-
-    async fn handle_report(
-        worker_ctx: &mut WorkerContext<T>,
-        id: Vec<u8>,
-        reporter: libp2p::PeerId,
-        reported: libp2p::PeerId,
-    ) -> Result<()> {
-        if reported == worker_ctx.transport.self_peer() {
-            if let Ok(Some(share)) = worker_ctx.context.own_share_clone(&id) {
-                Self::send_report_response(
-                    &mut worker_ctx.context,
-                    &worker_ctx.transport,
-                    &worker_ctx.topic,
-                    id.clone(),
-                    reporter,
-                    share,
-                )
-                .await?;
-            }
-        }
-        worker_ctx.context.add_report_peer(id, reporter, reported)?;
-        Ok(())
-    }
-
-    fn handle_report_response(
-        worker_ctx: &mut WorkerContext<T>,
-        id: Vec<u8>,
-        reported: libp2p::PeerId,
-        raw_share: Scalar,
-    ) -> Result<()> {
-        for peer in worker_ctx.context.get_reporters_of(&id, reported) {
-            worker_ctx.context.add_report_response(
-                id.clone(),
-                peer,
-                reported,
-                raw_share.clone(),
-            )?;
-        }
-        Ok(())
-    }
-
-    async fn send_report_response(
-        context: &mut Context,
-        transport: &Arc<T>,
-        topic: &str,
-        id: Vec<u8>,
-        reporter: libp2p::PeerId,
-        own_share: Scalar,
-    ) -> Result<()> {
-        let payload = gossipsub::Payload::VSSReportResponse {
-            id: id.clone(),
-            raw_share: own_share,
-        };
-
-        transport
-            .publish(topic, payload)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-
-        context.mark_self_report_as_responded(&id, &reporter)?;
-
-        Ok(())
-    }
-
-    fn complete_query(query: Query, context: &mut Context) {
-        match context.output(query.id.clone()) {
+    fn complete_query(query: Query, context: &Context) {
+        match context.output(query.id) {
             Ok(output) => {
                 if query.callback.send(output).is_err() {
                     log::error!("Failed to send callback, receiver dropped");
@@ -373,7 +281,7 @@ impl<T: Transport + 'static> Collector<T> {
         }
     }
 
-    pub async fn query(&self, id: Vec<u8>, raw_share: Scalar) -> Result<CollectionResult> {
+    pub async fn query(&self, id: Vec<u8>, de_shares: DecryptedShares) -> Result<event::Output> {
         let (tx, rx) = oneshot::channel();
 
         let cmd_tx = self
@@ -384,20 +292,13 @@ impl<T: Transport + 'static> Collector<T> {
         cmd_tx
             .send(Command::Query {
                 id,
-                raw_share,
+                de_shares,
                 callback: tx,
             })
             .await
             .map_err(|_| Error::ChannelClosed)?;
 
-        let result = rx.await.map_err(|_| Error::ChannelClosed)?;
-
-        match result {
-            EventResult::Success { bundle, .. } => CollectionResult::new(bundle),
-            EventResult::Failure { invalid_peers } => {
-                Ok(CollectionResult::Failure { invalid_peers })
-            }
-        }
+        rx.await.map_err(|_| Error::ChannelClosed)
     }
 
     pub fn stop(&mut self) {
