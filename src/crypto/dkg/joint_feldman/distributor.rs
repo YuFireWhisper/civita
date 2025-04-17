@@ -2,15 +2,13 @@ use std::sync::Arc;
 
 use crate::{
     crypto::{
-        dkg::joint_feldman::peer_registry::PeerRegistry,
-        keypair,
-        primitives::{
+        keypair, peer_registry::PeerRegistry, primitives::{
             algebra::Point,
             vss::{
                 decrypted_share::DecryptedShares,
                 encrypted_share::{self, EncryptedShares},
             },
-        },
+        }
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
@@ -81,9 +79,7 @@ mod tests {
 
     use crate::{
         crypto::{
-            dkg::joint_feldman::{distributor::Distributor, peer_registry::PeerRegistry},
-            keypair,
-            primitives::{algebra::Scheme, vss::Vss},
+            dkg::joint_feldman::distributor::Distributor, keypair, peer_registry::PeerRegistry, primitives::{algebra::Scheme, vss::Vss}
         },
         network::transport::MockTransport,
         MockError,

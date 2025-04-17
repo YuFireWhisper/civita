@@ -2,13 +2,14 @@ use std::{collections::VecDeque, sync::Arc};
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::crypto::peer_registry::PeerRegistry;
 use crate::crypto::primitives::algebra::Point;
 use crate::crypto::{
     dkg::joint_feldman::collector::event::ActionNeeded, primitives::vss::DecryptedShares,
 };
 use crate::{
     crypto::{
-        dkg::joint_feldman::{collector::context::Context, peer_registry::PeerRegistry},
+        dkg::joint_feldman::collector::context::Context,
         keypair::{self, SecretKey},
         primitives::algebra::{self},
     },

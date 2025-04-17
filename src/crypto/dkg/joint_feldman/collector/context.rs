@@ -3,11 +3,9 @@ use std::sync::Arc;
 use dashmap::{mapref::one::RefMut, DashMap, DashSet};
 
 use crate::crypto::{
-    dkg::joint_feldman::{
-        collector::event::{self, ActionNeeded, Event},
-        peer_registry::PeerRegistry,
-    },
+    dkg::joint_feldman::collector::event::{self, ActionNeeded, Event},
     keypair::SecretKey,
+    peer_registry::PeerRegistry,
     primitives::{
         algebra::{self, Point},
         vss::{
