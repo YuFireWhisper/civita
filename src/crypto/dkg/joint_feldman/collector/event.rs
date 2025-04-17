@@ -33,6 +33,7 @@ pub enum Error {
     EncryptedShare(#[from] encrypted_share::Error),
 }
 
+#[derive(Debug)]
 pub enum Output {
     Success {
         shares: Vec<Scalar>,
@@ -43,6 +44,7 @@ pub enum Output {
     },
 }
 
+#[derive(Debug)]
 pub enum ActionNeeded {
     Report(DecryptedShares),
     None,

@@ -47,6 +47,7 @@ pub enum Error {
     Keypair(#[from] keypair::Error),
 }
 
+#[derive(Debug)]
 enum Command {
     Query {
         id: Vec<u8>,
@@ -327,5 +328,161 @@ impl<T: Transport + 'static> Collector<T> {
 impl<T: Transport> Drop for Collector<T> {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use mockall::predicate::eq;
+
+    use crate::{
+        crypto::{
+            dkg::joint_feldman::{
+                collector::{Collector, Config, Error},
+                event,
+                peer_registry::PeerRegistry,
+            },
+            keypair::{self, SecretKey},
+            primitives::{
+                algebra::Scheme,
+                vss::{DecryptedShares, Vss},
+            },
+        },
+        network::transport::MockTransport,
+        MockError,
+    };
+
+    const TOPIC: &str = "test_topic";
+    const CHANNEL_SIZE: usize = 10;
+    const TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_millis(100);
+    const NUM_PEERS: u16 = 3;
+    const THRESHOLD: u16 = 2;
+    const SCHEME: Scheme = Scheme::Secp256k1;
+
+    fn create_config() -> Config {
+        Config {
+            gossipsub_topic: TOPIC.to_string(),
+            query_channel_size: CHANNEL_SIZE,
+            timeout: TIMEOUT,
+        }
+    }
+
+    fn create_secret_key() -> Arc<SecretKey> {
+        let (secret_key, _) = keypair::generate_secp256k1();
+        Arc::new(secret_key)
+    }
+
+    fn create_mock_transport(id: libp2p::PeerId) -> MockTransport {
+        let mut transport = MockTransport::new();
+        transport.expect_self_peer().return_once(move || id);
+        transport
+    }
+
+    #[test]
+    fn create_collector_correctly() {
+        let transport = create_mock_transport(libp2p::PeerId::random());
+        let secret_key = create_secret_key();
+        let config = create_config();
+
+        let collector = Collector::new(Arc::new(transport), secret_key, config);
+
+        assert_eq!(collector.config.gossipsub_topic, TOPIC);
+        assert_eq!(collector.config.query_channel_size, CHANNEL_SIZE);
+        assert_eq!(collector.config.timeout, TIMEOUT);
+        assert!(collector.command_tx.is_none());
+        assert!(collector.worker_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn communication_channles_setup() {
+        let mut transport = create_mock_transport(libp2p::PeerId::random());
+        let secret_key = create_secret_key();
+        let config = create_config();
+
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TOPIC))
+            .returning(move |_| {
+                let (_, rx) = tokio::sync::mpsc::channel(CHANNEL_SIZE);
+                Ok(rx)
+            });
+
+        let mut collector = Collector::new(Arc::new(transport), secret_key, config);
+        let peers = crate::crypto::dkg::joint_feldman::peer_registry::PeerRegistry::new(
+            std::collections::HashMap::new(),
+        );
+
+        collector.start(peers).await.unwrap();
+
+        assert!(collector.command_tx.is_some());
+        assert!(collector.worker_handle.is_some());
+        collector.stop();
+    }
+
+    #[tokio::test]
+    async fn fails_when_transport_error_occurs() {
+        let mut transport = create_mock_transport(libp2p::PeerId::random());
+        let secret_key = create_secret_key();
+        let config = create_config();
+
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TOPIC))
+            .returning(move |_| Err(MockError));
+
+        let mut collector = Collector::new(Arc::new(transport), secret_key, config);
+        let peers = crate::crypto::dkg::joint_feldman::peer_registry::PeerRegistry::new(
+            std::collections::HashMap::new(),
+        );
+
+        let result = collector.start(peers).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn fails_when_collector_not_started() {
+        let transport = create_mock_transport(libp2p::PeerId::random());
+        let secret_key = create_secret_key();
+        let config = create_config();
+
+        let collector = Collector::new(Arc::new(transport), secret_key, config);
+
+        let result = collector
+            .query(vec![0; 32], DecryptedShares::empty(), Vec::new())
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::Query(_))));
+    }
+
+    #[tokio::test]
+    async fn success_when_collector_is_start() {
+        let peer_id = libp2p::PeerId::random();
+        let mut transport = create_mock_transport(peer_id);
+        let mut peers_map = HashMap::new();
+        peers_map.insert(peer_id, keypair::generate_secp256k1().1);
+
+        let secret_key = create_secret_key();
+        let config = create_config();
+
+        let (_, rx) = tokio::sync::mpsc::channel(CHANNEL_SIZE);
+        transport
+            .expect_listen_on_topic()
+            .return_once(move |_| Ok(rx));
+
+        let mut collector = Collector::new(Arc::new(transport), secret_key, config);
+        let _ = collector.start(PeerRegistry::new(peers_map)).await;
+
+        let (de_shares, comms) = Vss::share(&SCHEME, THRESHOLD, NUM_PEERS);
+        let result = collector
+            .query(vec![0; 32], de_shares.clone(), comms.clone())
+            .await;
+
+        assert!(result.is_ok(), "Failed to query: {:?}", result);
+        assert!(matches!(result, Ok(event::Output::Success { .. })));
+        collector.stop();
     }
 }
