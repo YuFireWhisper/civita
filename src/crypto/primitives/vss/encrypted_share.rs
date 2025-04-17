@@ -71,7 +71,7 @@ impl EncryptedShares {
 
         for (index, public_key) in public_keys {
             assert!(index > 0, "Index must be greater than 0, because it is 1-based");
-            let index = index - 1;
+            // let index = index - 1;
             let share = decrypted_shares
                 .get(&index)
                 .ok_or(Error::ShareNotFound(index))?;

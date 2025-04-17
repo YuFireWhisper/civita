@@ -148,13 +148,13 @@ mod tests {
     };
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;
-    const DEFAULT_INDEX: u16 = 0;
+    const DEFAULT_INDEX_ONE_BASE: u16 = 1;
 
     fn create_valid_scalar_and_commitments() -> (Scalar, Vec<Point>) {
         const NUM_SHARES: u16 = 5;
         const THRESHOLD: u16 = 3;
         let (scalars, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_SHARES);
-        (scalars.get(&DEFAULT_INDEX).unwrap().clone(), commitments)
+        (scalars.get(&DEFAULT_INDEX_ONE_BASE).unwrap().clone(), commitments)
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn verification_succeeds_with_valid_commitments() {
         let (scalar, commitments) = create_valid_scalar_and_commitments();
-        let index = DEFAULT_INDEX + 1; // Because index is 1-based
+        let index = DEFAULT_INDEX_ONE_BASE;
 
         let result = scalar.verify(index, &commitments);
         assert!(result.is_ok());
@@ -248,7 +248,7 @@ mod tests {
         let (scalar, _) = create_valid_scalar_and_commitments();
         let invalid_commitments = vec![Point::zero(Scheme::Secp256k1)];
 
-        let result = scalar.verify(DEFAULT_INDEX, &invalid_commitments);
+        let result = scalar.verify(DEFAULT_INDEX_ONE_BASE, &invalid_commitments);
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
