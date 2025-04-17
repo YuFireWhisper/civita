@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn communication_channles_setup() {
+    async fn communication_channels_setup() {
         let mut transport = create_mock_transport(libp2p::PeerId::random());
         let secret_key = create_secret_key();
         let config = create_config();
