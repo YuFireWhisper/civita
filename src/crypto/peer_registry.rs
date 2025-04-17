@@ -178,8 +178,8 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::crypto::{
-        dkg::joint_feldman::peer_registry::{PeerRegistry, MAX_PEERS},
         keypair::{self, PublicKey},
+        peer_registry::{PeerRegistry, MAX_PEERS},
     };
 
     const NUM_PEERS: usize = 3;

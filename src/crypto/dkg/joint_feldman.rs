@@ -6,18 +6,15 @@ use crate::{
             joint_feldman::{
                 collector::{event, Collector},
                 distributor::Distributor,
-                peer_registry::PeerRegistry,
             },
             Dkg_, GenerateResult,
-        },
-        keypair::{PublicKey, SecretKey},
-        primitives::{
+        }, keypair::{PublicKey, SecretKey}, peer_registry::PeerRegistry, primitives::{
             algebra::{self, Point, Scalar},
             vss::{
                 decrypted_share::{self},
                 Vss,
             },
-        },
+        }
     },
     network::transport::Transport,
 };
@@ -25,7 +22,6 @@ use crate::{
 mod collector;
 mod config;
 mod distributor;
-mod peer_registry;
 
 pub use config::Config;
 

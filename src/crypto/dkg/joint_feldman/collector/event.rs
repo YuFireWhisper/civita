@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::crypto::{
-    dkg::joint_feldman::peer_registry::PeerRegistry,
     keypair::{self, PublicKey, SecretKey},
+    peer_registry::PeerRegistry,
     primitives::{
         algebra::{self, Point, Scalar},
         vss::{
@@ -464,11 +464,9 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use crate::crypto::{
-        dkg::joint_feldman::{
-            event::{ActionNeeded, Event, Output, Status},
-            peer_registry::PeerRegistry,
-        },
+        dkg::joint_feldman::event::{ActionNeeded, Event, Output, Status},
         keypair::{self, PublicKey, SecretKey},
+        peer_registry::PeerRegistry,
         primitives::{
             algebra::{Point, Scheme},
             vss::{DecryptedShares, EncryptedShares, Vss},
