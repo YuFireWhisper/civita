@@ -65,15 +65,16 @@ impl Context {
         }
     }
 
-    pub fn set_own_de_share(
+    pub fn set_own_componments(
         &self,
         id: Vec<u8>,
         de_shares: DecryptedShares,
+        comms: Vec<Point>,
     ) -> Result<ActionNeeded> {
         self.ensure_event_not_processed(&id)?;
 
         let mut event = self.get_or_create_event(&id);
-        Ok(event.set_own_de_shares(de_shares))
+        Ok(event.set_own_components(de_shares, comms))
     }
 
     pub fn handle_componments(

@@ -2,6 +2,7 @@ use std::{collections::VecDeque, sync::Arc};
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::crypto::primitives::algebra::Point;
 use crate::crypto::{
     dkg::joint_feldman::collector::event::ActionNeeded, primitives::vss::DecryptedShares,
 };
@@ -50,6 +51,7 @@ enum Command {
     Query {
         id: Vec<u8>,
         de_shares: DecryptedShares,
+        comms: Vec<Point>,
         callback: oneshot::Sender<event::Output>,
     },
     Shutdown,
@@ -135,11 +137,12 @@ impl<T: Transport + 'static> Collector<T> {
 
                 Some(cmd) = command_rx.recv() => {
                     match cmd {
-                        Command::Query { id, de_shares, callback } => {
+                        Command::Query { id, de_shares, comms, callback } => {
                             if let Err(e) = Self::handle_query(
                                 &worker_ctx,
                                 id,
                                 de_shares,
+                                comms,
                                 callback,
                                 timeout,
                                 &mut pending_queries,
@@ -232,6 +235,7 @@ impl<T: Transport + 'static> Collector<T> {
         worker_ctx: &WorkerContext<T>,
         id: Vec<u8>,
         de_share: DecryptedShares,
+        comms: Vec<Point>,
         callback: oneshot::Sender<event::Output>,
         timeout: tokio::time::Duration,
         pending_queries: &mut VecDeque<Query>,
@@ -243,7 +247,9 @@ impl<T: Transport + 'static> Collector<T> {
             callback,
         });
 
-        let action_needed = worker_ctx.context.set_own_de_share(id.clone(), de_share)?;
+        let action_needed = worker_ctx
+            .context
+            .set_own_componments(id.clone(), de_share, comms)?;
 
         if let ActionNeeded::Report(de_share) = action_needed {
             Self::send_report_response(&worker_ctx.transport, &worker_ctx.topic, id, de_share)
@@ -281,7 +287,12 @@ impl<T: Transport + 'static> Collector<T> {
         }
     }
 
-    pub async fn query(&self, id: Vec<u8>, de_shares: DecryptedShares) -> Result<event::Output> {
+    pub async fn query(
+        &self,
+        id: Vec<u8>,
+        de_shares: DecryptedShares,
+        comms: Vec<Point>,
+    ) -> Result<event::Output> {
         let (tx, rx) = oneshot::channel();
 
         let cmd_tx = self
@@ -293,6 +304,7 @@ impl<T: Transport + 'static> Collector<T> {
             .send(Command::Query {
                 id,
                 de_shares,
+                comms,
                 callback: tx,
             })
             .await

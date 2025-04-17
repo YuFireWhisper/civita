@@ -129,10 +129,13 @@ impl<T: Transport + 'static> JointFeldman<T> {
 
         let peers = self.peers()?;
         self.distributor
-            .send_shares(id.clone(), peers, &decrypted_shares, commitments)
+            .send_shares(id.clone(), peers, &decrypted_shares, commitments.clone())
             .await?;
 
-        let result = self.collector.query(id, decrypted_shares).await?;
+        let result = self
+            .collector
+            .query(id, decrypted_shares, commitments)
+            .await?;
 
         match result {
             event::Output::Success { shares, comms } => {
