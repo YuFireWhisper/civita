@@ -65,7 +65,7 @@ impl Context {
         }
     }
 
-    pub fn set_own_componments(
+    pub fn set_own_component(
         &self,
         id: Vec<u8>,
         de_shares: DecryptedShares,
@@ -77,7 +77,7 @@ impl Context {
         Ok(event.set_own_components(de_shares, comms))
     }
 
-    pub fn handle_componments(
+    pub fn handle_component(
         &self,
         id: Vec<u8>,
         source: libp2p::PeerId,

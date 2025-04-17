@@ -7,7 +7,7 @@ use crate::{
     crypto::{
         dkg::Data,
         primitives::{
-            algebra::{Point, Scalar},
+            algebra::Point,
             vss::{encrypted_share::EncryptedShares, DecryptedShares},
         },
     },
@@ -36,7 +36,7 @@ pub enum Payload {
 
     DkgVSS(Vec<u8>),
 
-    VSSComponments {
+    VSSComponent {
         id: Vec<u8>,
         encrypted_shares: EncryptedShares,
         commitments: Vec<Point>,

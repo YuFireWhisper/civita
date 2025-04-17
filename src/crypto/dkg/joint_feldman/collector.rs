@@ -167,12 +167,12 @@ impl<T: Transport + 'static> Collector<T> {
 
     async fn process_message(worker_ctx: &WorkerContext<T>, msg: gossipsub::Message) -> Result<()> {
         let (action_needed, id) = match msg.payload {
-            gossipsub::Payload::VSSComponments {
+            gossipsub::Payload::VSSComponent {
                 id,
                 encrypted_shares,
                 commitments,
             } => {
-                let action_needed = worker_ctx.context.handle_componments(
+                let action_needed = worker_ctx.context.handle_component(
                     id.clone(),
                     msg.source,
                     encrypted_shares,
@@ -249,7 +249,7 @@ impl<T: Transport + 'static> Collector<T> {
 
         let action_needed = worker_ctx
             .context
-            .set_own_componments(id.clone(), de_share, comms)?;
+            .set_own_component(id.clone(), de_share, comms)?;
 
         if let ActionNeeded::Report(de_share) = action_needed {
             Self::send_report_response(&worker_ctx.transport, &worker_ctx.topic, id, de_share)

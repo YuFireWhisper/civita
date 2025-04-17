@@ -87,7 +87,7 @@ impl PeerInfo {
             .collect()
     }
 
-    pub fn set_componments(
+    pub fn set_component(
         &mut self,
         en_shares: EncryptedShares,
         comms: Vec<Point>,
@@ -266,7 +266,7 @@ impl Event {
                 .peer_registry
                 .get_public_key_by_peer_id(&peer_id)
                 .expect("unreachable: PublicKey not found");
-            peer_info.set_componments(en_shares, comms, pk)?
+            peer_info.set_component(en_shares, comms, pk)?
         };
 
         if let Some(indices) = indices {
