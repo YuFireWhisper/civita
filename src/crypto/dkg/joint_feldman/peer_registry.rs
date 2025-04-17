@@ -7,6 +7,7 @@ const MAX_PEERS: usize = if cfg!(test) { 10 } else { u16::MAX as usize };
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Eq, PartialEq)]
 struct PeerInfo {
     pub index: u16,
     pub public_key: PublicKey,
@@ -14,6 +15,7 @@ struct PeerInfo {
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Eq, PartialEq)]
 pub struct PeerRegistry {
     peer_to_info: HashMap<libp2p::PeerId, PeerInfo>,
     index_to_peer: HashMap<u16, libp2p::PeerId>,
@@ -26,6 +28,10 @@ pub struct IndexPeerIterator<'a> {
 pub struct IndexKeyIterator<'a> {
     iter: hash_map::Iter<'a, u16, libp2p::PeerId>,
     registry: &'a PeerRegistry,
+}
+
+pub struct PeerKeyIterator<'a> {
+    iter: hash_map::Iter<'a, libp2p::PeerId, PeerInfo>,
 }
 
 impl PeerRegistry {
@@ -64,6 +70,7 @@ impl PeerRegistry {
     }
 
     pub fn get_public_key_by_index(&self, index: u16) -> Option<&PublicKey> {
+        assert!(index > 0, "index must be greater than 0, but got {}", index);
         self.index_to_peer
             .get(&index)
             .and_then(|peer_id| self.peer_to_info.get(peer_id).map(|info| &info.public_key))
@@ -71,6 +78,11 @@ impl PeerRegistry {
 
     pub fn get_public_key_by_peer_id(&self, peer_id: &libp2p::PeerId) -> Option<&PublicKey> {
         self.peer_to_info.get(peer_id).map(|info| &info.public_key)
+    }
+
+    pub fn get_peer_id_by_index(&self, index: u16) -> Option<&libp2p::PeerId> {
+        assert!(index > 0, "index must be greater than 0, but got {}", index);
+        self.index_to_peer.get(&index)
     }
 
     pub fn contains(&self, peer_id: &libp2p::PeerId) -> bool {
@@ -85,6 +97,12 @@ impl PeerRegistry {
         IndexKeyIterator {
             iter: self.index_to_peer.iter(),
             registry: self,
+        }
+    }
+
+    pub fn iter_peer_keys(&self) -> PeerKeyIterator<'_> {
+        PeerKeyIterator {
+            iter: self.peer_to_info.iter(),
         }
     }
 
@@ -139,6 +157,17 @@ impl<'a> Iterator for IndexKeyIterator<'a> {
             if let Some(info) = self.registry.peer_to_info.get(peer_id) {
                 return Some((*index, &info.public_key));
             }
+        }
+        None
+    }
+}
+
+impl<'a> Iterator for PeerKeyIterator<'a> {
+    type Item = (libp2p::PeerId, &'a PublicKey);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((peer_id, info)) = self.iter.next() {
+            return Some((*peer_id, &info.public_key));
         }
         None
     }
@@ -218,6 +247,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "index must be greater than 0, but got 0")]
+    fn panic_for_get_public_key_by_zero_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let _ = registry.get_public_key_by_index(0);
+    }
+
+    #[test]
     fn return_none_for_invalid_index() {
         let peers = generate_peers(NUM_PEERS);
         let registry = PeerRegistry::new(peers);
@@ -239,6 +277,26 @@ mod tests {
 
         assert!(public_key.is_some());
         assert_eq!(public_key.unwrap(), &expected_public_key);
+    }
+
+    #[test]
+    fn return_correct_peer_id_by_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        for i in 1..=NUM_PEERS as u16 {
+            let peer_id = registry.get_peer_id_by_index(i);
+            assert!(peer_id.is_some());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "index must be greater than 0, but got 0")]
+    fn panic_for_get_peer_id_by_zero_index() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let _ = registry.get_peer_id_by_index(0);
     }
 
     #[test]
@@ -294,6 +352,21 @@ mod tests {
         for (index, public_key) in registry.iter_index_keys() {
             assert!(registry.get_public_key_by_index(index).is_some());
             assert_eq!(registry.get_public_key_by_index(index), Some(public_key));
+            count += 1;
+        }
+
+        assert_eq!(count, NUM_PEERS);
+    }
+
+    #[test]
+    fn iter_peer_keys_should_iterate_all() {
+        let peers = generate_peers(NUM_PEERS);
+        let registry = PeerRegistry::new(peers);
+
+        let mut count = 0;
+        for (peer_id, index) in registry.iter_peer_keys() {
+            assert!(registry.contains(&peer_id));
+            assert_eq!(registry.get_public_key_by_peer_id(&peer_id), Some(index));
             count += 1;
         }
 

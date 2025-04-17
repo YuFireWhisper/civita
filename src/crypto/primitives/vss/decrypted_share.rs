@@ -57,7 +57,7 @@ impl DecryptedShares {
                 first = Some(share.clone());
             }
 
-            shares.insert(index as u16, share);
+            shares.insert(index as u16 + 1, share);
         }
         Self(shares)
     }

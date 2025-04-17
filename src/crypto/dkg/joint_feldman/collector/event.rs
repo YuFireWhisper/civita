@@ -1,12 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::crypto::{
+    dkg::joint_feldman::peer_registry::PeerRegistry,
     keypair::{self, PublicKey, SecretKey},
     primitives::{
         algebra::{self, Point, Scalar},
         vss::{
             encrypted_share::{self, EncryptedShare},
-            EncryptedShares,
+            DecryptedShares, EncryptedShares,
         },
     },
 };
@@ -16,246 +20,842 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("Report already exists for reporter: {0}, reported: {1}")]
-    ReportAlreadyExists(String, String),
-
-    #[error("Report not found")]
-    ReportNotFound,
-
-    #[error("Share not found for index: {0}")]
-    ShareNotFound(u16),
+    #[error("Peer not found: {0}")]
+    PeerNotFound(libp2p::PeerId),
 
     #[error("Algebra error: {0}")]
     Algebra(#[from] algebra::Error),
 
-    #[error("Encrypted share error: {0}")]
-    EncryptedShare(#[from] encrypted_share::Error),
-
     #[error("Keypair error: {0}")]
     Keypair(#[from] keypair::Error),
+
+    #[error("Encrypted share error: {0}")]
+    EncryptedShare(#[from] encrypted_share::Error),
+}
+
+pub enum Output {
+    Success {
+        shares: Vec<Scalar>,
+        comms: HashMap<libp2p::PeerId, Vec<Point>>,
+    },
+    Failure {
+        invalid_peers: HashSet<libp2p::PeerId>,
+    },
+}
+
+pub enum ActionNeeded {
+    Report(DecryptedShares),
+    None,
 }
 
 #[derive(Debug)]
-pub struct Bundle {
-    pub encrypted_shares: EncryptedShares,
-    pub commitments: Vec<Point>,
+#[derive(Default)]
+struct PeerInfo {
+    en_shares: Option<EncryptedShares>,
+    de_shares: Option<DecryptedShares>,
+    comms: Option<Vec<Point>>,
+    got_invalid: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum VerificationResult {
-    ReportedPeerMalicious,
-    ReporterPeerMalicious,
+#[derive(Debug)]
+#[derive(PartialEq, Eq)]
+enum Status {
     Pending,
-}
-
-#[derive(Debug)]
-pub struct Report {
-    reporter: libp2p::PeerId,
-    reported: libp2p::PeerId,
-    raw_share: Option<Scalar>,
-    result: VerificationResult,
+    Verifying(HashSet<libp2p::PeerId>), // Reporter peer ids
 }
 
 #[derive(Debug)]
 pub struct Event {
-    bundles: HashMap<u16, Bundle>,
+    peer_infos: HashMap<libp2p::PeerId, PeerInfo>,
+    peer_registry: Arc<PeerRegistry>,
+    invalid_peers: HashSet<libp2p::PeerId>,
     own_peer: libp2p::PeerId,
-    own_share: Option<Scalar>,
-    // (reporter, reported)
-    reports: HashMap<(libp2p::PeerId, libp2p::PeerId), Report>,
-    pending_self_reports: HashSet<libp2p::PeerId>,
+    own_index_one_base: u16,
+    own_shares: Vec<Scalar>,
+    own_comms: Option<Vec<Point>>,
+    own_de_shares: Option<DecryptedShares>,
+    is_reported: bool,
+    secret_key: Arc<SecretKey>,
+    status: Status,
 }
 
-impl Bundle {
-    pub fn new(encrypted_shares: EncryptedShares, commitments: Vec<Point>) -> Self {
-        Self {
-            encrypted_shares,
-            commitments,
+impl PeerInfo {
+    pub fn from_registry(registry: &Arc<PeerRegistry>) -> HashMap<libp2p::PeerId, Self> {
+        registry
+            .peer_ids()
+            .map(|peer_id| (*peer_id, Self::default()))
+            .collect()
+    }
+
+    pub fn set_component(
+        &mut self,
+        en_shares: EncryptedShares,
+        comms: Vec<Point>,
+        pk: &PublicKey,
+    ) -> Result<Option<Vec<u16>>> {
+        self.en_shares = Some(en_shares);
+        self.comms = Some(comms);
+
+        if self.is_complete() {
+            self.verify(pk)
+        } else {
+            Ok(None)
         }
     }
-}
 
-impl Report {
-    pub fn new(reporter: libp2p::PeerId, reported: libp2p::PeerId) -> Self {
-        Self {
-            reporter,
-            reported,
-            raw_share: None,
-            result: VerificationResult::Pending,
+    fn is_complete(&self) -> bool {
+        self.en_shares.is_some() && self.de_shares.is_some() && self.comms.is_some()
+    }
+
+    fn verify(&self, pk: &PublicKey) -> Result<Option<Vec<u16>>> {
+        assert!(self.is_complete(), "PeerInfo is not complete");
+
+        let en_shares = self
+            .en_shares
+            .as_ref()
+            .expect("unreachable: encrypted_shares is None");
+        let de_shares = self
+            .de_shares
+            .as_ref()
+            .expect("unreachable: decrypted_shares is None");
+        let comms = self
+            .comms
+            .as_ref()
+            .expect("unreachable: commitments is None");
+
+        let mut invalid_indices = Vec::new();
+        for (index, en_share) in en_shares.iter() {
+            let de_share = match de_shares.get(&index) {
+                Some(de_share) => de_share,
+                None => {
+                    invalid_indices.push(index);
+                    continue;
+                }
+            };
+
+            Self::verify_de_to_en(de_share, en_share, pk)?;
+            if !de_share.verify(index, comms)? {
+                invalid_indices.push(index);
+            }
+        }
+
+        if invalid_indices.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(invalid_indices))
         }
     }
 
-    pub fn set_raw_share(&mut self, raw_share: Scalar) {
-        self.raw_share = Some(raw_share);
+    fn verify_de_to_en(
+        de_share: &Scalar,
+        en_share: &EncryptedShare,
+        pk: &PublicKey,
+    ) -> Result<bool> {
+        let de_share_bytes = de_share.to_vec()?;
+        let expected_en_share = pk.encrypt(&de_share_bytes)?;
+        Ok(en_share.as_slice() == expected_en_share.as_slice())
     }
 
-    pub fn set_result(&mut self, result: VerificationResult) {
-        self.result = result;
+    pub fn set_de_shares(
+        &mut self,
+        de_shares: DecryptedShares,
+        pk: &PublicKey,
+    ) -> Result<Option<Vec<u16>>> {
+        self.de_shares = Some(de_shares);
+
+        if self.is_complete() {
+            self.verify(pk)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_got_invalid(&mut self) {
+        self.got_invalid = true;
+    }
+
+    pub fn is_got_invalid(&self) -> bool {
+        self.got_invalid
+    }
+
+    pub fn is_components_set(&self) -> bool {
+        self.en_shares.is_some() && self.comms.is_some()
+    }
+
+    pub fn is_de_shares_set(&self) -> bool {
+        self.de_shares.is_some()
     }
 }
 
 impl Event {
-    pub fn new(own_peer: libp2p::PeerId) -> Self {
+    pub fn new(
+        peer_registry: Arc<PeerRegistry>,
+        secret_key: Arc<SecretKey>,
+        own_peer: libp2p::PeerId,
+    ) -> Self {
+        let own_index_one_base = peer_registry
+            .get_index(&own_peer)
+            .expect("Own peer should be in the registry");
+
         Self {
-            bundles: HashMap::new(),
+            peer_infos: PeerInfo::from_registry(&peer_registry),
+            peer_registry,
+            invalid_peers: HashSet::new(),
             own_peer,
-            own_share: None,
-            reports: HashMap::new(),
-            pending_self_reports: HashSet::new(),
+            own_index_one_base,
+            own_shares: Vec::new(),
+            own_comms: None,
+            own_de_shares: None,
+            is_reported: false,
+            secret_key,
+            status: Status::Pending,
         }
     }
 
-    pub fn add_pair(&mut self, source_index: u16, bundle: Bundle) {
-        self.bundles.insert(source_index, bundle);
-    }
-
-    pub fn set_own_share(&mut self, own_share: Scalar) {
-        self.own_share = Some(own_share);
-    }
-
-    pub fn add_report(&mut self, reporter: libp2p::PeerId, reported: libp2p::PeerId) -> Result<()> {
-        let key = (reporter, reported);
-        if self.reports.contains_key(&key) {
-            return Err(Error::ReportAlreadyExists(
-                reporter.to_string(),
-                reported.to_string(),
-            ));
-        }
-
-        self.reports.insert(key, Report::new(reporter, reported));
-
-        if reported == self.own_peer {
-            self.pending_self_reports.insert(reporter);
-        }
-
-        Ok(())
-    }
-
-    pub fn pending_reports_against_self(&self) -> Vec<libp2p::PeerId> {
-        self.pending_self_reports.iter().copied().collect()
-    }
-
-    pub fn mark_self_report_as_responded(&mut self, reporter: &libp2p::PeerId) {
-        self.pending_self_reports.remove(reporter);
-    }
-
-    pub fn respond_to_report(
+    pub fn set_own_components(
         &mut self,
-        reporter: libp2p::PeerId,
-        reported: libp2p::PeerId,
-        raw_share: Scalar,
-        reporter_index: u16,
-        reported_index: u16,
-        reporter_public_key: &PublicKey,
-    ) -> Result<()> {
-        let key = (reporter, reported);
-        let report = self.reports.get_mut(&key).ok_or(Error::ReportNotFound)?;
+        de_shares: DecryptedShares,
+        comms: Vec<Point>,
+    ) -> ActionNeeded {
+        if self.is_verifying() && !self.is_reported {
+            self.is_reported = true;
+            return ActionNeeded::Report(de_shares);
+        }
 
-        report.set_raw_share(raw_share.clone());
+        self.own_shares.push(
+            de_shares
+                .get(&self.own_index_one_base)
+                .expect("own share should be present")
+                .clone(),
+        );
+        self.own_comms = Some(comms);
 
-        let accused_share = self
-            .bundles
-            .get(&reported_index)
-            .ok_or(Error::ShareNotFound(reported_index))?;
-
-        Self::verify_report(
-            report,
-            &raw_share,
-            accused_share,
-            reporter_index,
-            reporter_public_key,
-        )?;
-
-        Ok(())
+        ActionNeeded::None
     }
 
-    fn verify_report(
-        report: &mut Report,
-        reported_raw_share: &Scalar,
-        reported_bundle: &Bundle,
-        reporter_index: u16,
-        reporter_public_key: &PublicKey,
-    ) -> Result<()> {
-        let encrypted_share = match reported_bundle.encrypted_shares.get(&reporter_index) {
-            Some(share) => share,
-            None => {
-                report.result = VerificationResult::ReportedPeerMalicious;
-                return Ok(());
-            }
+    fn is_verifying(&self) -> bool {
+        matches!(self.status, Status::Verifying(_))
+    }
+
+    fn set_status_to_verifying(&mut self) {
+        if self.status == Status::Pending {
+            self.status = Status::Verifying(HashSet::new());
+        }
+    }
+
+    pub fn add_en_shares_and_comms(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        en_shares: EncryptedShares,
+        comms: Vec<Point>,
+    ) -> Result<ActionNeeded> {
+        if !self.peer_infos.contains_key(&peer_id) {
+            return Ok(ActionNeeded::None);
+        }
+
+        if self.process_own_share(&en_shares, &comms).is_err() {
+            return Ok(self.handle_invalid_peer(peer_id));
+        }
+
+        let indices = {
+            let peer_info = self
+                .peer_infos
+                .get_mut(&peer_id)
+                .ok_or(Error::PeerNotFound(peer_id))?;
+            let pk = self
+                .peer_registry
+                .get_public_key_by_peer_id(&peer_id)
+                .expect("unreachable: PublicKey not found");
+            peer_info.set_component(en_shares, comms, pk)?
         };
 
-        if !is_share_matching(reported_raw_share, encrypted_share, reporter_public_key)? {
-            report.result = VerificationResult::ReportedPeerMalicious;
-            return Ok(());
+        if let Some(indices) = indices {
+            self.mark_peers_by_indices(&indices);
+            return Ok(self.handle_invalid_peer(peer_id));
         }
 
-        let result =
-            match reported_raw_share.verify(reporter_index, &reported_bundle.commitments)? {
-                true => VerificationResult::ReporterPeerMalicious,
-                false => VerificationResult::ReportedPeerMalicious,
-            };
-        report.set_result(result);
+        Ok(ActionNeeded::None)
+    }
 
+    fn process_own_share(
+        &mut self,
+        encrypted_shares: &EncryptedShares,
+        commitments: &[Point],
+    ) -> std::result::Result<(), ()> {
+        let encrypted_share = match encrypted_shares.get(&self.own_index_one_base) {
+            Some(share) => share,
+            None => return Err(()),
+        };
+
+        let decrypted_share = match encrypted_share.to_scalar(&self.secret_key) {
+            Ok(share) => share,
+            Err(_) => return Err(()),
+        };
+
+        if !self
+            .verify_share(&decrypted_share, commitments)
+            .unwrap_or(false)
+        {
+            return Err(());
+        }
+
+        self.own_shares.push(decrypted_share);
         Ok(())
     }
 
-    pub fn encrypted_shares(&self, index: &u16) -> Result<&EncryptedShares> {
-        self.bundles
-            .get(index)
-            .ok_or(Error::ShareNotFound(*index))
-            .map(|pair| &pair.encrypted_shares)
-    }
+    fn handle_invalid_peer(&mut self, peer_id: libp2p::PeerId) -> ActionNeeded {
+        self.set_status_to_verifying();
+        self.invalid_peers.insert(peer_id);
+        self.peer_infos.remove(&peer_id);
 
-    pub fn own_share_ref(&self) -> Option<&Scalar> {
-        self.own_share.as_ref()
-    }
-
-    pub fn get_malicious_peers(&self) -> HashSet<libp2p::PeerId> {
-        let mut malicious = HashSet::new();
-
-        for report in self.reports.values() {
-            match report.result {
-                VerificationResult::ReportedPeerMalicious => {
-                    malicious.insert(report.reported);
-                }
-                VerificationResult::ReporterPeerMalicious => {
-                    malicious.insert(report.reporter);
-                }
-                VerificationResult::Pending => {
-                    malicious.insert(report.reported);
-                }
+        if !self.is_reported && self.own_de_shares.is_some() {
+            self.is_reported = true;
+            if let Some(de_shares) = self.own_de_shares.take() {
+                return ActionNeeded::Report(de_shares);
             }
         }
 
-        malicious
+        ActionNeeded::None
     }
 
-    pub fn decrypted_share(&self, index: &u16, secret_key: &SecretKey) -> Result<Scalar> {
-        let encrypted_share = self
-            .encrypted_shares(index)?
-            .get(index)
-            .ok_or(Error::ShareNotFound(*index))?;
-        encrypted_share.to_scalar(secret_key).map_err(Error::from)
+    fn verify_share(&self, de_share: &Scalar, comms: &[Point]) -> Result<bool> {
+        de_share
+            .verify(self.own_index_one_base, comms)
+            .map_err(Error::from)
     }
 
-    pub fn commitments(&self, index: &u16) -> Result<&Vec<Point>> {
-        self.bundles
-            .get(index)
-            .ok_or(Error::ShareNotFound(*index))
-            .map(|pair| &pair.commitments)
+    fn mark_peers_by_indices(&mut self, indices: &[u16]) {
+        indices.iter().for_each(|index| {
+            let peer_id = self
+                .peer_registry
+                .get_peer_id_by_index(*index)
+                .expect("unreachable: Peer ID not found");
+            let peer_info = self
+                .peer_infos
+                .get_mut(peer_id)
+                .expect("unreachable: PeerInfo not found");
+            peer_info.set_got_invalid();
+        });
     }
 
-    pub fn reports(&self) -> &HashMap<(libp2p::PeerId, libp2p::PeerId), Report> {
-        &self.reports
+    pub fn add_reporter(
+        &mut self,
+        reporter: libp2p::PeerId,
+        de_shares: DecryptedShares,
+    ) -> Result<ActionNeeded> {
+        self.set_status_to_verifying();
+
+        if let Status::Verifying(ref mut reporters) = self.status {
+            reporters.insert(reporter);
+        } else {
+            panic!("unreachable: status should be Verifying");
+        }
+
+        self.add_decrypted_shares(reporter, de_shares)
+    }
+
+    pub fn add_decrypted_shares(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        de_shares: DecryptedShares,
+    ) -> Result<ActionNeeded> {
+        let indices = {
+            let peer_info = self
+                .peer_infos
+                .get_mut(&peer_id)
+                .ok_or(Error::PeerNotFound(peer_id))?;
+            let pk = self
+                .peer_registry
+                .get_public_key_by_peer_id(&peer_id)
+                .expect("unreachable: PublicKey not found");
+            peer_info.set_de_shares(de_shares, pk)?
+        };
+
+        if let Some(indices) = indices {
+            self.mark_peers_by_indices(&indices);
+            Ok(self.handle_invalid_peer(peer_id))
+        } else {
+            Ok(ActionNeeded::None)
+        }
+    }
+
+    pub fn output(self) -> Output {
+        let mut all_invalid_peers = self.invalid_peers.to_owned();
+
+        self.detect_not_set_component_peers(&mut all_invalid_peers);
+        self.detect_not_set_de_shares_peers(&mut all_invalid_peers);
+        self.detect_malicious_report(&mut all_invalid_peers);
+
+        if !all_invalid_peers.is_empty() {
+            println!("Invalid peers: {:?}", all_invalid_peers);
+            return Output::Failure {
+                invalid_peers: all_invalid_peers,
+            };
+        }
+
+        let mut comms = self
+            .peer_infos
+            .iter()
+            .filter_map(|(peer_id, peer_info)| {
+                if peer_id == &self.own_peer {
+                    return None;
+                }
+                let comms = peer_info
+                    .comms
+                    .as_ref()
+                    .expect("comms should be set before output");
+                Some((*peer_id, comms.to_owned()))
+            })
+            .collect::<HashMap<_, _>>();
+
+        comms.insert(
+            self.own_peer,
+            self.own_comms
+                .as_ref()
+                .expect("Own comms should be set before output")
+                .to_owned(),
+        );
+
+        Output::Success {
+            shares: self.own_shares,
+            comms,
+        }
+    }
+
+    fn detect_not_set_component_peers(&self, all_invalid_peers: &mut HashSet<libp2p::PeerId>) {
+        for (peer_id, peer_info) in &self.peer_infos {
+            if !peer_info.is_components_set() && peer_id != &self.own_peer {
+                all_invalid_peers.insert(*peer_id);
+            }
+        }
+    }
+
+    fn detect_not_set_de_shares_peers(&self, all_invalid_peers: &mut HashSet<libp2p::PeerId>) {
+        if !self.is_verifying() {
+            return;
+        }
+
+        for (peer_id, peer_info) in &self.peer_infos {
+            if !peer_info.is_de_shares_set() && peer_id != &self.own_peer {
+                all_invalid_peers.insert(*peer_id);
+            }
+        }
+    }
+
+    fn detect_malicious_report(&self, all_invalid_peers: &mut HashSet<libp2p::PeerId>) {
+        if let Status::Verifying(reporters) = &self.status {
+            for reporter in reporters {
+                let peer_info = self
+                    .peer_infos
+                    .get(reporter)
+                    .expect("unreachable: PeerInfo not found");
+                if !peer_info.is_got_invalid() {
+                    all_invalid_peers.insert(*reporter);
+                }
+            }
+        }
     }
 }
 
-fn is_share_matching(
-    raw_share: &Scalar,
-    encrypted_share: &EncryptedShare,
-    public_key: &PublicKey,
-) -> Result<bool> {
-    let raw_share_bytes = raw_share.to_vec()?;
-    let expected_encrypted_share = public_key.encrypt(&raw_share_bytes)?;
-    Ok(encrypted_share.as_slice() == expected_encrypted_share)
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use crate::crypto::{
+        dkg::joint_feldman::{
+            event::{ActionNeeded, Event, Output, Status},
+            peer_registry::PeerRegistry,
+        },
+        keypair::{self, PublicKey, SecretKey},
+        primitives::{
+            algebra::{Point, Scheme},
+            vss::{DecryptedShares, EncryptedShares, Vss},
+        },
+    };
+
+    const NUM_PEERS: u16 = 3;
+    const THRESHOLD: u16 = 2;
+    const SCHEME: Scheme = Scheme::Secp256k1;
+    const OWN_INDEX_ZERO_BASE: u16 = 0;
+
+    struct TestPeerInfo {
+        peer_id: libp2p::PeerId,
+        sk: SecretKey,
+        pk: PublicKey,
+        de_shares: DecryptedShares,
+        valid_comms: Vec<Point>,
+        invalid_comms: Vec<Point>,
+    }
+
+    struct TestContext {
+        peers: Vec<TestPeerInfo>,
+        peer_registry: Arc<PeerRegistry>,
+    }
+
+    impl TestPeerInfo {
+        pub fn generate(peer: libp2p::PeerId) -> Self {
+            let (sk, pk) = keypair::generate_secp256k1();
+            let (de_shares, valid_comms) = Vss::share(&SCHEME, THRESHOLD, NUM_PEERS);
+
+            let invalid_comms = valid_comms
+                .iter()
+                .map(|_| Point::zero(SCHEME))
+                .collect::<Vec<_>>();
+
+            Self {
+                peer_id: peer,
+                sk,
+                pk,
+                de_shares,
+                valid_comms,
+                invalid_comms,
+            }
+        }
+
+        pub fn generate_en_shares(&self, registry: &PeerRegistry) -> EncryptedShares {
+            EncryptedShares::from_decrypted(&self.de_shares, registry.iter_index_keys())
+                .expect("EncryptedShares generation succeeded")
+        }
+    }
+
+    impl TestContext {
+        pub fn setup(num: u16) -> Self {
+            let mut peers = Vec::new();
+            let mut peer_map = HashMap::new();
+
+            for _ in 0..num {
+                let peer_id = libp2p::PeerId::random();
+                let peer_info = TestPeerInfo::generate(peer_id);
+                peer_map.insert(peer_id, peer_info.pk.clone());
+                peers.push(peer_info);
+            }
+
+            let peer_registry = PeerRegistry::new(peer_map);
+
+            Self {
+                peers,
+                peer_registry: Arc::new(peer_registry),
+            }
+        }
+
+        pub fn create_event(&self, own_index: u16) -> Event {
+            let secret_key = self.peers[own_index as usize].sk.clone();
+            let peer_id = self.peers[own_index as usize].peer_id;
+
+            Event::new(self.peer_registry.clone(), Arc::new(secret_key), peer_id)
+        }
+
+        pub fn set_own_components(&self, event: &mut Event, index: u16) {
+            let own_de_shares = self.peers[index as usize].de_shares.clone();
+            let own_comms = self.get_comms(index, true);
+            event.set_own_components(own_de_shares, own_comms);
+        }
+
+        fn get_comms(&self, index: u16, is_valid: bool) -> Vec<Point> {
+            if is_valid {
+                self.peers[index as usize].valid_comms.clone()
+            } else {
+                self.peers[index as usize].invalid_comms.clone()
+            }
+        }
+
+        pub fn add_valid_components(
+            &self,
+            event: &mut Event,
+            index: u16,
+        ) -> Result<ActionNeeded, String> {
+            let peer_id = self.get_peer_id(index);
+            let en_shares = self.get_encrypted_shares(index);
+            let comms = self.get_comms(index, true);
+
+            event
+                .add_en_shares_and_comms(peer_id, en_shares, comms)
+                .map_err(|e| e.to_string())
+        }
+
+        pub fn get_peer_id(&self, index: u16) -> libp2p::PeerId {
+            self.peers[index as usize].peer_id
+        }
+
+        fn get_encrypted_shares(&self, index: u16) -> EncryptedShares {
+            self.peers[index as usize].generate_en_shares(&self.peer_registry)
+        }
+
+        pub fn add_invalid_components(
+            &self,
+            event: &mut Event,
+            index: u16,
+        ) -> Result<ActionNeeded, String> {
+            let peer_id = self.get_peer_id(index);
+            let en_shares = self.get_encrypted_shares(index);
+            let comms = self.get_comms(index, false);
+
+            event
+                .add_en_shares_and_comms(peer_id, en_shares, comms)
+                .map_err(|e| e.to_string())
+        }
+
+        pub fn add_decrypted_shares(
+            &self,
+            event: &mut Event,
+            index: u16,
+        ) -> Result<ActionNeeded, String> {
+            let peer_id = self.peers[index as usize].peer_id;
+            let de_shares = self.peers[index as usize].de_shares.clone();
+
+            event
+                .add_decrypted_shares(peer_id, de_shares)
+                .map_err(|e| e.to_string())
+        }
+
+        pub fn add_reporter(&self, event: &mut Event, index: u16) -> Result<ActionNeeded, String> {
+            let peer_id = self.peers[index as usize].peer_id;
+            let de_shares = self.peers[index as usize].de_shares.clone();
+
+            event
+                .add_reporter(peer_id, de_shares)
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    fn assert_success_output(output: Output, expected_peer_count: u16) {
+        match output {
+            Output::Success { shares, comms } => {
+                assert_eq!(shares.len(), expected_peer_count as usize);
+                assert_eq!(comms.len(), expected_peer_count as usize);
+            }
+            _ => panic!("Expected success output"),
+        }
+    }
+
+    fn assert_failure_output(output: Output, invalid_peer_ids: &[libp2p::PeerId]) {
+        match output {
+            Output::Failure { invalid_peers } => {
+                assert_eq!(invalid_peers.len(), invalid_peer_ids.len());
+                for peer_id in invalid_peer_ids {
+                    assert!(invalid_peers.contains(peer_id));
+                }
+            }
+            _ => panic!("Expected failure output"),
+        }
+    }
+
+    #[test]
+    fn initialize_correctly() {
+        let context = TestContext::setup(NUM_PEERS);
+        let event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        assert_eq!(event.peer_registry, context.peer_registry);
+        assert!(matches!(event.status, Status::Pending));
+        assert!(!event.is_reported);
+    }
+
+    #[test]
+    fn succeeds_with_valid_compoments() {
+        const TARGET_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        let peer_id = context.get_peer_id(TARGET_INDEX as u16);
+        let result = context.add_valid_components(&mut event, TARGET_INDEX as u16);
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), ActionNeeded::None));
+        assert!(event.invalid_peers.is_empty());
+        assert!(event.peer_infos.contains_key(&peer_id));
+    }
+
+    #[test]
+    fn fails_with_invalid_compoments() {
+        const TARGET_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        let peer_id = context.get_peer_id(TARGET_INDEX as u16);
+        let result = context.add_invalid_components(&mut event, TARGET_INDEX as u16);
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), ActionNeeded::None));
+        assert!(event.invalid_peers.contains(&peer_id));
+        assert_eq!(event.invalid_peers.len(), 1);
+        assert!(!event.peer_infos.contains_key(&peer_id));
+        assert_eq!(event.peer_infos.len(), (NUM_PEERS - 1) as usize);
+        assert!(matches!(event.status, Status::Verifying(_)));
+        assert!(!event.is_reported);
+    }
+
+    #[test]
+    fn return_none_when_add_unknown_peer() {
+        const TARGET_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        let peer_id = libp2p::PeerId::random();
+        let en_shares = context.peers[TARGET_INDEX].generate_en_shares(&context.peer_registry);
+        let comms = context.peers[1].valid_comms.clone();
+
+        let result = event.add_en_shares_and_comms(peer_id, en_shares, comms);
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), ActionNeeded::None));
+        assert!(event.invalid_peers.is_empty());
+    }
+
+    #[test]
+    fn returns_none_when_not_reporting() {
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        context.set_own_components(&mut event, OWN_INDEX_ZERO_BASE);
+
+        assert!(!event.is_reported);
+    }
+
+    #[test]
+    fn returns_report_when_reporting() {
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        event.set_status_to_verifying();
+        context.set_own_components(&mut event, OWN_INDEX_ZERO_BASE);
+
+        assert!(event.is_reported);
+    }
+
+    #[test]
+    fn entrys_verifying_state_when_add_reporter() {
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        context.add_reporter(&mut event, 1).unwrap();
+
+        assert!(matches!(event.status, Status::Verifying(_)));
+    }
+
+    #[test]
+    fn output_all_peers_valid() {
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        context.set_own_components(&mut event, OWN_INDEX_ZERO_BASE);
+
+        for i in 1..NUM_PEERS {
+            context.add_valid_components(&mut event, i).unwrap();
+        }
+
+        let output = event.output();
+        assert_success_output(output, NUM_PEERS);
+    }
+
+    #[test]
+    fn output_some_peers_invalid() {
+        const INVALID_PEER_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        context.set_own_components(&mut event, OWN_INDEX_ZERO_BASE);
+
+        context
+            .add_invalid_components(&mut event, INVALID_PEER_INDEX as u16)
+            .unwrap();
+
+        for i in 1..NUM_PEERS {
+            if i as usize == INVALID_PEER_INDEX {
+                continue;
+            }
+            context.add_valid_components(&mut event, i).unwrap();
+            context.add_decrypted_shares(&mut event, i).unwrap();
+        }
+
+        let output = event.output();
+        assert_failure_output(output, &[context.peers[INVALID_PEER_INDEX].peer_id]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Own comms should be set before output")]
+    fn output_own_comms_not_set() {
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        for i in 1..NUM_PEERS {
+            context.add_valid_components(&mut event, i).unwrap();
+        }
+
+        event.output();
+    }
+
+    #[test]
+    fn detect_not_set_component_peers() {
+        const NOT_SET_COMPONENT_PEER_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        context.set_own_components(&mut event, OWN_INDEX_ZERO_BASE);
+
+        for i in 1..NUM_PEERS {
+            if i as usize == NOT_SET_COMPONENT_PEER_INDEX {
+                continue;
+            }
+            context.add_valid_components(&mut event, i).unwrap();
+        }
+
+        let output = event.output();
+        assert_failure_output(
+            output,
+            &[context.peers[NOT_SET_COMPONENT_PEER_INDEX].peer_id],
+        );
+    }
+
+    #[test]
+    fn detect_not_set_de_shares_peers() {
+        const NOT_SET_DE_SHARES_PEER_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        event.set_status_to_verifying();
+        context.set_own_components(&mut event, OWN_INDEX_ZERO_BASE);
+
+        for i in 1..NUM_PEERS {
+            context.add_valid_components(&mut event, i).unwrap();
+
+            if i as usize != NOT_SET_DE_SHARES_PEER_INDEX {
+                context.add_decrypted_shares(&mut event, i).unwrap();
+            }
+        }
+
+        let output = event.output();
+        assert_failure_output(
+            output,
+            &[context.peers[NOT_SET_DE_SHARES_PEER_INDEX].peer_id],
+        );
+    }
+
+    #[test]
+    fn detect_malicious_report() {
+        const MALICIOUS_REPORTER_INDEX: usize = 1;
+
+        let context = TestContext::setup(NUM_PEERS);
+        let mut event = context.create_event(OWN_INDEX_ZERO_BASE);
+
+        context.set_own_components(&mut event, OWN_INDEX_ZERO_BASE);
+
+        for i in 1..NUM_PEERS {
+            context.add_valid_components(&mut event, i).unwrap();
+
+            if i as usize == MALICIOUS_REPORTER_INDEX {
+                context.add_reporter(&mut event, i).unwrap();
+            } else {
+                context.add_decrypted_shares(&mut event, i).unwrap();
+            }
+        }
+
+        let output = event.output();
+        assert_failure_output(output, &[context.peers[MALICIOUS_REPORTER_INDEX].peer_id]);
+    }
 }

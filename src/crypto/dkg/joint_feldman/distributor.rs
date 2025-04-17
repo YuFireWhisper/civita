@@ -58,7 +58,7 @@ impl<T: Transport + 'static> Distributor<T> {
 
         let encrypted_shares =
             EncryptedShares::from_decrypted(decrypted_shares, peers.iter_index_keys())?;
-        let payload = gossipsub::Payload::VSSBundle {
+        let payload = gossipsub::Payload::VSSComponent {
             id,
             encrypted_shares,
             commitments,
