@@ -30,7 +30,6 @@ pub struct IndexKeyIterator<'a> {
 
 pub struct PeerKeyIterator<'a> {
     iter: hash_map::Iter<'a, libp2p::PeerId, PeerInfo>,
-    registry: &'a PeerRegistry,
 }
 
 impl PeerRegistry {
@@ -102,7 +101,6 @@ impl PeerRegistry {
     pub fn iter_peer_keys(&self) -> PeerKeyIterator<'_> {
         PeerKeyIterator {
             iter: self.peer_to_info.iter(),
-            registry: self,
         }
     }
 
