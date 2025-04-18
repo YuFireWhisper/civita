@@ -74,6 +74,10 @@ impl Scalar {
         scalar: &CurvScalar<CurvSecp256k1>,
         commitments: &[Point],
     ) -> Result<bool> {
+        if scalar.is_zero() {
+            return Err(Error::ZeroScalar);
+        }
+
         let g = CurvPoint::<CurvSecp256k1>::generator();
         let s_point = g * scalar;
         let commitments = commitments
@@ -81,6 +85,9 @@ impl Scalar {
             .map(|point| {
                 if !point.is_same_type_scalar(self) {
                     return Err(Error::InconsistentVariants);
+                }
+                if point.is_zero() {
+                    return Err(Error::ZeroPoint);
                 }
                 point.to_curv_secp256k1_point()
             })
@@ -371,6 +378,36 @@ mod tests {
         let result = scalar.verify(DEFAULT_INDEX_ONE_BASE, &invalid_commitments);
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn verification_fails_with_zero_scalar() {
+        let zero_scalar = Scalar::zero(Scheme::Secp256k1);
+        let (_, commitments) = create_valid_scalar_and_commitments();
+        let index = DEFAULT_INDEX_ONE_BASE;
+
+        let result = zero_scalar.verify(index, &commitments);
+        assert!(matches!(result, Err(Error::ZeroScalar)));
+    }
+
+    #[test]
+    fn verification_fails_with_zero_commitments() {
+        let zero_scalar = Scalar::random(&Scheme::Secp256k1);
+        let zero_commitments = vec![Point::zero(Scheme::Secp256k1)];
+        let index = DEFAULT_INDEX_ONE_BASE;
+
+        let result = zero_scalar.verify(index, &zero_commitments);
+        assert!(matches!(result, Err(Error::ZeroPoint)));
+    }
+
+    #[test]
+    fn verification_fails_with_zero_scalar_and_commitments() {
+        let zero_scalar = Scalar::zero(Scheme::Secp256k1);
+        let zero_commitments = vec![Point::zero(Scheme::Secp256k1)];
+        let index = DEFAULT_INDEX_ONE_BASE;
+
+        let result = zero_scalar.verify(index, &zero_commitments);
+        assert!(result.is_err());
     }
 
     #[test]

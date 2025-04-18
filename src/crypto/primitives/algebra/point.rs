@@ -57,6 +57,12 @@ impl Point {
         }
     }
 
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Point::Secp256k1(point) => point.is_zero(),
+        }
+    }
+
     pub fn to_vec(&self) -> Result<Vec<u8>> {
         bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(Error::from)
     }
@@ -162,6 +168,15 @@ mod tests {
         let scalar = Scalar::random(&DEFAULT_SCHEME);
 
         assert!(point.is_same_type_scalar(&scalar));
+    }
+
+    #[test]
+    fn point_is_zero() {
+        let zero_point = Point::zero(DEFAULT_SCHEME);
+        let random_point = Point::random(&DEFAULT_SCHEME);
+
+        assert!(zero_point.is_zero());
+        assert!(!random_point.is_zero());
     }
 
     #[test]

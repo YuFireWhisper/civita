@@ -18,6 +18,12 @@ pub enum Error {
 
     #[error("Iterator empty")]
     IteratorEmpty,
+
+    #[error("Scalar cannot be zero")]
+    ZeroScalar,
+
+    #[error("Point cannot be zero")]
+    ZeroPoint,
 }
 
 #[derive(Clone)]
