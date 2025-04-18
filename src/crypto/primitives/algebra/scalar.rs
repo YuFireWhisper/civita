@@ -1,6 +1,6 @@
-use curv::{
-    elliptic::curves::secp256_k1::Secp256k1 as CurvSecp256k1, elliptic::curves::Point as CurvPoint,
-    elliptic::curves::Scalar as CurvScalar,
+use curv::elliptic::curves::{
+    secp256_k1::Secp256k1 as CurvSecp256k1, Curve as CurvCurve, Point as CurvPoint,
+    Scalar as CurvScalar,
 };
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +143,57 @@ impl Scalar {
             Scalar::Secp256k1(_) => Scheme::Secp256k1,
         }
     }
+
+    pub fn lagrange_interpolation(indices: &[u16], values: &[Scalar]) -> Result<Self> {
+        let scheme = values.first().ok_or(Error::IteratorEmpty)?.scheme();
+
+        match scheme {
+            Scheme::Secp256k1 => {
+                let values = values
+                    .iter()
+                    .map(|scalar| scalar.get_secp256k1_raw())
+                    .collect::<Result<Vec<_>>>()?;
+                let result = Self::curv_lagrange_interpolation::<CurvSecp256k1>(indices, &values);
+                Ok(Scalar::Secp256k1(result))
+            }
+        }
+    }
+
+    fn curv_lagrange_interpolation<E: CurvCurve>(
+        indices: &[u16],
+        scalars: &[&CurvScalar<E>],
+    ) -> CurvScalar<E> {
+        assert_eq!(
+            indices.len(),
+            scalars.len(),
+            "Indices and scalars must have the same length"
+        );
+
+        let points = indices
+            .iter()
+            .map(|p| (*p).into())
+            .collect::<Vec<CurvScalar<E>>>();
+
+        let mut result = CurvScalar::<E>::zero();
+
+        for (i, (xi, yi)) in points.iter().zip(scalars.iter()).enumerate() {
+            let mut coeff = CurvScalar::<E>::from(1);
+            for (j, xj) in points.iter().enumerate() {
+                if i != j {
+                    let num = CurvScalar::<E>::zero() - xj;
+                    let denom = xi - xj;
+                    if !denom.is_zero() {
+                        let term = num * &denom.invert().unwrap();
+                        coeff = coeff * &term;
+                    }
+                }
+            }
+
+            result = result + (coeff * (*yi));
+        }
+
+        result
+    }
 }
 
 impl From<CurvScalar<CurvSecp256k1>> for Scalar {
@@ -153,6 +204,8 @@ impl From<CurvScalar<CurvSecp256k1>> for Scalar {
 
 #[cfg(test)]
 mod tests {
+    use curv::elliptic::curves::{secp256_k1::Secp256k1 as CurvSecp256k1, Scalar as CurvScalar};
+
     use crate::crypto::primitives::{
         algebra::{Error, Point, Scalar, Scheme},
         vss::Vss,
@@ -169,6 +222,32 @@ mod tests {
             scalars.get(&DEFAULT_INDEX_ONE_BASE).unwrap().clone(),
             commitments,
         )
+    }
+
+    fn create_polynomial_points(
+        coefficients: &[u16],
+        evaluation_points: &[u16],
+    ) -> (Vec<u16>, Vec<Scalar>) {
+        let indices = evaluation_points.to_vec();
+        let values = evaluation_points
+            .iter()
+            .map(|&x| {
+                let mut y_value = 0u16;
+                for (i, &coeff) in coefficients.iter().enumerate() {
+                    y_value = y_value.wrapping_add((x as u32).pow(i as u32) as u16 * coeff);
+                }
+
+                let scalar = CurvScalar::<CurvSecp256k1>::from(y_value);
+                Scalar::from(scalar)
+            })
+            .collect();
+
+        (indices, values)
+    }
+
+    fn get_expected_secret(coefficients: &[u16]) -> Scalar {
+        let secret = CurvScalar::<CurvSecp256k1>::from(coefficients[0]);
+        Scalar::from(secret)
     }
 
     #[test]
@@ -337,5 +416,120 @@ mod tests {
     fn return_correct_scheme() {
         let scalar = Scalar::random(&DEFAULT_SCHEME);
         assert_eq!(scalar.scheme(), DEFAULT_SCHEME);
+    }
+
+    #[test]
+    fn interpolation_recovers_constant_polynomial() {
+        let coefficients = [42];
+        let evaluation_points = [1, 2, 3, 4];
+
+        let (indices, values) = create_polynomial_points(&coefficients, &evaluation_points);
+        let expected = get_expected_secret(&coefficients);
+
+        let result = Scalar::lagrange_interpolation(&indices, &values).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn interpolation_matches_shares_from_vss() {
+        const NUM_SHARES: u16 = 5;
+        const THRESHOLD: u16 = 3;
+
+        let (shares, _) = Vss::share(&Scheme::Secp256k1, THRESHOLD, NUM_SHARES);
+
+        let mut indices = Vec::new();
+        let mut values = Vec::new();
+        for i in 1..=NUM_SHARES {
+            indices.push(i);
+            values.push(shares.get(&i).unwrap().clone());
+        }
+
+        let result = Scalar::lagrange_interpolation(&indices, &values).unwrap();
+
+        let mut all_indices = Vec::new();
+        let mut all_values = Vec::new();
+        for i in 1..=NUM_SHARES {
+            all_indices.push(i);
+            all_values.push(shares.get(&i).unwrap().clone());
+        }
+
+        let reference = Scalar::lagrange_interpolation(&all_indices, &all_values).unwrap();
+
+        assert_eq!(result, reference);
+    }
+
+    #[test]
+    fn interpolation_with_zero_values_works() {
+        let indices = vec![1u16, 2u16, 3u16];
+        let values = vec![
+            Scalar::zero(Scheme::Secp256k1),
+            Scalar::zero(Scheme::Secp256k1),
+            Scalar::zero(Scheme::Secp256k1),
+        ];
+
+        let result = Scalar::lagrange_interpolation(&indices, &values).unwrap();
+
+        let expected = Scalar::zero(DEFAULT_SCHEME);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn interpolation_at_x_equals_zero_recovers_secret() {
+        const NUM_POINTS: usize = 5;
+
+        let secret = Scalar::random(&DEFAULT_SCHEME);
+        let random_coeff = Scalar::random(&DEFAULT_SCHEME);
+
+        let mut indices = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 1..=NUM_POINTS {
+            let index = i as u16;
+            indices.push(index);
+
+            let index_scalar =
+                Scalar::from_curv_secp256k1(CurvScalar::<CurvSecp256k1>::from(index));
+            let term = match (random_coeff.clone(), index_scalar) {
+                (Scalar::Secp256k1(r), Scalar::Secp256k1(i_scalar)) => {
+                    Scalar::Secp256k1(r * &i_scalar)
+                }
+            };
+            let value = secret.add(&term).unwrap();
+            values.push(value);
+        }
+
+        let result = Scalar::lagrange_interpolation(&indices, &values).unwrap();
+        assert_eq!(result, secret);
+    }
+
+    #[test]
+    fn verify_lagrange_basis_polynomials_sum_to_one() {
+        let indices = [1u16, 2u16, 3u16];
+        let x_target = 0u16;
+
+        let x_target = CurvScalar::<CurvSecp256k1>::from(x_target);
+        let points = indices
+            .iter()
+            .map(|p| CurvScalar::<CurvSecp256k1>::from(*p))
+            .collect::<Vec<_>>();
+
+        let mut sum = CurvScalar::<CurvSecp256k1>::zero();
+
+        for (i, xi) in points.iter().enumerate() {
+            let mut term = CurvScalar::<CurvSecp256k1>::from(1);
+
+            for (j, xj) in points.iter().enumerate() {
+                if i != j {
+                    let num = x_target.clone() - xj;
+                    let denom = xi - xj;
+                    term = term * &(num * &denom.invert().unwrap());
+                }
+            }
+
+            sum = sum + term;
+        }
+
+        let one = CurvScalar::<CurvSecp256k1>::from(1);
+        assert_eq!(sum, one);
     }
 }
