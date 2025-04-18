@@ -22,6 +22,7 @@ pub enum Error {
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(PartialEq, Eq)]
 pub enum Scheme {
     Secp256k1,
 }

@@ -82,6 +82,21 @@ impl Point {
 
         Ok(sum)
     }
+
+    pub fn add(&self, other: &Self) -> Result<Self> {
+        if !self.is_same_type(other) {
+            return Err(Error::InconsistentVariants);
+        }
+        match (self, other) {
+            (Point::Secp256k1(s), Point::Secp256k1(o)) => Ok(Point::Secp256k1(s + o)),
+        }
+    }
+
+    pub fn scheme(&self) -> Scheme {
+        match self {
+            Point::Secp256k1(_) => Scheme::Secp256k1,
+        }
+    }
 }
 
 impl From<CurvPoint<CurvSecp256k1>> for Point {
@@ -185,5 +200,25 @@ mod tests {
                 assert_eq!(p, curv_point);
             }
         }
+    }
+
+    #[test]
+    fn add_points() {
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
+
+        let sum = point1.add(&point2).unwrap();
+
+        match (point1, point2) {
+            (Point::Secp256k1(p1), Point::Secp256k1(p2)) => {
+                assert_eq!(sum, Point::Secp256k1(p1 + p2));
+            }
+        }
+    }
+
+    #[test]
+    fn return_correct_scheme() {
+        let point = Point::random(&DEFAULT_SCHEME);
+        assert_eq!(point.scheme(), DEFAULT_SCHEME);
     }
 }

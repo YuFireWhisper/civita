@@ -42,15 +42,11 @@ impl Scalar {
     }
 
     pub fn is_same_type(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Scalar::Secp256k1(_), Scalar::Secp256k1(_)) => true,
-        }
+        self.scheme() == other.scheme()
     }
 
     pub fn is_same_type_point(&self, other: &Point) -> bool {
-        match (self, other) {
-            (Scalar::Secp256k1(_), Point::Secp256k1(_)) => true,
-        }
+        self.scheme() == other.scheme()
     }
 
     pub fn get_secp256k1_raw(&self) -> Result<&CurvScalar<CurvSecp256k1>> {
@@ -60,7 +56,7 @@ impl Scalar {
     }
 
     pub fn is_secp256k1(&self) -> bool {
-        matches!(self, Scalar::Secp256k1(_))
+        self.scheme() == Scheme::Secp256k1
     }
 
     pub fn verify(&self, index: u16, commitments: &[Point]) -> Result<bool> {
@@ -131,6 +127,21 @@ impl Scalar {
             }
         }
         Ok(sum)
+    }
+
+    pub fn add(&self, other: &Self) -> Result<Self> {
+        if !self.is_same_type(other) {
+            return Err(Error::InconsistentVariants);
+        }
+        match (self, other) {
+            (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2)) => Ok(Scalar::Secp256k1(s1 + s2)),
+        }
+    }
+
+    pub fn scheme(&self) -> Scheme {
+        match self {
+            Scalar::Secp256k1(_) => Scheme::Secp256k1,
+        }
     }
 }
 
@@ -305,5 +316,26 @@ mod tests {
                 assert_eq!(s, curv_scalar);
             }
         }
+    }
+
+    #[test]
+    fn addition_of_scalars() {
+        let scalar1 = Scalar::random(&DEFAULT_SCHEME);
+        let scalar2 = Scalar::random(&DEFAULT_SCHEME);
+
+        let sum = scalar1.add(&scalar2).unwrap();
+
+        match (scalar1, scalar2) {
+            (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2)) => {
+                let expected_sum = Scalar::Secp256k1(s1 + s2);
+                assert_eq!(sum, expected_sum);
+            }
+        }
+    }
+
+    #[test]
+    fn return_correct_scheme() {
+        let scalar = Scalar::random(&DEFAULT_SCHEME);
+        assert_eq!(scalar.scheme(), DEFAULT_SCHEME);
     }
 }
