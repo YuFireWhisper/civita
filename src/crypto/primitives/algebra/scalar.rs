@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn verification_fails_with_invalid_commitments() {
         let (scalar, _) = create_valid_scalar_and_commitments();
-        let invalid_commitments = vec![Point::zero(Scheme::Secp256k1)];
+        let invalid_commitments = vec![Point::random(&DEFAULT_SCHEME)];
 
         let result = scalar.verify(DEFAULT_INDEX_ONE_BASE, &invalid_commitments);
         assert!(result.is_ok());
