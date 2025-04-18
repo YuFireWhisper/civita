@@ -92,9 +92,25 @@ impl Point {
         }
     }
 
+    pub fn mul(&self, scalar: &Scalar) -> Result<Self> {
+        if !self.is_same_type_scalar(scalar) {
+            return Err(Error::InconsistentVariants);
+        }
+
+        match (self, scalar) {
+            (Point::Secp256k1(s), Scalar::Secp256k1(o)) => Ok(Point::Secp256k1(s * o)),
+        }
+    }
+
     pub fn scheme(&self) -> Scheme {
         match self {
             Point::Secp256k1(_) => Scheme::Secp256k1,
+        }
+    }
+
+    pub fn generator(scheme: &Scheme) -> Self {
+        match scheme {
+            Scheme::Secp256k1 => Self::Secp256k1(CurvPoint::<CurvSecp256k1>::generator().into()),
         }
     }
 }
@@ -217,8 +233,29 @@ mod tests {
     }
 
     #[test]
+    fn multiplication_with_scalar() {
+        let point = Point::random(&DEFAULT_SCHEME);
+        let scalar = Scalar::random(&DEFAULT_SCHEME);
+
+        let result = point.mul(&scalar).unwrap();
+
+        match (point, scalar) {
+            (Point::Secp256k1(p), Scalar::Secp256k1(s)) => {
+                assert_eq!(result, Point::Secp256k1(p * s));
+            }
+        }
+    }
+
+    #[test]
     fn return_correct_scheme() {
         let point = Point::random(&DEFAULT_SCHEME);
         assert_eq!(point.scheme(), DEFAULT_SCHEME);
+    }
+
+    #[test]
+    fn generator_point() {
+        let scheme = Scheme::Secp256k1;
+        let generator = Point::generator(&scheme);
+        assert_eq!(generator.scheme(), scheme);
     }
 }

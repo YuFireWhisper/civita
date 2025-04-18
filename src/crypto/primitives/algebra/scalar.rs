@@ -1,6 +1,9 @@
-use curv::elliptic::curves::{
-    secp256_k1::Secp256k1 as CurvSecp256k1, Curve as CurvCurve, Point as CurvPoint,
-    Scalar as CurvScalar,
+use curv::{
+    arithmetic::Converter,
+    elliptic::curves::{
+        secp256_k1::Secp256k1 as CurvSecp256k1, Curve as CurvCurve, Point as CurvPoint,
+        Scalar as CurvScalar,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +141,15 @@ impl Scalar {
         }
     }
 
+    pub fn mul(&self, scalar: &Self) -> Result<Self> {
+        if !self.is_same_type(scalar) {
+            return Err(Error::InconsistentVariants);
+        }
+        match (self, scalar) {
+            (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2)) => Ok(Scalar::Secp256k1(s1 * s2)),
+        }
+    }
+
     pub fn scheme(&self) -> Scheme {
         match self {
             Scalar::Secp256k1(_) => Scheme::Secp256k1,
@@ -194,6 +206,18 @@ impl Scalar {
 
         result
     }
+
+    pub fn from_bytes(bytes: &[u8], scheme: &Scheme) -> Self {
+        match scheme {
+            Scheme::Secp256k1 => Self::from_bytes_secp256k1(bytes),
+        }
+    }
+
+    fn from_bytes_secp256k1(bytes: &[u8]) -> Self {
+        let bigint = curv::BigInt::from_bytes(bytes);
+        let scalar = CurvScalar::<CurvSecp256k1>::from(bigint);
+        Scalar::Secp256k1(scalar)
+    }
 }
 
 impl From<CurvScalar<CurvSecp256k1>> for Scalar {
@@ -204,7 +228,10 @@ impl From<CurvScalar<CurvSecp256k1>> for Scalar {
 
 #[cfg(test)]
 mod tests {
-    use curv::elliptic::curves::{secp256_k1::Secp256k1 as CurvSecp256k1, Scalar as CurvScalar};
+    use curv::{
+        arithmetic::Converter,
+        elliptic::curves::{secp256_k1::Secp256k1 as CurvSecp256k1, Scalar as CurvScalar},
+    };
 
     use crate::crypto::primitives::{
         algebra::{Error, Point, Scalar, Scheme},
@@ -413,6 +440,21 @@ mod tests {
     }
 
     #[test]
+    fn multiplication_of_scalars() {
+        let scalar1 = Scalar::random(&DEFAULT_SCHEME);
+        let scalar2 = Scalar::random(&DEFAULT_SCHEME);
+
+        let product = scalar1.mul(&scalar2).unwrap();
+
+        match (scalar1, scalar2) {
+            (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2)) => {
+                let expected_product = Scalar::Secp256k1(s1 * s2);
+                assert_eq!(product, expected_product);
+            }
+        }
+    }
+
+    #[test]
     fn return_correct_scheme() {
         let scalar = Scalar::random(&DEFAULT_SCHEME);
         assert_eq!(scalar.scheme(), DEFAULT_SCHEME);
@@ -531,5 +573,30 @@ mod tests {
 
         let one = CurvScalar::<CurvSecp256k1>::from(1);
         assert_eq!(sum, one);
+    }
+
+    #[test]
+    fn from_bytes_creates_valid_scalar() {
+        let bytes = [1, 2, 3, 4, 5];
+
+        let scalar = Scalar::from_bytes(&bytes, &Scheme::Secp256k1);
+
+        assert!(scalar.is_secp256k1());
+
+        let inner_scalar = scalar.get_secp256k1_raw().unwrap();
+
+        let bigint = curv::BigInt::from_bytes(&bytes);
+        let expected_scalar = CurvScalar::<CurvSecp256k1>::from(bigint);
+        assert_eq!(*inner_scalar, expected_scalar);
+    }
+
+    #[test]
+    fn from_bytes_with_zero_bytes_creates_zero_scalar() {
+        let bytes = [0, 0, 0, 0];
+        let zero = Scalar::zero(Scheme::Secp256k1);
+
+        let result = Scalar::from_bytes(&bytes, &Scheme::Secp256k1);
+
+        assert_eq!(result, zero);
     }
 }

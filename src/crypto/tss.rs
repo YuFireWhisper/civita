@@ -1,3 +1,5 @@
+pub mod schnorr;
+
 pub trait Tss {
     type Error;
     type Signature;
