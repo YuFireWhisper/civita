@@ -6,6 +6,7 @@ use std::{
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(PartialEq, Eq)]
 pub struct IndexedMap<K, V>
 where
     K: Eq + Hash,
@@ -16,6 +17,14 @@ where
 }
 
 pub struct IndexedIter<'a, K, V>
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    map: &'a IndexedMap<K, V>,
+    index_iter: hash_map::Iter<'a, u16, K>,
+}
+
+pub struct IndexedValueIter<'a, K, V>
 where
     K: Eq + Hash + Clone + Ord,
 {
@@ -97,20 +106,20 @@ where
         self.entries.get_mut(key)
     }
 
-    pub fn get_by_index(&self, index: u16) -> Option<&V> {
+    pub fn get_by_index(&self, index: &u16) -> Option<&V> {
         self.index_to_key
-            .get(&index)
+            .get(index)
             .and_then(|key| self.entries.get(key))
     }
 
-    pub fn get_mut_by_index(&mut self, index: u16) -> Option<&mut V> {
+    pub fn get_mut_by_index(&mut self, index: &u16) -> Option<&mut V> {
         self.index_to_key
-            .get(&index)
+            .get(index)
             .and_then(|key| self.entries.get_mut(key))
     }
 
-    pub fn get_key(&self, index: u16) -> Option<&K> {
-        self.index_to_key.get(&index)
+    pub fn get_key(&self, index: &u16) -> Option<&K> {
+        self.index_to_key.get(index)
     }
 
     pub fn get_index(&self, key: &K) -> Option<u16> {
@@ -125,12 +134,12 @@ where
         self.entries.contains_key(key)
     }
 
-    pub fn contains_index(&self, index: u16) -> bool {
-        self.index_to_key.contains_key(&index)
+    pub fn contains_index(&self, index: &u16) -> bool {
+        self.index_to_key.contains_key(index)
     }
 
-    pub fn len(&self) -> usize {
-        self.entries.len()
+    pub fn len(&self) -> u16 {
+        self.entries.len() as u16
     }
 
     pub fn is_empty(&self) -> bool {
@@ -173,6 +182,13 @@ where
             index_iter: self.index_to_key.iter(),
         }
     }
+
+    pub fn iter_indexed_values(&self) -> IndexedValueIter<'_, K, V> {
+        IndexedValueIter {
+            map: self,
+            index_iter: self.index_to_key.iter(),
+        }
+    }
 }
 
 impl<K, V> Default for IndexedMap<K, V>
@@ -199,11 +215,20 @@ where
     }
 }
 
+impl<K, V> From<IndexedMap<K, V>> for HashMap<K, V>
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    fn from(indexed_map: IndexedMap<K, V>) -> Self {
+        indexed_map.entries
+    }
+}
+
 impl<'a, K, V> Iterator for IndexedIter<'a, K, V>
 where
     K: Eq + Hash + Clone + Ord,
 {
-    type Item = (u16, &'a K, &'a V);
+    type Item = (&'a u16, &'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.index_iter.next().map(|(index, key)| {
@@ -212,7 +237,25 @@ where
                 .entries
                 .get(key)
                 .expect("Index-key mapping inconsistent");
-            (*index, key, value)
+            (index, key, value)
+        })
+    }
+}
+
+impl<'a, K, V> Iterator for IndexedValueIter<'a, K, V>
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    type Item = (&'a u16, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.index_iter.next().map(|(index, key)| {
+            let value = self
+                .map
+                .entries
+                .get(key)
+                .expect("Index-key mapping inconsistent");
+            (index, value)
         })
     }
 }
@@ -352,7 +395,7 @@ mod tests {
         assert_eq!(removed, Some(2));
         assert_eq!(map.len(), 2);
         assert!(map.get(&"b".to_string()).is_none());
-        assert!(map.get_by_index(2).is_none());
+        assert!(map.get_by_index(&2).is_none());
 
         assert_eq!(map.get_index(&"a".to_string()), Some(1));
         assert_eq!(map.get_index(&"c".to_string()), Some(3));
@@ -365,7 +408,7 @@ mod tests {
         let result = map.remove(&"d".to_string());
 
         assert_eq!(result, None);
-        assert_eq!(map.len(), TEST_MAP_SIZE);
+        assert_eq!(map.len(), TEST_MAP_SIZE as u16);
     }
 
     #[test]
@@ -393,17 +436,17 @@ mod tests {
     fn get_by_index_returns_correct_value() {
         let map = create_test_map();
 
-        assert_eq!(map.get_by_index(1), Some(&1)); // "a" at index 1
-        assert_eq!(map.get_by_index(2), Some(&2)); // "b" at index 2
-        assert_eq!(map.get_by_index(3), Some(&3)); // "c" at index 3
-        assert_eq!(map.get_by_index(4), None);
+        assert_eq!(map.get_by_index(&1), Some(&1)); // "a" at index 1
+        assert_eq!(map.get_by_index(&2), Some(&2)); // "b" at index 2
+        assert_eq!(map.get_by_index(&3), Some(&3)); // "c" at index 3
+        assert_eq!(map.get_by_index(&4), None);
     }
 
     #[test]
     fn get_mut_by_index_allows_value_modification() {
         let mut map = create_test_map();
 
-        if let Some(value) = map.get_mut_by_index(2) {
+        if let Some(value) = map.get_mut_by_index(&2) {
             *value = 20;
         }
 
@@ -414,10 +457,10 @@ mod tests {
     fn get_key_by_index_returns_correct_key() {
         let map = create_test_map();
 
-        assert_eq!(map.get_key(1).map(|s| s.as_str()), Some("a"));
-        assert_eq!(map.get_key(2).map(|s| s.as_str()), Some("b"));
-        assert_eq!(map.get_key(3).map(|s| s.as_str()), Some("c"));
-        assert_eq!(map.get_key(4), None);
+        assert_eq!(map.get_key(&1).map(|s| s.as_str()), Some("a"));
+        assert_eq!(map.get_key(&2).map(|s| s.as_str()), Some("b"));
+        assert_eq!(map.get_key(&3).map(|s| s.as_str()), Some("c"));
+        assert_eq!(map.get_key(&4), None);
     }
 
     #[test]
@@ -444,10 +487,10 @@ mod tests {
     fn contains_index_correctly_identifies_presence() {
         let map = create_test_map();
 
-        assert!(map.contains_index(1));
-        assert!(map.contains_index(2));
-        assert!(map.contains_index(3));
-        assert!(!map.contains_index(4));
+        assert!(map.contains_index(&1));
+        assert!(map.contains_index(&2));
+        assert!(map.contains_index(&3));
+        assert!(!map.contains_index(&4));
     }
 
     #[test]
@@ -476,7 +519,7 @@ mod tests {
     #[test]
     fn len_returns_correct_count() {
         let map = create_test_map();
-        assert_eq!(map.len(), TEST_MAP_SIZE);
+        assert_eq!(map.len(), TEST_MAP_SIZE as u16);
 
         let empty_map: IndexedMap<String, i32> = IndexedMap::new();
         assert_eq!(empty_map.len(), 0);
@@ -563,9 +606,9 @@ mod tests {
         triplets.sort_by_key(|(idx, _, _)| *idx);
 
         assert_eq!(triplets.len(), TEST_MAP_SIZE);
-        assert_eq!(triplets[0], (1, "a".to_string(), 1));
-        assert_eq!(triplets[1], (2, "b".to_string(), 2));
-        assert_eq!(triplets[2], (3, "c".to_string(), 3));
+        assert_eq!(triplets[0], (&1, "a".to_string(), 1));
+        assert_eq!(triplets[1], (&2, "b".to_string(), 2));
+        assert_eq!(triplets[2], (&3, "c".to_string(), 3));
     }
 
     #[test]
@@ -596,7 +639,7 @@ mod tests {
 
         map.extend(new_entries);
 
-        assert_eq!(map.len(), TEST_MAP_SIZE);
+        assert_eq!(map.len(), TEST_MAP_SIZE as u16);
         assert_eq!(map.get(&"a".to_string()), Some(&1));
         assert_eq!(map.get(&"b".to_string()), Some(&2));
         assert_eq!(map.get(&"c".to_string()), Some(&3));
@@ -652,12 +695,41 @@ mod tests {
 
         assert_eq!(map.get_index(&"a".to_string()), Some(1));
         assert_eq!(map.get_index(&"c".to_string()), Some(3));
-        assert!(!map.contains_index(2));
+        assert!(!map.contains_index(&2));
 
         map.insert("d".to_string(), 4);
 
         assert_eq!(map.get_index(&"a".to_string()), Some(1));
         assert_eq!(map.get_index(&"c".to_string()), Some(2));
         assert_eq!(map.get_index(&"d".to_string()), Some(3));
+    }
+
+    #[test]
+    fn indexed_map_can_be_converted_to_hashmap() {
+        let map = create_test_map();
+
+        let hash_map: HashMap<String, i32> = map.into();
+
+        assert_eq!(hash_map.len(), TEST_MAP_SIZE);
+        assert_eq!(hash_map.get("a"), Some(&1));
+        assert_eq!(hash_map.get("b"), Some(&2));
+        assert_eq!(hash_map.get("c"), Some(&3));
+    }
+
+    #[test]
+    fn iter_indexed_values_provides_correct_pairs() {
+        let map = create_test_map();
+
+        let mut pairs = Vec::new();
+        for (index, value) in map.iter_indexed_values() {
+            pairs.push((index, *value));
+        }
+
+        pairs.sort_by_key(|(idx, _)| *idx);
+
+        assert_eq!(pairs.len(), TEST_MAP_SIZE);
+        assert_eq!(pairs[0], (&1, 1));
+        assert_eq!(pairs[1], (&2, 2));
+        assert_eq!(pairs[2], (&3, 3));
     }
 }
