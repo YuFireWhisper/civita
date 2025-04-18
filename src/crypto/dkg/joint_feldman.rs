@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     crypto::{
@@ -9,8 +9,8 @@ use crate::{
             },
             Dkg_, GenerateResult,
         },
+        index_map::IndexedMap,
         keypair::{PublicKey, SecretKey},
-        peer_registry::PeerRegistry,
         primitives::{
             algebra::{self, Point, Scalar},
             vss::{
@@ -80,7 +80,7 @@ pub struct JointFeldman<T: Transport + 'static> {
     config: Config,
     collector: Collector<T>,
     distributor: Distributor<T>,
-    peers: Option<PeerRegistry>,
+    peer_pks: Option<IndexedMap<libp2p::PeerId, PublicKey>>,
 }
 
 impl<T: Transport + 'static> JointFeldman<T> {
@@ -99,36 +99,33 @@ impl<T: Transport + 'static> JointFeldman<T> {
             config,
             collector,
             distributor,
-            peers: None,
+            peer_pks: None,
         })
     }
 
-    pub async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {
-        assert!(peers.len() > 1, "ids length must be greater than 1");
-        assert!(
-            peers.len() <= u16::MAX as usize,
-            "ids length is exceeding the maximum"
-        );
-
-        let peers = PeerRegistry::new(peers);
+    pub async fn set_peers(
+        &mut self,
+        peer_pks: IndexedMap<libp2p::PeerId, PublicKey>,
+    ) -> Result<()> {
+        assert!(peer_pks.len() > 1, "ids length must be greater than 1");
 
         self.collector.stop();
-        self.collector.start(peers.clone()).await?;
-        self.peers = Some(peers);
+        self.collector.start(peer_pks.clone()).await?;
+        self.peer_pks = Some(peer_pks);
         Ok(())
     }
 
     pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult> {
-        assert!(self.peers.is_some(), "Peers is empty");
+        assert!(self.peer_pks.is_some(), "Peers is empty");
 
         let peers_len = self.peers_len()?;
         let threshold = self.config.threshold_counter.call(peers_len);
         let (decrypted_shares, commitments) =
             Vss::share(&self.config.crypto_scheme, threshold, peers_len);
 
-        let peers = self.peers()?;
+        let peer_pks = self.peer_pks()?;
         self.distributor
-            .send_shares(id.clone(), peers, &decrypted_shares, commitments.clone())
+            .send_shares(id.clone(), peer_pks, &decrypted_shares, commitments.clone())
             .await?;
 
         let result = self
@@ -159,14 +156,13 @@ impl<T: Transport + 'static> JointFeldman<T> {
     }
 
     fn peers_len(&self) -> Result<u16> {
-        self.peers
-            .as_ref()
-            .map(|peers| peers.len())
-            .ok_or(Error::PeersNotSet)
+        self.peer_pks()
+            .map(|peer_pks| peer_pks.len())
+            .map_err(|_| Error::IndexNotFound)
     }
 
-    fn peers(&self) -> Result<&PeerRegistry> {
-        self.peers.as_ref().ok_or(Error::PeersNotSet)
+    fn peer_pks(&self) -> Result<&IndexedMap<libp2p::PeerId, PublicKey>> {
+        self.peer_pks.as_ref().ok_or(Error::PeersNotSet)
     }
 }
 
@@ -174,7 +170,7 @@ impl<T: Transport + 'static> JointFeldman<T> {
 impl<T: Transport + 'static> Dkg_ for JointFeldman<T> {
     type Error = Error;
 
-    async fn set_peers(&mut self, peers: HashMap<libp2p::PeerId, PublicKey>) -> Result<()> {
+    async fn set_peers(&mut self, peers: IndexedMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         self.set_peers(peers).await
     }
 

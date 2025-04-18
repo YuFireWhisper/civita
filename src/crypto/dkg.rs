@@ -1,5 +1,6 @@
 use crate::{
     crypto::{
+        index_map::IndexedMap,
         keypair::PublicKey,
         primitives::algebra::{Point, Scalar},
     },
@@ -48,13 +49,14 @@ pub enum GenerateResult {
     },
 }
 
+#[automock(type Error=MockError;)]
 #[async_trait::async_trait]
 pub trait Dkg_ {
     type Error: Error;
 
     async fn set_peers(
         &mut self,
-        peers: HashMap<libp2p::PeerId, PublicKey>,
+        peers: IndexedMap<libp2p::PeerId, PublicKey>,
     ) -> Result<(), Self::Error>;
     async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult, Self::Error>;
 }

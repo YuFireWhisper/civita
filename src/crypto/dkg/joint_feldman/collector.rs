@@ -2,7 +2,8 @@ use std::{collections::VecDeque, sync::Arc};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::crypto::peer_registry::PeerRegistry;
+use crate::crypto::index_map::IndexedMap;
+use crate::crypto::keypair::PublicKey;
 use crate::crypto::primitives::algebra::Point;
 use crate::crypto::{
     dkg::joint_feldman::collector::event::ActionNeeded, primitives::vss::DecryptedShares,
@@ -90,7 +91,7 @@ impl<T: Transport + 'static> Collector<T> {
         }
     }
 
-    pub async fn start(&mut self, peers: PeerRegistry) -> Result<()> {
+    pub async fn start(&mut self, peer_pks: IndexedMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         let (command_tx, command_rx) = mpsc::channel(self.config.query_channel_size);
         self.command_tx = Some(command_tx);
 
@@ -106,7 +107,7 @@ impl<T: Transport + 'static> Collector<T> {
         let timeout = self.config.timeout;
 
         let handle = tokio::spawn(async move {
-            let context = Context::new(peers, secret_key, transport.self_peer());
+            let context = Context::new(peer_pks, secret_key, transport.self_peer());
             let worker_ctx = WorkerContext {
                 context,
                 transport,
@@ -334,7 +335,7 @@ impl<T: Transport> Drop for Collector<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::sync::Arc;
 
     use mockall::predicate::eq;
 
@@ -344,8 +345,8 @@ mod tests {
                 collector::{Collector, Config, Error},
                 event,
             },
+            index_map::IndexedMap,
             keypair::{self, SecretKey},
-            peer_registry::PeerRegistry,
             primitives::{
                 algebra::Scheme,
                 vss::{DecryptedShares, Vss},
@@ -411,7 +412,7 @@ mod tests {
             });
 
         let mut collector = Collector::new(Arc::new(transport), secret_key, config);
-        let peers = PeerRegistry::new(std::collections::HashMap::new());
+        let peers = IndexedMap::new();
 
         collector.start(peers).await.unwrap();
 
@@ -432,7 +433,7 @@ mod tests {
             .returning(move |_| Err(MockError));
 
         let mut collector = Collector::new(Arc::new(transport), secret_key, config);
-        let peers = PeerRegistry::new(std::collections::HashMap::new());
+        let peers = IndexedMap::new();
 
         let result = collector.start(peers).await;
 
@@ -459,7 +460,7 @@ mod tests {
     async fn success_when_collector_is_start() {
         let peer_id = libp2p::PeerId::random();
         let mut transport = create_mock_transport(peer_id);
-        let mut peers_map = HashMap::new();
+        let mut peers_map = IndexedMap::new();
         peers_map.insert(peer_id, keypair::generate_secp256k1().1);
 
         let secret_key = create_secret_key();
@@ -471,7 +472,7 @@ mod tests {
             .return_once(move |_| Ok(rx));
 
         let mut collector = Collector::new(Arc::new(transport), secret_key, config);
-        let _ = collector.start(PeerRegistry::new(peers_map)).await;
+        let _ = collector.start(peers_map).await;
 
         let (de_shares, comms) = Vss::share(&SCHEME, THRESHOLD, NUM_PEERS);
         let result = collector
