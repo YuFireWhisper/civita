@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use crate::crypto::{
     index_map::IndexedMap,
@@ -37,7 +34,7 @@ pub enum Error {
 pub enum Output {
     Success {
         shares: Vec<Scalar>,
-        comms: HashMap<libp2p::PeerId, Vec<Point>>,
+        comms: IndexedMap<libp2p::PeerId, Vec<Point>>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,
@@ -410,7 +407,7 @@ impl Event {
                     .expect("comms should be set before output");
                 Some((*peer_id, comms.to_owned()))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<IndexedMap<_, _>>();
 
         comms.insert(
             self.own_peer,
@@ -625,7 +622,7 @@ mod tests {
         match output {
             Output::Success { shares, comms } => {
                 assert_eq!(shares.len(), expected_peer_count as usize);
-                assert_eq!(comms.len(), expected_peer_count as usize);
+                assert_eq!(comms.len(), expected_peer_count);
             }
             _ => panic!("Expected success output"),
         }

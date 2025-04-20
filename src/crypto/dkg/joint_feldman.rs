@@ -12,7 +12,7 @@ use crate::{
         index_map::IndexedMap,
         keypair::{PublicKey, SecretKey},
         primitives::{
-            algebra::{self, Point, Scalar},
+            algebra::{self, Scalar},
             vss::{
                 decrypted_share::{self},
                 Vss,
@@ -136,17 +136,9 @@ impl<T: Transport + 'static> JointFeldman<T> {
         match result {
             event::Output::Success { shares, comms } => {
                 let share = Scalar::sum(shares.iter())?;
-                let public = Point::sum(
-                    comms
-                        .values()
-                        .map(|p| p.first().expect("Point is not empty")),
-                )
-                .map_err(Error::from)?;
-
                 Ok(GenerateResult::Success {
                     secret: share,
-                    public,
-                    partial_public: comms,
+                    partial_publics: comms,
                 })
             }
             event::Output::Failure { invalid_peers } => {

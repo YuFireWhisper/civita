@@ -224,6 +224,17 @@ where
     }
 }
 
+impl<K, V> From<HashMap<K, V>> for IndexedMap<K, V>
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    fn from(entries: HashMap<K, V>) -> Self {
+        let mut map = IndexedMap::new();
+        map.extend(entries);
+        map
+    }
+}
+
 impl<'a, K, V> Iterator for IndexedIter<'a, K, V>
 where
     K: Eq + Hash + Clone + Ord,
@@ -714,6 +725,21 @@ mod tests {
         assert_eq!(hash_map.get("a"), Some(&1));
         assert_eq!(hash_map.get("b"), Some(&2));
         assert_eq!(hash_map.get("c"), Some(&3));
+    }
+
+    #[test]
+    fn hash_map_can_be_converted_to_indexed_map() {
+        let mut hash_map = HashMap::new();
+        hash_map.insert("a".to_string(), 1);
+        hash_map.insert("b".to_string(), 2);
+        hash_map.insert("c".to_string(), 3);
+
+        let indexed_map: IndexedMap<String, i32> = hash_map.into();
+
+        assert_eq!(indexed_map.len(), TEST_MAP_SIZE as u16);
+        assert_eq!(indexed_map.get(&"a".to_string()), Some(&1));
+        assert_eq!(indexed_map.get(&"b".to_string()), Some(&2));
+        assert_eq!(indexed_map.get(&"c".to_string()), Some(&3));
     }
 
     #[test]

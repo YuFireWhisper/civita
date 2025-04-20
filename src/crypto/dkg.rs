@@ -7,7 +7,7 @@ use crate::{
     MockError,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     error::Error,
 };
 
@@ -41,8 +41,7 @@ pub trait DkgFactory {
 pub enum GenerateResult {
     Success {
         secret: Scalar,
-        public: Point,
-        partial_public: HashMap<libp2p::PeerId, Vec<Point>>,
+        partial_publics: IndexedMap<libp2p::PeerId, Vec<Point>>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,
