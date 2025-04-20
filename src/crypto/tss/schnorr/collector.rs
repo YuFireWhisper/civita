@@ -230,3 +230,177 @@ impl<T: Transport + 'static> Collector<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use mockall::predicate::eq;
+
+    use crate::{
+        crypto::{
+            index_map::IndexedMap,
+            primitives::{
+                algebra::{Point, Scheme},
+                threshold,
+                vss::Vss,
+            },
+            tss::schnorr::collector::{CollectionResult, Collector, Config, Error},
+        },
+        network::transport::MockTransport,
+        MockError,
+    };
+
+    const TOPIC: &str = "test_topic";
+    const TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_millis(100);
+    const SCHEME: Scheme = Scheme::Secp256k1;
+    const NUM_PEERS: u16 = 3;
+    const ID: [u8; 3] = [1, 2, 3];
+
+    fn create_config() -> Config {
+        Config {
+            threshold_counter: threshold::Counter::default(),
+            topic: TOPIC.to_string(),
+            timeout: TIMEOUT,
+        }
+    }
+
+    fn generate_peers(n: u16) -> IndexedMap<libp2p::PeerId, Vec<Point>> {
+        let threshold = threshold::Counter::default().call(n);
+        let mut peer_ids = generate_peer_ids(n);
+        peer_ids.sort();
+
+        peer_ids
+            .into_iter()
+            .map(|peer_id| {
+                let (_, comms) = Vss::share(&SCHEME, threshold - 1, n);
+                (peer_id, comms)
+            })
+            .collect()
+    }
+
+    fn generate_peer_ids(n: u16) -> Vec<libp2p::PeerId> {
+        (0..n).map(|_| libp2p::PeerId::random()).collect()
+    }
+
+    #[tokio::test]
+    async fn strat_initialize_successfully() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TOPIC.to_string()))
+            .times(1)
+            .returning(|_| {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                Ok(rx)
+            });
+        let transport = Arc::new(transport);
+        let config = create_config();
+        let mut collector = Collector::new(transport.clone(), config);
+        let partial_pks = generate_peers(NUM_PEERS);
+
+        let result = collector.start(partial_pks).await;
+
+        assert!(result.is_ok());
+        assert!(collector.action_tx.is_some());
+
+        collector.stop().await;
+    }
+
+    #[tokio::test]
+    async fn start_fails_on_transport_error() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TOPIC.to_string()))
+            .times(1)
+            .returning(|_| Err(MockError));
+
+        let transport = Arc::new(transport);
+        let config = create_config();
+        let mut collector = Collector::new(transport.clone(), config);
+        let partial_pks = generate_peers(NUM_PEERS);
+
+        let result = collector.start(partial_pks).await;
+
+        assert!(matches!(result, Err(Error::Transport(_))));
+    }
+
+    #[tokio::test]
+    async fn query_nonce_return_none_on_timeout() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TOPIC.to_string()))
+            .times(1)
+            .returning(|_| {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                Ok(rx)
+            });
+
+        let transport = Arc::new(transport);
+        let config = create_config();
+        let mut collector = Collector::new(transport.clone(), config);
+        let partial_pks = generate_peers(NUM_PEERS);
+
+        collector.start(partial_pks).await.unwrap();
+
+        let result = collector.query_nonce_shares(ID.to_vec()).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), CollectionResult::Failure(_)));
+
+        collector.stop().await;
+    }
+
+    #[tokio::test]
+    async fn query_signature_return_none_on_timeout() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TOPIC.to_string()))
+            .times(1)
+            .returning(|_| {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                Ok(rx)
+            });
+
+        let transport = Arc::new(transport);
+        let config = create_config();
+        let mut collector = Collector::new(transport.clone(), config);
+        let partial_pks = generate_peers(NUM_PEERS);
+
+        collector.start(partial_pks).await.unwrap();
+
+        let result = collector.query_signature_share(ID.to_vec()).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), CollectionResult::Failure(_)));
+
+        collector.stop().await;
+    }
+
+    #[tokio::test]
+    async fn stop_shuts_down_collector() {
+        let mut transport = MockTransport::new();
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TOPIC.to_string()))
+            .times(1)
+            .returning(|_| {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                Ok(rx)
+            });
+
+        let transport = Arc::new(transport);
+        let config = create_config();
+        let mut collector = Collector::new(transport.clone(), config);
+        let partial_pks = generate_peers(NUM_PEERS);
+
+        collector.start(partial_pks).await.unwrap();
+
+        collector.stop().await;
+
+        assert!(collector.action_tx.is_none());
+    }
+}
