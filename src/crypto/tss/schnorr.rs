@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -22,7 +25,6 @@ type Result<T> = std::result::Result<T, Error>;
 
 const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 const DEFAULT_TOPIC: &str = "tss/schnorr";
-const DEFAULT_RANDOM_GENERATE_ID_SUFFIX: &[u8] = b"random_generate";
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -55,7 +57,6 @@ pub struct Config {
     pub threshold_counter: threshold::Counter,
     pub topic: String,
     pub timeout: tokio::time::Duration,
-    pub random_generate_id_suffix: Vec<u8>,
 }
 
 pub struct Schnorr<D: Dkg_, T: Transport + 'static> {
@@ -121,40 +122,42 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
     }
 
     pub async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<SignResult> {
-        let own_random_share = match self.generate_random(id.clone()).await? {
+        let own_nonce_share = match self.generate_random_share(id.clone()).await? {
             RandomGenerateResult::Success(secret) => secret,
             RandomGenerateResult::Failure(invalid_peers) => {
                 return Ok(SignResult::Failure(invalid_peers));
             }
         };
 
-        self.publish_random(id.clone(), own_random_share.clone())
+        self.publish_nonce_share(id.clone(), own_nonce_share.clone())
             .await?;
-        let mut random_shares = match self.collect_random(id.clone()).await? {
+
+        let mut nonce_shares = match self.collect_nonce_share(id.clone()).await? {
             CollectionResult::Success(shares) => shares,
             CollectionResult::Failure(invalid_peers) => {
                 return Ok(SignResult::Failure(invalid_peers));
             }
         };
+        nonce_shares.insert(self.transport.self_peer(), own_nonce_share.clone());
 
-        random_shares.insert(self.transport.self_peer(), own_random_share.clone());
+        let (indices, nonce_shares) = self.get_indices_and_shares(nonce_shares);
+        let random = Scalar::lagrange_interpolation(&indices, &nonce_shares)?;
+        let public_random = Point::generator(&random.scheme()).mul(&random)?;
 
-        let indices = self.get_indices(random_shares.keys());
-        let shares = random_shares.into_values().collect::<Vec<_>>();
-        let random = Scalar::lagrange_interpolation(&indices, &shares)?;
-        let global_random = Point::generator(&random.scheme()).mul(&random)?;
-        let challenge = self.compute_challenge(msg, &random)?;
-        let own_sig = self.calculate_signature(&challenge, &own_random_share)?;
+        let challenge = self.compute_challenge(msg, &public_random)?;
+        let own_sig = self.calculate_signature(&challenge, &own_nonce_share)?;
+
         self.publish_signature(id.clone(), own_sig.clone()).await?;
         let result = self.collector.query_signature_share(id.clone()).await?;
 
         match result {
             CollectionResult::Success(mut shares) => {
                 shares.insert(self.transport.self_peer(), own_sig);
-                let indices = self.get_indices(shares.keys());
-                let sig_shares = shares.into_values().collect::<Vec<_>>();
-                let sig = Scalar::lagrange_interpolation(&indices, &sig_shares)?;
-                let sig = Signature::new(sig, global_random);
+                let (indices, shares) = self.get_indices_and_shares(shares);
+
+                let sig = Scalar::lagrange_interpolation(&indices, &shares)?;
+                let sig = Signature::new(sig, public_random);
+
                 Ok(SignResult::Success(sig))
             }
             collector::CollectionResult::Failure(invalid_peers) => {
@@ -163,23 +166,26 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         }
     }
 
-    fn get_indices<'a>(&self, iter: impl Iterator<Item = &'a libp2p::PeerId>) -> Vec<u16> {
+    fn get_indices_and_shares(
+        &self,
+        map: HashMap<libp2p::PeerId, Scalar>,
+    ) -> (Vec<u16>, Vec<Scalar>) {
         let peer_index = self.peer_index.as_ref().expect("Peer index is not set");
         let mut indices = Vec::new();
+        let mut shares = Vec::new();
 
-        for peer_id in iter {
+        for (peer_id, share) in map {
             let index = peer_index
-                .get_index(peer_id)
+                .get_index(&peer_id)
                 .expect("Peer ID not found in peer index");
             indices.push(index);
+            shares.push(share);
         }
 
-        indices
+        (indices, shares)
     }
 
-    async fn generate_random(&self, id: Vec<u8>) -> Result<RandomGenerateResult> {
-        let id = self.combine_id(id);
-
+    async fn generate_random_share(&self, id: Vec<u8>) -> Result<RandomGenerateResult> {
         let result = self
             .dkg
             .generate(id)
@@ -194,14 +200,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         }
     }
 
-    fn combine_id(&self, id: Vec<u8>) -> Vec<u8> {
-        id.iter()
-            .chain(self.config.random_generate_id_suffix.iter())
-            .copied()
-            .collect()
-    }
-
-    async fn publish_random(&self, id: Vec<u8>, random: Scalar) -> Result<()> {
+    async fn publish_nonce_share(&self, id: Vec<u8>, random: Scalar) -> Result<()> {
         let payload = gossipsub::Payload::TssNonceShare {
             id: id.clone(),
             share: random,
@@ -215,28 +214,19 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         Ok(())
     }
 
-    async fn collect_random(&self, id: Vec<u8>) -> Result<CollectionResult> {
-        let id = self.combine_id(id);
+    async fn collect_nonce_share(&self, id: Vec<u8>) -> Result<CollectionResult> {
         self.collector
             .query_nonce_shares(id)
             .await
             .map_err(Error::from)
     }
 
-    fn compute_challenge(&self, msg: &[u8], global_random: &Scalar) -> Result<Scalar> {
-        const DOMAIN_SEPARATOR: &[u8] = b"SCHNORR_SIGNATURE";
-
-        let random_bytes = global_random.to_vec()?;
-        let global_pk_bytes = self
+    fn compute_challenge(&self, msg: &[u8], public_random: &Point) -> Result<Scalar> {
+        let global_pk = self
             .global_pk
             .as_ref()
-            .expect("Global public key is not set")
-            .to_vec()?;
-
-        let input = [DOMAIN_SEPARATOR, msg, &random_bytes, &global_pk_bytes].concat();
-
-        let hash = Sha256::new().chain(&input).finalize();
-        Ok(Scalar::from_bytes(hash.as_slice(), &global_random.scheme()))
+            .expect("Global public key is not set");
+        calculate_challenge(msg, public_random, global_pk)
     }
 
     fn calculate_signature(&self, challenge: &Scalar, own_random_share: &Scalar) -> Result<Scalar> {
@@ -261,13 +251,29 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
     }
 }
 
+pub fn calculate_challenge(msg: &[u8], public_random: &Point, global_pk: &Point) -> Result<Scalar> {
+    const DOMAIN_SEPARATOR: &[u8] = b"SCHNORR_SIGNATURE";
+
+    let public_random_bytes = public_random.to_vec()?;
+    let global_pk_bytes = global_pk.to_vec()?;
+    let input = [
+        DOMAIN_SEPARATOR,
+        msg,
+        &public_random_bytes,
+        &global_pk_bytes,
+    ]
+    .concat();
+
+    let hash = Sha256::new().chain(&input).finalize();
+    Ok(Scalar::from_bytes(hash.as_slice(), &public_random.scheme()))
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             threshold_counter: threshold::Counter::default(),
             topic: DEFAULT_TOPIC.to_string(),
             timeout: DEFAULT_TIMEOUT,
-            random_generate_id_suffix: DEFAULT_RANDOM_GENERATE_ID_SUFFIX.to_vec(),
         }
     }
 }

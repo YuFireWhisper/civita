@@ -16,10 +16,10 @@ use civita::{
 
 use crate::common::transport;
 
-struct PeerInfo {
-    transport: Arc<Libp2pTransport>,
-    joint_feldman: JointFeldman<Libp2pTransport>,
-    pk: PublicKey,
+pub struct PeerInfo {
+    pub transport: Arc<Libp2pTransport>,
+    pub joint_feldman: JointFeldman<Libp2pTransport>,
+    pub pk: PublicKey,
 }
 
 pub struct Context {
@@ -105,5 +105,9 @@ impl Context {
         joint_feldman::Config::default()
             .threshold_counter
             .call(self.peers.len())
+    }
+
+    pub fn into_iter_peers(self) -> impl Iterator<Item = (libp2p::PeerId, PeerInfo)> {
+        self.peers.into_iter()
     }
 }

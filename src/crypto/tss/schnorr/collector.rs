@@ -122,7 +122,7 @@ impl<T: Transport + 'static> Collector<T> {
                 Some(action) = action_rx.recv() => {
                     match action {
                         Command::Query { id, immediate_return, callback } => {
-                            Self::process_query_nonce_shares(&ctx, id, immediate_return, callback);
+                            Self::process_query_shares(&ctx, id, immediate_return, callback);
                         }
                         Command::Shutdown => {
                             log::info!("Shutting down collector");
@@ -140,14 +140,22 @@ impl<T: Transport + 'static> Collector<T> {
     }
 
     fn process_message(ctx: &Context, message: gossipsub::Message) {
-        if let gossipsub::Payload::TssNonceShare { id, share } = message.payload {
-            let id = SessionId::NonceShare(id);
-            let peer_id = message.source;
-            ctx.add_share(id, peer_id, share);
+        match message.payload {
+            gossipsub::Payload::TssNonceShare { id, share } => {
+                let id = SessionId::NonceShare(id);
+                let peer_id = message.source;
+                ctx.add_share(id, peer_id, share);
+            }
+            gossipsub::Payload::TssSignatureShare { id, share } => {
+                let id = SessionId::SignatureShare(id);
+                let peer_id = message.source;
+                ctx.add_share(id, peer_id, share);
+            }
+            _ => {}
         }
     }
 
-    fn process_query_nonce_shares(
+    fn process_query_shares(
         ctx: &Context,
         id: SessionId,
         immediate_return: bool,
