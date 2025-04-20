@@ -69,7 +69,7 @@ pub struct Schnorr<D: Dkg_, T: Transport + 'static> {
 }
 
 impl<D: Dkg_, T: Transport> Schnorr<D, T> {
-    pub fn new(dkg: D, transport: Arc<T>, config: Config) -> Result<Self> {
+    pub fn new(dkg: D, transport: Arc<T>, config: Config) -> Self {
         let collector_config = collector::Config {
             threshold_counter: config.threshold_counter,
             topic: config.topic.clone(),
@@ -78,7 +78,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
 
         let collector = collector::Collector::new(transport.clone(), collector_config);
 
-        Ok(Self {
+        Self {
             transport,
             dkg,
             secret: None,
@@ -86,7 +86,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
             collector,
             peer_index: None,
             config,
-        })
+        }
     }
 
     pub async fn start(
