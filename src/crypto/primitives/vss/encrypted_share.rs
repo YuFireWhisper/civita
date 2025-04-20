@@ -64,22 +64,20 @@ impl EncryptedShares {
 
     pub fn from_decrypted<'a>(
         decrypted_shares: &DecryptedShares,
-        public_keys: impl Iterator<Item = (u16, &'a PublicKey)>,
+        public_keys: impl Iterator<Item = (&'a u16, &'a PublicKey)>,
     ) -> Result<Self> {
         let mut encrypted_shares = HashMap::new();
         let mut public_keys_len = 0;
 
         for (index, public_key) in public_keys {
-            assert!(
-                index > 0,
-                "Index must be greater than 0, because it is 1-based"
-            );
+            assert!(index > &0, "Index must be greater than 0");
+
             let share = decrypted_shares
-                .get(&index)
-                .ok_or(Error::ShareNotFound(index))?;
+                .get(index)
+                .ok_or(Error::ShareNotFound(*index))?;
 
             let encrypted_share = EncryptedShare::from_scalar(share, public_key)?;
-            encrypted_shares.insert(index, encrypted_share);
+            encrypted_shares.insert(*index, encrypted_share);
             public_keys_len += 1;
         }
 

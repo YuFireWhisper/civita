@@ -18,10 +18,17 @@ pub enum Error {
 
     #[error("Iterator empty")]
     IteratorEmpty,
+
+    #[error("Scalar cannot be zero")]
+    ZeroScalar,
+
+    #[error("Point cannot be zero")]
+    ZeroPoint,
 }
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(PartialEq, Eq)]
 pub enum Scheme {
     Secp256k1,
 }

@@ -4,8 +4,8 @@ use dashmap::{mapref::one::RefMut, DashMap, DashSet};
 
 use crate::crypto::{
     dkg::joint_feldman::collector::event::{self, ActionNeeded, Event},
-    keypair::SecretKey,
-    peer_registry::PeerRegistry,
+    index_map::IndexedMap,
+    keypair::{PublicKey, SecretKey},
     primitives::{
         algebra::{self, Point},
         vss::{
@@ -43,7 +43,7 @@ pub enum Error {
 
 #[derive(Debug)]
 pub struct Context {
-    peers: Arc<PeerRegistry>,
+    peer_pks: Arc<IndexedMap<libp2p::PeerId, PublicKey>>,
     secret_key: Arc<SecretKey>,
     own_peer: libp2p::PeerId,
     events: DashMap<Vec<u8>, Event>,
@@ -51,11 +51,15 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(peers: PeerRegistry, secret_key: Arc<SecretKey>, own_peer: libp2p::PeerId) -> Self {
-        let peers = Arc::new(peers);
+    pub fn new(
+        peer_pks: IndexedMap<libp2p::PeerId, PublicKey>,
+        secret_key: Arc<SecretKey>,
+        own_peer: libp2p::PeerId,
+    ) -> Self {
+        let peer_pks = Arc::new(peer_pks);
 
         Self {
-            peers,
+            peer_pks,
             secret_key,
             own_peer,
             events: DashMap::new(),
@@ -101,7 +105,11 @@ impl Context {
 
     fn get_or_create_event(&self, id: &[u8]) -> RefMut<Vec<u8>, Event> {
         self.events.entry(id.to_vec()).or_insert_with(move || {
-            Event::new(self.peers.clone(), self.secret_key.clone(), self.own_peer)
+            Event::new(
+                self.peer_pks.clone(),
+                self.secret_key.clone(),
+                self.own_peer,
+            )
         })
     }
 
@@ -160,14 +168,12 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::sync::Arc;
 
     use crate::crypto::{
-        dkg::joint_feldman::{
-            collector::context::{Context, Error},
-            peer_registry::PeerRegistry,
-        },
-        keypair::{self},
+        dkg::joint_feldman::collector::context::{Context, Error},
+        index_map::IndexedMap,
+        keypair::{self, PublicKey},
         primitives::{
             algebra::Scheme,
             vss::{EncryptedShares, Vss},
@@ -179,8 +185,8 @@ mod tests {
     const SCHEME: Scheme = Scheme::Secp256k1;
     const ID: [u8; 32] = [0; 32];
 
-    fn setup(num: u16) -> (Context, PeerRegistry) {
-        let mut peers = HashMap::new();
+    fn setup(num: u16) -> (Context, IndexedMap<libp2p::PeerId, PublicKey>) {
+        let mut peers = IndexedMap::new();
         let own_peer = libp2p::PeerId::random();
         let (own_sk, own_pk) = keypair::generate_secp256k1();
 
@@ -191,7 +197,6 @@ mod tests {
             peers.insert(peer_id, pk);
         }
 
-        let peers = PeerRegistry::new(peers);
         let secret_key = Arc::new(own_sk);
 
         (Context::new(peers.clone(), secret_key, own_peer), peers)
@@ -199,8 +204,8 @@ mod tests {
 
     #[test]
     fn initialization_correctness() {
-        let (context, _) = setup(NUM_PEERS);
-        assert_eq!(context.peers.len(), NUM_PEERS);
+        let (context, peer_pks) = setup(NUM_PEERS);
+        assert_eq!(context.peer_pks, Arc::new(peer_pks));
     }
 
     #[test]
@@ -222,10 +227,10 @@ mod tests {
 
         let (context, peers) = setup(NUM_PEERS);
         let id = ID.to_vec();
-        let peer_id = peers.get_peer_id_by_index(TARGET_INDEX).unwrap();
+        let peer_id = peers.get_key(&TARGET_INDEX).unwrap();
         let (de_shares, comms) = Vss::share(&SCHEME, THRESHOLD, NUM_PEERS);
         let en_shares =
-            EncryptedShares::from_decrypted(&de_shares, peers.iter_index_keys()).unwrap();
+            EncryptedShares::from_decrypted(&de_shares, peers.iter_indexed_values()).unwrap();
 
         let result = context.handle_component(id.clone(), *peer_id, en_shares, comms);
 
@@ -240,7 +245,7 @@ mod tests {
 
         let (context, peers) = setup(NUM_PEERS);
         let id = ID.to_vec();
-        let peer_id = peers.get_peer_id_by_index(TARGET_INDEX).unwrap();
+        let peer_id = peers.get_key(&TARGET_INDEX).unwrap();
         let (de_shares, _) = Vss::share(&SCHEME, THRESHOLD, NUM_PEERS);
 
         let result = context.handle_report(id.clone(), *peer_id, de_shares);
@@ -256,7 +261,7 @@ mod tests {
 
         let (context, peers) = setup(NUM_PEERS);
         let id = ID.to_vec();
-        let peer_id = peers.get_peer_id_by_index(TARGET_INDEX).unwrap();
+        let peer_id = peers.get_key(&TARGET_INDEX).unwrap();
         let (de_shares, _) = Vss::share(&SCHEME, THRESHOLD, NUM_PEERS);
 
         let result = context.handle_report_response(id.clone(), *peer_id, de_shares);

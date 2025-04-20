@@ -2,13 +2,15 @@ use std::sync::Arc;
 
 use crate::{
     crypto::{
-        keypair, peer_registry::PeerRegistry, primitives::{
+        index_map::IndexedMap,
+        keypair,
+        primitives::{
             algebra::Point,
             vss::{
                 decrypted_share::DecryptedShares,
                 encrypted_share::{self, EncryptedShares},
             },
-        }
+        },
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
@@ -44,18 +46,19 @@ impl<T: Transport + 'static> Distributor<T> {
     pub async fn send_shares(
         &self,
         id: Vec<u8>,
-        peers: &PeerRegistry,
+        peer_pks: &IndexedMap<libp2p::PeerId, keypair::PublicKey>,
         decrypted_shares: &DecryptedShares,
         commitments: Vec<Point>,
     ) -> Result<()> {
         assert_eq!(
-            peers.len(),
+            peer_pks.len(),
             decrypted_shares.len(),
             "Number of peers must match the number of shares"
         );
 
         let encrypted_shares =
-            EncryptedShares::from_decrypted(decrypted_shares, peers.iter_index_keys())?;
+            EncryptedShares::from_decrypted(decrypted_shares, peer_pks.iter_indexed_values())?;
+
         let payload = gossipsub::Payload::VSSComponent {
             id,
             encrypted_shares,
@@ -73,13 +76,16 @@ impl<T: Transport + 'static> Distributor<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::sync::Arc;
 
     use mockall::predicate::{always, eq};
 
     use crate::{
         crypto::{
-            dkg::joint_feldman::distributor::Distributor, keypair, peer_registry::PeerRegistry, primitives::{algebra::Scheme, vss::Vss}
+            dkg::joint_feldman::distributor::Distributor,
+            index_map::IndexedMap,
+            keypair,
+            primitives::{algebra::Scheme, vss::Vss},
         },
         network::transport::MockTransport,
         MockError,
@@ -96,8 +102,8 @@ mod tests {
         libp2p::gossipsub::MessageId::from(MESSAGE_ID)
     }
 
-    fn generate_peers(nums: u16) -> PeerRegistry {
-        let mut peers_map = HashMap::new();
+    fn generate_peers(nums: u16) -> IndexedMap<libp2p::PeerId, keypair::PublicKey> {
+        let mut peers_map = IndexedMap::new();
 
         for _ in 0..nums {
             let peer_id = libp2p::PeerId::random();
@@ -105,7 +111,7 @@ mod tests {
             peers_map.insert(peer_id, public_key);
         }
 
-        PeerRegistry::new(peers_map)
+        peers_map
     }
 
     #[tokio::test]

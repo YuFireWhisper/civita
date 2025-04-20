@@ -7,7 +7,7 @@ use crate::{
     crypto::{
         dkg::Data,
         primitives::{
-            algebra::Point,
+            algebra::{Point, Scalar},
             vss::{encrypted_share::EncryptedShares, DecryptedShares},
         },
     },
@@ -50,6 +50,16 @@ pub enum Payload {
     VSSReportResponse {
         id: Vec<u8>,
         decrypted_shares: DecryptedShares,
+    },
+
+    TssNonceShare {
+        id: Vec<u8>,
+        share: Scalar,
+    },
+
+    TssSignatureShare {
+        id: Vec<u8>,
+        share: Scalar,
     },
 
     CommitteeSignatureRequest(kad::Payload),

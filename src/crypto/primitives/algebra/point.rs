@@ -1,5 +1,6 @@
 use curv::{
-    elliptic::curves::secp256_k1::Secp256k1 as CurvSecp256k1, elliptic::curves::Point as CurvPoint,
+    elliptic::curves::secp256_k1::Secp256k1 as CurvSecp256k1,
+    elliptic::curves::{Point as CurvPoint, Scalar as CurvScalar},
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,18 @@ pub enum Point {
 }
 
 impl Point {
+    pub fn random(scheme: &Scheme) -> Self {
+        match scheme {
+            Scheme::Secp256k1 => Point::secp256k1_random(),
+        }
+    }
+
+    fn secp256k1_random() -> Self {
+        let random_scalar = CurvScalar::<CurvSecp256k1>::random();
+        let random_point = CurvPoint::<CurvSecp256k1>::generator() * random_scalar;
+        Point::Secp256k1(random_point)
+    }
+
     pub fn zero(scheme: Scheme) -> Self {
         match scheme {
             Scheme::Secp256k1 => Point::secp256k1_zero(),
@@ -44,6 +57,12 @@ impl Point {
         }
     }
 
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Point::Secp256k1(point) => point.is_zero(),
+        }
+    }
+
     pub fn to_vec(&self) -> Result<Vec<u8>> {
         bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(Error::from)
     }
@@ -54,12 +73,12 @@ impl Point {
             .map_err(Error::from)
     }
 
-    pub fn sum<I: Iterator<Item = Self>>(iter: I) -> Result<Self> {
+    pub fn sum<'a, I: Iterator<Item = &'a Self>>(iter: I) -> Result<Self> {
         let mut iter = iter.peekable();
-        let mut sum = iter.next().ok_or(Error::IteratorEmpty)?;
+        let mut sum = iter.next().ok_or(Error::IteratorEmpty)?.clone();
 
         for next in iter {
-            if !sum.is_same_type(&next) {
+            if !sum.is_same_type(next) {
                 return Err(Error::InconsistentVariants);
             }
             sum = match (sum, next) {
@@ -68,6 +87,37 @@ impl Point {
         }
 
         Ok(sum)
+    }
+
+    pub fn add(&self, other: &Self) -> Result<Self> {
+        if !self.is_same_type(other) {
+            return Err(Error::InconsistentVariants);
+        }
+        match (self, other) {
+            (Point::Secp256k1(s), Point::Secp256k1(o)) => Ok(Point::Secp256k1(s + o)),
+        }
+    }
+
+    pub fn mul(&self, scalar: &Scalar) -> Result<Self> {
+        if !self.is_same_type_scalar(scalar) {
+            return Err(Error::InconsistentVariants);
+        }
+
+        match (self, scalar) {
+            (Point::Secp256k1(s), Scalar::Secp256k1(o)) => Ok(Point::Secp256k1(s * o)),
+        }
+    }
+
+    pub fn scheme(&self) -> Scheme {
+        match self {
+            Point::Secp256k1(_) => Scheme::Secp256k1,
+        }
+    }
+
+    pub fn generator(scheme: &Scheme) -> Self {
+        match scheme {
+            Scheme::Secp256k1 => Self::Secp256k1(CurvPoint::<CurvSecp256k1>::generator().into()),
+        }
     }
 }
 
@@ -83,16 +133,10 @@ mod tests {
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;
 
-    fn create_random_point() -> Point {
-        let random_scalar = curv::elliptic::curves::Scalar::random();
-        let random_point = curv::elliptic::curves::Point::generator() * random_scalar;
-        Point::Secp256k1(random_point)
-    }
-
     #[test]
     fn zero_create_additive_identity() {
         let zero_point = Point::zero(DEFAULT_SCHEME);
-        let random_point = create_random_point();
+        let random_point = Point::random(&DEFAULT_SCHEME);
 
         match (zero_point, random_point.clone()) {
             (Point::Secp256k1(z), Point::Secp256k1(r)) => {
@@ -103,24 +147,41 @@ mod tests {
     }
 
     #[test]
+    fn point_random_are_randomly_generated() {
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
+
+        assert_ne!(point1, point2);
+    }
+
+    #[test]
     fn same_scheme_point_match_type() {
-        let point1 = create_random_point();
-        let point2 = create_random_point();
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
 
         assert!(point1.is_same_type(&point2));
     }
 
     #[test]
     fn same_scheme_point_match_scalar() {
-        let point = create_random_point();
+        let point = Point::random(&DEFAULT_SCHEME);
         let scalar = Scalar::random(&DEFAULT_SCHEME);
 
         assert!(point.is_same_type_scalar(&scalar));
     }
 
     #[test]
+    fn point_is_zero() {
+        let zero_point = Point::zero(DEFAULT_SCHEME);
+        let random_point = Point::random(&DEFAULT_SCHEME);
+
+        assert!(zero_point.is_zero());
+        assert!(!random_point.is_zero());
+    }
+
+    #[test]
     fn serialization_roundtrip_preserves_point_value() {
-        let point = create_random_point();
+        let point = Point::random(&DEFAULT_SCHEME);
         let serialized = point.to_vec().unwrap();
         let deserialized = Point::from_slice(&serialized).unwrap();
 
@@ -137,12 +198,12 @@ mod tests {
 
     #[test]
     fn sum_of_points() {
-        let point1 = create_random_point();
-        let point2 = create_random_point();
-        let point3 = create_random_point();
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
+        let point3 = Point::random(&DEFAULT_SCHEME);
 
         let points = vec![point1.clone(), point2.clone(), point3.clone()];
-        let sum = Point::sum(points.into_iter()).unwrap();
+        let sum = Point::sum(points.iter()).unwrap();
 
         match (point1, point2, point3) {
             (Point::Secp256k1(p1), Point::Secp256k1(p2), Point::Secp256k1(p3)) => {
@@ -156,7 +217,7 @@ mod tests {
     fn sum_with_empty_iterator_returns_error() {
         let empty_iter: Vec<Point> = vec![];
 
-        let result = Point::sum(empty_iter.into_iter());
+        let result = Point::sum(empty_iter.iter());
         assert!(result.is_err());
     }
 
@@ -170,5 +231,46 @@ mod tests {
                 assert_eq!(p, curv_point);
             }
         }
+    }
+
+    #[test]
+    fn add_points() {
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
+
+        let sum = point1.add(&point2).unwrap();
+
+        match (point1, point2) {
+            (Point::Secp256k1(p1), Point::Secp256k1(p2)) => {
+                assert_eq!(sum, Point::Secp256k1(p1 + p2));
+            }
+        }
+    }
+
+    #[test]
+    fn multiplication_with_scalar() {
+        let point = Point::random(&DEFAULT_SCHEME);
+        let scalar = Scalar::random(&DEFAULT_SCHEME);
+
+        let result = point.mul(&scalar).unwrap();
+
+        match (point, scalar) {
+            (Point::Secp256k1(p), Scalar::Secp256k1(s)) => {
+                assert_eq!(result, Point::Secp256k1(p * s));
+            }
+        }
+    }
+
+    #[test]
+    fn return_correct_scheme() {
+        let point = Point::random(&DEFAULT_SCHEME);
+        assert_eq!(point.scheme(), DEFAULT_SCHEME);
+    }
+
+    #[test]
+    fn generator_point() {
+        let scheme = Scheme::Secp256k1;
+        let generator = Point::generator(&scheme);
+        assert_eq!(generator.scheme(), scheme);
     }
 }
