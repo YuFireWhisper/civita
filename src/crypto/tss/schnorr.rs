@@ -58,7 +58,7 @@ pub struct Schnorr<D: Dkg_, T: Transport + 'static> {
     transport: Arc<T>,
     dkg: D,
     secret: Option<Scalar>,
-    golobal_pk: Option<Point>,
+    global_pk: Option<Point>,
     collector: collector::Collector<T>,
     peer_index: Option<IndexedMap<libp2p::PeerId, ()>>,
     config: Config,
@@ -78,7 +78,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
             transport,
             dkg,
             secret: None,
-            golobal_pk: None,
+            global_pk: None,
             collector,
             peer_index: None,
             config,
@@ -97,7 +97,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         )?;
 
         self.secret = Some(secret);
-        self.golobal_pk = Some(global_pk);
+        self.global_pk = Some(global_pk);
         self.peer_index = Some(self.convert_to_peer_index(&partial_pks));
         self.collector.stop().await;
         self.collector.start(partial_pks).await?;
@@ -139,7 +139,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         let shares = random_shares.into_values().collect::<Vec<_>>();
         let random = Scalar::lagrange_interpolation(&indices, &shares)?;
         let challenge = self.compute_challenge(msg, &random)?;
-        let own_sig = self.calaulate_signature(&challenge, &own_random_share)?;
+        let own_sig = self.calculate_signature(&challenge, &own_random_share)?;
         self.publish_signature(id.clone(), own_sig.clone()).await?;
         let result = self.collector.query_signature_share(id.clone()).await?;
 
@@ -223,7 +223,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         let global_random = Point::generator(&random.scheme()).mul(random)?;
         let random_bytes = global_random.to_vec()?;
         let global_pk_bytes = self
-            .golobal_pk
+            .global_pk
             .as_ref()
             .expect("Global public key is not set")
             .to_vec()?;
@@ -234,7 +234,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         Ok(Scalar::from_bytes(hash.as_slice(), &random.scheme()))
     }
 
-    fn calaulate_signature(&self, challenge: &Scalar, own_random_share: &Scalar) -> Result<Scalar> {
+    fn calculate_signature(&self, challenge: &Scalar, own_random_share: &Scalar) -> Result<Scalar> {
         let secret = self.secret.as_ref().expect("Secret key is not set");
         own_random_share
             .add(&challenge.mul(secret)?)
