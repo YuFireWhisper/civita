@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use civita::crypto::{
     dkg::GenerateResult,
     primitives::algebra::{Point, Scalar},
@@ -25,42 +27,45 @@ async fn generate_valid_secret_and_commitment() {
     assert!(!verify_secret(&secrets, &public, NUM_PEERS - 1)); // not enough
 }
 
-fn extract_shares_and_public(results: Vec<GenerateResult>) -> (Vec<Scalar>, Point) {
+fn extract_shares_and_public(results: HashMap<u16, GenerateResult>) -> (Vec<Scalar>, Point) {
     assert!(
         results
-            .iter()
+            .values()
             .all(|r| matches!(r, GenerateResult::Success { .. })),
         "All results must be successful"
     );
 
-    let mut secrets = Vec::with_capacity(results.len());
-    let first_partial_public = match &results[0] {
+    let scheme = match results.values().next().unwrap() {
+        GenerateResult::Success { secret, .. } => secret.scheme(),
+        _ => unreachable!(),
+    };
+
+    let mut secrets = vec![Scalar::zero(scheme); results.len()];
+    let first_partial_publics = match &results.values().next().unwrap() {
         GenerateResult::Success {
             partial_publics, ..
         } => partial_publics.clone(),
         _ => unreachable!(),
     };
 
-    for result in results {
+    for (i, result) in results.into_iter() {
         match result {
             GenerateResult::Success {
                 secret,
                 partial_publics,
             } => {
                 assert!(
-                    partial_publics == first_partial_public,
+                    partial_publics == first_partial_publics,
                     "All public keys must be identical"
                 );
-                secrets.push(secret);
+                secrets[i as usize - 1] = secret;
             }
             _ => unreachable!(),
         }
     }
 
-    (
-        secrets,
-        Point::sum(first_partial_public.values().map(|ps| ps.first().unwrap())).unwrap(),
-    )
+    let public = Point::sum(first_partial_publics.values().map(|ps| ps.first().unwrap())).unwrap();
+    (secrets, public)
 }
 
 fn verify_secret(shares: &[Scalar], public: &Point, n: u16) -> bool {
