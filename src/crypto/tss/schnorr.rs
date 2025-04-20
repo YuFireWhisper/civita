@@ -255,39 +255,3 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         Ok(())
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use std::collections::HashMap;
-//
-//     use crate::crypto::{
-//         dkg::{Dkg_, MockDkg_},
-//         primitives::algebra::{Point, Scalar, Scheme},
-//         tss::schnorr::Schnorr,
-//     };
-//
-//     const SCHEME: Scheme = Scheme::Secp256k1;
-//     const NUM_PARTIAL_PKS: usize = 3;
-//
-//     fn generate_partial_pks(num: usize) -> HashMap<libp2p::PeerId, Point> {
-//         let mut partial_pks = HashMap::new();
-//         for _ in 0..num {
-//             let peer_id = libp2p::PeerId::random();
-//             let point = Point::random(&SCHEME);
-//             partial_pks.insert(peer_id, point);
-//         }
-//         partial_pks
-//     }
-//
-//     #[test]
-//     fn global_pk_generate_from_correct_partial_pks() {
-//         let dkg = MockDkg_::new();
-//         let secret = Scalar::random(&SCHEME);
-//         let partial_pks = generate_partial_pks(NUM_PARTIAL_PKS);
-//         let expected_global_pk = Point::sum(partial_pks.values()).unwrap();
-//
-//         let schnorr = Schnorr::new(dkg, secret.clone(), partial_pks.clone()).unwrap();
-//
-//         assert_eq!(schnorr.golobal_pk, expected_global_pk);
-//     }
-// }
