@@ -84,7 +84,7 @@ pub struct JointFeldman<T: Transport + 'static> {
 }
 
 impl<T: Transport + 'static> JointFeldman<T> {
-    pub async fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Result<Self> {
+    pub fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Self {
         let collector_config = collector::Config {
             timeout: config.timeout,
             gossipsub_topic: config.gossipsub_topic.clone(),
@@ -95,12 +95,12 @@ impl<T: Transport + 'static> JointFeldman<T> {
         let collector = Collector::new(transport.clone(), secret_key, collector_config);
         let distributor = Distributor::new(transport, &config.gossipsub_topic);
 
-        Ok(Self {
+        Self {
             config,
             collector,
             distributor,
             peer_pks: None,
-        })
+        }
     }
 
     pub async fn set_peers(
