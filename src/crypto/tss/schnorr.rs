@@ -10,14 +10,19 @@ use crate::{
             algebra::{self, Point, Scalar},
             threshold,
         },
-        tss::schnorr::collector::CollectionResult,
+        tss::schnorr::{collector::CollectionResult, signature::Signature},
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
 
 mod collector;
+pub mod signature;
 
 type Result<T> = std::result::Result<T, Error>;
+
+const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+const DEFAULT_TOPIC: &str = "tss/schnorr";
+const DEFAULT_RANDOM_GENERATE_ID_SUFFIX: &[u8] = b"random_generate";
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -36,7 +41,7 @@ pub enum Error {
 }
 
 pub enum SignResult {
-    Success(Scalar),
+    Success(Signature),
     Failure(HashSet<libp2p::PeerId>),
 }
 
@@ -51,7 +56,6 @@ pub struct Config {
     pub topic: String,
     pub timeout: tokio::time::Duration,
     pub random_generate_id_suffix: Vec<u8>,
-    pub gossipusb_topic: String,
 }
 
 pub struct Schnorr<D: Dkg_, T: Transport + 'static> {
@@ -138,6 +142,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         let indices = self.get_indices(random_shares.keys());
         let shares = random_shares.into_values().collect::<Vec<_>>();
         let random = Scalar::lagrange_interpolation(&indices, &shares)?;
+        let global_random = Point::generator(&random.scheme()).mul(&random)?;
         let challenge = self.compute_challenge(msg, &random)?;
         let own_sig = self.calculate_signature(&challenge, &own_random_share)?;
         self.publish_signature(id.clone(), own_sig.clone()).await?;
@@ -149,6 +154,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
                 let indices = self.get_indices(shares.keys());
                 let sig_shares = shares.into_values().collect::<Vec<_>>();
                 let sig = Scalar::lagrange_interpolation(&indices, &sig_shares)?;
+                let sig = Signature::new(sig, global_random);
                 Ok(SignResult::Success(sig))
             }
             collector::CollectionResult::Failure(invalid_peers) => {
@@ -202,7 +208,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         };
 
         self.transport
-            .publish(&self.config.gossipusb_topic, payload)
+            .publish(&self.config.topic, payload)
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
 
@@ -217,10 +223,9 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
             .map_err(Error::from)
     }
 
-    fn compute_challenge(&self, msg: &[u8], random: &Scalar) -> Result<Scalar> {
+    fn compute_challenge(&self, msg: &[u8], global_random: &Scalar) -> Result<Scalar> {
         const DOMAIN_SEPARATOR: &[u8] = b"SCHNORR_SIGNATURE";
 
-        let global_random = Point::generator(&random.scheme()).mul(random)?;
         let random_bytes = global_random.to_vec()?;
         let global_pk_bytes = self
             .global_pk
@@ -231,7 +236,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         let input = [DOMAIN_SEPARATOR, msg, &random_bytes, &global_pk_bytes].concat();
 
         let hash = Sha256::new().chain(&input).finalize();
-        Ok(Scalar::from_bytes(hash.as_slice(), &random.scheme()))
+        Ok(Scalar::from_bytes(hash.as_slice(), &global_random.scheme()))
     }
 
     fn calculate_signature(&self, challenge: &Scalar, own_random_share: &Scalar) -> Result<Scalar> {
@@ -248,10 +253,21 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         };
 
         self.transport
-            .publish(&self.config.gossipusb_topic, payload)
+            .publish(&self.config.topic, payload)
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
 
         Ok(())
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            threshold_counter: threshold::Counter::default(),
+            topic: DEFAULT_TOPIC.to_string(),
+            timeout: DEFAULT_TIMEOUT,
+            random_generate_id_suffix: DEFAULT_RANDOM_GENERATE_ID_SUFFIX.to_vec(),
+        }
     }
 }
