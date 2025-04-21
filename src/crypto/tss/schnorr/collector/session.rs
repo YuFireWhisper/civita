@@ -60,12 +60,13 @@ impl Session {
             return;
         }
 
+        self.completed = true;
+
         if let Some(callback) = self.callback.take() {
             let output = CollectionResult::Success(self.shares.to_owned());
             if let Err(e) = callback.send(output) {
                 log::warn!("Failed to send nonce shares: {:?}", e);
             }
-            self.completed = true;
         }
     }
 
@@ -91,6 +92,8 @@ impl Session {
             return;
         }
 
+        self.completed = true;
+
         if self.has_threshold_reached() {
             let result = CollectionResult::Success(self.shares.clone());
             if let Err(e) = callback.send(result) {
@@ -103,8 +106,6 @@ impl Session {
                 log::warn!("Failed to send collection result: {:?}", e);
             }
         }
-
-        self.completed = true;
     }
 }
 

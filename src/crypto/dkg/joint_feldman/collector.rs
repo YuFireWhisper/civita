@@ -47,6 +47,9 @@ pub enum Error {
 
     #[error("Keypair error: {0}")]
     Keypair(#[from] keypair::Error),
+
+    #[error("Collector is not started")]
+    NotStarted,
 }
 
 #[derive(Debug)]
@@ -129,13 +132,12 @@ impl<T: Transport + 'static> Collector<T> {
     ) {
         let mut pending_queries = VecDeque::new();
         let mut check_timer = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let mut message_queue = VecDeque::new();
 
         loop {
             tokio::select! {
                 Some(msg) = gossipsub_rx.recv() => {
-                    if let Err(e) = Self::process_message(&worker_ctx, msg).await {
-                        log::error!("Failed to process message: {}", e);
-                    }
+                    message_queue.push_back(msg);
                 }
 
                 Some(cmd) = command_rx.recv() => {
@@ -162,6 +164,12 @@ impl<T: Transport + 'static> Collector<T> {
                 }
 
                 else => break,
+            }
+
+            while let Some(msg) = message_queue.pop_front() {
+                if let Err(e) = Self::process_message(&worker_ctx, msg).await {
+                    log::error!("Failed to process message: {}", e);
+                }
             }
         }
 
@@ -298,10 +306,7 @@ impl<T: Transport + 'static> Collector<T> {
     ) -> Result<event::Output> {
         let (tx, rx) = oneshot::channel();
 
-        let cmd_tx = self
-            .command_tx
-            .as_ref()
-            .ok_or_else(|| Error::Query("Collector not started".to_string()))?;
+        let cmd_tx = self.command_tx.as_ref().ok_or(Error::NotStarted)?;
 
         cmd_tx
             .send(Command::Query {
@@ -311,7 +316,7 @@ impl<T: Transport + 'static> Collector<T> {
                 callback: tx,
             })
             .await
-            .map_err(|_| Error::ChannelClosed)?;
+            .map_err(|e| Error::Query(e.to_string()))?;
 
         rx.await.map_err(|_| Error::ChannelClosed)
     }

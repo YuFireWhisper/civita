@@ -248,7 +248,7 @@ impl Event {
         }
     }
 
-    pub fn add_en_shares_and_comms(
+    pub fn add_componments(
         &mut self,
         peer_id: libp2p::PeerId,
         en_shares: EncryptedShares,
@@ -309,6 +309,8 @@ impl Event {
     }
 
     fn handle_invalid_peer(&mut self, peer_id: libp2p::PeerId) -> ActionNeeded {
+        println!("Invalid peer: {peer_id}");
+
         self.set_status_to_verifying();
         self.invalid_peers.insert(peer_id);
         self.peer_infos.remove(&peer_id);
@@ -388,7 +390,6 @@ impl Event {
         self.detect_malicious_report(&mut all_invalid_peers);
 
         if !all_invalid_peers.is_empty() {
-            println!("Invalid peers: {:?}", all_invalid_peers);
             return Output::Failure {
                 invalid_peers: all_invalid_peers,
             };
@@ -569,7 +570,7 @@ mod tests {
             let comms = self.get_comms(index, true);
 
             event
-                .add_en_shares_and_comms(peer_id, en_shares, comms)
+                .add_componments(peer_id, en_shares, comms)
                 .map_err(|e| e.to_string())
         }
 
@@ -591,7 +592,7 @@ mod tests {
             let comms = self.get_comms(index, false);
 
             event
-                .add_en_shares_and_comms(peer_id, en_shares, comms)
+                .add_componments(peer_id, en_shares, comms)
                 .map_err(|e| e.to_string())
         }
 
@@ -700,7 +701,7 @@ mod tests {
         let en_shares = context.get_encrypted_shares(TARGET_INDEX as u16);
         let comms = context.peer_infos[1].valid_comms.clone();
 
-        let result = event.add_en_shares_and_comms(peer_id, en_shares, comms);
+        let result = event.add_componments(peer_id, en_shares, comms);
 
         assert!(result.is_ok());
         assert!(matches!(result.unwrap(), ActionNeeded::None));

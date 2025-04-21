@@ -11,7 +11,7 @@ use crate::common::{joint_feldman, schnorr};
 
 mod common;
 
-const NUM_PEERS: u16 = 3;
+const NUM_PEERS: u16 = 9;
 const ID: &[u8] = b"test id";
 const SIG_ID: &[u8] = b"test sig id";
 const MSG: &[u8] = b"test message";
@@ -22,7 +22,7 @@ async fn generate_valid_signature() {
     ctx.set_peers().await;
     let results = ctx.generate(ID.to_vec()).await;
     let (secrets, publics) = extract_shares_and_public(results);
-    let public = calcualate_public(&publics);
+    let public = calculate_public(&publics);
 
     let mut schnorr_ctx = schnorr::Context::from_joint_feldman_ctx(ctx);
     schnorr_ctx.start(secrets, publics).await;
@@ -34,7 +34,10 @@ async fn generate_valid_signature() {
         sigs.iter().all(|sig| sig == first),
         "All signatures must be identical"
     );
-    assert!(first.verify(MSG, &public), "Signature verification failed");
+    assert!(
+        sigs.iter().all(|sig| sig.verify(MSG, &public)),
+        "Signature verification failed"
+    );
 }
 
 fn extract_shares_and_public(
@@ -79,7 +82,7 @@ fn extract_shares_and_public(
     (secrets, first_public.clone())
 }
 
-fn calcualate_public(partial_publics: &IndexedMap<libp2p::PeerId, Vec<Point>>) -> Point {
+fn calculate_public(partial_publics: &IndexedMap<libp2p::PeerId, Vec<Point>>) -> Point {
     Point::sum(partial_publics.values().map(|ps| ps.first().unwrap())).unwrap()
 }
 

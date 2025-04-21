@@ -9,7 +9,7 @@ use crate::common::joint_feldman;
 
 mod common;
 
-const NUM_PEERS: u16 = 3;
+const NUM_PEERS: u16 = 9;
 const ID: &[u8] = b"test id";
 
 #[tokio::test]
@@ -20,11 +20,34 @@ async fn generate_valid_secret_and_commitment() {
 
     let (secrets, public) = extract_shares_and_public(results);
     let threshold = ctx.threshold();
+    println!("Threshold: {}", threshold);
 
     assert_eq!(secrets.len(), NUM_PEERS as usize);
     assert!(verify_secret(&secrets, &public, NUM_PEERS)); // full
     assert!(verify_secret(&secrets, &public, threshold)); // equal
-    assert!(!verify_secret(&secrets, &public, NUM_PEERS - 1)); // not enough
+    assert!(!verify_secret(&secrets, &public, threshold - 1)); // not enough
+}
+
+#[tokio::test]
+async fn generate_multiple_times() {
+    const TIMES: usize = 2;
+
+    let mut ctx = joint_feldman::Context::new(NUM_PEERS).await;
+    ctx.set_peers().await;
+
+    for i in 0..TIMES {
+        let mut id = ID.to_vec();
+        id.push(i as u8);
+        let results = ctx.generate(id).await;
+
+        let (secrets, public) = extract_shares_and_public(results);
+        let threshold = ctx.threshold();
+
+        assert_eq!(secrets.len(), NUM_PEERS as usize);
+        assert!(verify_secret(&secrets, &public, NUM_PEERS)); // full
+        assert!(verify_secret(&secrets, &public, threshold)); // equal
+        assert!(!verify_secret(&secrets, &public, threshold - 1)); // not enough
+    }
 }
 
 fn extract_shares_and_public(results: HashMap<u16, GenerateResult>) -> (Vec<Scalar>, Point) {

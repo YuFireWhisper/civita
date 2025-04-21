@@ -95,7 +95,7 @@ impl<T: Transport + 'static> Collector<T> {
         let (action_tx, action_rx) = tokio::sync::mpsc::channel(100);
         self.action_tx = Some(action_tx);
 
-        let threshold = self.config.threshold_counter.call(partial_pks.len()) - 1; // Exclude self
+        let threshold = self.config.threshold_counter.call(partial_pks.len()) - 1;
         let ctx = Context::new(threshold, partial_pks);
 
         tokio::spawn(async move {

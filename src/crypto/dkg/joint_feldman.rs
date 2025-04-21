@@ -107,10 +107,11 @@ impl<T: Transport + 'static> JointFeldman<T> {
         &mut self,
         peer_pks: IndexedMap<libp2p::PeerId, PublicKey>,
     ) -> Result<()> {
-        assert!(peer_pks.len() > 1, "ids length must be greater than 1");
+        assert!(peer_pks.len() > 3, "ids length must be greater than 3");
 
         self.collector.stop();
         self.collector.start(peer_pks.clone()).await?;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         self.peer_pks = Some(peer_pks);
         Ok(())
     }
@@ -121,7 +122,7 @@ impl<T: Transport + 'static> JointFeldman<T> {
         let peers_len = self.peers_len()?;
         let threshold = self.config.threshold_counter.call(peers_len);
         let (decrypted_shares, commitments) =
-            Vss::share(&self.config.crypto_scheme, threshold - 1, peers_len);
+            Vss::share(&self.config.crypto_scheme, threshold, peers_len);
 
         let peer_pks = self.peer_pks()?;
         self.distributor
