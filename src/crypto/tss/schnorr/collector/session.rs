@@ -60,13 +60,12 @@ impl Session {
             return;
         }
 
-        self.completed = true;
-
         if let Some(callback) = self.callback.take() {
             let output = CollectionResult::Success(self.shares.to_owned());
             if let Err(e) = callback.send(output) {
                 log::warn!("Failed to send nonce shares: {:?}", e);
             }
+            self.completed = true;
         }
     }
 

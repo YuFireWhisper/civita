@@ -458,7 +458,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result, Err(Error::Query(_))));
+        assert!(matches!(result, Err(Error::NotStarted)));
     }
 
     #[tokio::test]
