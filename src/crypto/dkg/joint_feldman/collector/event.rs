@@ -248,7 +248,7 @@ impl Event {
         }
     }
 
-    pub fn add_componments(
+    pub fn add_component(
         &mut self,
         peer_id: libp2p::PeerId,
         en_shares: EncryptedShares,
@@ -570,7 +570,7 @@ mod tests {
             let comms = self.get_comms(index, true);
 
             event
-                .add_componments(peer_id, en_shares, comms)
+                .add_component(peer_id, en_shares, comms)
                 .map_err(|e| e.to_string())
         }
 
@@ -592,7 +592,7 @@ mod tests {
             let comms = self.get_comms(index, false);
 
             event
-                .add_componments(peer_id, en_shares, comms)
+                .add_component(peer_id, en_shares, comms)
                 .map_err(|e| e.to_string())
         }
 
@@ -701,7 +701,7 @@ mod tests {
         let en_shares = context.get_encrypted_shares(TARGET_INDEX as u16);
         let comms = context.peer_infos[1].valid_comms.clone();
 
-        let result = event.add_componments(peer_id, en_shares, comms);
+        let result = event.add_component(peer_id, en_shares, comms);
 
         assert!(result.is_ok());
         assert!(matches!(result.unwrap(), ActionNeeded::None));

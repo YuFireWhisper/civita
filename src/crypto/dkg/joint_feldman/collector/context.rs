@@ -90,7 +90,7 @@ impl Context {
 
         let mut event = self.get_or_create_event(&id);
         event
-            .add_componments(source, en_shares, comms)
+            .add_component(source, en_shares, comms)
             .map_err(Error::from)
     }
 
