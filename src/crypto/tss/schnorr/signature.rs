@@ -36,7 +36,7 @@ impl Signature {
             Err(_) => return false,
         };
 
-        let right = match self.public_random.add(&pe) {
+        let right = match self.public_random.sub(&pe) {
             Ok(right) => right,
             Err(_) => return false,
         };

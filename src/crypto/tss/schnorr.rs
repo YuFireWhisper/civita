@@ -23,7 +23,7 @@ pub mod signature;
 
 type Result<T> = std::result::Result<T, Error>;
 
-const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(3);
 const DEFAULT_TOPIC: &str = "tss/schnorr";
 
 #[derive(Debug)]
@@ -48,7 +48,7 @@ pub enum SignResult {
 }
 
 enum RandomGenerateResult {
-    Success(Scalar),
+    Success((Scalar, Point)),
     Failure(HashSet<libp2p::PeerId>),
 }
 
@@ -103,7 +103,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
 
         self.secret = Some(secret);
         self.global_pk = Some(global_pk);
-        self.peer_index = Some(self.convert_to_peer_index(&partial_pks));
+        self.peer_index = Some(Self::convert_to_peer_index(&partial_pks));
         self.collector.stop().await;
         self.collector.start(partial_pks).await?;
 
@@ -111,7 +111,6 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
     }
 
     fn convert_to_peer_index(
-        &self,
         peer_pks: &IndexedMap<libp2p::PeerId, Vec<Point>>,
     ) -> IndexedMap<libp2p::PeerId, ()> {
         let mut peer_index = IndexedMap::new();
@@ -122,30 +121,15 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
     }
 
     pub async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<SignResult> {
-        let own_nonce_share = match self.generate_random_share(id.clone()).await? {
+        let (random_share, random_point) = match self.generate_random_share(id.clone()).await? {
             RandomGenerateResult::Success(secret) => secret,
             RandomGenerateResult::Failure(invalid_peers) => {
                 return Ok(SignResult::Failure(invalid_peers));
             }
         };
 
-        self.publish_nonce_share(id.clone(), own_nonce_share.clone())
-            .await?;
-
-        let mut nonce_shares = match self.collect_nonce_share(id.clone()).await? {
-            CollectionResult::Success(shares) => shares,
-            CollectionResult::Failure(invalid_peers) => {
-                return Ok(SignResult::Failure(invalid_peers));
-            }
-        };
-        nonce_shares.insert(self.transport.self_peer(), own_nonce_share.clone());
-
-        let (indices, nonce_shares) = self.get_indices_and_shares(nonce_shares);
-        let random = Scalar::lagrange_interpolation(&indices, &nonce_shares)?;
-        let public_random = Point::generator(&random.scheme()).mul(&random)?;
-
-        let challenge = self.compute_challenge(msg, &public_random)?;
-        let own_sig = self.calculate_signature(&challenge, &own_nonce_share)?;
+        let challenge = self.compute_challenge(msg, &random_point)?;
+        let own_sig = self.calculate_signature(&random_share, &challenge)?;
 
         self.publish_signature(id.clone(), own_sig.clone()).await?;
         let result = self.collector.query_signature_share(id.clone()).await?;
@@ -156,7 +140,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
                 let (indices, shares) = self.get_indices_and_shares(shares);
 
                 let sig = Scalar::lagrange_interpolation(&indices, &shares)?;
-                let sig = Signature::new(sig, public_random);
+                let sig = Signature::new(sig, random_point);
 
                 Ok(SignResult::Success(sig))
             }
@@ -171,6 +155,7 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
         map: HashMap<libp2p::PeerId, Scalar>,
     ) -> (Vec<u16>, Vec<Scalar>) {
         let peer_index = self.peer_index.as_ref().expect("Peer index is not set");
+
         let mut indices = Vec::new();
         let mut shares = Vec::new();
 
@@ -193,47 +178,33 @@ impl<D: Dkg_, T: Transport> Schnorr<D, T> {
             .map_err(|e| Error::Dkg(e.to_string()))?;
 
         match result {
-            GenerateResult::Success { secret, .. } => Ok(RandomGenerateResult::Success(secret)),
+            GenerateResult::Success {
+                secret,
+                partial_publics,
+            } => {
+                let random_point =
+                    Point::sum(partial_publics.values().map(|p| p.first().unwrap()))?;
+                Ok(RandomGenerateResult::Success((secret, random_point)))
+            }
             GenerateResult::Failure { invalid_peers } => {
                 Ok(RandomGenerateResult::Failure(invalid_peers))
             }
         }
     }
 
-    async fn publish_nonce_share(&self, id: Vec<u8>, random: Scalar) -> Result<()> {
-        let payload = gossipsub::Payload::TssNonceShare {
-            id: id.clone(),
-            share: random,
-        };
-
-        self.transport
-            .publish(&self.config.topic, payload)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn collect_nonce_share(&self, id: Vec<u8>) -> Result<CollectionResult> {
-        self.collector
-            .query_nonce_shares(id)
-            .await
-            .map_err(Error::from)
-    }
-
-    fn compute_challenge(&self, msg: &[u8], public_random: &Point) -> Result<Scalar> {
+    fn compute_challenge(&self, msg: &[u8], random_point: &Point) -> Result<Scalar> {
         let global_pk = self
             .global_pk
             .as_ref()
             .expect("Global public key is not set");
-        calculate_challenge(msg, public_random, global_pk)
+        calculate_challenge(msg, random_point, global_pk)
     }
 
-    fn calculate_signature(&self, challenge: &Scalar, own_random_share: &Scalar) -> Result<Scalar> {
+    fn calculate_signature(&self, random_share: &Scalar, challenge: &Scalar) -> Result<Scalar> {
         let secret = self.secret.as_ref().expect("Secret key is not set");
-        own_random_share
-            .add(&challenge.mul(secret)?)
-            .map_err(Error::from)
+        random_share
+            .sub(&(challenge.mul(secret)?))
+            .map_err(Error::from) // random_share - secret * challenge
     }
 
     async fn publish_signature(&self, id: Vec<u8>, signature: Scalar) -> Result<()> {
