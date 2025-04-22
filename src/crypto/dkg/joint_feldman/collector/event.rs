@@ -309,8 +309,6 @@ impl Event {
     }
 
     fn handle_invalid_peer(&mut self, peer_id: libp2p::PeerId) -> ActionNeeded {
-        println!("Invalid peer: {peer_id}");
-
         self.set_status_to_verifying();
         self.invalid_peers.insert(peer_id);
         self.peer_infos.remove(&peer_id);
