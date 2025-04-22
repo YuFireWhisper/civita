@@ -42,7 +42,7 @@ async fn generate_valid_signature() {
 
 fn extract_shares_and_public(
     results: HashMap<u16, GenerateResult>,
-) -> (Vec<Scalar>, IndexedMap<libp2p::PeerId, Vec<Point>>) {
+) -> (HashMap<u16, Scalar>, IndexedMap<libp2p::PeerId, Vec<Point>>) {
     assert!(
         results
             .values()
@@ -50,12 +50,7 @@ fn extract_shares_and_public(
         "All results must be successful"
     );
 
-    let scheme = match results.values().next().unwrap() {
-        GenerateResult::Success { secret, .. } => secret.scheme(),
-        _ => unreachable!(),
-    };
-
-    let mut secrets = vec![Scalar::zero(scheme); results.len()];
+    let mut secrets = HashMap::with_capacity(results.len());
     let first_public = match &results.values().next().unwrap() {
         GenerateResult::Success {
             partial_publics, ..
@@ -73,13 +68,13 @@ fn extract_shares_and_public(
                     partial_publics == first_public,
                     "All public keys must be identical"
                 );
-                secrets[i as usize - 1] = secret;
+                secrets.insert(i, secret.clone());
             }
             _ => unreachable!(),
         }
     }
 
-    (secrets, first_public.clone())
+    (secrets, first_public)
 }
 
 fn calculate_public(partial_publics: &IndexedMap<libp2p::PeerId, Vec<Point>>) -> Point {
