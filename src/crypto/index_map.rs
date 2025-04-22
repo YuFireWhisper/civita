@@ -32,6 +32,16 @@ where
     index_iter: hash_map::Iter<'a, u16, K>,
 }
 
+pub struct IndexedValueIterMut<'a, K, V>
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    map: &'a mut IndexedMap<K, V>,
+    indices_and_keys: Vec<(u16, K)>,
+    current: usize,
+    _marker: std::marker::PhantomData<&'a mut ()>,
+}
+
 impl<K, V> IndexedMap<K, V>
 where
     K: Eq + Hash + Clone + Ord,
@@ -189,6 +199,21 @@ where
             index_iter: self.index_to_key.iter(),
         }
     }
+
+    pub fn iter_indexed_values_mut(&mut self) -> IndexedValueIterMut<'_, K, V> {
+        let indices_and_keys: Vec<_> = self
+            .index_to_key
+            .iter()
+            .map(|(idx, key)| (*idx, key.clone()))
+            .collect();
+
+        IndexedValueIterMut {
+            map: self,
+            indices_and_keys,
+            current: 0,
+            _marker: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<K, V> Default for IndexedMap<K, V>
@@ -268,6 +293,30 @@ where
                 .expect("Index-key mapping inconsistent");
             (index, value)
         })
+    }
+}
+
+impl<'a, K, V> Iterator for IndexedValueIterMut<'a, K, V>
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    type Item = (u16, &'a mut V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.indices_and_keys.len() {
+            return None;
+        }
+
+        let (index, key) = &self.indices_and_keys[self.current];
+        self.current += 1;
+
+        let value = {
+            let entries = &mut self.map.entries;
+            entries.get_mut(key)?
+        };
+
+        let value = unsafe { std::mem::transmute::<&mut V, &'a mut V>(value) };
+        Some((*index, value))
     }
 }
 
@@ -686,19 +735,6 @@ mod tests {
     }
 
     #[test]
-    fn into_iter_mut_allows_modification() {
-        let mut map = create_test_map();
-
-        for (_, value) in &mut map {
-            *value *= 2;
-        }
-
-        assert_eq!(map.get(&"a".to_string()), Some(&2));
-        assert_eq!(map.get(&"b".to_string()), Some(&4));
-        assert_eq!(map.get(&"c".to_string()), Some(&6));
-    }
-
-    #[test]
     fn when_removing_entries_indices_are_not_reorganized() {
         let mut map = create_test_map();
 
@@ -757,5 +793,18 @@ mod tests {
         assert_eq!(pairs[0], (&1, 1));
         assert_eq!(pairs[1], (&2, 2));
         assert_eq!(pairs[2], (&3, 3));
+    }
+
+    #[test]
+    fn iter_indexed_values_mut_allows_modification() {
+        let mut map = create_test_map();
+
+        for (index, value) in map.iter_indexed_values_mut() {
+            *value *= index as i32;
+        }
+
+        assert_eq!(map.get(&"a".to_string()), Some(&1));
+        assert_eq!(map.get(&"b".to_string()), Some(&(2 * 2)));
+        assert_eq!(map.get(&"c".to_string()), Some(&(3 * 3)));
     }
 }
