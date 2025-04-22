@@ -107,8 +107,6 @@ impl<T: Transport + 'static> JointFeldman<T> {
         &mut self,
         peer_pks: IndexedMap<libp2p::PeerId, PublicKey>,
     ) -> Result<()> {
-        assert!(peer_pks.len() > 3, "ids length must be greater than 3");
-
         self.collector.stop();
         self.collector.start(peer_pks.clone()).await?;
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
