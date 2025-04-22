@@ -12,7 +12,7 @@ use crate::{
         index_map::IndexedMap,
         keypair::{PublicKey, SecretKey},
         primitives::{
-            algebra::{self, Point, Scalar},
+            algebra::{self, Scalar},
             vss::{
                 decrypted_share::{self},
                 Vss,
@@ -107,10 +107,9 @@ impl<T: Transport + 'static> JointFeldman<T> {
         &mut self,
         peer_pks: IndexedMap<libp2p::PeerId, PublicKey>,
     ) -> Result<()> {
-        assert!(peer_pks.len() > 1, "ids length must be greater than 1");
-
         self.collector.stop();
         self.collector.start(peer_pks.clone()).await?;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         self.peer_pks = Some(peer_pks);
         Ok(())
     }
@@ -121,7 +120,7 @@ impl<T: Transport + 'static> JointFeldman<T> {
         let peers_len = self.peers_len()?;
         let threshold = self.config.threshold_counter.call(peers_len);
         let (decrypted_shares, commitments) =
-            Vss::share(&self.config.crypto_scheme, threshold - 1, peers_len);
+            Vss::share(&self.config.crypto_scheme, threshold, peers_len);
 
         let peer_pks = self.peer_pks()?;
         self.distributor
@@ -136,17 +135,9 @@ impl<T: Transport + 'static> JointFeldman<T> {
         match result {
             event::Output::Success { shares, comms } => {
                 let share = Scalar::sum(shares.iter())?;
-                let public = Point::sum(
-                    comms
-                        .values()
-                        .map(|p| p.first().expect("Point is not empty")),
-                )
-                .map_err(Error::from)?;
-
                 Ok(GenerateResult::Success {
                     secret: share,
-                    public,
-                    partial_public: comms,
+                    partial_publics: comms,
                 })
             }
             event::Output::Failure { invalid_peers } => {

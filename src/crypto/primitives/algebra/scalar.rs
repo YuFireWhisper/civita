@@ -148,6 +148,15 @@ impl Scalar {
         }
     }
 
+    pub fn sub(&self, other: &Self) -> Result<Self> {
+        if !self.is_same_type(other) {
+            return Err(Error::InconsistentVariants);
+        }
+        match (self, other) {
+            (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2)) => Ok(Scalar::Secp256k1(s1 - s2)),
+        }
+    }
+
     pub fn mul(&self, scalar: &Self) -> Result<Self> {
         if !self.is_same_type(scalar) {
             return Err(Error::InconsistentVariants);
@@ -472,6 +481,21 @@ mod tests {
             (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2)) => {
                 let expected_sum = Scalar::Secp256k1(s1 + s2);
                 assert_eq!(sum, expected_sum);
+            }
+        }
+    }
+
+    #[test]
+    fn subtraction_of_scalars() {
+        let scalar1 = Scalar::random(&DEFAULT_SCHEME);
+        let scalar2 = Scalar::random(&DEFAULT_SCHEME);
+
+        let result = scalar1.sub(&scalar2).unwrap();
+
+        match (scalar1, scalar2) {
+            (Scalar::Secp256k1(s1), Scalar::Secp256k1(s2)) => {
+                let expected_result = Scalar::Secp256k1(s1 - s2);
+                assert_eq!(result, expected_result);
             }
         }
     }

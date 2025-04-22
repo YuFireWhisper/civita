@@ -91,6 +91,8 @@ impl Session {
             return;
         }
 
+        self.completed = true;
+
         if self.has_threshold_reached() {
             let result = CollectionResult::Success(self.shares.clone());
             if let Err(e) = callback.send(result) {
@@ -103,8 +105,6 @@ impl Session {
                 log::warn!("Failed to send collection result: {:?}", e);
             }
         }
-
-        self.completed = true;
     }
 }
 

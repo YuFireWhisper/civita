@@ -98,6 +98,15 @@ impl Point {
         }
     }
 
+    pub fn sub(&self, other: &Self) -> Result<Self> {
+        if !self.is_same_type(other) {
+            return Err(Error::InconsistentVariants);
+        }
+        match (self, other) {
+            (Point::Secp256k1(s), Point::Secp256k1(o)) => Ok(Point::Secp256k1(s - o)),
+        }
+    }
+
     pub fn mul(&self, scalar: &Scalar) -> Result<Self> {
         if !self.is_same_type_scalar(scalar) {
             return Err(Error::InconsistentVariants);
@@ -243,6 +252,20 @@ mod tests {
         match (point1, point2) {
             (Point::Secp256k1(p1), Point::Secp256k1(p2)) => {
                 assert_eq!(sum, Point::Secp256k1(p1 + p2));
+            }
+        }
+    }
+
+    #[test]
+    fn subtract_points() {
+        let point1 = Point::random(&DEFAULT_SCHEME);
+        let point2 = Point::random(&DEFAULT_SCHEME);
+
+        let result = point1.sub(&point2).unwrap();
+
+        match (point1, point2) {
+            (Point::Secp256k1(p1), Point::Secp256k1(p2)) => {
+                assert_eq!(result, Point::Secp256k1(p1 - p2));
             }
         }
     }

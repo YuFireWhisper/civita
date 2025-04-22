@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use civita::crypto::{
     dkg::GenerateResult,
     primitives::algebra::{Point, Scalar},
@@ -7,7 +9,7 @@ use crate::common::joint_feldman;
 
 mod common;
 
-const NUM_PEERS: u16 = 3;
+const NUM_PEERS: u16 = 9;
 const ID: &[u8] = b"test id";
 
 #[tokio::test]
@@ -18,38 +20,75 @@ async fn generate_valid_secret_and_commitment() {
 
     let (secrets, public) = extract_shares_and_public(results);
     let threshold = ctx.threshold();
+    println!("Threshold: {}", threshold);
 
     assert_eq!(secrets.len(), NUM_PEERS as usize);
     assert!(verify_secret(&secrets, &public, NUM_PEERS)); // full
     assert!(verify_secret(&secrets, &public, threshold)); // equal
-    assert!(!verify_secret(&secrets, &public, NUM_PEERS - 1)); // not enough
+    assert!(!verify_secret(&secrets, &public, threshold - 1)); // not enough
 }
 
-fn extract_shares_and_public(results: Vec<GenerateResult>) -> (Vec<Scalar>, Point) {
+#[tokio::test]
+async fn generate_multiple_times() {
+    const TIMES: usize = 2;
+
+    let mut ctx = joint_feldman::Context::new(NUM_PEERS).await;
+    ctx.set_peers().await;
+
+    for i in 0..TIMES {
+        let mut id = ID.to_vec();
+        id.push(i as u8);
+        let results = ctx.generate(id).await;
+
+        let (secrets, public) = extract_shares_and_public(results);
+        let threshold = ctx.threshold();
+
+        assert_eq!(secrets.len(), NUM_PEERS as usize);
+        assert!(verify_secret(&secrets, &public, NUM_PEERS)); // full
+        assert!(verify_secret(&secrets, &public, threshold)); // equal
+        assert!(!verify_secret(&secrets, &public, threshold - 1)); // not enough
+    }
+}
+
+fn extract_shares_and_public(results: HashMap<u16, GenerateResult>) -> (Vec<Scalar>, Point) {
     assert!(
         results
-            .iter()
+            .values()
             .all(|r| matches!(r, GenerateResult::Success { .. })),
         "All results must be successful"
     );
 
-    let mut secrets = Vec::with_capacity(results.len());
-    let first_public = match &results[0] {
-        GenerateResult::Success { public, .. } => public.clone(),
+    let scheme = match results.values().next().unwrap() {
+        GenerateResult::Success { secret, .. } => secret.scheme(),
         _ => unreachable!(),
     };
 
-    for result in results {
+    let mut secrets = vec![Scalar::zero(scheme); results.len()];
+    let first_partial_publics = match &results.values().next().unwrap() {
+        GenerateResult::Success {
+            partial_publics, ..
+        } => partial_publics.clone(),
+        _ => unreachable!(),
+    };
+
+    for (i, result) in results.into_iter() {
         match result {
-            GenerateResult::Success { secret, public, .. } => {
-                assert!(public == first_public, "All public keys must be identical");
-                secrets.push(secret);
+            GenerateResult::Success {
+                secret,
+                partial_publics,
+            } => {
+                assert!(
+                    partial_publics == first_partial_publics,
+                    "All public keys must be identical"
+                );
+                secrets[i as usize - 1] = secret;
             }
             _ => unreachable!(),
         }
     }
 
-    (secrets, first_public.clone())
+    let public = Point::sum(first_partial_publics.values().map(|ps| ps.first().unwrap())).unwrap();
+    (secrets, public)
 }
 
 fn verify_secret(shares: &[Scalar], public: &Point, n: u16) -> bool {

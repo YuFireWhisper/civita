@@ -143,7 +143,7 @@ mod tests {
         IndexedMap<libp2p::PeerId, Scalar>,
         u16,
     ) {
-        let threshold = 2 * n / 3;
+        let threshold = 2 * n / 3 + 1;
         let mut peer_ids = generate_peer_ids(n);
         peer_ids.sort();
 
@@ -188,14 +188,14 @@ mod tests {
         let context = Context::new(threshold, peer_pks.clone());
 
         assert_eq!(context.threshold, threshold);
-        assert_eq!(context.global_comms.len(), NUM_PEERS as usize);
+        assert_eq!(context.global_comms.len(), threshold as usize);
         assert_eq!(context.peers_index.len(), NUM_PEERS);
     }
 
     #[test]
     fn calculate_global_comms_should_sum_all_points() {
         let (peer_pks, _, threshold) = setup(NUM_PEERS);
-        let mut expected_global_comms = vec![Point::zero(SCHEME); NUM_PEERS as usize];
+        let mut expected_global_comms = vec![Point::zero(SCHEME); threshold as usize];
         for (_, pks) in peer_pks.iter() {
             for (i, pk) in pks.iter().enumerate() {
                 expected_global_comms[i] = expected_global_comms[i].add(pk).unwrap();

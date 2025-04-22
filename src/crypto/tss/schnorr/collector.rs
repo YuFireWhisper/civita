@@ -95,7 +95,7 @@ impl<T: Transport + 'static> Collector<T> {
         let (action_tx, action_rx) = tokio::sync::mpsc::channel(100);
         self.action_tx = Some(action_tx);
 
-        let threshold = self.config.threshold_counter.call(partial_pks.len()) - 1; // Exclude self
+        let threshold = self.config.threshold_counter.call(partial_pks.len()) - 1;
         let ctx = Context::new(threshold, partial_pks);
 
         tokio::spawn(async move {
@@ -122,7 +122,7 @@ impl<T: Transport + 'static> Collector<T> {
                 Some(action) = action_rx.recv() => {
                     match action {
                         Command::Query { id, immediate_return, callback } => {
-                            Self::process_query_nonce_shares(&ctx, id, immediate_return, callback);
+                            Self::process_query_shares(&ctx, id, immediate_return, callback);
                         }
                         Command::Shutdown => {
                             log::info!("Shutting down collector");
@@ -140,14 +140,22 @@ impl<T: Transport + 'static> Collector<T> {
     }
 
     fn process_message(ctx: &Context, message: gossipsub::Message) {
-        if let gossipsub::Payload::TssNonceShare { id, share } = message.payload {
-            let id = SessionId::NonceShare(id);
-            let peer_id = message.source;
-            ctx.add_share(id, peer_id, share);
+        match message.payload {
+            gossipsub::Payload::TssNonceShare { id, share } => {
+                let id = SessionId::NonceShare(id);
+                let peer_id = message.source;
+                ctx.add_share(id, peer_id, share);
+            }
+            gossipsub::Payload::TssSignatureShare { id, share } => {
+                let id = SessionId::SignatureShare(id);
+                let peer_id = message.source;
+                ctx.add_share(id, peer_id, share);
+            }
+            _ => {}
         }
     }
 
-    fn process_query_nonce_shares(
+    fn process_query_shares(
         ctx: &Context,
         id: SessionId,
         immediate_return: bool,
@@ -163,15 +171,6 @@ impl<T: Transport + 'static> Collector<T> {
     pub async fn stop(&mut self) {
         if let Some(action_tx) = self.action_tx.take() {
             let _ = action_tx.send(Command::Shutdown).await;
-        }
-    }
-
-    pub async fn query_nonce_shares(&self, id: Vec<u8>) -> Result<CollectionResult> {
-        let id = SessionId::NonceShare(id);
-        if let Some(result) = self.query_with_timeout(id.clone()).await? {
-            Ok(result)
-        } else {
-            return Ok(self.query_with_force(id).await);
         }
     }
 
@@ -324,33 +323,6 @@ mod tests {
         let result = collector.start(partial_pks).await;
 
         assert!(matches!(result, Err(Error::Transport(_))));
-    }
-
-    #[tokio::test]
-    async fn query_nonce_return_none_on_timeout() {
-        let mut transport = MockTransport::new();
-        transport
-            .expect_listen_on_topic()
-            .with(eq(TOPIC.to_string()))
-            .times(1)
-            .returning(|_| {
-                let (_, rx) = tokio::sync::mpsc::channel(1);
-                Ok(rx)
-            });
-
-        let transport = Arc::new(transport);
-        let config = create_config();
-        let mut collector = Collector::new(transport.clone(), config);
-        let partial_pks = generate_peers(NUM_PEERS);
-
-        collector.start(partial_pks).await.unwrap();
-
-        let result = collector.query_nonce_shares(ID.to_vec()).await;
-
-        assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), CollectionResult::Failure(_)));
-
-        collector.stop().await;
     }
 
     #[tokio::test]
