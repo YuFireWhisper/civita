@@ -27,9 +27,9 @@ impl Vss {
 
     fn generate_secp256k1(threshold: u16, num_shares: u16) -> (DecryptedShares, Vec<Point>) {
         let degree = threshold - 1;
+
         let raw_secret = CurvScalar::<CurvSecp256k1>::random();
-        let (vss, raw_shares) =
-            VerifiableSS::<_, Sha256>::share(degree, num_shares, &raw_secret);
+        let (vss, raw_shares) = VerifiableSS::<_, Sha256>::share(degree, num_shares, &raw_secret);
         let derived_shares = DecryptedShares::from_scalars(raw_shares.iter().map(|s| s.to_owned()));
         let commitments = vss
             .commitments
