@@ -23,7 +23,7 @@ pub mod signature;
 
 type Result<T> = std::result::Result<T, Error>;
 
-const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 const DEFAULT_TOPIC: &str = "tss/schnorr";
 
 #[derive(Debug)]
