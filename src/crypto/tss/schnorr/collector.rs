@@ -174,15 +174,6 @@ impl<T: Transport + 'static> Collector<T> {
         }
     }
 
-    pub async fn query_nonce_shares(&self, id: Vec<u8>) -> Result<CollectionResult> {
-        let id = SessionId::NonceShare(id);
-        if let Some(result) = self.query_with_timeout(id.clone()).await? {
-            Ok(result)
-        } else {
-            return Ok(self.query_with_force(id).await);
-        }
-    }
-
     async fn query_with_timeout(&self, id: SessionId) -> Result<Option<CollectionResult>> {
         let action_tx = self.action_tx.as_ref().expect("Collector is not started");
 
@@ -332,33 +323,6 @@ mod tests {
         let result = collector.start(partial_pks).await;
 
         assert!(matches!(result, Err(Error::Transport(_))));
-    }
-
-    #[tokio::test]
-    async fn query_nonce_return_none_on_timeout() {
-        let mut transport = MockTransport::new();
-        transport
-            .expect_listen_on_topic()
-            .with(eq(TOPIC.to_string()))
-            .times(1)
-            .returning(|_| {
-                let (_, rx) = tokio::sync::mpsc::channel(1);
-                Ok(rx)
-            });
-
-        let transport = Arc::new(transport);
-        let config = create_config();
-        let mut collector = Collector::new(transport.clone(), config);
-        let partial_pks = generate_peers(NUM_PEERS);
-
-        collector.start(partial_pks).await.unwrap();
-
-        let result = collector.query_nonce_shares(ID.to_vec()).await;
-
-        assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), CollectionResult::Failure(_)));
-
-        collector.stop().await;
     }
 
     #[tokio::test]
