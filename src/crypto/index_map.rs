@@ -4,10 +4,12 @@ use std::{
     hash::Hash,
 };
 
+use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Encode, Decode)]
 #[derive(PartialEq, Eq)]
 #[derive(Serialize, Deserialize)]
 pub struct IndexedMap<K, V>

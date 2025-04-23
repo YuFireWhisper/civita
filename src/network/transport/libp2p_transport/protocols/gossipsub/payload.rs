@@ -1,17 +1,16 @@
 use std::collections::HashSet;
 
-use libp2p::{gossipsub::MessageId, PeerId};
+use libp2p::gossipsub::MessageId;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    crypto::{
-        dkg::Data,
-        primitives::{
-            algebra::{Point, Scalar},
-            vss::{encrypted_share::EncryptedShares, DecryptedShares},
-        },
+use crate::crypto::{
+    index_map::IndexedMap,
+    keypair::PublicKey,
+    primitives::{
+        algebra::{Point, Scalar},
+        vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
-    network::transport::libp2p_transport::protocols::kad,
+    tss::Signature,
 };
 
 #[derive(Clone)]
@@ -62,24 +61,20 @@ pub enum Payload {
         share: Scalar,
     },
 
-    CommitteeSignatureRequest(kad::Payload),
-
-    CommitteeSignatureResponse {
-        request_msg_id: MessageId,
-        partial_sig: Data,
+    CommitteeCandiates {
+        candidates: IndexedMap<libp2p::PeerId, PublicKey>,
+        signature: Signature,
     },
 
-    CommitteeChange {
-        new_members: HashSet<PeerId>,
-        new_committee_pub_key: Vec<u8>,
-        signature: Data,
+    CommitteeGenerateSuccess {
+        candidates_hash: Vec<u8>,
+        committee_pub_key: Point,
+        signature: Signature,
     },
 
-    CommitteeCandidateVote(HashSet<PeerId>),
-
-    CommitteeCandidateResult {
-        new_members_set_hash: Vec<u8>,
-        signature: Data,
+    CommitteeGenerateFailure {
+        candidates_hash: Vec<u8>,
+        invalid_peers: HashSet<libp2p::PeerId>,
     },
 
     // For testing

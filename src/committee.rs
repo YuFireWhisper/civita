@@ -1,339 +1,256 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
-use libp2p::{
-    gossipsub::MessageId,
-    identity::{DecodingError, PublicKey},
-    PeerId,
-};
-use log::error;
-use thiserror::Error;
-use tokio::sync::Mutex;
+use sha2::{Digest, Sha256};
+use tokio::sync::{mpsc::Receiver as TokioReceiver, Mutex as TokioMutex, RwLock as TokioRwLock};
 
 use crate::{
-    committee::{
-        builder::Component, message_channels::MessageChannels,
-        signature_collector::SignatureResult, state::State, timer::Timer,
+    committee::config::Config,
+    crypto::{
+        dkg::{self, Dkg_},
+        index_map::IndexedMap,
+        keypair::PublicKey,
+        primitives::algebra::{self, Point, Scalar},
+        tss::{Signature, Tss},
     },
-    crypto::dkg::{Data, Dkg},
     network::transport::{
-        libp2p_transport::protocols::{
-            gossipsub::{Message, Payload},
-            kad,
-        },
+        libp2p_transport::protocols::gossipsub::{Message, Payload},
         Transport,
     },
 };
 
-pub mod builder;
 pub mod config;
-
-mod message_channels;
-mod signature_collector;
-mod state;
 mod timer;
-
-pub use builder::Builder;
-pub use config::Config;
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub const COMMITTEE_TOPIC: &str = "committee";
-pub const SIGNATURE_REQUEST_TOPIC: &str = "signature_request";
-
-#[derive(Debug, Error)]
+#[derive(Debug)]
+#[derive(thiserror::Error)]
 pub enum Error {
-    #[error("Failed to create DKG: {0}")]
+    #[error("Signature verification failed, message from: {0}")]
+    SignatureVerificationFailed(libp2p::PeerId),
+
+    #[error("{0}")]
     Dkg(String),
+
+    #[error("{0}")]
+    Encode(#[from] bincode::error::EncodeError),
+
     #[error("{0}")]
     Transport(String),
+
     #[error("{0}")]
-    KadPayload(#[from] kad::payload::Error),
-    #[error("Failed to decode public key: {0}")]
-    DecodingPublicKey(#[from] DecodingError),
-    #[error("Peer info verification failed. Source PeerId: {0}")]
-    PeerInfoVerificationFailed(PeerId),
-    #[error("Failed to decode payload: {0}. Source PeerId: {1}")]
-    DecodePayload(String, PeerId),
-    #[error("Unexpected payload type")]
-    UnexpectedPayloadType,
-    #[error("Failed to get peer index")]
-    PeerIndexNotFound,
-    #[error("Signature channel closed")]
-    SignatureChannelClosed,
-    #[error("Committee channel closed")]
-    CommitteeChannelClosed,
-    #[error("Timer channel closed")]
-    TimerChannelClosed,
-    #[error("Failed to aggregate signature")]
-    SignatureAggregation(String),
+    Algebra(#[from] algebra::Error),
+
+    #[error("{0}")]
+    Tss(String),
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum Action {
     Start,
     Stop,
 }
 
-pub struct Committee<T, D>
+pub struct Committee<T, D, S>
 where
     T: Transport + Send + Sync + 'static,
-    D: Dkg + Send + Sync + 'static,
+    D: Dkg_ + Send + Sync + 'static,
+    S: Tss + 'static,
 {
     transport: Arc<T>,
-    dkg: D,
+    dkg: TokioRwLock<D>,
+    tss: TokioRwLock<S>,
+    committee_pk: TokioRwLock<Point>,
     config: Config,
-    state: Mutex<State>,
-    timer: Mutex<Timer<Action>>,
-    channels: Mutex<MessageChannels>,
-    is_member: AtomicBool,
-    self_peer: PeerId,
+    handler: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-impl<T, D> Committee<T, D>
+impl<T, D, S> Committee<T, D, S>
 where
     T: Transport + Send + Sync + 'static,
-    D: Dkg + Send + Sync + 'static,
+    D: Dkg_ + Send + Sync + 'static,
+    S: Tss + Send + Sync + 'static,
 {
-    async fn from_component(component: Component<T, D>) -> Result<Arc<Self>> {
-        let transport = component.transport;
-        let dkg = component.dkg;
-        let config = component.config;
+    pub async fn new(
+        transport: Arc<T>,
+        dkg: D,
+        tss: S,
+        committee_pk: Point,
+        config: Config,
+    ) -> Result<Arc<Self>> {
+        let dkg = TokioRwLock::new(dkg);
+        let tss = TokioRwLock::new(tss);
+        let committee_pk = TokioRwLock::new(committee_pk);
 
-        let state = Mutex::new(State::new(config.threshold_counter.clone_box()));
-        let (timer, timer_rx) = Timer::new().await;
-        let timer = Mutex::new(timer);
-        let committee_rx = transport
-            .listen_on_topic(COMMITTEE_TOPIC)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-        let sig_req_rx = transport
-            .listen_on_topic(SIGNATURE_REQUEST_TOPIC)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-        let channels = Mutex::new(MessageChannels::new(committee_rx, sig_req_rx, timer_rx));
-        let is_member = AtomicBool::new(false);
-        let self_peer = transport.self_peer();
-
-        let committee = Arc::new(Self {
+        let self_arc = Arc::new(Self {
             transport,
             dkg,
+            tss,
+            committee_pk,
             config,
-            state,
-            timer,
-            channels,
-            is_member,
-            self_peer,
+            handler: TokioMutex::new(None),
         });
 
-        committee.clone().run().await?;
+        self_arc.clone().start().await?;
 
-        Ok(committee)
+        Ok(self_arc)
     }
 
-    async fn run(self: Arc<Self>) -> Result<()> {
-        tokio::spawn(async move {
-            if let Err(e) = self.process_messages().await {
-                error!("Committee processing error: {}", e);
+    async fn start(self: Arc<Self>) -> Result<()> {
+        let gossipsub_rx = self
+            .transport
+            .listen_on_topic(&self.config.topic)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let self_arc = Arc::clone(&self);
+        let handler = tokio::spawn({
+            async move {
+                self_arc.run_loop(gossipsub_rx).await;
             }
         });
+
+        self.handler.lock().await.replace(handler);
         Ok(())
     }
 
-    async fn process_messages(self: &Arc<Self>) -> Result<()> {
-        let channels = self.channels.lock().await;
-        let mut committee_rx = channels.lock_committee_rx().await;
-        let mut sig_req_rx = channels.lock_sig_req_rx().await;
-        let mut timer_rx = channels.lock_timer_rx().await;
-
+    async fn run_loop(self: Arc<Self>, mut gossipsub_rx: TokioReceiver<Message>) {
         loop {
             tokio::select! {
-                Some(msg) = committee_rx.recv() => {
-                    self.handle_committee_message(msg).await?;
+                Some(msg) = gossipsub_rx.recv() => {
+                    if let Err(e) = self.process_message(msg).await {
+                        log::error!("Error processing message: {:?}", e);
+                    }
                 }
-                Some(action) = timer_rx.recv() => {
-                    self.handle_timer_action(action).await?;
+                else => {
+                    break;
                 }
-                Some(msg) = sig_req_rx.recv() => {
-                    self.handle_signature_request(msg).await?;
-                }
-                else => break,
             }
         }
-
-        Err(Error::CommitteeChannelClosed)
     }
 
-    async fn handle_committee_message(self: &Arc<Self>, msg: Message) -> Result<()> {
+    async fn process_message(self: &Arc<Self>, msg: Message) -> Result<()> {
         match msg.payload {
-            Payload::CommitteeChange {
-                new_members,
-                new_committee_pub_key,
-                ..
+            Payload::CommitteeCandiates {
+                candidates,
+                signature,
             } => {
-                let mut state = self.state.lock().await;
-                state.update_members(new_members.clone());
-                state.set_pub_key(new_committee_pub_key);
-
-                if new_members.contains(&self.self_peer) {
-                    let timer = self.timer.lock().await;
-                    timer
-                        .schedule(Action::Start, self.config.committee_change_buffer_time)
-                        .await;
-                }
-
-                Ok(())
+                self.process_new_candidates(msg.source, candidates, &signature)
+                    .await
             }
             _ => Ok(()),
         }
     }
 
-    async fn handle_timer_action(self: &Arc<Self>, action: Action) -> Result<()> {
-        match action {
-            Action::Start => {
-                self.is_member.store(true, Ordering::SeqCst);
-
-                let timer = self.timer.lock().await;
-                timer
-                    .schedule(Action::Stop, self.config.committee_term_duration)
-                    .await;
-            }
-            Action::Stop => {
-                self.is_member.store(false, Ordering::SeqCst);
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_signature_request(self: &Arc<Self>, msg: Message) -> Result<()> {
-        if !self.is_member.load(Ordering::SeqCst) {
+    async fn process_new_candidates(
+        self: &Arc<Self>,
+        source: libp2p::PeerId,
+        candidates: IndexedMap<libp2p::PeerId, PublicKey>,
+        signature: &Signature,
+    ) -> Result<()> {
+        if !candidates.contains_key(&self.transport.self_peer()) {
             return Ok(());
         }
 
-        match msg.payload {
-            Payload::CommitteeSignatureRequest(payload) => {
-                self.process_signature_reqeust(msg.message_id, payload)
-                    .await?;
-            }
-            Payload::CommitteeSignatureResponse {
-                request_msg_id,
-                partial_sig,
+        let bytes = bincode::serde::encode_to_vec(&candidates, bincode::config::standard())?;
+        let hash = Sha256::digest(&bytes).to_vec();
+
+        if !signature.verify(&hash, &*self.committee_pk.read().await) {
+            return Err(Error::SignatureVerificationFailed(source));
+        }
+
+        let result = {
+            let mut dkg = self.dkg.write().await;
+            dkg.set_peers(candidates.clone())
+                .await
+                .map_err(|e| Error::Dkg(e.to_string()))?;
+            dkg.generate(hash.clone()).await
+        }
+        .map_err(|e| Error::Dkg(e.to_string()))?;
+
+        match result {
+            dkg::GenerateResult::Success {
+                secret,
+                partial_publics,
             } => {
-                self.process_signature_response(request_msg_id, msg.source, partial_sig)
+                self.process_dkg_generate_success(hash, secret, partial_publics)
                     .await?;
             }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    async fn process_signature_reqeust(
-        self: &Arc<Self>,
-        msg_id: MessageId,
-        payload: kad::Payload,
-    ) -> Result<()> {
-        if let kad::Payload::PeerInfo { .. } = payload {
-            self.validate_peer_info(&payload).await?;
-        }
-
-        self.process_validated_signature_request(msg_id, payload)
-            .await
-    }
-
-    async fn validate_peer_info(self: &Arc<Self>, payload: &kad::Payload) -> Result<()> {
-        if let kad::Payload::PeerInfo { peer_id, pub_key } = payload {
-            let pub_key = PublicKey::try_decode_protobuf(pub_key)?;
-            let expected = PeerId::from_public_key(&pub_key);
-
-            if expected != *peer_id {
-                return Err(Error::PeerInfoVerificationFailed(*peer_id));
+            dkg::GenerateResult::Failure { invalid_peers } => {
+                self.process_dkg_generate_failure(hash, invalid_peers)
+                    .await?;
             }
         }
 
         Ok(())
     }
 
-    async fn process_validated_signature_request(
+    async fn process_dkg_generate_success(
         self: &Arc<Self>,
-        msg_id: MessageId,
-        kad_payload: kad::Payload,
+        candidates_hash: Vec<u8>,
+        secret: Scalar,
+        partial_publics: IndexedMap<libp2p::PeerId, Vec<Point>>,
     ) -> Result<()> {
-        let signature = self
-            .dkg
-            .sign(&msg_id.to_string().into_bytes(), &kad_payload.to_vec()?);
+        let public_key = Point::sum(
+            partial_publics
+                .values()
+                .map(|p| p.first().expect("Publics is empty")),
+        )?;
 
-        self.publish_signature(msg_id.clone(), signature.clone())
-            .await?;
-
-        self.process_signature_aggregation(msg_id, self.self_peer, signature, Some(kad_payload))
+        self.tss
+            .write()
             .await
-    }
+            .set_keypair(secret, partial_publics)
+            .await
+            .map_err(|e| Error::Tss(e.to_string()))?;
 
-    async fn publish_signature(
-        self: &Arc<Self>,
-        request_msg_id: MessageId,
-        partial_signature: Data,
-    ) -> Result<()> {
-        let payload = Payload::CommitteeSignatureResponse {
-            request_msg_id,
-            partial_sig: partial_signature,
+        let input = Self::generate_input(&candidates_hash, &public_key)?;
+
+        let signature = self
+            .tss
+            .read()
+            .await
+            .sign(candidates_hash.clone(), &input)
+            .await
+            .map_err(|e| Error::Tss(e.to_string()))?;
+
+        let payload = Payload::CommitteeGenerateSuccess {
+            candidates_hash,
+            committee_pub_key: public_key,
+            signature,
         };
 
         self.transport
-            .publish(SIGNATURE_REQUEST_TOPIC, payload)
+            .publish(&self.config.topic, payload)
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn process_signature_aggregation(
-        self: &Arc<Self>,
-        msg_id: MessageId,
-        peer: PeerId,
-        signature: Data,
-        payload: Option<kad::Payload>,
-    ) -> Result<()> {
-        let mut state = self.state.lock().await;
-
-        let index = state.get_peer_index(peer).ok_or(Error::PeerIndexNotFound)?;
-
-        if let Some(result) = state
-            .add_signature(msg_id.clone(), index, signature)
-            .or_else(|| payload.and_then(|p| state.set_payload(msg_id, p)))
-        {
-            drop(state);
-            self.finalize_aggregated_signature(result).await?;
-        }
 
         Ok(())
     }
 
-    async fn finalize_aggregated_signature(
+    fn generate_input(candidates_hash: &[u8], public_key: &Point) -> Result<Vec<u8>> {
+        let mut input = Vec::new();
+        input.extend_from_slice(candidates_hash);
+        input.extend_from_slice(&public_key.to_vec()?);
+        Ok(input)
+    }
+
+    async fn process_dkg_generate_failure(
         self: &Arc<Self>,
-        result: SignatureResult,
+        candidates_hash: Vec<u8>,
+        invalid_peers: HashSet<libp2p::PeerId>,
     ) -> Result<()> {
-        let aggregated_signature = self
-            .dkg
-            .aggregate(&result.indices, result.signatures)
-            .map_err(|e| Error::SignatureAggregation(e.to_string()))?;
+        let payload = Payload::CommitteeGenerateFailure {
+            candidates_hash,
+            invalid_peers,
+        };
 
         self.transport
-            .put(result.payload, aggregated_signature)
+            .publish(&self.config.topic, payload)
             .await
-            .map_err(|e| Error::Transport(e.to_string()))
-    }
+            .map_err(|e| Error::Transport(e.to_string()))?;
 
-    async fn process_signature_response(
-        self: &Arc<Self>,
-        msg_id: MessageId,
-        peer: PeerId,
-        signature: Data,
-    ) -> Result<()> {
-        self.process_signature_aggregation(msg_id, peer, signature, None)
-            .await
+        Ok(())
     }
 }
