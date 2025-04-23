@@ -33,8 +33,8 @@ pub enum Error {
     #[error("Publish error: {0}")]
     Publish(#[from] libp2p::gossipsub::PublishError),
 
-    #[error("Serialize error: {0}")]
-    Serialize(#[from] serde_json::Error),
+    #[error("{0}")]
+    Payload(#[from] payload::Error),
 
     #[error("Oneshot error: {0}")]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),

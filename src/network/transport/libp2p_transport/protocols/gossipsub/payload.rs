@@ -13,6 +13,13 @@ use crate::crypto::{
     tss::Signature,
 };
 
+#[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Encode(#[from] bincode::error::EncodeError),
+}
+
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
@@ -63,25 +70,58 @@ pub enum Payload {
 
     CommitteeCandiates {
         candidates: IndexedMap<libp2p::PeerId, PublicKey>,
-        signature: Signature,
+        signature: Option<Signature>,
     },
 
     CommitteeGenerateSuccess {
-        candidates_hash: Vec<u8>,
+        request_hash: Vec<u8>,
         committee_pub_key: Point,
-        signature: Signature,
     },
 
     CommitteeGenerateFailure {
-        candidates_hash: Vec<u8>,
+        request_hash: Vec<u8>,
         invalid_peers: HashSet<libp2p::PeerId>,
+    },
+
+    CommitteeChange {
+        members: IndexedMap<libp2p::PeerId, PublicKey>,
+        new_public_key: Point,
+        signature: Option<Signature>,
     },
 
     // For testing
     Raw(Vec<u8>),
+
+    RawWithSignature {
+        raw: Vec<u8>,
+        signature: Option<Signature>,
+    },
 }
 
 impl Payload {
+    pub fn take_signature(&mut self) -> Option<Signature> {
+        match self {
+            Payload::CommitteeCandiates { signature, .. } => signature.take(),
+            Payload::CommitteeChange { signature, .. } => signature.take(),
+            _ => None,
+        }
+    }
+
+    pub fn is_need_committee_signature(&self) -> bool {
+        matches!(
+            self,
+            Payload::CommitteeCandiates { .. } | Payload::CommitteeChange { .. }
+        )
+    }
+
+    pub fn set_signature(&mut self, sig: Signature) {
+        match self {
+            Payload::CommitteeCandiates { signature, .. } => *signature = Some(sig),
+            Payload::CommitteeChange { signature, .. } => *signature = Some(sig),
+            _ => {}
+        }
+    }
+
     pub fn create_vrf_proof(message_id: MessageId, public_key: Vec<u8>, proof: Vec<u8>) -> Payload {
         Payload::VrfProof {
             message_id,
@@ -94,16 +134,16 @@ impl Payload {
         Payload::VrfConsensus { message_id, random }
     }
 
-    pub fn to_vec(self) -> Result<Vec<u8>, serde_json::Error> {
+    pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
         self.try_into()
     }
 }
 
-impl TryInto<Vec<u8>> for Payload {
-    type Error = serde_json::Error;
+impl TryInto<Vec<u8>> for &Payload {
+    type Error = Error;
 
     fn try_into(self) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(&self)
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(Error::from)
     }
 }
 
@@ -119,13 +159,45 @@ impl TryFrom<Vec<u8>> for Payload {
 mod tests {
     use libp2p::gossipsub::MessageId;
 
-    use crate::network::transport::libp2p_transport::protocols::gossipsub::Payload;
+    use crate::{
+        crypto::{
+            index_map::IndexedMap,
+            primitives::algebra::{Point, Scalar},
+            tss::{schnorr::signature::Signature as SchnorrSignature, Signature},
+        },
+        network::transport::libp2p_transport::protocols::gossipsub::Payload,
+    };
 
     const MESSAGE_ID: &str = "MESSAGE_ID";
     const RANDOM: [u8; 32] = [1; 32];
 
     fn create_message_id() -> MessageId {
         MessageId::from(MESSAGE_ID)
+    }
+
+    fn create_signature() -> Signature {
+        Signature::Schnorr(SchnorrSignature::new(
+            Scalar::secp256k1_zero(),
+            Point::secp256k1_zero(),
+        ))
+    }
+
+    #[test]
+    fn field_should_be_none() {
+        let mut payload = Payload::CommitteeCandiates {
+            candidates: IndexedMap::new(),
+            signature: Some(create_signature()),
+        };
+        assert!(payload.take_signature().is_none());
+    }
+
+    #[test]
+    fn return_true_if_have_signature_field() {
+        let payload = Payload::CommitteeCandiates {
+            candidates: IndexedMap::new(),
+            signature: Some(create_signature()),
+        };
+        assert!(payload.is_need_committee_signature());
     }
 
     #[test]
