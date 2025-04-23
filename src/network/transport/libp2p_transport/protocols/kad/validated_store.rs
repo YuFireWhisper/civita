@@ -7,7 +7,10 @@ use std::{
 use libp2p::kad::{store::RecordStore, ProviderRecord, Record, RecordKey};
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::protocols::kad::{message, payload, Message};
+use crate::{
+    crypto::primitives::algebra::Point,
+    network::transport::libp2p_transport::protocols::kad::{message, payload, Message},
+};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -23,27 +26,28 @@ pub enum Error {
 #[derive(Debug)]
 #[derive(Default)]
 pub struct ValidatedStore {
-    pub_key: Vec<u8>,
+    pub_key: Option<Point>,
     records: HashMap<RecordKey, Record>,
     providers: HashMap<RecordKey, Vec<ProviderRecord>>,
 }
 
 impl ValidatedStore {
-    pub fn set_pub_key(&mut self, pub_key: Vec<u8>) {
-        self.pub_key = pub_key;
+    pub fn set_pub_key(&mut self, pub_key: Point) {
+        self.pub_key = Some(pub_key);
     }
 
     fn validate_record(&self, record: &Record) -> Result<bool> {
-        if self.pub_key.is_empty() {
-            return Ok(false);
-        }
+        let pub_key = match self.pub_key {
+            Some(ref key) => key,
+            None => return Ok(false),
+        };
 
         let message = Message::from_bytes(&record.value)?;
 
         let signature = message.signature;
         let raw_message = message.payload.to_vec()?;
 
-        Ok(signature.validate(&raw_message, &self.pub_key))
+        Ok(signature.verify(&raw_message, pub_key))
     }
 }
 

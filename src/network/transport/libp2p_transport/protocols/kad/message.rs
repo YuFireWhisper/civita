@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{crypto::dkg::Data, network::transport::libp2p_transport::protocols::kad::Payload};
+use crate::{
+    crypto::tss::Signature, network::transport::libp2p_transport::protocols::kad::Payload,
+};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -18,11 +20,11 @@ pub enum Error {
 #[derive(Serialize, Deserialize)]
 pub struct Message {
     pub payload: Payload,
-    pub signature: Data,
+    pub signature: Signature,
 }
 
 impl Message {
-    pub fn new(payload: Payload, signature: Data) -> Self {
+    pub fn new(payload: Payload, signature: Signature) -> Self {
         Self { payload, signature }
     }
 
@@ -48,30 +50,5 @@ impl TryFrom<Message> for Vec<u8> {
 
     fn try_from(message: Message) -> std::result::Result<Self, Self::Error> {
         serde_json::to_vec(&message).map_err(Error::from)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::crypto::dkg::classic::signature::SignatureBytes;
-
-    use super::*;
-
-    const PAYLOAD: &[u8] = &[1, 2, 3];
-
-    fn create_payload() -> Payload {
-        Payload::Raw(PAYLOAD.to_vec())
-    }
-
-    #[test]
-    fn test_new() {
-        let payload = create_payload();
-        let signature = SignatureBytes::random();
-        let data = Data::Classic(signature);
-
-        let result = Message::new(payload.clone(), data.clone());
-
-        assert_eq!(result.payload, payload);
-        assert_eq!(result.signature, data);
     }
 }
