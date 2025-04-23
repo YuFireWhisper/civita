@@ -24,7 +24,7 @@ pub enum GenerateResult {
 
 #[automock(type Error=MockError;)]
 #[async_trait::async_trait]
-pub trait Dkg_ {
+pub trait Dkg {
     type Error: Error;
 
     async fn set_peers(

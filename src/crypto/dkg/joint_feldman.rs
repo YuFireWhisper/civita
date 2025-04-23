@@ -7,7 +7,7 @@ use crate::{
                 collector::{event, Collector},
                 distributor::Distributor,
             },
-            Dkg_, GenerateResult,
+            Dkg, GenerateResult,
         },
         index_map::IndexedMap,
         keypair::{PublicKey, SecretKey},
@@ -158,7 +158,7 @@ impl<T: Transport + 'static> JointFeldman<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: Transport + 'static> Dkg_ for JointFeldman<T> {
+impl<T: Transport + 'static> Dkg for JointFeldman<T> {
     type Error = Error;
 
     async fn set_peers(&mut self, peers: IndexedMap<libp2p::PeerId, PublicKey>) -> Result<()> {

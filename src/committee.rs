@@ -6,7 +6,7 @@ use tokio::sync::{mpsc::Receiver as TokioReceiver, Mutex as TokioMutex, RwLock a
 use crate::{
     committee::config::Config,
     crypto::{
-        dkg::{self, Dkg_},
+        dkg::{self, Dkg},
         index_map::IndexedMap,
         keypair::PublicKey,
         primitives::algebra::{self, Point, Scalar},
@@ -55,7 +55,7 @@ enum Action {
 pub struct Committee<T, D, S>
 where
     T: Transport + Send + Sync + 'static,
-    D: Dkg_ + Send + Sync + 'static,
+    D: Dkg + Send + Sync + 'static,
     S: Tss + 'static,
 {
     transport: Arc<T>,
@@ -69,7 +69,7 @@ where
 impl<T, D, S> Committee<T, D, S>
 where
     T: Transport + Send + Sync + 'static,
-    D: Dkg_ + Send + Sync + 'static,
+    D: Dkg + Send + Sync + 'static,
     S: Tss + Send + Sync + 'static,
 {
     pub async fn new(

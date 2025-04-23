@@ -1,8 +1,12 @@
+use mockall::automock;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{
-    index_map::IndexedMap,
-    primitives::algebra::{Point, Scalar},
+use crate::{
+    crypto::{
+        index_map::IndexedMap,
+        primitives::algebra::{Point, Scalar},
+    },
+    MockError,
 };
 
 pub mod schnorr;
@@ -15,6 +19,7 @@ pub enum Signature {
     Schnorr(schnorr::signature::Signature),
 }
 
+#[automock(type Error=MockError;)]
 #[async_trait::async_trait]
 pub trait Tss: Send + Sync {
     type Error: std::error::Error;
