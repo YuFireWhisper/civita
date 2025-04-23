@@ -4,7 +4,9 @@ use crate::crypto::primitives::algebra::Point;
 
 pub mod schnorr;
 
+#[derive(Clone)]
 #[derive(Debug)]
+#[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub enum Signature {
     Schnorr(schnorr::signature::Signature),

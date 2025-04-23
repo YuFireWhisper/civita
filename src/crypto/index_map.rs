@@ -4,9 +4,12 @@ use std::{
     hash::Hash,
 };
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 pub struct IndexedMap<K, V>
 where
     K: Eq + Hash,

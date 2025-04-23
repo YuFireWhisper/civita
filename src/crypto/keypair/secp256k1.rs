@@ -1,5 +1,6 @@
 use bincode::{Decode, Encode};
 use libsecp256k1::{self, PublicKey as LibPublicKey, PublicKeyFormat, SecretKey as LibSecretKey};
+use serde::{Deserialize, Serialize};
 
 const SECRET_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 33;
@@ -31,6 +32,7 @@ pub enum Error {
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 #[derive(PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 pub struct SecretKey([u8; SECRET_KEY_LENGTH]);
 
 #[derive(Clone)]
@@ -91,6 +93,40 @@ pub fn generate_keypair() -> (SecretKey, PublicKey) {
         SecretKey::from_secret_key(&sk),
         PublicKey::from_public_key(&pk),
     )
+}
+
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let bytes = <Vec<u8>>::deserialize(deserializer)?;
+
+        if bytes.len() != PUBLIC_KEY_LENGTH {
+            return Err(D::Error::custom(format!(
+                "Invalid public key length: expected {}, got {}",
+                PUBLIC_KEY_LENGTH,
+                bytes.len()
+            )));
+        }
+
+        let mut arr = [0u8; PUBLIC_KEY_LENGTH];
+        arr.copy_from_slice(&bytes);
+
+        PublicKey::from_slice(&arr)
+            .map_err(|e| D::Error::custom(format!("Invalid public key: {}", e)))
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use bincode::{Decode, Encode};
+use serde::{Deserialize, Serialize};
 
 mod secp256k1;
 
@@ -21,6 +22,7 @@ pub enum Error {
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
 pub enum SecretKey {
     Secp256k1(secp256k1::SecretKey),
 }
@@ -29,6 +31,7 @@ pub enum SecretKey {
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
 pub enum PublicKey {
     Secp256k1(secp256k1::PublicKey),
 }
