@@ -7,17 +7,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::network::transport::libp2p_transport::{
-    dispatcher::Keyed, protocols::gossipsub::Payload,
+    dispatcher::Keyed,
+    protocols::gossipsub::{payload, Payload},
 };
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("{0}")]
-    Serde(#[from] serde_json::Error),
     #[error("Sequence number is missing")]
     MissingSequenceNumber,
+
     #[error("Event is not a valid message")]
     InvalidMessage,
+
+    #[error("{0}")]
+    Payload(#[from] payload::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;

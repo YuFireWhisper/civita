@@ -18,6 +18,9 @@ use crate::crypto::{
 pub enum Error {
     #[error("{0}")]
     Encode(#[from] bincode::error::EncodeError),
+
+    #[error("{0}")]
+    Decode(#[from] bincode::error::DecodeError),
 }
 
 #[derive(Clone)]
@@ -139,19 +142,21 @@ impl Payload {
     }
 }
 
-impl TryInto<Vec<u8>> for &Payload {
+impl TryFrom<&Payload> for Vec<u8> {
     type Error = Error;
 
-    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(Error::from)
+    fn try_from(value: &Payload) -> Result<Self, Self::Error> {
+        bincode::serde::encode_to_vec(value, bincode::config::standard()).map_err(Error::from)
     }
 }
 
 impl TryFrom<Vec<u8>> for Payload {
-    type Error = serde_json::Error;
+    type Error = Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        serde_json::from_slice(&value)
+        bincode::serde::decode_from_slice(&value, bincode::config::standard())
+            .map(|(p, _)| p)
+            .map_err(Error::from)
     }
 }
 
@@ -188,7 +193,14 @@ mod tests {
             candidates: IndexedMap::new(),
             signature: Some(create_signature()),
         };
-        assert!(payload.take_signature().is_none());
+        payload.take_signature();
+
+        let expected = Payload::CommitteeCandiates {
+            candidates: IndexedMap::new(),
+            signature: None,
+        };
+
+        assert_eq!(payload, expected);
     }
 
     #[test]

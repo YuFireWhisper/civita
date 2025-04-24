@@ -112,11 +112,14 @@ impl Gossipsub {
 
                 self.subscribed_topics.write().await.insert(topic);
             }
-            event => {
-                if let Ok(message) = Message::try_from_gossipsub_event(event) {
+            event => match Message::try_from_gossipsub_event(event) {
+                Ok(message) => {
                     self.dispatcher.dispatch(message)?;
                 }
-            }
+                Err(_) => {
+                    log::warn!("Failed to convert event to message");
+                }
+            },
         }
 
         self.dispatcher.remove_dead();
