@@ -32,6 +32,8 @@ mockall = { version = "0.13", features = ["nightly"] }
 async-trait = "0.1"
 ecies = "0.2"
 libsecp256k1 = "0.7"
+k256 = { version = "0.13", features = ["hash2curve", "arithmetic"] }
+libecvrf-k256 = "1.1"
 
 [dev-dependencies]
 tempfile = "3.17"

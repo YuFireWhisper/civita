@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
     index_map::IndexedMap,
-    keypair::PublicKey,
+    keypair::{PublicKey, VrfProof},
     primitives::{
         algebra::{Point, Scalar},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
@@ -87,9 +87,21 @@ pub enum Payload {
     },
 
     CommitteeChange {
+        epoch: u64,
         members: IndexedMap<libp2p::PeerId, PublicKey>,
-        new_public_key: Point,
+        public_key: Point,
         signature: Option<Signature>,
+    },
+
+    CommitteeElection {
+        seed: Vec<u8>,
+        signature: Option<Signature>,
+    },
+
+    CommitteeElectionResponse {
+        seed: Vec<u8>,
+        public_key: PublicKey,
+        proof: VrfProof,
     },
 
     // For testing
@@ -106,6 +118,7 @@ impl Payload {
         match self {
             Payload::CommitteeCandiates { signature, .. } => signature.take(),
             Payload::CommitteeChange { signature, .. } => signature.take(),
+            Payload::CommitteeElection { signature, .. } => signature.take(),
             _ => None,
         }
     }
@@ -113,7 +126,9 @@ impl Payload {
     pub fn is_need_committee_signature(&self) -> bool {
         matches!(
             self,
-            Payload::CommitteeCandiates { .. } | Payload::CommitteeChange { .. }
+            Payload::CommitteeCandiates { .. }
+                | Payload::CommitteeChange { .. }
+                | Payload::CommitteeElection { .. }
         )
     }
 
@@ -121,6 +136,7 @@ impl Payload {
         match self {
             Payload::CommitteeCandiates { signature, .. } => *signature = Some(sig),
             Payload::CommitteeChange { signature, .. } => *signature = Some(sig),
+            Payload::CommitteeElection { signature, .. } => *signature = Some(sig),
             _ => {}
         }
     }

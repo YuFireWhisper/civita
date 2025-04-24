@@ -10,13 +10,13 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc::Receiver as TokioReceiver, Mutex as TokioMutex, RwLock as TokioRwLock};
 
 use crate::{
-    committee::{config::Config, timer::Timer},
+    committee::{config::Config, info::Info, timer::Timer},
     crypto::{
         dkg::{self, Dkg},
         index_map::IndexedMap,
-        keypair::PublicKey,
+        keypair::{self, PublicKey, SecretKey},
         primitives::algebra::{self, Point, Scalar},
-        tss::Tss,
+        tss::{self, Tss},
     },
     network::transport::{
         libp2p_transport::protocols::gossipsub::{payload, Message, Payload},
@@ -25,6 +25,8 @@ use crate::{
 };
 
 pub mod config;
+mod election;
+pub mod info;
 mod timer;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -55,12 +57,22 @@ pub enum Error {
 
     #[error("{0}")]
     Payload(#[from] payload::Error),
+
+    #[error("{0}")]
+    Signature(#[from] tss::SignatureError),
+
+    #[error("{0}")]
+    Keypair(#[from] keypair::Error),
+
+    #[error("{0}")]
+    Election(#[from] election::Error),
 }
 
 #[allow(dead_code)]
 #[derive(Debug)]
 enum Action {
     RemoveOldCommittee,
+    ElectNewCommittee,
 }
 
 pub struct Committee<T, D, S>
@@ -72,14 +84,15 @@ where
     transport: Arc<T>,
     dkg: TokioRwLock<D>,
     tss: TokioRwLock<S>,
+    secret_key: SecretKey,
+    public_key: PublicKey,
     handler: TokioMutex<Option<tokio::task::JoinHandle<()>>>,
     timer: TokioMutex<Timer<Action>>,
-    members: TokioRwLock<IndexedMap<libp2p::PeerId, PublicKey>>,
-    next_members: TokioRwLock<Option<IndexedMap<libp2p::PeerId, PublicKey>>>,
-    committee_pk: TokioRwLock<Point>,
-    next_committee_pk: TokioRwLock<Option<Point>>,
+    current_committee: TokioRwLock<Info>,
+    next_committee: TokioRwLock<Option<Info>>,
     is_member: AtomicBool,
     config: Config,
+    election: election::Election,
 }
 
 impl<T, D, S> Committee<T, D, S>
@@ -92,25 +105,29 @@ where
         transport: Arc<T>,
         dkg: D,
         tss: S,
-        committee_pk: Point,
-        member: IndexedMap<libp2p::PeerId, PublicKey>,
+        secret_key: SecretKey,
+        public_key: PublicKey,
+        current_committee: Info,
         config: Config,
     ) -> Result<Arc<Self>> {
         let (timer, timer_rx) = Timer::new().await;
         let timer = TokioMutex::new(timer);
 
+        let election = election::Election::new(secret_key.clone(), public_key.clone());
+
         let self_arc = Arc::new(Self {
             transport,
             dkg: TokioRwLock::new(dkg),
             tss: TokioRwLock::new(tss),
+            secret_key,
+            public_key,
             handler: TokioMutex::new(None),
             timer,
-            members: TokioRwLock::new(member),
-            next_members: TokioRwLock::new(None),
-            committee_pk: TokioRwLock::new(committee_pk),
-            next_committee_pk: TokioRwLock::new(None),
+            current_committee: TokioRwLock::new(current_committee),
+            next_committee: TokioRwLock::new(None),
             is_member: AtomicBool::new(false),
             config,
+            election,
         });
 
         self_arc.clone().start(timer_rx).await?;
@@ -153,6 +170,11 @@ where
                         Action::RemoveOldCommittee => {
                             self.process_remove_old_member().await;
                         }
+                        Action::ElectNewCommittee => {
+                            if let Err(e) = self.processs_elect_new_committee_action().await {
+                                log::error!("Error electing new committee: {:?}", e);
+                            }
+                        }
                     }
                 }
                 else => {
@@ -170,12 +192,17 @@ where
                 self.process_new_candidates(hash, candidates).await
             }
             Payload::CommitteeChange {
+                epoch,
                 members,
-                new_public_key,
+                public_key,
                 ..
             } => {
-                self.process_committee_change(members, new_public_key).await;
+                self.process_committee_change(epoch, members, public_key)
+                    .await;
                 Ok(())
+            }
+            Payload::CommitteeElection { seed, .. } => {
+                self.process_committee_election_request(&seed).await
             }
             _ => Ok(()),
         }
@@ -234,13 +261,15 @@ where
         let hash = Sha256::digest(&msg.payload.to_vec()?);
         let hash_vec = hash.to_vec();
 
-        let public_key = self.committee_pk.read().await;
-
-        if signature.verify(&hash, &public_key) {
-            return Ok(hash_vec);
+        {
+            let curr_committee_pk = &self.current_committee.read().await.public_key;
+            if signature.verify(&hash, curr_committee_pk) {
+                return Ok(hash_vec);
+            }
         }
 
-        if let Some(next_committee_pk) = self.next_committee_pk.read().await.as_ref() {
+        if let Some(next_committee) = self.next_committee.read().await.as_ref() {
+            let next_committee_pk = &next_committee.public_key;
             if signature.verify(&hash, next_committee_pk) {
                 return Ok(hash_vec);
             }
@@ -250,12 +279,16 @@ where
     }
 
     async fn is_peer_in_committee(&self, peer_id: &libp2p::PeerId) -> bool {
-        if self.members.read().await.contains_key(peer_id) {
-            return true;
+        {
+            let curr_members = &self.current_committee.read().await.members;
+            if curr_members.contains_key(peer_id) {
+                return true;
+            }
         }
 
-        if let Some(next_committee) = self.next_members.read().await.as_ref() {
-            if next_committee.contains_key(peer_id) {
+        if let Some(next_committee) = self.next_committee.read().await.as_ref() {
+            let next_members = &next_committee.members;
+            if next_members.contains_key(peer_id) {
                 return true;
             }
         }
@@ -315,33 +348,61 @@ where
 
     async fn process_committee_change(
         &self,
+        epoch: u64,
         member: IndexedMap<libp2p::PeerId, PublicKey>,
-        new_public_key: Point,
+        public_key: Point,
     ) {
         if member.contains_key(&self.transport.self_peer()) {
             self.is_member.store(true, Ordering::SeqCst);
+            self.timer
+                .lock()
+                .await
+                .schedule(Action::RemoveOldCommittee, self.config.buffer_time)
+                .await;
         } else {
             self.is_member.store(false, Ordering::SeqCst);
         }
 
-        self.next_committee_pk.write().await.replace(new_public_key);
-        self.next_members.write().await.replace(member);
-        self.timer
-            .lock()
+        let info = Info::new(epoch, member, public_key);
+        self.next_committee.write().await.replace(info);
+    }
+
+    async fn process_committee_election_request(&self, seed: &[u8]) -> Result<()> {
+        let payload = self.election.generate_election_response(seed.to_vec())?;
+
+        self.transport
+            .publish(&self.config.topic, payload)
             .await
-            .schedule(Action::RemoveOldCommittee, self.config.buffer_time)
-            .await;
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        Ok(())
     }
 
     async fn process_remove_old_member(&self) {
-        if let (Some(old_committee_pk), Some(old_committee)) = (
-            self.next_committee_pk.write().await.take(),
-            self.next_members.write().await.take(),
-        ) {
-            *self.committee_pk.write().await = old_committee_pk;
-            *self.members.write().await = old_committee;
+        if let Some(next_committee) = self.next_committee.write().await.take() {
+            *self.current_committee.write().await = next_committee;
         } else {
-            panic!("Next committee public key or members is not set");
+            panic!("Next committee is not set");
         }
+
+        self.timer
+            .lock()
+            .await
+            .schedule(Action::ElectNewCommittee, self.config.epoch_duration)
+            .await;
+    }
+
+    async fn processs_elect_new_committee_action(&self) -> Result<()> {
+        let payload = self
+            .election
+            .generate_new_election_request(&self.tss)
+            .await?;
+
+        self.transport
+            .publish(&self.config.topic, payload)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        Ok(())
     }
 }
