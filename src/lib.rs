@@ -1,6 +1,7 @@
 pub mod committee;
 pub mod crypto;
 pub mod network;
+pub mod identity;
 
 #[derive(Debug)]
 pub struct MockError;
