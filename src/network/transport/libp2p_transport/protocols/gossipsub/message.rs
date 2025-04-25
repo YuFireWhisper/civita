@@ -36,6 +36,9 @@ pub enum Error {
 
     #[error("Payload does not require signature")]
     SignatureNotRequired,
+
+    #[error("Signature verification failed")]
+    SignatureVerificationFailed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -48,8 +51,9 @@ pub struct Message {
     pub message_id: MessageId,
     pub source: PeerId,
     pub topic: String,
-    pub payload: Payload,
     pub sequence_number: u64,
+    pub payload: Payload,
+    pub signature: Option<Signature>,
 }
 
 #[derive(Clone)]
@@ -107,17 +111,20 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
         {
             let source = propagation_source;
             let topic = message.topic.into_string();
-            let payload: Payload = Payload::try_from(message.data)?;
             let sequence_number = message
                 .sequence_number
                 .ok_or(Error::MissingSequenceNumber)?;
+            let transport_message = TransportMessage::try_from(message.data.as_slice())?;
+            let payload = transport_message.payload;
+            let signature = transport_message.signature;
 
             Ok(Message {
                 message_id,
                 source,
                 topic,
-                payload,
                 sequence_number,
+                payload,
+                signature,
             })
         } else {
             Err(Error::InvalidMessage)
@@ -148,29 +155,132 @@ impl TryFrom<&[u8]> for TransportMessage {
 }
 
 #[cfg(test)]
-pub mod mock_message {
-    use super::*;
+mod tests {
+    use libp2p::gossipsub::{self, IdentTopic, MessageId};
 
-    use libp2p::gossipsub::MessageId;
-    use libp2p::PeerId;
+    use crate::{
+        crypto::{
+            primitives::algebra::{Point, Scalar},
+            tss::{schnorr, Signature},
+        },
+        network::transport::libp2p_transport::protocols::gossipsub::{
+            Message, Payload, TransportMessage,
+        },
+    };
 
-    const TOPIC: &str = "TOPIC";
-    const PAYLOAD: &[u8] = &[1, 2, 3];
-    const SEQUENCE_NUMBER: u64 = 1;
+    const TEST_TOPIC: &str = "test_topic";
+    const TEST_SEQUENCE_NUMBER: u64 = 1;
+    const TEST_PAYLOAD: &[u8] = b"test_payload";
+    const MESSAGE_ID: &[u8] = b"test-message-id";
 
-    pub fn create_message() -> Message {
-        let message_id = MessageId::from("MESSAGE_ID");
-        let source = PeerId::random();
-        let topic = TOPIC.to_string();
-        let payload = Payload::Raw(PAYLOAD.to_vec());
-        let sequence_number = SEQUENCE_NUMBER;
+    fn create_signature() -> Option<Signature> {
+        Some(Signature::Schnorr(schnorr::signature::Signature::new(
+            Scalar::secp256k1_random(),
+            Point::secp256k1_zero(),
+        )))
+    }
 
-        Message {
+    fn create_gossipsub_event(
+        payload: Payload,
+        signature: Option<Signature>,
+        sequence_number: Option<u64>,
+    ) -> gossipsub::Event {
+        let message_id = MessageId::from(MESSAGE_ID);
+        let source = libp2p::PeerId::random();
+        let transport_message = TransportMessage::new(payload, signature).unwrap();
+
+        gossipsub::Event::Message {
+            propagation_source: source,
             message_id,
-            source,
-            topic,
-            payload,
-            sequence_number,
+            message: gossipsub::Message {
+                source: Some(source),
+                topic: IdentTopic::new(TEST_TOPIC).hash(),
+                sequence_number,
+                data: transport_message.to_vec().unwrap(),
+            },
         }
+    }
+
+    #[test]
+    fn success_when_all_fields_are_present() {
+        let payload = Payload::RawWithSignature {
+            raw: TEST_PAYLOAD.to_vec(),
+            signature: Some(create_signature().unwrap()),
+        };
+
+        let result = TransportMessage::new(payload, create_signature());
+
+        assert!(
+            result.is_ok(),
+            "Failed to create TransportMessage: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn fail_when_signature_is_missing() {
+        let payload = Payload::RawWithSignature {
+            raw: TEST_PAYLOAD.to_vec(),
+            signature: None,
+        };
+
+        let result = TransportMessage::new(payload, None);
+
+        assert!(
+            result.is_err(),
+            "Expected error when signature is missing, but got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn success_when_signature_is_not_required() {
+        let payload = Payload::Raw(TEST_PAYLOAD.to_vec());
+
+        let result = TransportMessage::new(payload, None);
+
+        assert!(
+            result.is_ok(),
+            "Failed to create TransportMessage: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn fail_when_signature_is_not_required() {
+        let payload = Payload::Raw(TEST_PAYLOAD.to_vec());
+
+        let result = TransportMessage::new(payload, create_signature());
+
+        assert!(
+            result.is_err(),
+            "Expected error when signature is not required, but got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn success_convert_from_gossipsub_event() {
+        let payload = Payload::RawWithSignature {
+            raw: TEST_PAYLOAD.to_vec(),
+            signature: Some(create_signature().unwrap()),
+        };
+        let event = create_gossipsub_event(
+            payload.clone(),
+            create_signature(),
+            Some(TEST_SEQUENCE_NUMBER),
+        );
+
+        let result = Message::try_from_gossipsub_event(event);
+
+        assert!(
+            result.is_ok(),
+            "Failed to convert from gossipsub event: {:?}",
+            result
+        );
+        let message = result.unwrap();
+        assert_eq!(message.topic, TEST_TOPIC);
+        assert_eq!(message.sequence_number, TEST_SEQUENCE_NUMBER);
+        assert_eq!(message.payload, payload);
     }
 }

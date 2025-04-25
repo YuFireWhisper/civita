@@ -114,6 +114,7 @@ impl Payload {
             Payload::CommitteeCandiates { .. }
                 | Payload::CommitteeChange { .. }
                 | Payload::CommitteeElection { .. }
+                | Payload::RawWithSignature { .. }
         )
     }
 
