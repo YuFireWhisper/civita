@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use libp2p::gossipsub::MessageId;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
@@ -28,23 +27,6 @@ pub enum Error {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub enum Payload {
-    VrfRequest,
-
-    VrfProof {
-        message_id: MessageId,
-        public_key: Vec<u8>,
-        proof: Vec<u8>,
-    },
-
-    VrfConsensus {
-        message_id: MessageId,
-        random: [u8; 32],
-    },
-
-    VrfProcessFailure(MessageId),
-
-    DkgVSS(Vec<u8>),
-
     VSSComponent {
         id: Vec<u8>,
         encrypted_shares: EncryptedShares,
@@ -72,17 +54,18 @@ pub enum Payload {
     },
 
     CommitteeCandiates {
+        count: u32,
         candidates: IndexedMap<libp2p::PeerId, PublicKey>,
         signature: Option<Signature>,
     },
 
     CommitteeGenerateSuccess {
-        request_hash: Vec<u8>,
+        request_hash: [u8; 32],
         committee_pub_key: Point,
     },
 
     CommitteeGenerateFailure {
-        request_hash: Vec<u8>,
+        request_hash: [u8; 32],
         invalid_peers: HashSet<libp2p::PeerId>,
     },
 
@@ -94,12 +77,12 @@ pub enum Payload {
     },
 
     CommitteeElection {
-        seed: Vec<u8>,
+        seed: [u8; 32],
         signature: Option<Signature>,
     },
 
     CommitteeElectionResponse {
-        seed: Vec<u8>,
+        seed: [u8; 32],
         public_key: PublicKey,
         proof: VrfProof,
     },
@@ -107,6 +90,7 @@ pub enum Payload {
     // For testing
     Raw(Vec<u8>),
 
+    // For testing
     RawWithSignature {
         raw: Vec<u8>,
         signature: Option<Signature>,
@@ -119,11 +103,12 @@ impl Payload {
             Payload::CommitteeCandiates { signature, .. } => signature.take(),
             Payload::CommitteeChange { signature, .. } => signature.take(),
             Payload::CommitteeElection { signature, .. } => signature.take(),
+            Payload::RawWithSignature { signature, .. } => signature.take(),
             _ => None,
         }
     }
 
-    pub fn is_need_committee_signature(&self) -> bool {
+    pub fn is_need_from_committee(&self) -> bool {
         matches!(
             self,
             Payload::CommitteeCandiates { .. }
@@ -139,18 +124,6 @@ impl Payload {
             Payload::CommitteeElection { signature, .. } => *signature = Some(sig),
             _ => {}
         }
-    }
-
-    pub fn create_vrf_proof(message_id: MessageId, public_key: Vec<u8>, proof: Vec<u8>) -> Payload {
-        Payload::VrfProof {
-            message_id,
-            public_key,
-            proof,
-        }
-    }
-
-    pub fn create_vrf_consensus(message_id: MessageId, random: [u8; 32]) -> Payload {
-        Payload::VrfConsensus { message_id, random }
     }
 
     pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
@@ -178,8 +151,6 @@ impl TryFrom<Vec<u8>> for Payload {
 
 #[cfg(test)]
 mod tests {
-    use libp2p::gossipsub::MessageId;
-
     use crate::{
         crypto::{
             index_map::IndexedMap,
@@ -188,13 +159,6 @@ mod tests {
         },
         network::transport::libp2p_transport::protocols::gossipsub::Payload,
     };
-
-    const MESSAGE_ID: &str = "MESSAGE_ID";
-    const RANDOM: [u8; 32] = [1; 32];
-
-    fn create_message_id() -> MessageId {
-        MessageId::from(MESSAGE_ID)
-    }
 
     fn create_signature() -> Signature {
         Signature::Schnorr(SchnorrSignature::new(
@@ -205,14 +169,14 @@ mod tests {
 
     #[test]
     fn field_should_be_none() {
-        let mut payload = Payload::CommitteeCandiates {
-            candidates: IndexedMap::new(),
+        let mut payload = Payload::RawWithSignature {
+            raw: vec![],
             signature: Some(create_signature()),
         };
         payload.take_signature();
 
-        let expected = Payload::CommitteeCandiates {
-            candidates: IndexedMap::new(),
+        let expected = Payload::RawWithSignature {
+            raw: vec![],
             signature: None,
         };
 
@@ -222,26 +186,10 @@ mod tests {
     #[test]
     fn return_true_if_have_signature_field() {
         let payload = Payload::CommitteeCandiates {
+            count: 0,
             candidates: IndexedMap::new(),
             signature: Some(create_signature()),
         };
-        assert!(payload.is_need_committee_signature());
-    }
-
-    #[test]
-    fn test_create_vrf_consensus() {
-        let message_id = create_message_id();
-        let expected = Payload::VrfConsensus {
-            message_id: message_id.clone(),
-            random: RANDOM,
-        };
-
-        let result = Payload::create_vrf_consensus(message_id, RANDOM);
-
-        assert_eq!(
-            result, expected,
-            "Expected: {:?}, got: {:?}",
-            expected, result
-        );
+        assert!(payload.is_need_from_committee());
     }
 }
