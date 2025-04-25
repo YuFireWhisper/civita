@@ -243,7 +243,7 @@ where
     }
 
     async fn verify_source(&self, msg: &Message) -> Result<()> {
-        if msg.payload.is_need_from_committee() && !self.is_peer_in_committee(&msg.source).await {
+        if msg.payload.need_signature() && !self.is_peer_in_committee(&msg.source).await {
             return Err(Error::NotCommitteeMember(msg.source));
         }
 
@@ -286,7 +286,7 @@ where
     }
 
     async fn verify_signature(&self, msg: &mut Message) -> Result<[u8; 32]> {
-        if !msg.payload.is_need_from_committee() {
+        if !msg.payload.need_signature() {
             let hash = Sha256::digest(&msg.payload.to_vec()?);
             return Ok(hash.into());
         }

@@ -108,7 +108,7 @@ impl Payload {
         }
     }
 
-    pub fn is_need_from_committee(&self) -> bool {
+    pub fn need_signature(&self) -> bool {
         matches!(
             self,
             Payload::CommitteeCandiates { .. }
@@ -190,6 +190,6 @@ mod tests {
             candidates: IndexedMap::new(),
             signature: Some(create_signature()),
         };
-        assert!(payload.is_need_from_committee());
+        assert!(payload.need_signature());
     }
 }

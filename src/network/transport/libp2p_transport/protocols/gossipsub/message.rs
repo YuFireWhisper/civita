@@ -6,9 +6,12 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::{
-    dispatcher::Keyed,
-    protocols::gossipsub::{payload, Payload},
+use crate::{
+    crypto::tss::Signature,
+    network::transport::libp2p_transport::{
+        dispatcher::Keyed,
+        protocols::gossipsub::{payload, Payload},
+    },
 };
 
 #[derive(Debug, Error)]
@@ -21,11 +24,26 @@ pub enum Error {
 
     #[error("{0}")]
     Payload(#[from] payload::Error),
+
+    #[error("Encode error: {0}")]
+    Encode(#[from] bincode::error::EncodeError),
+
+    #[error("Decode error: {0}")]
+    Decode(#[from] bincode::error::DecodeError),
+
+    #[error("Payload requires signature")]
+    MissingSignature,
+
+    #[error("Payload does not require signature")]
+    SignatureNotRequired,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
 pub struct Message {
     pub message_id: MessageId,
     pub source: PeerId,
@@ -34,9 +52,40 @@ pub struct Message {
     pub sequence_number: u64,
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
+pub(super) struct TransportMessage {
+    pub payload: Payload,
+    pub signature: Option<Signature>,
+}
+
 impl Message {
     pub fn try_from_gossipsub_event(event: Event) -> Result<Self> {
         Self::try_from(event)
+    }
+}
+
+impl TransportMessage {
+    pub fn new(payload: Payload, signature: Option<Signature>) -> Result<Self> {
+        let message = TransportMessage { payload, signature };
+        message.validate()?;
+        Ok(message)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.payload.need_signature() && self.signature.is_none() {
+            return Err(Error::MissingSignature);
+        }
+        if !self.payload.need_signature() && self.signature.is_some() {
+            return Err(Error::SignatureNotRequired);
+        }
+        Ok(())
+    }
+
+    pub fn to_vec(&self) -> Result<Vec<u8>> {
+        self.try_into()
     }
 }
 
@@ -73,6 +122,28 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
         } else {
             Err(Error::InvalidMessage)
         }
+    }
+}
+
+impl TryFrom<&TransportMessage> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(message: &TransportMessage) -> Result<Self> {
+        bincode::serde::encode_to_vec(message, bincode::config::standard()).map_err(Error::from)
+    }
+}
+
+impl TryFrom<&[u8]> for TransportMessage {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        let msg: TransportMessage =
+            bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+                .map(|(message, _)| message)?;
+
+        msg.validate()?;
+
+        Ok(msg)
     }
 }
 
