@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::crypto::{
     primitives::algebra::{Point, Scalar},
     tss::schnorr,
@@ -6,6 +8,7 @@ use crate::crypto::{
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 pub struct Signature {
     pub sig: Scalar,
     pub public_random: Point,

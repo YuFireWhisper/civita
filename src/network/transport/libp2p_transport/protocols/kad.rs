@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::{crypto::dkg, network::transport::libp2p_transport::behaviour::Behaviour};
+use crate::{crypto::tss::Signature, network::transport::libp2p_transport::behaviour::Behaviour};
 
 pub mod key;
 pub mod message;
@@ -154,7 +154,7 @@ impl Kad {
         }
     }
 
-    pub async fn put(&self, payload: Payload, signture: dkg::Data) -> Result<()> {
+    pub async fn put(&self, payload: Payload, signture: Signature) -> Result<()> {
         let record_key = Self::generate_key(&payload)?;
         let record_value = Message::new(payload, signture).to_vec()?;
         let record = libp2p::kad::Record::new(record_key, record_value);
@@ -168,9 +168,7 @@ impl Kad {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_put_queries.insert(query_id, tx);
 
-        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
-            .await??
-            .map_err(Error::from)
+        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
     }
 
     fn generate_key(payload: &Payload) -> Result<libp2p::kad::RecordKey> {

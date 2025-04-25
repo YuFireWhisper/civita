@@ -62,7 +62,8 @@ impl Context {
         transports.into_iter().for_each(|transport| {
             let peer_id = transport.self_peer();
             let (sk, pk) = keypair::generate_secp256k1();
-            let joint_feldman = JointFeldman::new(transport.clone(), sk, joint_feldman::Config::default());
+            let joint_feldman =
+                JointFeldman::new(transport.clone(), sk, joint_feldman::Config::default());
             let peer_info = PeerInfo::new(transport, joint_feldman, pk);
             peers.insert(peer_id, peer_info);
         });

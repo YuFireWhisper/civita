@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     crypto::{
-        dkg::{Dkg_, GenerateResult},
+        dkg::{Dkg, GenerateResult},
         index_map::IndexedMap,
         primitives::{
             algebra::{self, Point, Scalar},
@@ -59,7 +59,7 @@ pub struct Config {
     pub timeout: tokio::time::Duration,
 }
 
-pub struct Schnorr<D: Dkg_, T: Transport + 'static> {
+pub struct Schnorr<D: Dkg, T: Transport + 'static> {
     transport: Arc<T>,
     dkg: D,
     secret: Option<Scalar>,
@@ -69,7 +69,7 @@ pub struct Schnorr<D: Dkg_, T: Transport + 'static> {
     config: Config,
 }
 
-impl<D: Dkg_, T: Transport> Schnorr<D, T> {
+impl<D: Dkg, T: Transport> Schnorr<D, T> {
     pub fn new(dkg: D, transport: Arc<T>, config: Config) -> Self {
         let collector_config = collector::Config {
             threshold_counter: config.threshold_counter,

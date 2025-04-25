@@ -1,5 +1,6 @@
 use bincode::{Decode, Encode};
 use libsecp256k1::{self, PublicKey as LibPublicKey, PublicKeyFormat, SecretKey as LibSecretKey};
+use serde::{Deserialize, Serialize};
 
 const SECRET_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 33;
@@ -25,12 +26,16 @@ pub enum Error {
 
     #[error("Decryption error: {0}")]
     Decryption(String),
+
+    #[error("{0}")]
+    Ecvrf(String),
 }
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 #[derive(PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 pub struct SecretKey([u8; SECRET_KEY_LENGTH]);
 
 #[derive(Clone)]
@@ -60,6 +65,15 @@ impl SecretKey {
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         ecies::decrypt(&self.0, ciphertext).map_err(Error::from)
     }
+
+    pub fn prove(&self, input: impl AsRef<[u8]>) -> Result<libecvrf_k256::ECVRFProof> {
+        let ecvrf = libecvrf_k256::ECVRF::new_from_bytes(&self.0)
+            .map_err(|e| Error::Ecvrf(e.to_string()))?;
+
+        ecvrf
+            .prove(input.as_ref())
+            .map_err(|e| Error::Ecvrf(e.to_string()))
+    }
 }
 
 impl PublicKey {
@@ -83,6 +97,10 @@ impl PublicKey {
     pub fn encrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
         ecies::encrypt(&self.0, msg).map_err(Error::from)
     }
+
+    pub fn verify_proof(&self, input: impl AsRef<[u8]>, proof: &libecvrf_k256::ECVRFProof) -> bool {
+        libecvrf_k256::ECVRF::verify(input.as_ref(), proof, &self.0)
+    }
 }
 
 pub fn generate_keypair() -> (SecretKey, PublicKey) {
@@ -91,6 +109,40 @@ pub fn generate_keypair() -> (SecretKey, PublicKey) {
         SecretKey::from_secret_key(&sk),
         PublicKey::from_public_key(&pk),
     )
+}
+
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let bytes = <Vec<u8>>::deserialize(deserializer)?;
+
+        if bytes.len() != PUBLIC_KEY_LENGTH {
+            return Err(D::Error::custom(format!(
+                "Invalid public key length: expected {}, got {}",
+                PUBLIC_KEY_LENGTH,
+                bytes.len()
+            )));
+        }
+
+        let mut arr = [0u8; PUBLIC_KEY_LENGTH];
+        arr.copy_from_slice(&bytes);
+
+        PublicKey::from_slice(&arr)
+            .map_err(|e| D::Error::custom(format!("Invalid public key: {}", e)))
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +188,19 @@ mod tests {
         assert!(
             sk2.decrypt(&ciphertext).is_err(),
             "Decryption should fail with different keys"
+        );
+    }
+
+    #[test]
+    fn vrf_success() {
+        const MESSAGE: &[u8] = b"Hello, world!";
+
+        let (sk, pk) = super::generate_keypair();
+        let proof = sk.prove(MESSAGE);
+        assert!(proof.is_ok(), "VRF proof generation failed");
+        assert!(
+            pk.verify_proof(MESSAGE, &proof.unwrap()),
+            "VRF proof verification failed"
         );
     }
 }

@@ -33,8 +33,8 @@ pub enum Error {
     #[error("Publish error: {0}")]
     Publish(#[from] libp2p::gossipsub::PublishError),
 
-    #[error("Serialize error: {0}")]
-    Serialize(#[from] serde_json::Error),
+    #[error("{0}")]
+    Payload(#[from] payload::Error),
 
     #[error("Oneshot error: {0}")]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
@@ -112,11 +112,14 @@ impl Gossipsub {
 
                 self.subscribed_topics.write().await.insert(topic);
             }
-            event => {
-                if let Ok(message) = Message::try_from_gossipsub_event(event) {
+            event => match Message::try_from_gossipsub_event(event) {
+                Ok(message) => {
                     self.dispatcher.dispatch(message)?;
                 }
-            }
+                Err(_) => {
+                    log::warn!("Failed to convert event to message");
+                }
+            },
         }
 
         self.dispatcher.remove_dead();

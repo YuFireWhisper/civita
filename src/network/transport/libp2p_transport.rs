@@ -4,7 +4,7 @@ use futures::StreamExt;
 use libp2p::PeerId;
 
 use crate::{
-    crypto::dkg::Data,
+    crypto::tss::Signature,
     network::transport::{
         libp2p_transport::{
             behaviour::Behaviour,
@@ -260,7 +260,7 @@ impl Transport for Libp2pTransport {
         self.request_response.request(peer_id, request).await;
     }
 
-    async fn put(&self, payload: kad::Payload, signature: Data) -> Result<()> {
+    async fn put(&self, payload: kad::Payload, signature: Signature) -> Result<()> {
         self.kad.put(payload, signature).await.map_err(Error::from)
     }
 
