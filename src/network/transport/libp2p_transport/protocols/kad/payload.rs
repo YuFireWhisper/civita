@@ -1,7 +1,8 @@
 use bincode::{config, error::EncodeError, serde::encode_to_vec};
-use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::crypto::primitives::algebra::Point;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -20,7 +21,7 @@ pub enum Error {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub enum Payload {
-    PeerInfo { peer_id: PeerId, pub_key: Vec<u8> },
+    CommitteePubKey(Point),
     // For testing
     Raw(Vec<u8>),
 }

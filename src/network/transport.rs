@@ -37,7 +37,12 @@ pub trait Transport: Send + Sync {
         payload: gossipsub::Payload,
     ) -> Result<libp2p::gossipsub::MessageId, Self::Error>;
     async fn request(&self, peer_id: &libp2p::PeerId, request: Request);
-    async fn put(&self, payload: kad::Payload, signature: Signature) -> Result<(), Self::Error>;
+    async fn put(
+        &self,
+        key: kad::Key,
+        payload: kad::Payload,
+        signature: Signature,
+    ) -> Result<(), Self::Error>;
     async fn get(&self, key: kad::Key) -> Result<Option<kad::Payload>, Self::Error>;
     fn self_peer(&self) -> libp2p::PeerId;
     fn keypair(&self) -> &libp2p::identity::Keypair;
