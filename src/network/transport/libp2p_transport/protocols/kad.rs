@@ -154,10 +154,10 @@ impl Kad {
         }
     }
 
-    pub async fn put(&self, payload: Payload, signture: Signature) -> Result<()> {
-        let record_key = Self::generate_key(&payload)?;
-        let record_value = Message::new(payload, signture).to_vec()?;
-        let record = libp2p::kad::Record::new(record_key, record_value);
+    pub async fn put(&self, key: Key, payload: Payload, signature: Signature) -> Result<()> {
+        let key = key.to_storage_key()?;
+        let record_value = Message::new(payload, signature).to_vec()?;
+        let record = libp2p::kad::Record::new(key, record_value);
 
         let mut swarm = self.swarm.lock().await;
         let query_id = swarm
@@ -169,15 +169,6 @@ impl Kad {
         self.waiting_put_queries.insert(query_id, tx);
 
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
-    }
-
-    fn generate_key(payload: &Payload) -> Result<libp2p::kad::RecordKey> {
-        let key = match payload {
-            Payload::PeerInfo { peer_id, .. } => Key::PeerInfo(*peer_id),
-            _ => return Err(Error::InvalidPayloadType),
-        };
-
-        Ok(key.to_storage_key()?)
     }
 
     pub async fn get(&self, key: Key) -> Result<Option<Payload>> {

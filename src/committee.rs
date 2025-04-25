@@ -19,7 +19,10 @@ use crate::{
         tss::{self, Tss},
     },
     network::transport::{
-        libp2p_transport::protocols::gossipsub::{payload, Message, Payload},
+        libp2p_transport::protocols::{
+            gossipsub::{payload, Message, Payload},
+            kad,
+        },
         Transport,
     },
 };
@@ -66,6 +69,9 @@ pub enum Error {
 
     #[error("{0}")]
     Keypair(#[from] keypair::Error),
+
+    #[error("{0}")]
+    KadPayload(#[from] kad::payload::Error),
 }
 
 #[derive(Debug)]
@@ -517,14 +523,13 @@ where
 
         let hash = Sha256::digest(&payload.to_vec()?);
         let signature = self.sign_message(hash.to_vec(), &payload).await?;
-
         payload.set_signature(signature);
 
-        let info = Info::new(next_epoch, memeber, public_key);
-
+        let info = Info::new(next_epoch, memeber, public_key.clone());
         self.next_committee.write().await.replace(info);
 
         self.publish_payload(payload).await?;
+        self.storage_new_public_key(next_epoch, public_key).await?;
 
         Ok(())
     }
@@ -542,6 +547,33 @@ where
         };
 
         expected_hash == request_hash
+    }
+
+    async fn storage_new_public_key(&self, epoch: u64, public_key: Point) -> Result<()> {
+        let key = kad::Key::CommitteePubKey(epoch);
+        let hash = Sha256::digest(&public_key.to_vec()?);
+        let payload = kad::Payload::CommitteePubKey(public_key);
+        let signature = self.sign_kad_message(hash.into(), &payload).await?;
+
+        self.transport
+            .put(key, payload, signature)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn sign_kad_message(
+        &self,
+        seed: [u8; 32],
+        payload: &kad::Payload,
+    ) -> Result<tss::Signature> {
+        self.tss
+            .read()
+            .await
+            .sign(seed.to_vec(), &payload.to_vec()?)
+            .await
+            .map_err(|e| Error::Tss(e.to_string()))
     }
 
     async fn process_dkg_generate_failure_request(
