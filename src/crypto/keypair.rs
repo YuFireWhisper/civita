@@ -70,6 +70,12 @@ impl PublicKey {
             (PublicKey::Secp256k1(pk), VrfProof::Secp256k1(proof)) => pk.verify_proof(msg, proof),
         }
     }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            PublicKey::Secp256k1(pk) => pk.as_bytes(),
+        }
+    }
 }
 
 impl VrfProof {
