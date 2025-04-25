@@ -1,5 +1,4 @@
 pub mod committee;
-pub mod community;
 pub mod crypto;
 pub mod network;
 
