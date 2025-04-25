@@ -148,6 +148,7 @@ where
         });
 
         self.handler.lock().await.replace(handler);
+
         Ok(())
     }
 
@@ -176,6 +177,10 @@ where
     }
 
     async fn process_message(&self, mut msg: Message) -> Result<()> {
+        if self.is_need_in_committee(&msg) && !self.is_member() {
+            return Ok(());
+        }
+
         self.verify_source(&msg).await?;
 
         let hash = self.verify_signature(&mut msg).await?;
@@ -220,6 +225,15 @@ where
             }
             _ => Ok(()),
         }
+    }
+
+    fn is_need_in_committee(&self, msg: &Message) -> bool {
+        matches!(
+            msg.payload,
+            Payload::CommitteeElectionResponse { .. }
+                | Payload::CommitteeGenerateSuccess { .. }
+                | Payload::CommitteeGenerateFailure { .. }
+        )
     }
 
     async fn verify_source(&self, msg: &Message) -> Result<()> {
@@ -471,10 +485,6 @@ where
         public_key: PublicKey,
         proof: VrfProof,
     ) -> Result<()> {
-        if !self.is_member() {
-            return Ok(());
-        }
-
         self.add_vote(seed, source, proof.output(), public_key)
             .await
     }
@@ -484,10 +494,6 @@ where
         request_hash: [u8; 32],
         public_key: Point,
     ) -> Result<()> {
-        if self.is_member() {
-            return Ok(());
-        }
-
         if !self.verify_request_hash(request_hash).await {
             return Ok(());
         }
@@ -543,10 +549,6 @@ where
         request_hash: [u8; 32],
         invalid_peers: HashSet<libp2p::PeerId>,
     ) -> Result<()> {
-        if self.is_member() {
-            return Ok(());
-        }
-
         self.pending_election
             .write()
             .await
@@ -680,5 +682,68 @@ where
             .sign(seed, &payload.to_vec()?)
             .await
             .map_err(|e| Error::Tss(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{
+        committee::{self},
+        crypto::{
+            dkg::MockDkg,
+            keypair::{self},
+            primitives::algebra::Point,
+            tss::MockTss,
+        },
+        network::transport::MockTransport,
+    };
+
+    fn setup_mock_transport() -> Arc<MockTransport> {
+        let mut transport = MockTransport::new();
+
+        transport
+            .expect_self_peer()
+            .returning(libp2p::PeerId::random);
+
+        transport.expect_listen_on_topic().returning(|_| {
+            let (_, rx) = tokio::sync::mpsc::channel(100);
+            Ok(rx)
+        });
+
+        Arc::new(transport)
+    }
+
+    #[tokio::test]
+    async fn initialize_correctly() {
+        let transport = setup_mock_transport();
+        let dkg = MockDkg::new();
+        let tss = MockTss::new();
+        let (secret_key, public_key) = keypair::generate_secp256k1();
+        let current_committee =
+            committee::Info::new(1, Default::default(), Point::secp256k1_zero());
+        let config = committee::Config::default();
+
+        let committee = committee::Committee::new(
+            transport,
+            dkg,
+            tss,
+            secret_key.clone(),
+            public_key.clone(),
+            current_committee,
+            config,
+        )
+        .await;
+
+        assert!(
+            committee.is_ok(),
+            "Failed to initialize committee: {:?}",
+            committee.err()
+        );
+        let committee = committee.unwrap();
+        assert_eq!(committee.secret_key, secret_key);
+        assert_eq!(committee.public_key, public_key);
+        assert_eq!(committee.current_committee.read().await.epoch, 1);
     }
 }
