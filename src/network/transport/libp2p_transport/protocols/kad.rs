@@ -154,9 +154,9 @@ impl Kad {
         }
     }
 
-    pub async fn put(&self, key: Key, payload: Payload, signture: Signature) -> Result<()> {
+    pub async fn put(&self, key: Key, payload: Payload, signature: Signature) -> Result<()> {
         let key = key.to_storage_key()?;
-        let record_value = Message::new(payload, signture).to_vec()?;
+        let record_value = Message::new(payload, signature).to_vec()?;
         let record = libp2p::kad::Record::new(key, record_value);
 
         let mut swarm = self.swarm.lock().await;
