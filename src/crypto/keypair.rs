@@ -72,6 +72,14 @@ impl PublicKey {
     }
 }
 
+impl VrfProof {
+    pub fn output(&self) -> [u8; 32] {
+        match self {
+            VrfProof::Secp256k1(proof) => proof.y.to_bytes().into(),
+        }
+    }
+}
+
 pub fn generate_secp256k1() -> (SecretKey, PublicKey) {
     let (sk, pk) = secp256k1::generate_keypair();
     (SecretKey::Secp256k1(sk), PublicKey::Secp256k1(pk))
