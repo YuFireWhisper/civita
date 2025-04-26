@@ -18,6 +18,11 @@ pub enum Error {
     Secpk1(#[from] secp256k1::Error),
 }
 
+#[derive(Debug)]
+pub enum KeyType {
+    Secp256k1,
+}
+
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
@@ -72,9 +77,7 @@ impl PublicKey {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            PublicKey::Secp256k1(pk) => pk.as_bytes(),
-        }
+        self.as_ref()
     }
 }
 
@@ -86,7 +89,41 @@ impl VrfProof {
     }
 }
 
+pub fn generate_keypair(t: KeyType) -> (SecretKey, PublicKey) {
+    match t {
+        KeyType::Secp256k1 => generate_secp256k1(),
+    }
+}
+
 pub fn generate_secp256k1() -> (SecretKey, PublicKey) {
     let (sk, pk) = secp256k1::generate_keypair();
     (SecretKey::Secp256k1(sk), PublicKey::Secp256k1(pk))
+}
+
+impl From<secp256k1::SecretKey> for SecretKey {
+    fn from(secret_key: secp256k1::SecretKey) -> Self {
+        SecretKey::Secp256k1(secret_key)
+    }
+}
+
+impl AsRef<[u8]> for SecretKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            SecretKey::Secp256k1(sk) => sk.as_ref(),
+        }
+    }
+}
+
+impl From<secp256k1::PublicKey> for PublicKey {
+    fn from(public_key: secp256k1::PublicKey) -> Self {
+        PublicKey::Secp256k1(public_key)
+    }
+}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            PublicKey::Secp256k1(pk) => pk.as_ref(),
+        }
+    }
 }
