@@ -1,5 +1,8 @@
 use bincode::{Decode, Encode};
-use libsecp256k1::{self, PublicKey as LibPublicKey, PublicKeyFormat, SecretKey as LibSecretKey};
+use k256::{
+    elliptic_curve::{rand_core::OsRng, sec1::ToEncodedPoint},
+    PublicKey as K256PublicKey, SecretKey as K256SecretKey,
+};
 use serde::{Deserialize, Serialize};
 
 const SECRET_KEY_LENGTH: usize = 32;
@@ -10,22 +13,10 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
-    Secp256k1(#[from] libsecp256k1::Error),
+    EllipticCurve(#[from] k256::elliptic_curve::Error),
 
-    #[error("Secret key not found")]
-    SecretKeyNotFound,
-
-    #[error("Invalid public key length")]
-    InvalidPublicKeyLength,
-
-    #[error("Invalid secret key length")]
-    InvalidSecretKeyLength,
-
-    #[error("Encryption error: {0}")]
-    Encryption(String),
-
-    #[error("Decryption error: {0}")]
-    Decryption(String),
+    #[error("{0}")]
+    Ecies(String),
 
     #[error("{0}")]
     Ecvrf(String),
@@ -45,25 +36,21 @@ pub struct SecretKey([u8; SECRET_KEY_LENGTH]);
 pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
 
 impl SecretKey {
+    pub fn random() -> Self {
+        let secret_key: K256SecretKey = K256SecretKey::random(&mut OsRng);
+        Self::from(&secret_key)
+    }
+
+    pub fn to_public_key(&self) -> PublicKey {
+        self.into()
+    }
+
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        let _ = LibSecretKey::parse_slice(bytes)?;
-
-        let mut key = [0u8; SECRET_KEY_LENGTH];
-        key.copy_from_slice(bytes);
-
-        Ok(Self(key))
-    }
-
-    pub fn from_secret_key(secret_key: &LibSecretKey) -> Self {
-        Self(secret_key.serialize())
-    }
-
-    pub fn as_bytes(&self) -> &[u8; SECRET_KEY_LENGTH] {
-        &self.0
+        Self::try_from(bytes)
     }
 
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        ecies::decrypt(&self.0, ciphertext).map_err(Error::from)
+        ecies::decrypt(&self.0, ciphertext).map_err(|e| Error::Ecies(e.to_string()))
     }
 
     pub fn prove(&self, input: impl AsRef<[u8]>) -> Result<libecvrf_k256::ECVRFProof> {
@@ -77,25 +64,21 @@ impl SecretKey {
 }
 
 impl PublicKey {
+    pub fn random() -> Self {
+        let secret_key = SecretKey::random();
+        Self::from_secret_key(&secret_key)
+    }
+
+    pub fn from_secret_key(secret_key: &SecretKey) -> Self {
+        Self::from(secret_key)
+    }
+
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        let _ = LibPublicKey::parse_slice(bytes, Some(PublicKeyFormat::Compressed))?;
-
-        let mut key = [0u8; PUBLIC_KEY_LENGTH];
-        key.copy_from_slice(bytes);
-
-        Ok(Self(key))
-    }
-
-    pub fn from_public_key(public_key: &LibPublicKey) -> Self {
-        Self(public_key.serialize_compressed())
-    }
-
-    pub fn as_bytes(&self) -> &[u8; PUBLIC_KEY_LENGTH] {
-        &self.0
+        Self::try_from(bytes)
     }
 
     pub fn encrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
-        ecies::encrypt(&self.0, msg).map_err(Error::from)
+        ecies::encrypt(&self.0, msg).map_err(|e| Error::Ecies(e.to_string()))
     }
 
     pub fn verify_proof(&self, input: impl AsRef<[u8]>, proof: &libecvrf_k256::ECVRFProof) -> bool {
@@ -104,11 +87,72 @@ impl PublicKey {
 }
 
 pub fn generate_keypair() -> (SecretKey, PublicKey) {
-    let (sk, pk) = ecies::utils::generate_keypair();
-    (
-        SecretKey::from_secret_key(&sk),
-        PublicKey::from_public_key(&pk),
-    )
+    let secret_key = SecretKey::random();
+    let public_key = PublicKey::from_secret_key(&secret_key);
+    (secret_key, public_key)
+}
+
+impl From<&k256::SecretKey> for SecretKey {
+    fn from(secret_key: &k256::SecretKey) -> Self {
+        Self(secret_key.to_bytes().into())
+    }
+}
+
+impl From<&SecretKey> for k256::SecretKey {
+    fn from(secret_key: &SecretKey) -> Self {
+        k256::SecretKey::from_slice(secret_key.as_ref()).expect("Invalid secret key")
+    }
+}
+
+impl TryFrom<&[u8]> for SecretKey {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        let key = K256SecretKey::from_slice(bytes)?;
+        Ok(Self::from(&key))
+    }
+}
+
+impl AsRef<[u8]> for SecretKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&k256::PublicKey> for PublicKey {
+    fn from(public_key: &k256::PublicKey) -> Self {
+        let mut arr = [0u8; PUBLIC_KEY_LENGTH];
+        arr.copy_from_slice(&public_key.to_encoded_point(true).to_bytes());
+        Self(arr)
+    }
+}
+
+impl From<&SecretKey> for PublicKey {
+    fn from(secret_key: &SecretKey) -> Self {
+        let secret_key =
+            K256SecretKey::from_slice(secret_key.as_ref()).expect("Invalid secret key");
+        let public_key = secret_key.public_key();
+        Self::from(&public_key)
+    }
+}
+
+impl TryFrom<&[u8]> for PublicKey {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        let key = K256PublicKey::from_sec1_bytes(bytes)?;
+
+        let mut arr = [0u8; PUBLIC_KEY_LENGTH];
+        arr.copy_from_slice(&key.to_encoded_point(true).to_bytes());
+
+        Ok(Self(arr))
+    }
+}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 impl Serialize for PublicKey {
@@ -129,32 +173,21 @@ impl<'de> serde::Deserialize<'de> for PublicKey {
 
         let bytes = <Vec<u8>>::deserialize(deserializer)?;
 
-        if bytes.len() != PUBLIC_KEY_LENGTH {
-            return Err(D::Error::custom(format!(
-                "Invalid public key length: expected {}, got {}",
-                PUBLIC_KEY_LENGTH,
-                bytes.len()
-            )));
-        }
-
-        let mut arr = [0u8; PUBLIC_KEY_LENGTH];
-        arr.copy_from_slice(&bytes);
-
-        PublicKey::from_slice(&arr)
+        PublicKey::from_slice(&bytes)
             .map_err(|e| D::Error::custom(format!("Invalid public key: {}", e)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::keypair::secp256k1::PublicKey;
+    use crate::crypto::keypair::secp256k1::{PublicKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH};
 
     #[test]
     fn generate_keypair_is_valid() {
         let (sk, pk) = super::generate_keypair();
 
-        assert_eq!(sk.as_bytes().len(), super::SECRET_KEY_LENGTH);
-        assert_eq!(pk.as_bytes().len(), super::PUBLIC_KEY_LENGTH);
+        assert_eq!(sk.as_ref().len(), SECRET_KEY_LENGTH);
+        assert_eq!(pk.as_ref().len(), PUBLIC_KEY_LENGTH);
     }
 
     #[test]
@@ -181,8 +214,8 @@ mod tests {
         let (sk1, pk1) = super::generate_keypair();
         let (sk2, pk2) = super::generate_keypair();
 
-        assert_ne!(sk1.as_bytes(), sk2.as_bytes());
-        assert_ne!(pk1.as_bytes(), pk2.as_bytes());
+        assert_ne!(sk1, sk2);
+        assert_ne!(pk1, pk2);
 
         let ciphertext = pk1.encrypt(MESSAGE).expect("Encryption failed");
         assert!(
