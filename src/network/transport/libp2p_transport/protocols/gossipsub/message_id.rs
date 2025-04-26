@@ -8,6 +8,7 @@ use crate::identity::resident_id::ResidentId;
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Encode, Decode)]
+#[derive(Hash)]
 #[derive(PartialOrd, Ord)]
 #[derive(Serialize, Deserialize)]
 pub struct MessageId(u64);

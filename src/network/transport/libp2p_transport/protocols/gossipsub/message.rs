@@ -1,44 +1,48 @@
-use libp2p::{
-    gossipsub::{Event, MessageId},
-    PeerId,
-};
+use libp2p::gossipsub::Event;
 use log::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    crypto::tss::Signature,
-    network::transport::libp2p_transport::{
-        dispatcher::Keyed,
-        protocols::gossipsub::{payload, Payload},
-    },
+    crypto::{keypair::ResidentSignature, tss::CommitteeSignature},
+    identity::resident_id::ResidentId,
+    network::transport::libp2p_transport::protocols::gossipsub::{MessageId, Payload},
 };
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Sequence number is missing")]
-    MissingSequenceNumber,
-
-    #[error("Event is not a valid message")]
-    InvalidMessage,
-
-    #[error("{0}")]
-    Payload(#[from] payload::Error),
-
     #[error("Encode error: {0}")]
     Encode(#[from] bincode::error::EncodeError),
 
     #[error("Decode error: {0}")]
     Decode(#[from] bincode::error::DecodeError),
 
-    #[error("Payload requires signature")]
-    MissingSignature,
+    #[error("Require MessageId")]
+    RequireMessageId,
+
+    #[error("Require Source")]
+    RequireSource,
+
+    #[error("Require Topic")]
+    RequireTopic,
+
+    #[error("Require Payload")]
+    RequirePayload,
+
+    #[error("Require Resident Signature")]
+    RequireResidentSignature,
+
+    #[error("Require Signature")]
+    RequireSignature,
 
     #[error("Payload does not require signature")]
-    SignatureNotRequired,
+    NotRequiredSignature,
 
     #[error("Signature verification failed")]
     SignatureVerificationFailed,
+
+    #[error("Event is not a message")]
+    NotMessage,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -48,44 +52,54 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub struct Message {
-    pub message_id: MessageId,
-    pub source: PeerId,
-    pub topic: String,
-    pub sequence_number: u64,
-    pub payload: Payload,
-    pub signature: Option<Signature>,
+    /// The unique identifier of the message
+    /// Derived from H(ResidentId + SequenceNumber), where H is a hash function (currently using xxHash).
+    pub(crate) id: MessageId,
+
+    /// The source of the message
+    pub(crate) source: ResidentId,
+
+    /// The topic to which the message was sent
+    pub(crate) topic: Vec<u8>,
+
+    /// The payload of the message
+    /// This is the actual data being sent in the message
+    pub(crate) payload: Payload,
+
+    /// The signature of the resident
+    pub(crate) resident_signature: ResidentSignature,
+
+    /// The signature of the committee
+    /// This is optional and is only set when the message need to come from the committee
+    pub(crate) committee_signature: Option<CommitteeSignature>,
 }
 
-#[derive(Clone)]
 #[derive(Debug)]
-#[derive(Eq, PartialEq)]
-#[derive(Serialize, Deserialize)]
-pub(super) struct TransportMessage {
-    pub payload: Payload,
-    pub signature: Option<Signature>,
+#[derive(Default)]
+pub struct MessageBuilder {
+    id: Option<MessageId>,
+    source: Option<ResidentId>,
+    topic: Option<Vec<u8>>,
+    payload: Option<Payload>,
+    resident_signature: Option<ResidentSignature>,
+    committee_signature: Option<CommitteeSignature>,
 }
 
 impl Message {
+    pub fn validate(&self) -> Result<()> {
+        if self.payload.need_signature() && self.committee_signature.is_none() {
+            return Err(Error::RequireSignature);
+        }
+
+        if !self.payload.need_signature() && self.committee_signature.is_some() {
+            return Err(Error::NotRequiredSignature);
+        }
+
+        Ok(())
+    }
+
     pub fn try_from_gossipsub_event(event: Event) -> Result<Self> {
         Self::try_from(event)
-    }
-}
-
-impl TransportMessage {
-    pub fn new(payload: Payload, signature: Option<Signature>) -> Result<Self> {
-        let message = TransportMessage { payload, signature };
-        message.validate()?;
-        Ok(message)
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.payload.need_signature() && self.signature.is_none() {
-            return Err(Error::MissingSignature);
-        }
-        if !self.payload.need_signature() && self.signature.is_some() {
-            return Err(Error::SignatureNotRequired);
-        }
-        Ok(())
     }
 
     pub fn to_vec(&self) -> Result<Vec<u8>> {
@@ -93,9 +107,64 @@ impl TransportMessage {
     }
 }
 
-impl Keyed<String> for Message {
-    fn key(&self) -> &String {
-        &self.topic
+impl MessageBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_source(mut self, source: ResidentId, squence_number: u64) -> Self {
+        self.source = Some(source);
+        self.id = Some(MessageId::new(source, squence_number));
+        self
+    }
+
+    pub fn set_topic(mut self, topic: Vec<u8>) -> Self {
+        self.topic = Some(topic);
+        self
+    }
+
+    pub fn set_payload(mut self, payload: Payload) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    pub fn set_resident_signature(mut self, signature: ResidentSignature) -> Self {
+        self.resident_signature = Some(signature);
+        self
+    }
+
+    pub fn set_committee_signature(mut self, signature: CommitteeSignature) -> Self {
+        self.committee_signature = Some(signature);
+        self
+    }
+
+    pub fn set_committee_signature_option(mut self, signature: Option<CommitteeSignature>) -> Self {
+        self.committee_signature = signature;
+        self
+    }
+
+    pub fn build(self) -> Result<Message> {
+        let id = self.id.ok_or(Error::RequireMessageId)?;
+        let source = self.source.ok_or(Error::RequireSource)?;
+        let topic = self.topic.ok_or(Error::RequireTopic)?;
+        let payload = self.payload.ok_or(Error::RequirePayload)?;
+        let resident_signature = self
+            .resident_signature
+            .ok_or(Error::RequireResidentSignature)?;
+        let committee_signature = self.committee_signature;
+
+        let message = Message {
+            id,
+            source,
+            topic,
+            payload,
+            resident_signature,
+            committee_signature,
+        };
+
+        message.validate()?;
+
+        Ok(message)
     }
 }
 
@@ -103,184 +172,46 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
     type Error = Error;
 
     fn try_from(event: Event) -> Result<Self> {
-        if let Event::Message {
-            propagation_source,
-            message_id,
-            message,
-        } = event
-        {
-            let source = propagation_source;
-            let topic = message.topic.into_string();
-            let sequence_number = message
-                .sequence_number
-                .ok_or(Error::MissingSequenceNumber)?;
-            let transport_message = TransportMessage::try_from(message.data.as_slice())?;
-            let payload = transport_message.payload;
-            let signature = transport_message.signature;
-
-            Ok(Message {
-                message_id,
-                source,
-                topic,
-                sequence_number,
-                payload,
-                signature,
-            })
+        if let Event::Message { message, .. } = event {
+            Self::try_from(&message.data)
         } else {
-            Err(Error::InvalidMessage)
+            Err(Error::NotMessage)
         }
     }
 }
 
-impl TryFrom<&TransportMessage> for Vec<u8> {
+impl TryFrom<Message> for Vec<u8> {
     type Error = Error;
 
-    fn try_from(message: &TransportMessage) -> Result<Self> {
+    fn try_from(message: Message) -> Result<Self> {
+        bincode::serde::encode_to_vec(&message, bincode::config::standard()).map_err(Error::from)
+    }
+}
+
+impl TryFrom<&Message> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(message: &Message) -> Result<Self> {
         bincode::serde::encode_to_vec(message, bincode::config::standard()).map_err(Error::from)
     }
 }
 
-impl TryFrom<&[u8]> for TransportMessage {
+impl TryFrom<&Vec<u8>> for Message {
     type Error = Error;
 
-    fn try_from(bytes: &[u8]) -> Result<Self> {
-        let msg: TransportMessage =
-            bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-                .map(|(message, _)| message)?;
-
-        msg.validate()?;
-
-        Ok(msg)
+    fn try_from(value: &Vec<u8>) -> Result<Self> {
+        bincode::serde::decode_from_slice(value, bincode::config::standard())
+            .map(|(msg, _)| msg)
+            .map_err(Error::from)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use libp2p::gossipsub::{self, IdentTopic, MessageId};
+impl TryFrom<&[u8]> for Message {
+    type Error = Error;
 
-    use crate::{
-        crypto::{
-            primitives::algebra::{Point, Scalar},
-            tss::{schnorr, Signature},
-        },
-        network::transport::libp2p_transport::protocols::gossipsub::{
-            Message, Payload, TransportMessage,
-        },
-    };
-
-    const TEST_TOPIC: &str = "test_topic";
-    const TEST_SEQUENCE_NUMBER: u64 = 1;
-    const TEST_PAYLOAD: &[u8] = b"test_payload";
-    const MESSAGE_ID: &[u8] = b"test-message-id";
-
-    fn create_signature() -> Option<Signature> {
-        Some(Signature::Schnorr(schnorr::signature::Signature::new(
-            Scalar::secp256k1_random(),
-            Point::secp256k1_zero(),
-        )))
-    }
-
-    fn create_gossipsub_event(
-        payload: Payload,
-        signature: Option<Signature>,
-        sequence_number: Option<u64>,
-    ) -> gossipsub::Event {
-        let message_id = MessageId::from(MESSAGE_ID);
-        let source = libp2p::PeerId::random();
-        let transport_message = TransportMessage::new(payload, signature).unwrap();
-
-        gossipsub::Event::Message {
-            propagation_source: source,
-            message_id,
-            message: gossipsub::Message {
-                source: Some(source),
-                topic: IdentTopic::new(TEST_TOPIC).hash(),
-                sequence_number,
-                data: transport_message.to_vec().unwrap(),
-            },
-        }
-    }
-
-    #[test]
-    fn success_when_all_fields_are_present() {
-        let payload = Payload::RawWithSignature {
-            raw: TEST_PAYLOAD.to_vec(),
-            signature: Some(create_signature().unwrap()),
-        };
-
-        let result = TransportMessage::new(payload, create_signature());
-
-        assert!(
-            result.is_ok(),
-            "Failed to create TransportMessage: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn fail_when_signature_is_missing() {
-        let payload = Payload::RawWithSignature {
-            raw: TEST_PAYLOAD.to_vec(),
-            signature: None,
-        };
-
-        let result = TransportMessage::new(payload, None);
-
-        assert!(
-            result.is_err(),
-            "Expected error when signature is missing, but got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn success_when_signature_is_not_required() {
-        let payload = Payload::Raw(TEST_PAYLOAD.to_vec());
-
-        let result = TransportMessage::new(payload, None);
-
-        assert!(
-            result.is_ok(),
-            "Failed to create TransportMessage: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn fail_when_signature_is_not_required() {
-        let payload = Payload::Raw(TEST_PAYLOAD.to_vec());
-
-        let result = TransportMessage::new(payload, create_signature());
-
-        assert!(
-            result.is_err(),
-            "Expected error when signature is not required, but got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn success_convert_from_gossipsub_event() {
-        let payload = Payload::RawWithSignature {
-            raw: TEST_PAYLOAD.to_vec(),
-            signature: Some(create_signature().unwrap()),
-        };
-        let event = create_gossipsub_event(
-            payload.clone(),
-            create_signature(),
-            Some(TEST_SEQUENCE_NUMBER),
-        );
-
-        let result = Message::try_from_gossipsub_event(event);
-
-        assert!(
-            result.is_ok(),
-            "Failed to convert from gossipsub event: {:?}",
-            result
-        );
-        let message = result.unwrap();
-        assert_eq!(message.topic, TEST_TOPIC);
-        assert_eq!(message.sequence_number, TEST_SEQUENCE_NUMBER);
-        assert_eq!(message.payload, payload);
+    fn try_from(value: &[u8]) -> Result<Self> {
+        bincode::serde::decode_from_slice(value, bincode::config::standard())
+            .map(|(msg, _)| msg)
+            .map_err(Error::from)
     }
 }

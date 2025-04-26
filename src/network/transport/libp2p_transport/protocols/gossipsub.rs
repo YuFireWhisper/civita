@@ -6,19 +6,22 @@ use libp2p::{
     Swarm,
 };
 
+mod dispatcher;
 pub mod message;
 pub mod message_id;
 pub mod payload;
 
 pub use message::Message;
+pub use message_id::MessageId;
 pub use payload::Payload;
 
 use crate::{
-    crypto::tss::Signature,
+    crypto::{keypair, tss::CommitteeSignature},
+    identity::resident_id::ResidentId,
     network::transport::libp2p_transport::{
         behaviour::Behaviour,
-        dispatcher::{self, Dispatcher},
-        protocols::gossipsub::message::TransportMessage,
+        credentials::Credentials,
+        protocols::gossipsub::{dispatcher::Dispatcher, message::MessageBuilder},
     },
 };
 
@@ -47,6 +50,12 @@ pub enum Error {
 
     #[error("{0}")]
     Message(#[from] message::Error),
+
+    #[error("{0}")]
+    Keypair(#[from] keypair::Error),
+
+    #[error("{0}")]
+    FromUtf8Error(#[from] std::string::FromUtf8Error),
 }
 
 #[derive(Debug)]
@@ -60,6 +69,20 @@ pub struct Config {
 pub struct ConfigBuilder {
     timeout: Option<tokio::time::Duration>,
     channel_size: Option<usize>,
+}
+
+struct DispatcherFilter {
+    pub(crate) source: Option<ResidentId>,
+    pub(crate) topic: Vec<u8>,
+}
+
+pub struct Gossipsub {
+    swarm: Arc<tokio::sync::Mutex<Swarm<Behaviour>>>,
+    dispatcher: Dispatcher,
+    subscribed_topics: Arc<tokio::sync::RwLock<HashSet<TopicHash>>>,
+    waiting_subscription: DashMap<TopicHash, tokio::sync::oneshot::Sender<()>>,
+    credentials: Credentials,
+    config: Config,
 }
 
 impl ConfigBuilder {
@@ -91,21 +114,18 @@ impl ConfigBuilder {
     }
 }
 
-pub struct Gossipsub {
-    swarm: Arc<tokio::sync::Mutex<Swarm<Behaviour>>>,
-    dispatcher: Dispatcher<String, Message>,
-    subscribed_topics: Arc<tokio::sync::RwLock<HashSet<TopicHash>>>,
-    waiting_subscription: DashMap<TopicHash, tokio::sync::oneshot::Sender<()>>,
-    config: Config,
-}
-
 impl Gossipsub {
-    pub fn new(swarm: Arc<tokio::sync::Mutex<Swarm<Behaviour>>>, config: Config) -> Self {
+    pub fn new(
+        swarm: Arc<tokio::sync::Mutex<Swarm<Behaviour>>>,
+        credentials: Credentials,
+        config: Config,
+    ) -> Self {
         Self {
             swarm,
             dispatcher: Dispatcher::new(),
             subscribed_topics: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
             waiting_subscription: DashMap::new(),
+            credentials,
             config,
         }
     }
@@ -149,37 +169,41 @@ impl Gossipsub {
             .map_err(Error::Subscribe)?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(self.config.channel_size);
-        self.dispatcher.register(topic.to_string(), tx);
+        self.dispatcher
+            .register(topic.to_string().into_bytes(), None, tx);
 
         Ok(rx)
     }
 
     pub async fn publish(
         &self,
-        topic: impl Into<String>,
+        topic: impl Into<Vec<u8>>,
         payload: impl Into<Payload>,
     ) -> Result<libp2p::gossipsub::MessageId> {
-        let topic = IdentTopic::new(topic);
-
+        let topic: Vec<u8> = topic.into();
         let payload: Payload = payload.into();
-        let message = TransportMessage::new(payload, None).expect("Failed to create message");
 
-        self.publish_transport_message(topic, message).await
+        self.publish_message(topic, payload, None).await
     }
 
-    async fn publish_transport_message(
+    pub async fn publish_message(
         &self,
-        topic: IdentTopic,
-        message: TransportMessage,
+        topic: Vec<u8>,
+        payload: Payload,
+        committee_signature: Option<CommitteeSignature>,
     ) -> Result<libp2p::gossipsub::MessageId> {
-        if !self.subscribed_topics.read().await.contains(&topic.hash()) {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.waiting_subscription.insert(topic.hash(), tx);
+        let sequence_number = self.credentials.next_count();
+        let resident_signature = self.credentials.secret_key().sign(&payload.to_vec()?)?;
 
-            tokio::time::timeout(self.config.timeout, rx)
-                .await
-                .map_err(|_| Error::NoPeerSubscribed(topic.to_string()))??;
-        }
+        let message = MessageBuilder::new()
+            .set_topic(topic.clone())
+            .set_source(*self.credentials.id(), sequence_number)
+            .set_payload(payload)
+            .set_resident_signature(resident_signature)
+            .set_committee_signature_option(committee_signature)
+            .build()?;
+
+        let topic = IdentTopic::new(String::from_utf8(topic)?);
 
         self.swarm
             .lock()
@@ -192,17 +216,14 @@ impl Gossipsub {
 
     pub async fn publish_with_signature(
         &self,
-        topic: impl Into<String>,
+        topic: impl Into<Vec<u8>>,
         payload: impl Into<Payload>,
-        signature: impl Into<Signature>,
+        signature: impl Into<CommitteeSignature>,
     ) -> Result<libp2p::gossipsub::MessageId> {
-        let topic = IdentTopic::new(topic);
-
+        let topic: Vec<u8> = topic.into();
         let payload: Payload = payload.into();
-        let signature: Signature = signature.into();
-        let message =
-            TransportMessage::new(payload, Some(signature)).expect("Failed to create message");
 
-        self.publish_transport_message(topic, message).await
+        self.publish_message(topic, payload, Some(signature.into()))
+            .await
     }
 }
