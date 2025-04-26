@@ -7,6 +7,7 @@ use libp2p::{
 };
 
 pub mod message;
+pub mod message_id;
 pub mod payload;
 
 pub use message::Message;
