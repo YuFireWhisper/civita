@@ -59,19 +59,19 @@ pub enum ResidentSignature {
 }
 
 impl SecretKey {
-    pub fn decrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
+    pub fn decrypt(&self, msg: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         match self {
             SecretKey::Secp256k1(sk) => sk.decrypt(msg).map_err(Error::from),
         }
     }
 
-    pub fn prove(&self, msg: &[u8]) -> Result<VrfProof> {
+    pub fn prove(&self, msg: impl AsRef<[u8]>) -> Result<VrfProof> {
         match self {
             SecretKey::Secp256k1(sk) => Ok(VrfProof::Secp256k1(sk.prove(msg)?)),
         }
     }
 
-    pub fn sign(&self, msg: &[u8]) -> Result<ResidentSignature> {
+    pub fn sign(&self, msg: impl AsRef<[u8]>) -> Result<ResidentSignature> {
         match self {
             SecretKey::Secp256k1(sk) => Ok(ResidentSignature::Secp256k1(sk.sign(msg)?)),
         }
@@ -79,19 +79,19 @@ impl SecretKey {
 }
 
 impl PublicKey {
-    pub fn encrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
+    pub fn encrypt(&self, msg: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         match self {
             PublicKey::Secp256k1(pk) => pk.encrypt(msg).map_err(Error::from),
         }
     }
 
-    pub fn verify_proof(&self, msg: &[u8], proof: &VrfProof) -> bool {
+    pub fn verify_proof(&self, msg: impl AsRef<[u8]>, proof: &VrfProof) -> bool {
         match (self, proof) {
             (PublicKey::Secp256k1(pk), VrfProof::Secp256k1(proof)) => pk.verify_proof(msg, proof),
         }
     }
 
-    pub fn verify_signature(&self, msg: &[u8], sig: &ResidentSignature) -> bool {
+    pub fn verify_signature(&self, msg: impl AsRef<[u8]>, sig: &ResidentSignature) -> bool {
         match (self, sig) {
             (PublicKey::Secp256k1(pk), ResidentSignature::Secp256k1(sig)) => {
                 pk.verify_signature(msg, sig)

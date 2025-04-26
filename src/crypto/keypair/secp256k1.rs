@@ -56,27 +56,27 @@ impl SecretKey {
         self.into()
     }
 
-    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        Self::try_from(bytes)
+    pub fn from_slice(bytes: impl AsRef<[u8]>) -> Result<Self> {
+        Self::try_from(bytes.as_ref())
     }
 
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        ecies::decrypt(&self.0, ciphertext).map_err(|e| Error::Ecies(e.to_string()))
+    pub fn decrypt(&self, ciphertext: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+        ecies::decrypt(&self.0, ciphertext.as_ref()).map_err(|e| Error::Ecies(e.to_string()))
     }
 
-    pub fn prove(&self, input: impl AsRef<[u8]>) -> Result<libecvrf_k256::ECVRFProof> {
+    pub fn prove(&self, msg: impl AsRef<[u8]>) -> Result<libecvrf_k256::ECVRFProof> {
         let ecvrf = libecvrf_k256::ECVRF::new_from_bytes(&self.0)
             .map_err(|e| Error::Ecvrf(e.to_string()))?;
 
         ecvrf
-            .prove(input.as_ref())
+            .prove(msg.as_ref())
             .map_err(|e| Error::Ecvrf(e.to_string()))
     }
 
-    pub fn sign(&self, msg: &[u8]) -> Result<ResidentSignature> {
+    pub fn sign(&self, msg: impl AsRef<[u8]>) -> Result<ResidentSignature> {
         let secret_key = self.to_k256_secret_key();
         let signing_key: k256::schnorr::SigningKey = secret_key.into();
-        let signature = signing_key.sign_prehash(msg)?;
+        let signature = signing_key.sign_prehash(msg.as_ref())?;
 
         Ok(signature.into())
     }
@@ -96,24 +96,26 @@ impl PublicKey {
         Self::from(secret_key)
     }
 
-    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        Self::try_from(bytes)
+    pub fn from_slice(bytes: impl AsRef<[u8]>) -> Result<Self> {
+        Self::try_from(bytes.as_ref())
     }
 
-    pub fn encrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
-        ecies::encrypt(&self.0, msg).map_err(|e| Error::Ecies(e.to_string()))
+    pub fn encrypt(&self, msg: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+        ecies::encrypt(&self.0, msg.as_ref()).map_err(|e| Error::Ecies(e.to_string()))
     }
 
-    pub fn verify_proof(&self, input: impl AsRef<[u8]>, proof: &libecvrf_k256::ECVRFProof) -> bool {
-        libecvrf_k256::ECVRF::verify(input.as_ref(), proof, &self.0)
+    pub fn verify_proof(&self, msg: impl AsRef<[u8]>, proof: &libecvrf_k256::ECVRFProof) -> bool {
+        libecvrf_k256::ECVRF::verify(msg.as_ref(), proof, &self.0)
     }
 
-    pub fn verify_signature(&self, msg: &[u8], signature: &ResidentSignature) -> bool {
+    pub fn verify_signature(&self, msg: impl AsRef<[u8]>, signature: &ResidentSignature) -> bool {
         let public_key = self.to_k256_public_key();
         let verifying_key: k256::schnorr::VerifyingKey = public_key
             .try_into()
             .expect("Failed to convert public key to verifying key");
-        verifying_key.verify(msg, &signature.into()).is_ok()
+        verifying_key
+            .verify(msg.as_ref(), &signature.into())
+            .is_ok()
     }
 
     pub fn to_k256_public_key(&self) -> K256PublicKey {
