@@ -49,6 +49,14 @@ pub enum VrfProof {
     Secp256k1(libecvrf_k256::ECVRFProof),
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
+pub enum ResidentSignature {
+    Secp256k1(secp256k1::ResidentSignature),
+}
+
 impl SecretKey {
     pub fn decrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
         match self {
@@ -59,6 +67,12 @@ impl SecretKey {
     pub fn prove(&self, msg: &[u8]) -> Result<VrfProof> {
         match self {
             SecretKey::Secp256k1(sk) => Ok(VrfProof::Secp256k1(sk.prove(msg)?)),
+        }
+    }
+
+    pub fn sign(&self, msg: &[u8]) -> Result<ResidentSignature> {
+        match self {
+            SecretKey::Secp256k1(sk) => Ok(ResidentSignature::Secp256k1(sk.sign(msg)?)),
         }
     }
 }
@@ -73,6 +87,14 @@ impl PublicKey {
     pub fn verify_proof(&self, msg: &[u8], proof: &VrfProof) -> bool {
         match (self, proof) {
             (PublicKey::Secp256k1(pk), VrfProof::Secp256k1(proof)) => pk.verify_proof(msg, proof),
+        }
+    }
+
+    pub fn verify_signature(&self, msg: &[u8], sig: &ResidentSignature) -> bool {
+        match (self, sig) {
+            (PublicKey::Secp256k1(pk), ResidentSignature::Secp256k1(sig)) => {
+                pk.verify_signature(msg, sig)
+            }
         }
     }
 
