@@ -115,3 +115,68 @@ impl TryFrom<&[u8]> for SignedPayload {
             .map_err(Error::from)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        crypto::{
+            primitives::algebra::{Point, Scalar},
+            tss::{schnorr, Signature},
+        },
+        network::transport::libp2p_transport::protocols::gossipsub::{
+            signed_payload::SignedPayload, Payload,
+        },
+    };
+
+    fn create_signature() -> Signature {
+        Signature::Schnorr(schnorr::signature::Signature {
+            sig: Scalar::secp256k1_random(),
+            public_random: Point::secp256k1_zero(),
+        })
+    }
+
+    #[test]
+    fn fails_when_payload_needs_signature() {
+        let payload = Payload::RawWithSignature { raw: vec![] };
+        let result = SignedPayload::new(payload, None);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fails_when_payload_doesnt_need_signature() {
+        let payload = Payload::Raw(vec![]);
+        let result = SignedPayload::new(payload, Some(create_signature()));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn succeeds_when_payload_needs_signature() {
+        let payload = Payload::RawWithSignature { raw: vec![] };
+        let result = SignedPayload::new(payload, Some(create_signature()));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn succeeds_when_payload_doesnt_need_signature() {
+        let payload = Payload::Raw(vec![]);
+        let result = SignedPayload::new(payload, None);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn success_convert_with_vec() {
+        const PAYLOAD: &[u8] = &[1, 2, 3, 4, 5];
+
+        let payload = Payload::Raw(PAYLOAD.to_vec());
+        let signed_payload = SignedPayload::new(payload, None).unwrap();
+
+        let signed_payload_vec = signed_payload.to_vec().unwrap();
+        let signed_payload_from_vec = SignedPayload::try_from(signed_payload_vec).unwrap();
+
+        assert_eq!(signed_payload, signed_payload_from_vec);
+    }
+}
