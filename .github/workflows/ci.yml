@@ -16,6 +16,12 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+      if: runner.os == 'Linux'
+
     - name: Cache Rust dependencies
       id: cache
       uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
