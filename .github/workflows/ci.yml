@@ -35,8 +35,10 @@ jobs:
         toolchain: nightly
 
     - name: Install tarpaulin
-      run: cargo install cargo-tarpaulin
-      if: steps.cache.outputs.cache-hit != 'true'
+      run: |
+        if ! command -v cargo-tarpaulin >/dev/null 2>&1; then
+          cargo install cargo-tarpaulin
+        fi
 
     - name: Run tests and generate coverage
       run: cargo tarpaulin --out Lcov --output-dir ./coverage
