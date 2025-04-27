@@ -138,4 +138,49 @@ impl TryFrom<Vec<u8>> for Payload {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use crate::network::transport::libp2p_transport::protocols::gossipsub::Payload;
+
+    #[test]
+    fn success_convert_with_vec() {
+        const PAYLOAD: &[u8] = &[1, 2, 3, 4, 5];
+
+        let payload = Payload::Raw(PAYLOAD.to_vec());
+        let payload_vec = payload.to_vec().unwrap();
+        let payload_from_vec = Payload::try_from(payload_vec).unwrap();
+
+        assert_eq!(payload, payload_from_vec);
+    }
+
+    #[test]
+    fn returns_true_when_committee_signature_required() {
+        let payload = Payload::RawWithSignature { raw: vec![] };
+
+        assert!(
+            payload.require_committee_signature(),
+            "Expected payload to require committee signature"
+        );
+    }
+
+    #[test]
+    fn returns_false_when_committee_signature_not_required() {
+        let payload = Payload::Raw(vec![]);
+
+        assert!(
+            !payload.require_committee_signature(),
+            "Expected payload to not require committee signature"
+        );
+    }
+
+    #[test]
+    fn error_when_decoding_invalid_payload() {
+        let invalid_payload = vec![0, 1, 2, 3, 4];
+
+        let result = Payload::try_from(invalid_payload);
+
+        assert!(
+            result.is_err(),
+            "Expected error when decoding invalid payload"
+        );
+    }
+}
