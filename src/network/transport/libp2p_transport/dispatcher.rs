@@ -49,10 +49,6 @@ where
         }
     }
 
-    pub fn remove_dead(&self) {
-        self.registered.retain(|_, tx| !tx.is_closed());
-    }
-
     pub fn dispatch(&self, value: T) -> Result<()> {
         let key = value.key();
         let sender = self.registered.get(key).ok_or(Error::NoSuchItem)?;
@@ -112,19 +108,5 @@ mod tests {
         dispatcher.register_all(keys.clone(), &tx);
 
         assert_eq!(dispatcher.registered.len(), NUMBER);
-    }
-
-    #[test]
-    fn map_len_down_remove_deal() {
-        const KEY: &str = "test";
-
-        let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
-        let dispatcher = Dispatcher::<String, TestMessage>::new();
-        dispatcher.register(KEY.to_string(), tx);
-
-        rx.close();
-        dispatcher.remove_dead();
-
-        assert_eq!(dispatcher.registered.len(), 0);
     }
 }

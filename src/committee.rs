@@ -183,7 +183,7 @@ where
     }
 
     async fn process_message(&self, mut msg: Message) -> Result<()> {
-        if self.is_need_in_committee(&msg) && !self.is_member() {
+        if self.is_self_member_required(&msg) && !self.is_member() {
             return Ok(());
         }
 
@@ -192,7 +192,7 @@ where
         let hash = self.verify_signature(&mut msg).await?;
 
         match msg.payload {
-            Payload::CommitteeCandiates { candidates, .. } => {
+            Payload::CommitteeCandidates { candidates, .. } => {
                 self.process_candidate_proposal(hash, candidates).await
             }
             Payload::CommitteeChange {
@@ -233,7 +233,7 @@ where
         }
     }
 
-    fn is_need_in_committee(&self, msg: &Message) -> bool {
+    fn is_self_member_required(&self, msg: &Message) -> bool {
         matches!(
             msg.payload,
             Payload::CommitteeElectionResponse { .. }
@@ -243,7 +243,9 @@ where
     }
 
     async fn verify_source(&self, msg: &Message) -> Result<()> {
-        if msg.payload.is_need_from_committee() && !self.is_peer_in_committee(&msg.source).await {
+        if msg.payload.require_committee_signature()
+            && !self.is_peer_in_committee(&msg.source).await
+        {
             return Err(Error::NotCommitteeMember(msg.source));
         }
 
@@ -286,7 +288,7 @@ where
     }
 
     async fn verify_signature(&self, msg: &mut Message) -> Result<[u8; 32]> {
-        if !msg.payload.is_need_from_committee() {
+        if !msg.payload.require_committee_signature() {
             let hash = Sha256::digest(&msg.payload.to_vec()?);
             return Ok(hash.into());
         }
@@ -295,7 +297,7 @@ where
             return Err(Error::NotCommitteeMember(msg.source));
         }
 
-        let signature = match msg.payload.take_signature() {
+        let signature = match msg.committee_signature.take() {
             Some(signature) => signature,
             None => return Err(Error::InvalidSignature(msg.source)),
         };
@@ -471,7 +473,7 @@ where
     }
 
     async fn process_election_request(&self, seed: [u8; 32]) -> Result<()> {
-        let proof = self.secret_key.prove(&seed)?;
+        let proof = self.secret_key.prove(seed)?;
 
         let payload = Payload::CommitteeElectionResponse {
             seed,
@@ -514,21 +516,19 @@ where
             .take_candidates()
             .expect("Candidates is empty");
 
-        let mut payload = Payload::CommitteeChange {
+        let payload = Payload::CommitteeChange {
             epoch: next_epoch,
             members: memeber.clone(),
             public_key: public_key.clone(),
-            signature: None,
         };
 
         let hash = Sha256::digest(&payload.to_vec()?);
         let signature = self.sign_message(hash.to_vec(), &payload).await?;
-        payload.set_signature(signature);
 
         let info = Info::new(next_epoch, memeber, public_key.clone());
         self.next_committee.write().await.replace(info);
 
-        self.publish_payload(payload).await?;
+        self.publish_with_signature(payload, signature).await?;
         self.storage_new_public_key(next_epoch, public_key).await?;
 
         Ok(())
@@ -547,6 +547,18 @@ where
         };
 
         expected_hash == request_hash
+    }
+
+    async fn publish_with_signature(
+        &self,
+        payload: Payload,
+        signature: tss::Signature,
+    ) -> Result<()> {
+        self.transport
+            .publish_signed(&self.config.topic, payload, signature)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        Ok(())
     }
 
     async fn storage_new_public_key(&self, epoch: u64, public_key: Point) -> Result<()> {
@@ -641,28 +653,24 @@ where
     }
 
     async fn processs_elect_new_committee_action(&self) -> Result<()> {
-        let (payload, seed) = self.generate_election_request().await?;
+        let (payload, signature, seed) = self.generate_election_request().await?;
 
-        self.publish_payload(payload).await?;
+        self.publish_with_signature(payload, signature).await?;
         self.set_empty_pending_election(seed).await;
         self.schedule_action(Action::VoteCollectionDone(seed)).await;
 
         Ok(())
     }
 
-    async fn generate_election_request(&self) -> Result<(Payload, [u8; 32])> {
+    async fn generate_election_request(&self) -> Result<(Payload, tss::Signature, [u8; 32])> {
         const SEED: &[u8] = b"election_request";
 
         let seed = Sha256::digest(SEED);
-        let mut payload = Payload::CommitteeElection {
-            seed: seed.into(),
-            signature: None,
-        };
+        let payload = Payload::CommitteeElection { seed: seed.into() };
 
         let signature = self.sign_message(seed.to_vec(), &payload).await?;
-        payload.set_signature(signature);
 
-        Ok((payload, seed.into()))
+        Ok((payload, signature, seed.into()))
     }
 
     async fn set_empty_pending_election(&self, seed: [u8; 32]) {
@@ -685,10 +693,9 @@ where
             .expect("Pending election is not set")
             .generate_candidates(self.config.max_num_members);
 
-        let mut payload = Payload::CommitteeCandiates {
+        let payload = Payload::CommitteeCandidates {
             count: generate_count,
             candidates,
-            signature: None,
         };
 
         let hash = Sha256::digest(&payload.to_vec()?);
@@ -700,9 +707,8 @@ where
             .set_message_hash(hash.into());
 
         let signature = self.sign_message(seed.to_vec(), &payload).await?;
-        payload.set_signature(signature);
 
-        self.publish_payload(payload).await?;
+        self.publish_with_signature(payload, signature).await?;
 
         Ok(())
     }

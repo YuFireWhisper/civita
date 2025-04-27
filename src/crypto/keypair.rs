@@ -18,10 +18,15 @@ pub enum Error {
     Secpk1(#[from] secp256k1::Error),
 }
 
+#[derive(Debug)]
+pub enum KeyType {
+    Secp256k1,
+}
+
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Encode, Decode)]
 #[derive(Eq, PartialEq)]
+#[derive(Encode, Decode)]
 #[derive(Serialize, Deserialize)]
 pub enum SecretKey {
     Secp256k1(secp256k1::SecretKey),
@@ -29,8 +34,8 @@ pub enum SecretKey {
 
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Encode, Decode)]
 #[derive(Eq, PartialEq)]
+#[derive(Encode, Decode)]
 #[derive(Serialize, Deserialize)]
 pub enum PublicKey {
     Secp256k1(secp256k1::PublicKey),
@@ -44,37 +49,58 @@ pub enum VrfProof {
     Secp256k1(libecvrf_k256::ECVRFProof),
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Encode, Decode)]
+#[derive(Serialize, Deserialize)]
+pub enum ResidentSignature {
+    Secp256k1(secp256k1::ResidentSignature),
+}
+
 impl SecretKey {
-    pub fn decrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
+    pub fn decrypt(&self, msg: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         match self {
             SecretKey::Secp256k1(sk) => sk.decrypt(msg).map_err(Error::from),
         }
     }
 
-    pub fn prove(&self, msg: &[u8]) -> Result<VrfProof> {
+    pub fn prove(&self, msg: impl AsRef<[u8]>) -> Result<VrfProof> {
         match self {
             SecretKey::Secp256k1(sk) => Ok(VrfProof::Secp256k1(sk.prove(msg)?)),
+        }
+    }
+
+    pub fn sign(&self, msg: impl AsRef<[u8]>) -> Result<ResidentSignature> {
+        match self {
+            SecretKey::Secp256k1(sk) => Ok(ResidentSignature::Secp256k1(sk.sign(msg)?)),
         }
     }
 }
 
 impl PublicKey {
-    pub fn encrypt(&self, msg: &[u8]) -> Result<Vec<u8>> {
+    pub fn encrypt(&self, msg: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         match self {
             PublicKey::Secp256k1(pk) => pk.encrypt(msg).map_err(Error::from),
         }
     }
 
-    pub fn verify_proof(&self, msg: &[u8], proof: &VrfProof) -> bool {
+    pub fn verify_proof(&self, msg: impl AsRef<[u8]>, proof: &VrfProof) -> bool {
         match (self, proof) {
             (PublicKey::Secp256k1(pk), VrfProof::Secp256k1(proof)) => pk.verify_proof(msg, proof),
         }
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            PublicKey::Secp256k1(pk) => pk.as_bytes(),
+    pub fn verify_signature(&self, msg: impl AsRef<[u8]>, sig: &ResidentSignature) -> bool {
+        match (self, sig) {
+            (PublicKey::Secp256k1(pk), ResidentSignature::Secp256k1(sig)) => {
+                pk.verify_signature(msg, sig)
+            }
         }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.as_ref()
     }
 }
 
@@ -86,7 +112,41 @@ impl VrfProof {
     }
 }
 
+pub fn generate_keypair(t: KeyType) -> (SecretKey, PublicKey) {
+    match t {
+        KeyType::Secp256k1 => generate_secp256k1(),
+    }
+}
+
 pub fn generate_secp256k1() -> (SecretKey, PublicKey) {
     let (sk, pk) = secp256k1::generate_keypair();
     (SecretKey::Secp256k1(sk), PublicKey::Secp256k1(pk))
+}
+
+impl From<secp256k1::SecretKey> for SecretKey {
+    fn from(secret_key: secp256k1::SecretKey) -> Self {
+        SecretKey::Secp256k1(secret_key)
+    }
+}
+
+impl AsRef<[u8]> for SecretKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            SecretKey::Secp256k1(sk) => sk.as_ref(),
+        }
+    }
+}
+
+impl From<secp256k1::PublicKey> for PublicKey {
+    fn from(public_key: secp256k1::PublicKey) -> Self {
+        PublicKey::Secp256k1(public_key)
+    }
+}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            PublicKey::Secp256k1(pk) => pk.as_ref(),
+        }
+    }
 }

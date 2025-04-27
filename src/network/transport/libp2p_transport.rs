@@ -94,7 +94,7 @@ impl Libp2pTransport {
 
         let swarm = Arc::new(tokio::sync::Mutex::new(swarm));
         let gossipsub_config = gossipsub::ConfigBuilder::new()
-            .with_waiting_subscription_timeout(config.wait_for_gossipsub_peer_timeout)
+            .with_timeout(config.wait_for_gossipsub_peer_timeout)
             .with_channel_size(config.channel_capacity)
             .build();
         let gossipsub = Gossipsub::new(swarm.clone(), gossipsub_config);
@@ -252,6 +252,18 @@ impl Transport for Libp2pTransport {
     ) -> Result<libp2p::gossipsub::MessageId> {
         self.gossipsub
             .publish(topic, payload)
+            .await
+            .map_err(Error::from)
+    }
+
+    async fn publish_signed(
+        &self,
+        topic: &str,
+        payload: gossipsub::Payload,
+        committee_signature: Signature,
+    ) -> Result<libp2p::gossipsub::MessageId> {
+        self.gossipsub
+            .publish_signed(topic, payload, committee_signature)
             .await
             .map_err(Error::from)
     }

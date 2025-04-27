@@ -1,6 +1,3 @@
-pub mod message;
-pub mod payload;
-
 use std::{collections::HashSet, sync::Arc};
 
 use dashmap::DashMap;
@@ -8,13 +5,22 @@ use libp2p::{
     gossipsub::{IdentTopic, TopicHash},
     Swarm,
 };
+
+use crate::{
+    crypto::tss::Signature,
+    network::transport::libp2p_transport::{
+        behaviour::Behaviour,
+        protocols::gossipsub::{dispatcher::Dispatcher, signed_payload::SignedPayload},
+    },
+};
+
+mod dispatcher;
+pub mod message;
+pub mod payload;
+mod signed_payload;
+
 pub use message::Message;
 pub use payload::Payload;
-
-use crate::network::transport::libp2p_transport::{
-    behaviour::Behaviour,
-    dispatcher::{self, Dispatcher},
-};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -38,19 +44,30 @@ pub enum Error {
 
     #[error("Oneshot error: {0}")]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
+
+    #[error("{0}")]
+    SignedPayload(#[from] signed_payload::Error),
 }
 
 #[derive(Debug)]
 pub struct Config {
-    pub waiting_subscription_timeout: tokio::time::Duration,
+    pub timeout: tokio::time::Duration,
     pub channel_size: usize,
 }
 
 #[derive(Debug)]
 #[derive(Default)]
 pub struct ConfigBuilder {
-    waiting_subscription_timeout: Option<tokio::time::Duration>,
+    timeout: Option<tokio::time::Duration>,
     channel_size: Option<usize>,
+}
+
+pub struct Gossipsub {
+    swarm: Arc<tokio::sync::Mutex<Swarm<Behaviour>>>,
+    dispatcher: Dispatcher,
+    subscribed_topics: Arc<tokio::sync::RwLock<HashSet<TopicHash>>>,
+    waiting_subscription: DashMap<TopicHash, tokio::sync::oneshot::Sender<()>>,
+    config: Config,
 }
 
 impl ConfigBuilder {
@@ -61,8 +78,8 @@ impl ConfigBuilder {
         Self::default()
     }
 
-    pub fn with_waiting_subscription_timeout(mut self, timeout: tokio::time::Duration) -> Self {
-        self.waiting_subscription_timeout = Some(timeout);
+    pub fn with_timeout(mut self, timeout: tokio::time::Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 
@@ -72,24 +89,14 @@ impl ConfigBuilder {
     }
 
     pub fn build(self) -> Config {
-        let waiting_subscription_timeout = self
-            .waiting_subscription_timeout
-            .unwrap_or(Self::DEFAULT_TIMEOUT);
+        let waiting_subscription_timeout = self.timeout.unwrap_or(Self::DEFAULT_TIMEOUT);
         let channel_size = self.channel_size.unwrap_or(Self::DEFAULT_CHANNEL_SIZE);
 
         Config {
-            waiting_subscription_timeout,
+            timeout: waiting_subscription_timeout,
             channel_size,
         }
     }
-}
-
-pub struct Gossipsub {
-    swarm: Arc<tokio::sync::Mutex<Swarm<Behaviour>>>,
-    dispatcher: Dispatcher<String, Message>,
-    subscribed_topics: Arc<tokio::sync::RwLock<HashSet<TopicHash>>>,
-    waiting_subscription: DashMap<TopicHash, tokio::sync::oneshot::Sender<()>>,
-    config: Config,
 }
 
 impl Gossipsub {
@@ -142,7 +149,7 @@ impl Gossipsub {
             .map_err(Error::Subscribe)?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(self.config.channel_size);
-        self.dispatcher.register(topic.to_string(), tx);
+        self.dispatcher.register(topic.to_string(), None, tx);
 
         Ok(rx)
     }
@@ -152,25 +159,44 @@ impl Gossipsub {
         topic: impl Into<String>,
         payload: impl Into<Payload>,
     ) -> Result<libp2p::gossipsub::MessageId> {
+        self.publish_signed_payload(topic, payload, None).await
+    }
+
+    async fn publish_signed_payload(
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<Payload>,
+        committee_signature: Option<Signature>,
+    ) -> Result<libp2p::gossipsub::MessageId> {
         let topic = IdentTopic::new(topic);
 
         if !self.subscribed_topics.read().await.contains(&topic.hash()) {
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.waiting_subscription.insert(topic.hash(), tx);
 
-            tokio::time::timeout(self.config.waiting_subscription_timeout, rx)
+            tokio::time::timeout(self.config.timeout, rx)
                 .await
                 .map_err(|_| Error::NoPeerSubscribed(topic.to_string()))??;
         }
 
-        let payload: Payload = payload.into();
-        let payload_bytes = payload.to_vec()?;
+        let signed_payload = SignedPayload::new(payload.into(), committee_signature)?;
+
         self.swarm
             .lock()
             .await
             .behaviour_mut()
             .gossipsub_mut()
-            .publish(topic, payload_bytes)
+            .publish(topic, signed_payload.to_vec()?)
             .map_err(Error::from)
+    }
+
+    pub async fn publish_signed(
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<Payload>,
+        signature: impl Into<Signature>,
+    ) -> Result<libp2p::gossipsub::MessageId> {
+        self.publish_signed_payload(topic, payload, Some(signature.into()))
+            .await
     }
 }

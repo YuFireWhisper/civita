@@ -6,32 +6,51 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::{
-    dispatcher::Keyed,
-    protocols::gossipsub::{payload, Payload},
+use crate::{
+    crypto::tss::Signature,
+    network::transport::libp2p_transport::{
+        dispatcher::Keyed,
+        protocols::gossipsub::{
+            payload,
+            signed_payload::{self, SignedPayload},
+            Payload,
+        },
+    },
 };
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Sequence number is missing")]
-    MissingSequenceNumber,
-
-    #[error("Event is not a valid message")]
-    InvalidMessage,
-
     #[error("{0}")]
     Payload(#[from] payload::Error),
+
+    #[error("{0}")]
+    SignedPayload(#[from] signed_payload::Error),
+
+    #[error("Source field is none")]
+    MissingSource,
+
+    #[error("Event is not a message")]
+    NotMessageEvent,
+
+    #[error("{0}")]
+    Encode(#[from] bincode::error::EncodeError),
+
+    #[error("{0}")]
+    Decode(#[from] bincode::error::DecodeError),
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
 pub struct Message {
     pub message_id: MessageId,
     pub source: PeerId,
     pub topic: String,
     pub payload: Payload,
-    pub sequence_number: u64,
+    pub committee_signature: Option<Signature>,
 }
 
 impl Message {
@@ -51,55 +70,99 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
 
     fn try_from(event: Event) -> Result<Self> {
         if let Event::Message {
-            propagation_source,
             message_id,
             message,
+            ..
         } = event
         {
-            let source = propagation_source;
+            let source = message.source.ok_or(Error::MissingSource)?;
             let topic = message.topic.into_string();
-            let payload: Payload = Payload::try_from(message.data)?;
-            let sequence_number = message
-                .sequence_number
-                .ok_or(Error::MissingSequenceNumber)?;
+            let signed_payload = SignedPayload::from_bytes(&message.data)?;
+            let (payload, committee_signature) = signed_payload.take_payload_and_signature();
 
-            Ok(Message {
+            Ok(Self {
                 message_id,
                 source,
                 topic,
                 payload,
-                sequence_number,
+                committee_signature,
             })
         } else {
-            Err(Error::InvalidMessage)
+            Err(Error::NotMessageEvent)
         }
     }
 }
 
+impl TryFrom<&Message> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(message: &Message) -> Result<Vec<u8>> {
+        bincode::serde::encode_to_vec(message, bincode::config::standard()).map_err(Error::from)
+    }
+}
+
+impl TryFrom<Message> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(message: Message) -> Result<Vec<u8>> {
+        Vec::try_from(&message)
+    }
+}
+
+impl TryFrom<&[u8]> for Message {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> Result<Self> {
+        bincode::serde::decode_from_slice(value, bincode::config::standard())
+            .map(|(m, _)| m)
+            .map_err(Error::from)
+    }
+}
+
+impl TryFrom<&Vec<u8>> for Message {
+    type Error = Error;
+
+    fn try_from(value: &Vec<u8>) -> Result<Self> {
+        Message::try_from(value.as_slice())
+    }
+}
+
+impl TryFrom<Vec<u8>> for Message {
+    type Error = Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self> {
+        Message::try_from(value.as_slice())
+    }
+}
+
 #[cfg(test)]
-pub mod mock_message {
-    use super::*;
+mod tests {
+    use libp2p::{gossipsub::MessageId, PeerId};
 
-    use libp2p::gossipsub::MessageId;
-    use libp2p::PeerId;
+    use crate::network::transport::libp2p_transport::protocols::gossipsub::{Message, Payload};
 
-    const TOPIC: &str = "TOPIC";
-    const PAYLOAD: &[u8] = &[1, 2, 3];
-    const SEQUENCE_NUMBER: u64 = 1;
+    #[test]
+    fn success_convert_with_vec() {
+        const MESSAGE_ID: &[u8] = &[1, 2, 3, 4, 5];
+        const TOPIC: &str = "test-topic";
+        const PAYLOAD: &[u8] = &[1, 2, 3, 4, 5];
 
-    pub fn create_message() -> Message {
-        let message_id = MessageId::from("MESSAGE_ID");
-        let source = PeerId::random();
-        let topic = TOPIC.to_string();
-        let payload = Payload::Raw(PAYLOAD.to_vec());
-        let sequence_number = SEQUENCE_NUMBER;
+        let message = Message {
+            message_id: MessageId::from(MESSAGE_ID),
+            source: PeerId::random(),
+            topic: TOPIC.to_string(),
+            payload: Payload::Raw(PAYLOAD.to_vec()),
+            committee_signature: None,
+        };
 
-        Message {
-            message_id,
-            source,
-            topic,
-            payload,
-            sequence_number,
-        }
+        let message_vec: Vec<u8> = Message::try_into(message.clone()).unwrap();
+
+        let message_from_vec = Message::try_from(message_vec.clone()).unwrap();
+        let message_from_ref_vec = Message::try_from(&message_vec.clone()).unwrap();
+        let message_from_bytes = Message::try_from(message_vec.as_slice()).unwrap();
+
+        assert_eq!(message, message_from_vec);
+        assert_eq!(message, message_from_ref_vec);
+        assert_eq!(message, message_from_bytes);
     }
 }

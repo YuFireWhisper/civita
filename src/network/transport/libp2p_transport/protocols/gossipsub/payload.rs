@@ -9,7 +9,6 @@ use crate::crypto::{
         algebra::{Point, Scalar},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
-    tss::Signature,
 };
 
 #[derive(Debug)]
@@ -53,10 +52,9 @@ pub enum Payload {
         share: Scalar,
     },
 
-    CommitteeCandiates {
+    CommitteeCandidates {
         count: u32,
         candidates: IndexedMap<libp2p::PeerId, PublicKey>,
-        signature: Option<Signature>,
     },
 
     CommitteeGenerateSuccess {
@@ -73,12 +71,10 @@ pub enum Payload {
         epoch: u64,
         members: IndexedMap<libp2p::PeerId, PublicKey>,
         public_key: Point,
-        signature: Option<Signature>,
     },
 
     CommitteeElection {
         seed: [u8; 32],
-        signature: Option<Signature>,
     },
 
     CommitteeElectionResponse {
@@ -93,36 +89,28 @@ pub enum Payload {
     // For testing
     RawWithSignature {
         raw: Vec<u8>,
-        signature: Option<Signature>,
     },
 }
 
 impl Payload {
-    pub fn take_signature(&mut self) -> Option<Signature> {
+    pub fn require_committee_signature(&self) -> bool {
         match self {
-            Payload::CommitteeCandiates { signature, .. } => signature.take(),
-            Payload::CommitteeChange { signature, .. } => signature.take(),
-            Payload::CommitteeElection { signature, .. } => signature.take(),
-            Payload::RawWithSignature { signature, .. } => signature.take(),
-            _ => None,
-        }
-    }
+            // Need
+            Payload::CommitteeChange { .. } => true,
+            Payload::CommitteeElection { .. } => true,
+            Payload::RawWithSignature { .. } => true,
 
-    pub fn is_need_from_committee(&self) -> bool {
-        matches!(
-            self,
-            Payload::CommitteeCandiates { .. }
-                | Payload::CommitteeChange { .. }
-                | Payload::CommitteeElection { .. }
-        )
-    }
-
-    pub fn set_signature(&mut self, sig: Signature) {
-        match self {
-            Payload::CommitteeCandiates { signature, .. } => *signature = Some(sig),
-            Payload::CommitteeChange { signature, .. } => *signature = Some(sig),
-            Payload::CommitteeElection { signature, .. } => *signature = Some(sig),
-            _ => {}
+            // Don't need
+            Payload::VSSComponent { .. } => false,
+            Payload::VSSReport { .. } => false,
+            Payload::VSSReportResponse { .. } => false,
+            Payload::TssNonceShare { .. } => false,
+            Payload::TssSignatureShare { .. } => false,
+            Payload::CommitteeCandidates { .. } => true,
+            Payload::CommitteeGenerateSuccess { .. } => false,
+            Payload::CommitteeGenerateFailure { .. } => false,
+            Payload::CommitteeElectionResponse { .. } => false,
+            Payload::Raw(_) => false,
         }
     }
 
@@ -151,45 +139,48 @@ impl TryFrom<Vec<u8>> for Payload {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        crypto::{
-            index_map::IndexedMap,
-            primitives::algebra::{Point, Scalar},
-            tss::{schnorr::signature::Signature as SchnorrSignature, Signature},
-        },
-        network::transport::libp2p_transport::protocols::gossipsub::Payload,
-    };
+    use crate::network::transport::libp2p_transport::protocols::gossipsub::Payload;
 
-    fn create_signature() -> Signature {
-        Signature::Schnorr(SchnorrSignature::new(
-            Scalar::secp256k1_zero(),
-            Point::secp256k1_zero(),
-        ))
+    #[test]
+    fn success_convert_with_vec() {
+        const PAYLOAD: &[u8] = &[1, 2, 3, 4, 5];
+
+        let payload = Payload::Raw(PAYLOAD.to_vec());
+        let payload_vec = payload.to_vec().unwrap();
+        let payload_from_vec = Payload::try_from(payload_vec).unwrap();
+
+        assert_eq!(payload, payload_from_vec);
     }
 
     #[test]
-    fn field_should_be_none() {
-        let mut payload = Payload::RawWithSignature {
-            raw: vec![],
-            signature: Some(create_signature()),
-        };
-        payload.take_signature();
+    fn returns_true_when_committee_signature_required() {
+        let payload = Payload::RawWithSignature { raw: vec![] };
 
-        let expected = Payload::RawWithSignature {
-            raw: vec![],
-            signature: None,
-        };
-
-        assert_eq!(payload, expected);
+        assert!(
+            payload.require_committee_signature(),
+            "Expected payload to require committee signature"
+        );
     }
 
     #[test]
-    fn return_true_if_have_signature_field() {
-        let payload = Payload::CommitteeCandiates {
-            count: 0,
-            candidates: IndexedMap::new(),
-            signature: Some(create_signature()),
-        };
-        assert!(payload.is_need_from_committee());
+    fn returns_false_when_committee_signature_not_required() {
+        let payload = Payload::Raw(vec![]);
+
+        assert!(
+            !payload.require_committee_signature(),
+            "Expected payload to not require committee signature"
+        );
+    }
+
+    #[test]
+    fn error_when_decoding_invalid_payload() {
+        let invalid_payload = vec![0, 1, 2, 3, 4];
+
+        let result = Payload::try_from(invalid_payload);
+
+        assert!(
+            result.is_err(),
+            "Expected error when decoding invalid payload"
+        );
     }
 }
