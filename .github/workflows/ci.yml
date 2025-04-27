@@ -19,21 +19,8 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libssl-dev pkg-config
+        sudo apt-get install -y build-essential libssl-dev pkg-config libgmp-dev
       if: runner.os == 'Linux'
-
-    - name: Cache Rust dependencies
-      id: cache
-      uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          ~/.cargo/bin
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0
