@@ -192,7 +192,7 @@ where
         let hash = self.verify_signature(&mut msg).await?;
 
         match msg.payload {
-            Payload::CommitteeCandiates { candidates, .. } => {
+            Payload::CommitteeCandidates { candidates, .. } => {
                 self.process_candidate_proposal(hash, candidates).await
             }
             Payload::CommitteeChange {
@@ -693,7 +693,7 @@ where
             .expect("Pending election is not set")
             .generate_candidates(self.config.max_num_members);
 
-        let payload = Payload::CommitteeCandiates {
+        let payload = Payload::CommitteeCandidates {
             count: generate_count,
             candidates,
         };

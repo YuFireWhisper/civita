@@ -52,7 +52,7 @@ pub enum Payload {
         share: Scalar,
     },
 
-    CommitteeCandiates {
+    CommitteeCandidates {
         count: u32,
         candidates: IndexedMap<libp2p::PeerId, PublicKey>,
     },
@@ -106,7 +106,7 @@ impl Payload {
             Payload::VSSReportResponse { .. } => false,
             Payload::TssNonceShare { .. } => false,
             Payload::TssSignatureShare { .. } => false,
-            Payload::CommitteeCandiates { .. } => true,
+            Payload::CommitteeCandidates { .. } => true,
             Payload::CommitteeGenerateSuccess { .. } => false,
             Payload::CommitteeGenerateFailure { .. } => false,
             Payload::CommitteeElectionResponse { .. } => false,
