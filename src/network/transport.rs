@@ -36,6 +36,12 @@ pub trait Transport: Send + Sync {
         topic: &str,
         payload: gossipsub::Payload,
     ) -> Result<libp2p::gossipsub::MessageId, Self::Error>;
+    async fn publish_signed(
+        &self,
+        topic: &str,
+        payload: gossipsub::Payload,
+        committee_signature: Signature,
+    ) -> Result<libp2p::gossipsub::MessageId, Self::Error>;
     async fn request(&self, peer_id: &libp2p::PeerId, request: Request);
     async fn put(
         &self,

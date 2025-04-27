@@ -6,9 +6,12 @@ use libp2p::{
     Swarm,
 };
 
-use crate::network::transport::libp2p_transport::{
-    behaviour::Behaviour,
-    protocols::gossipsub::{dispatcher::Dispatcher, signed_payload::SignedPayload},
+use crate::{
+    crypto::tss::Signature,
+    network::transport::libp2p_transport::{
+        behaviour::Behaviour,
+        protocols::gossipsub::{dispatcher::Dispatcher, signed_payload::SignedPayload},
+    },
 };
 
 mod dispatcher;
@@ -156,6 +159,15 @@ impl Gossipsub {
         topic: impl Into<String>,
         payload: impl Into<Payload>,
     ) -> Result<libp2p::gossipsub::MessageId> {
+        self.publish_signed_payload(topic, payload, None).await
+    }
+
+    async fn publish_signed_payload(
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<Payload>,
+        committee_signature: Option<Signature>,
+    ) -> Result<libp2p::gossipsub::MessageId> {
         let topic = IdentTopic::new(topic);
 
         if !self.subscribed_topics.read().await.contains(&topic.hash()) {
@@ -167,7 +179,7 @@ impl Gossipsub {
                 .map_err(|_| Error::NoPeerSubscribed(topic.to_string()))??;
         }
 
-        let signed_payload = SignedPayload::new(payload.into(), None)?;
+        let signed_payload = SignedPayload::new(payload.into(), committee_signature)?;
 
         self.swarm
             .lock()
@@ -176,5 +188,15 @@ impl Gossipsub {
             .gossipsub_mut()
             .publish(topic, signed_payload.to_vec()?)
             .map_err(Error::from)
+    }
+
+    pub async fn publish_signed(
+        &self,
+        topic: impl Into<String>,
+        payload: impl Into<Payload>,
+        signature: impl Into<Signature>,
+    ) -> Result<libp2p::gossipsub::MessageId> {
+        self.publish_signed_payload(topic, payload, Some(signature.into()))
+            .await
     }
 }
