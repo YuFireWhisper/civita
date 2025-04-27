@@ -134,3 +134,35 @@ impl TryFrom<Vec<u8>> for Message {
         Message::try_from(value.as_slice())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use libp2p::{gossipsub::MessageId, PeerId};
+
+    use crate::network::transport::libp2p_transport::protocols::gossipsub::{Message, Payload};
+
+    #[test]
+    fn success_convert_with_vec() {
+        const MESSAGE_ID: &[u8] = &[1, 2, 3, 4, 5];
+        const TOPIC: &str = "test-topic";
+        const PAYLOAD: &[u8] = &[1, 2, 3, 4, 5];
+
+        let message = Message {
+            message_id: MessageId::from(MESSAGE_ID),
+            source: PeerId::random(),
+            topic: TOPIC.to_string(),
+            payload: Payload::Raw(PAYLOAD.to_vec()),
+            committee_signature: None,
+        };
+
+        let message_vec: Vec<u8> = Message::try_into(message.clone()).unwrap();
+
+        let message_from_vec = Message::try_from(message_vec.clone()).unwrap();
+        let message_from_ref_vec = Message::try_from(&message_vec.clone()).unwrap();
+        let message_from_bytes = Message::try_from(message_vec.as_slice()).unwrap();
+
+        assert_eq!(message, message_from_vec);
+        assert_eq!(message, message_from_ref_vec);
+        assert_eq!(message, message_from_bytes);
+    }
+}
