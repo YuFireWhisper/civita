@@ -9,7 +9,7 @@ use crate::crypto::{
         algebra::{Point, Scalar},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
-    tss::CommitteeSignature,
+    tss::Signature,
 };
 
 #[derive(Debug)]
@@ -56,7 +56,7 @@ pub enum Payload {
     CommitteeCandiates {
         count: u32,
         candidates: IndexedMap<libp2p::PeerId, PublicKey>,
-        signature: Option<CommitteeSignature>,
+        signature: Option<Signature>,
     },
 
     CommitteeGenerateSuccess {
@@ -73,12 +73,12 @@ pub enum Payload {
         epoch: u64,
         members: IndexedMap<libp2p::PeerId, PublicKey>,
         public_key: Point,
-        signature: Option<CommitteeSignature>,
+        signature: Option<Signature>,
     },
 
     CommitteeElection {
         seed: [u8; 32],
-        signature: Option<CommitteeSignature>,
+        signature: Option<Signature>,
     },
 
     CommitteeElectionResponse {
@@ -93,12 +93,12 @@ pub enum Payload {
     // For testing
     RawWithSignature {
         raw: Vec<u8>,
-        signature: Option<CommitteeSignature>,
+        signature: Option<Signature>,
     },
 }
 
 impl Payload {
-    pub fn take_signature(&mut self) -> Option<CommitteeSignature> {
+    pub fn take_signature(&mut self) -> Option<Signature> {
         match self {
             Payload::CommitteeCandiates { signature, .. } => signature.take(),
             Payload::CommitteeChange { signature, .. } => signature.take(),
@@ -114,11 +114,10 @@ impl Payload {
             Payload::CommitteeCandiates { .. }
                 | Payload::CommitteeChange { .. }
                 | Payload::CommitteeElection { .. }
-                | Payload::RawWithSignature { .. }
         )
     }
 
-    pub fn set_signature(&mut self, sig: CommitteeSignature) {
+    pub fn set_signature(&mut self, sig: Signature) {
         match self {
             Payload::CommitteeCandiates { signature, .. } => *signature = Some(sig),
             Payload::CommitteeChange { signature, .. } => *signature = Some(sig),
@@ -156,13 +155,13 @@ mod tests {
         crypto::{
             index_map::IndexedMap,
             primitives::algebra::{Point, Scalar},
-            tss::{schnorr::signature::Signature as SchnorrSignature, CommitteeSignature},
+            tss::{schnorr::signature::Signature as SchnorrSignature, Signature},
         },
         network::transport::libp2p_transport::protocols::gossipsub::Payload,
     };
 
-    fn create_signature() -> CommitteeSignature {
-        CommitteeSignature::Schnorr(SchnorrSignature::new(
+    fn create_signature() -> Signature {
+        Signature::Schnorr(SchnorrSignature::new(
             Scalar::secp256k1_zero(),
             Point::secp256k1_zero(),
         ))

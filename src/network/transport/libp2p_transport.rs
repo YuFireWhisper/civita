@@ -94,7 +94,7 @@ impl Libp2pTransport {
 
         let swarm = Arc::new(tokio::sync::Mutex::new(swarm));
         let gossipsub_config = gossipsub::ConfigBuilder::new()
-            .with_waiting_subscription_timeout(config.wait_for_gossipsub_peer_timeout)
+            .with_timeout(config.wait_for_gossipsub_peer_timeout)
             .with_channel_size(config.channel_capacity)
             .build();
         let gossipsub = Gossipsub::new(swarm.clone(), gossipsub_config);

@@ -1,0 +1,117 @@
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    crypto::tss::Signature, network::transport::libp2p_transport::protocols::gossipsub::Payload,
+};
+
+type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum Error {
+    #[error("Payload needs a signature")]
+    MissingSignature,
+
+    #[error("Payload doesn't need a signature")]
+    SignatureNotNeeded,
+
+    #[error("{0}")]
+    Encode(#[from] bincode::error::EncodeError),
+
+    #[error("{0}")]
+    Decode(#[from] bincode::error::DecodeError),
+}
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
+pub struct SignedPayload {
+    payload: Payload,
+
+    /// The signature of the payload, if payload does't need a signature, this field should be None
+    committee_signature: Option<Signature>,
+}
+
+impl SignedPayload {
+    pub fn new(payload: Payload, committee_signature: Option<Signature>) -> Result<Self> {
+        if payload.need_signature() && committee_signature.is_none() {
+            return Err(Error::MissingSignature);
+        }
+
+        if !payload.need_signature() && committee_signature.is_some() {
+            return Err(Error::SignatureNotNeeded);
+        }
+
+        Ok(Self {
+            payload,
+            committee_signature,
+        })
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::try_from(bytes)
+    }
+
+    pub fn to_vec(&self) -> Result<Vec<u8>> {
+        self.try_into()
+    }
+
+    pub fn payload(&self) -> &Payload {
+        &self.payload
+    }
+
+    pub fn committee_signature(&self) -> Option<&Signature> {
+        self.committee_signature.as_ref()
+    }
+
+    pub fn take_payload_and_signature(self) -> (Payload, Option<Signature>) {
+        (self.payload, self.committee_signature)
+    }
+}
+
+impl TryFrom<SignedPayload> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(value: SignedPayload) -> Result<Self> {
+        bincode::serde::encode_to_vec(&value, bincode::config::standard()).map_err(Error::from)
+    }
+}
+
+impl TryFrom<&SignedPayload> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(value: &SignedPayload) -> Result<Self> {
+        bincode::serde::encode_to_vec(value, bincode::config::standard()).map_err(Error::from)
+    }
+}
+
+impl TryFrom<Vec<u8>> for SignedPayload {
+    type Error = Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self> {
+        bincode::serde::decode_from_slice(&value, bincode::config::standard())
+            .map(|(p, _)| p)
+            .map_err(Error::from)
+    }
+}
+
+impl TryFrom<&Vec<u8>> for SignedPayload {
+    type Error = Error;
+
+    fn try_from(value: &Vec<u8>) -> Result<Self> {
+        bincode::serde::decode_from_slice(value, bincode::config::standard())
+            .map(|(p, _)| p)
+            .map_err(Error::from)
+    }
+}
+
+impl TryFrom<&[u8]> for SignedPayload {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> Result<Self> {
+        bincode::serde::decode_from_slice(value, bincode::config::standard())
+            .map(|(p, _)| p)
+            .map_err(Error::from)
+    }
+}
