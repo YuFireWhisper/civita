@@ -1,7 +1,6 @@
 use bincode::{Decode, Encode};
 use k256::{
-    elliptic_curve::{rand_core::OsRng, sec1::ToEncodedPoint},
-    schnorr::signature::{hazmat::PrehashSigner, Verifier},
+    ecdsa::signature::SignerMut, elliptic_curve::rand_core::OsRng, schnorr::signature::Verifier,
     PublicKey as K256PublicKey, SecretKey as K256SecretKey,
 };
 use serde::{Deserialize, Serialize};
@@ -25,6 +24,9 @@ pub enum Error {
 
     #[error("{0}")]
     Schnorr(#[from] k256::schnorr::Error),
+
+    #[error("Invalid signature length: expected {SIGNATURE_LENGTH}, got {0}")]
+    InvalidSignatureLength(usize),
 }
 
 #[derive(Clone)]
@@ -75,8 +77,8 @@ impl SecretKey {
 
     pub fn sign(&self, msg: impl AsRef<[u8]>) -> Result<ResidentSignature> {
         let secret_key = self.to_k256_secret_key();
-        let signing_key: k256::schnorr::SigningKey = secret_key.into();
-        let signature = signing_key.sign_prehash(msg.as_ref())?;
+        let mut signing_key: k256::schnorr::SigningKey = secret_key.into();
+        let signature = signing_key.try_sign(msg.as_ref())?;
 
         Ok(signature.into())
     }
@@ -109,16 +111,17 @@ impl PublicKey {
     }
 
     pub fn verify_signature(&self, msg: impl AsRef<[u8]>, signature: &ResidentSignature) -> bool {
-        let public_key = self.to_k256_public_key();
-        let verifying_key: k256::schnorr::VerifyingKey = public_key
-            .try_into()
-            .expect("Failed to convert public key to verifying key");
+        let verifying_key = self.to_k256_verifying_key();
         verifying_key
             .verify(msg.as_ref(), &signature.into())
             .is_ok()
     }
 
     pub fn to_k256_public_key(&self) -> K256PublicKey {
+        self.into()
+    }
+
+    pub fn to_k256_verifying_key(&self) -> k256::schnorr::VerifyingKey {
         self.into()
     }
 }
@@ -156,10 +159,18 @@ impl AsRef<[u8]> for SecretKey {
     }
 }
 
+impl From<&SecretKey> for PublicKey {
+    fn from(secret_key: &SecretKey) -> Self {
+        let secret_key = secret_key.to_k256_secret_key();
+        let public_key = secret_key.public_key();
+        Self::from(&public_key)
+    }
+}
+
 impl From<&k256::PublicKey> for PublicKey {
     fn from(public_key: &k256::PublicKey) -> Self {
         let mut arr = [0u8; PUBLIC_KEY_LENGTH];
-        arr.copy_from_slice(&public_key.to_encoded_point(true).to_bytes());
+        arr.copy_from_slice(&public_key.to_sec1_bytes());
         Self(arr)
     }
 }
@@ -170,11 +181,16 @@ impl From<&PublicKey> for k256::PublicKey {
     }
 }
 
-impl From<&SecretKey> for PublicKey {
-    fn from(secret_key: &SecretKey) -> Self {
-        let secret_key = secret_key.to_k256_secret_key();
-        let public_key = secret_key.public_key();
-        Self::from(&public_key)
+impl From<&PublicKey> for k256::schnorr::VerifyingKey {
+    fn from(public_key: &PublicKey) -> Self {
+        let public_key = k256::PublicKey::from(public_key);
+
+        // If the y-coordinate is odd, negate the public key
+        k256::schnorr::VerifyingKey::try_from(&public_key).unwrap_or_else(|_| {
+            let affine = -(*public_key.as_affine());
+            let public_key = k256::PublicKey::from_affine(affine).expect("Invalid public key");
+            k256::schnorr::VerifyingKey::try_from(&public_key).expect("Invalid public key")
+        })
     }
 }
 
@@ -183,50 +199,11 @@ impl TryFrom<&[u8]> for PublicKey {
 
     fn try_from(bytes: &[u8]) -> Result<Self> {
         let key = K256PublicKey::from_sec1_bytes(bytes)?;
-
-        let mut arr = [0u8; PUBLIC_KEY_LENGTH];
-        arr.copy_from_slice(&key.to_encoded_point(true).to_bytes());
-
-        Ok(Self(arr))
+        Ok(Self::from(&key))
     }
 }
 
 impl AsRef<[u8]> for PublicKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<&k256::schnorr::Signature> for ResidentSignature {
-    fn from(signature: &k256::schnorr::Signature) -> Self {
-        let signature_bytes = signature.to_bytes();
-        Self(signature_bytes.into())
-    }
-}
-
-impl From<k256::schnorr::Signature> for ResidentSignature {
-    fn from(signature: k256::schnorr::Signature) -> Self {
-        let signature_bytes = signature.to_bytes();
-        Self(signature_bytes.into())
-    }
-}
-
-impl From<&ResidentSignature> for k256::schnorr::Signature {
-    fn from(signature: &ResidentSignature) -> Self {
-        k256::schnorr::Signature::try_from(signature.as_ref()).expect("Invalid signature")
-    }
-}
-
-impl TryFrom<&[u8]> for ResidentSignature {
-    type Error = Error;
-
-    fn try_from(bytes: &[u8]) -> Result<Self> {
-        let signature = k256::schnorr::Signature::try_from(bytes)?;
-        Ok(Self::from(signature))
-    }
-}
-
-impl AsRef<[u8]> for ResidentSignature {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
@@ -252,6 +229,44 @@ impl<'de> serde::Deserialize<'de> for PublicKey {
 
         PublicKey::from_slice(&bytes)
             .map_err(|e| D::Error::custom(format!("Invalid public key: {}", e)))
+    }
+}
+
+impl From<&k256::schnorr::Signature> for ResidentSignature {
+    fn from(signature: &k256::schnorr::Signature) -> Self {
+        let signature_bytes = signature.to_bytes();
+        Self(signature_bytes)
+    }
+}
+
+impl From<k256::schnorr::Signature> for ResidentSignature {
+    fn from(signature: k256::schnorr::Signature) -> Self {
+        Self::from(&signature)
+    }
+}
+
+impl From<&ResidentSignature> for k256::schnorr::Signature {
+    fn from(signature: &ResidentSignature) -> Self {
+        k256::schnorr::Signature::try_from(signature.as_ref()).expect("Invalid signature")
+    }
+}
+
+impl TryFrom<&[u8]> for ResidentSignature {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != SIGNATURE_LENGTH {
+            return Err(Error::InvalidSignatureLength(bytes.len()));
+        }
+
+        let signature = k256::schnorr::Signature::try_from(bytes)?;
+        Ok(Self::from(signature))
+    }
+}
+
+impl AsRef<[u8]> for ResidentSignature {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 
