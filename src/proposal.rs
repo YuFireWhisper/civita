@@ -1,18 +1,12 @@
-use crate::network::{connection::Connection, record::RecordValue};
+use crate::network::{connection::Connection, record::Record};
 
-pub trait ToRecord {
-    type Error: std::error::Error;
-}
-
-pub trait Proposal {
+pub trait Proposal: TryFrom<Vec<u8>> + TryInto<Vec<u8>> {
     type Error: std::error::Error;
     type CustomValue;
 
-    fn validate<C: Connection>(&self, connection: &C) -> Result<bool, Self::Error>;
+    fn validate<C: Connection>(&self, connection: &C) -> Result<bool, <Self as Proposal>::Error>;
     fn to_record<C: Connection>(
         &self,
         connection: &C,
-    ) -> Result<RecordValue<Self::CustomValue, Self>, Self::Error>
-    where
-        Self: Sized;
+    ) -> Result<Record<Self::CustomValue, Self>, <Self as Proposal>::Error>;
 }
