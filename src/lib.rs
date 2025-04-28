@@ -1,6 +1,7 @@
 pub mod committee;
 pub mod crypto;
 pub mod network;
+pub mod proposal;
 
 #[derive(Debug)]
 pub struct MockError;
@@ -12,3 +13,5 @@ impl std::fmt::Display for MockError {
 }
 
 impl std::error::Error for MockError {}
+
+type CerditType = u64;
