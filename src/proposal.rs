@@ -1,16 +1,18 @@
-use crate::network::{
-    connection::Connection,
-    record::{RecordKey, RecordValue},
-};
+use crate::network::{connection::Connection, record::RecordValue};
 
-pub trait ToRecord<const N: usize> {
+pub trait ToRecord {
     type Error: std::error::Error;
-
-    fn to_record(&self) -> Result<[(RecordKey, RecordValue); N], Self::Error>;
 }
 
-pub trait Proposal<const N: usize>: ToRecord<N> {
+pub trait Proposal {
     type Error: std::error::Error;
+    type CustomValue;
 
-    fn validate<C: Connection>(&self, connection: &C) -> Result<(), Self::Error>;
+    fn validate<C: Connection>(&self, connection: &C) -> Result<bool, Self::Error>;
+    fn to_record<C: Connection>(
+        &self,
+        connection: &C,
+    ) -> Result<RecordValue<Self::CustomValue, Self>, Self::Error>
+    where
+        Self: Sized;
 }
