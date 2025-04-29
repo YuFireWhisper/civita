@@ -3,10 +3,10 @@ use std::collections::HashSet;
 use crate::{
     crypto::{
         algebra::{Point, Scalar},
-        index_map::IndexedMap,
         keypair::PublicKey,
     },
     mocks::MockError,
+    utils::IndexedMap,
 };
 
 pub mod joint_feldman;

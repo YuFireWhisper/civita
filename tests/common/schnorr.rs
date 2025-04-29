@@ -6,10 +6,10 @@ use civita::{
     crypto::{
         algebra::{Point, Scalar},
         dkg::joint_feldman::JointFeldman,
-        index_map::IndexedMap,
         tss::schnorr::{self, Schnorr, SignResult},
     },
     network::transport::Libp2pTransport,
+    utils::IndexedMap,
 };
 
 use crate::common::joint_feldman;

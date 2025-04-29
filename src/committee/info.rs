@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{algebra::Point, index_map::IndexedMap, keypair::PublicKey};
+use crate::{
+    crypto::{algebra::Point, keypair::PublicKey},
+    utils::IndexedMap,
+};
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]

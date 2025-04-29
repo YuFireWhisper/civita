@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::crypto::{index_map::IndexedMap, keypair::PublicKey};
+use crate::{crypto::keypair::PublicKey, utils::IndexedMap};
 
 #[derive(Debug)]
 pub struct PendingElection {

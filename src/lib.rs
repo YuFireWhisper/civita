@@ -4,3 +4,4 @@ pub mod mocks;
 pub mod network;
 pub mod proposal;
 pub mod traits;
+pub mod utils;

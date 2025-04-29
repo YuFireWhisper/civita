@@ -8,10 +8,10 @@ use civita::{
             self,
             joint_feldman::{self, JointFeldman},
         },
-        index_map::IndexedMap,
         keypair::{self, PublicKey},
     },
     network::transport::{Libp2pTransport, Transport},
+    utils::IndexedMap,
 };
 
 use crate::common::transport;

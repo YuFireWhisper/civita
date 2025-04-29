@@ -1,13 +1,15 @@
 use std::{collections::HashSet, sync::Arc};
 
-use crate::crypto::{
-    algebra::{self, Point, Scalar},
-    index_map::IndexedMap,
-    keypair::{self, PublicKey, SecretKey},
-    vss::{
-        encrypted_share::{self, EncryptedShare},
-        DecryptedShares, EncryptedShares,
+use crate::{
+    crypto::{
+        algebra::{self, Point, Scalar},
+        keypair::{self, PublicKey, SecretKey},
+        vss::{
+            encrypted_share::{self, EncryptedShare},
+            DecryptedShares, EncryptedShares,
+        },
     },
+    utils::IndexedMap,
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -459,12 +461,14 @@ impl Event {
 mod tests {
     use std::sync::Arc;
 
-    use crate::crypto::{
-        algebra::{Point, Scheme},
-        dkg::joint_feldman::event::{ActionNeeded, Event, Output, Status},
-        index_map::IndexedMap,
-        keypair::{self, PublicKey, SecretKey},
-        vss::{DecryptedShares, EncryptedShares, Vss},
+    use crate::{
+        crypto::{
+            algebra::{Point, Scheme},
+            dkg::joint_feldman::event::{ActionNeeded, Event, Output, Status},
+            keypair::{self, PublicKey, SecretKey},
+            vss::{DecryptedShares, EncryptedShares, Vss},
+        },
+        utils::IndexedMap,
     };
 
     const NUM_PEERS: u16 = 3;

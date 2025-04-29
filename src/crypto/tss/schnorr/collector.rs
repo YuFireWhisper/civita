@@ -11,11 +11,11 @@ use tokio::sync::{
 use crate::{
     crypto::{
         algebra::{Point, Scalar},
-        index_map::IndexedMap,
         threshold,
         tss::schnorr::collector::context::Context,
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    utils::IndexedMap,
 };
 
 mod context;
@@ -237,13 +237,13 @@ mod tests {
     use crate::{
         crypto::{
             algebra::{Point, Scheme},
-            index_map::IndexedMap,
             threshold,
             tss::schnorr::collector::{CollectionResult, Collector, Config, Error},
             vss::Vss,
         },
         mocks::MockError,
         network::transport::MockTransport,
+        utils::IndexedMap,
     };
 
     const TOPIC: &str = "test_topic";
