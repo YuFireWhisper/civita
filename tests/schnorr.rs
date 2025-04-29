@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
-use civita::crypto::{
-    algebra::{Point, Scalar},
-    dkg::GenerateResult,
-    index_map::IndexedMap,
-    tss::schnorr::{signature::Signature, SignResult},
+use civita::{
+    crypto::{
+        algebra::{Point, Scalar},
+        dkg::GenerateResult,
+        tss::schnorr::{signature::Signature, SignResult},
+    },
+    utils::IndexedMap,
 };
 
 use crate::common::{joint_feldman, schnorr};

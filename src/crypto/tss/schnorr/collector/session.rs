@@ -110,11 +110,13 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::{
-        algebra::{Point, Scalar, Scheme},
-        index_map::IndexedMap,
-        tss::schnorr::collector::{session::Session, CollectionResult},
-        vss::Vss,
+    use crate::{
+        crypto::{
+            algebra::{Point, Scalar, Scheme},
+            tss::schnorr::collector::{session::Session, CollectionResult},
+            vss::Vss,
+        },
+        utils::IndexedMap,
     };
 
     const SCHEME: Scheme = Scheme::Secp256k1;

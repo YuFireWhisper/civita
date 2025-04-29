@@ -2,11 +2,9 @@ use mockall::automock;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    crypto::{
-        algebra::{Point, Scalar},
-        index_map::IndexedMap,
-    },
+    crypto::algebra::{Point, Scalar},
     mocks::MockError,
+    utils::IndexedMap,
 };
 
 pub mod schnorr;

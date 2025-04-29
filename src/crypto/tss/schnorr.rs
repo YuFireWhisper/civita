@@ -9,11 +9,11 @@ use crate::{
     crypto::{
         algebra::{self, Point, Scalar},
         dkg::{Dkg, GenerateResult},
-        index_map::IndexedMap,
         threshold,
         tss::schnorr::{collector::CollectionResult, signature::Signature},
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    utils::IndexedMap,
 };
 
 mod collector;

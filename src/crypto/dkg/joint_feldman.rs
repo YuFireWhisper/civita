@@ -10,11 +10,11 @@ use crate::{
             },
             Dkg, GenerateResult,
         },
-        index_map::IndexedMap,
         keypair::{PublicKey, SecretKey},
         vss::{decrypted_share, Vss},
     },
     network::transport::Transport,
+    utils::IndexedMap,
 };
 
 mod collector;

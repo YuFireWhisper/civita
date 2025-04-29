@@ -2,11 +2,13 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{
-    algebra::{Point, Scalar},
-    index_map::IndexedMap,
-    keypair::{PublicKey, VrfProof},
-    vss::{encrypted_share::EncryptedShares, DecryptedShares},
+use crate::{
+    crypto::{
+        algebra::{Point, Scalar},
+        keypair::{PublicKey, VrfProof},
+        vss::{encrypted_share::EncryptedShares, DecryptedShares},
+    },
+    utils::IndexedMap,
 };
 
 #[derive(Debug)]

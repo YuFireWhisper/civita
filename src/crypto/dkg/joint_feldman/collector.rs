@@ -6,11 +6,11 @@ use crate::{
     crypto::{
         algebra::{self, Point},
         dkg::joint_feldman::{collector::context::Context, event::ActionNeeded},
-        index_map::IndexedMap,
         keypair::{self, PublicKey, SecretKey},
         vss::DecryptedShares,
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    utils::IndexedMap,
 };
 
 pub mod config;
@@ -347,12 +347,12 @@ mod tests {
                 collector::{Collector, Config, Error},
                 event,
             },
-            index_map::IndexedMap,
             keypair::{self, SecretKey},
             vss::{DecryptedShares, Vss},
         },
         mocks::MockError,
         network::transport::MockTransport,
+        utils::IndexedMap,
     };
 
     const TOPIC: &str = "test_topic";

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::{
     crypto::{
         algebra::Point,
-        index_map::IndexedMap,
         keypair,
         vss::{
             decrypted_share::DecryptedShares,
@@ -11,6 +10,7 @@ use crate::{
         },
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    utils::IndexedMap,
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -80,11 +80,11 @@ mod tests {
 
     use crate::{
         crypto::{
-            algebra::Scheme, dkg::joint_feldman::distributor::Distributor, index_map::IndexedMap,
-            keypair, vss::Vss,
+            algebra::Scheme, dkg::joint_feldman::distributor::Distributor, keypair, vss::Vss,
         },
         mocks::MockError,
         network::transport::MockTransport,
+        utils::IndexedMap,
     };
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;

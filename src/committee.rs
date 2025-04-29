@@ -14,7 +14,6 @@ use crate::{
     crypto::{
         algebra::{self, Point, Scalar},
         dkg::{self, Dkg},
-        index_map::IndexedMap,
         keypair::{self, PublicKey, SecretKey, VrfProof},
         tss::{self, Tss},
     },
@@ -25,6 +24,7 @@ use crate::{
         },
         Transport,
     },
+    utils::IndexedMap,
 };
 
 pub mod config;

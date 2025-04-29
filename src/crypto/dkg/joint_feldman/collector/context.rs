@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use dashmap::{mapref::one::RefMut, DashMap, DashSet};
 
-use crate::crypto::{
-    algebra::{self, Point},
-    dkg::joint_feldman::collector::event::{self, ActionNeeded, Event},
-    index_map::IndexedMap,
-    keypair::{PublicKey, SecretKey},
-    vss::{encrypted_share, DecryptedShares, EncryptedShares},
+use crate::{
+    crypto::{
+        algebra::{self, Point},
+        dkg::joint_feldman::collector::event::{self, ActionNeeded, Event},
+        keypair::{PublicKey, SecretKey},
+        vss::{encrypted_share, DecryptedShares, EncryptedShares},
+    },
+    utils::IndexedMap,
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -165,12 +167,14 @@ impl Context {
 mod tests {
     use std::sync::Arc;
 
-    use crate::crypto::{
-        algebra::Scheme,
-        dkg::joint_feldman::collector::context::{Context, Error},
-        index_map::IndexedMap,
-        keypair::{self, PublicKey},
-        vss::{EncryptedShares, Vss},
+    use crate::{
+        crypto::{
+            algebra::Scheme,
+            dkg::joint_feldman::collector::context::{Context, Error},
+            keypair::{self, PublicKey},
+            vss::{EncryptedShares, Vss},
+        },
+        utils::IndexedMap,
     };
 
     const NUM_PEERS: u16 = 3;
