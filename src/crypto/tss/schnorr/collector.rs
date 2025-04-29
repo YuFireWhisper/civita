@@ -246,8 +246,8 @@ mod tests {
             },
             tss::schnorr::collector::{CollectionResult, Collector, Config, Error},
         },
+        mocks::MockError,
         network::transport::MockTransport,
-        MockError,
     };
 
     const TOPIC: &str = "test_topic";

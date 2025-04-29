@@ -4,7 +4,7 @@ use crate::{
         keypair::PublicKey,
         primitives::algebra::{Point, Scalar},
     },
-    MockError,
+    mocks::MockError,
 };
 use std::{collections::HashSet, error::Error};
 

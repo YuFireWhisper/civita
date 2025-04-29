@@ -357,8 +357,8 @@ mod tests {
                 vss::{DecryptedShares, Vss},
             },
         },
+        mocks::MockError,
         network::transport::MockTransport,
-        MockError,
     };
 
     const TOPIC: &str = "test_topic";
