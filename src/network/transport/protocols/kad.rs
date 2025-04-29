@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::{crypto::tss::Signature, network::transport::libp2p_transport::behaviour::Behaviour};
+use crate::{crypto::tss::Signature, network::transport::behaviour::Behaviour};
 
 pub mod key;
 pub mod message;

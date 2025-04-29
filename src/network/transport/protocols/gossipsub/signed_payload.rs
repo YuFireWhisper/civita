@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    crypto::tss::Signature, network::transport::libp2p_transport::protocols::gossipsub::Payload,
-};
+use crate::{crypto::tss::Signature, network::transport::protocols::gossipsub::Payload};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -123,9 +121,7 @@ mod tests {
             algebra::{Point, Scalar},
             tss::{schnorr, Signature},
         },
-        network::transport::libp2p_transport::protocols::gossipsub::{
-            signed_payload::SignedPayload, Payload,
-        },
+        network::transport::protocols::gossipsub::{signed_payload::SignedPayload, Payload},
     };
 
     fn create_signature() -> Signature {

@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    crypto::tss::Signature, network::transport::libp2p_transport::protocols::kad::Payload,
-};
+use crate::{crypto::tss::Signature, network::transport::protocols::kad::Payload};
 
 type Result<T> = std::result::Result<T, Error>;
 

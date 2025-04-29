@@ -14,9 +14,15 @@ use crate::{
         threshold,
         tss::schnorr::collector::context::Context,
     },
-    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    network::transport::protocols::gossipsub,
     utils::IndexedMap,
 };
+
+#[cfg(not(test))]
+use crate::network::transport::Transport;
+
+#[cfg(test)]
+use crate::network::transport::MockTransport as Transport;
 
 mod context;
 mod session;
@@ -65,14 +71,14 @@ pub struct Config {
     pub timeout: tokio::time::Duration,
 }
 
-pub struct Collector<T: Transport + 'static> {
-    transport: Arc<T>,
+pub struct Collector {
+    transport: Arc<Transport>,
     action_tx: Option<TokioSender<Command>>,
     config: Config,
 }
 
-impl<T: Transport + 'static> Collector<T> {
-    pub fn new(transport: Arc<T>, config: Config) -> Self {
+impl Collector {
+    pub fn new(transport: Arc<Transport>, config: Config) -> Self {
         Self {
             transport,
             action_tx: None,
@@ -241,8 +247,7 @@ mod tests {
             tss::schnorr::collector::{CollectionResult, Collector, Config, Error},
             vss::Vss,
         },
-        mocks::MockError,
-        network::transport::MockTransport,
+        network::transport::{self, MockTransport},
         utils::IndexedMap,
     };
 
@@ -280,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn strat_initialize_successfully() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
         transport
             .expect_listen_on_topic()
             .with(eq(TOPIC.to_string()))
@@ -304,12 +309,12 @@ mod tests {
 
     #[tokio::test]
     async fn start_fails_on_transport_error() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
         transport
             .expect_listen_on_topic()
             .with(eq(TOPIC.to_string()))
             .times(1)
-            .returning(|_| Err(MockError));
+            .returning(|_| Err(transport::Error::MockError));
 
         let transport = Arc::new(transport);
         let config = create_config();
@@ -323,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_signature_return_none_on_timeout() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
         transport
             .expect_listen_on_topic()
             .with(eq(TOPIC.to_string()))
@@ -350,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_shuts_down_collector() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
         transport
             .expect_listen_on_topic()
             .with(eq(TOPIC.to_string()))

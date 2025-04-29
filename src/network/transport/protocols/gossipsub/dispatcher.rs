@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use libp2p::PeerId;
 use tokio::sync::mpsc::Sender as TokioSender;
 
-use crate::network::transport::libp2p_transport::protocols::gossipsub::Message;
+use crate::network::transport::protocols::gossipsub::Message;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -72,7 +72,7 @@ mod tests {
     use libp2p::{gossipsub::MessageId, PeerId};
     use tokio::sync::mpsc;
 
-    use crate::network::transport::libp2p_transport::protocols::gossipsub::{
+    use crate::network::transport::protocols::gossipsub::{
         dispatcher::Dispatcher, Message, Payload,
     };
 

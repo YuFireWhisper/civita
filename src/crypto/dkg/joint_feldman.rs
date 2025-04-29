@@ -13,9 +13,14 @@ use crate::{
         keypair::{PublicKey, SecretKey},
         vss::{decrypted_share, Vss},
     },
-    network::transport::Transport,
     utils::IndexedMap,
 };
+
+#[cfg(not(test))]
+use crate::network::transport::Transport;
+
+#[cfg(test)]
+use crate::network::transport::MockTransport as Transport;
 
 mod collector;
 mod config;
@@ -71,15 +76,15 @@ pub enum Error {
     Algebra(#[from] algebra::Error),
 }
 
-pub struct JointFeldman<T: Transport + 'static> {
+pub struct JointFeldman {
     config: Config,
-    collector: Collector<T>,
-    distributor: Distributor<T>,
+    collector: Collector,
+    distributor: Distributor,
     peer_pks: Option<IndexedMap<libp2p::PeerId, PublicKey>>,
 }
 
-impl<T: Transport + 'static> JointFeldman<T> {
-    pub fn new(transport: Arc<T>, secret_key: SecretKey, config: Config) -> Self {
+impl JointFeldman {
+    pub fn new(transport: Arc<Transport>, secret_key: SecretKey, config: Config) -> Self {
         let collector_config = collector::Config {
             timeout: config.timeout,
             gossipsub_topic: config.gossipsub_topic.clone(),
@@ -153,7 +158,7 @@ impl<T: Transport + 'static> JointFeldman<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: Transport + 'static> Dkg for JointFeldman<T> {
+impl Dkg for JointFeldman {
     type Error = Error;
 
     async fn set_peers(&mut self, peers: IndexedMap<libp2p::PeerId, PublicKey>) -> Result<()> {

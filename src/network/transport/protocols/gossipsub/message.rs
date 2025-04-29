@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     crypto::tss::Signature,
-    network::transport::libp2p_transport::{
+    network::transport::{
         dispatcher::Keyed,
         protocols::gossipsub::{
             payload,
@@ -139,7 +139,7 @@ impl TryFrom<Vec<u8>> for Message {
 mod tests {
     use libp2p::{gossipsub::MessageId, PeerId};
 
-    use crate::network::transport::libp2p_transport::protocols::gossipsub::{Message, Payload};
+    use crate::network::transport::protocols::gossipsub::{Message, Payload};
 
     #[test]
     fn success_convert_with_vec() {

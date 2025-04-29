@@ -17,15 +17,18 @@ use crate::{
         keypair::{self, PublicKey, SecretKey, VrfProof},
         tss::{self, Tss},
     },
-    network::transport::{
-        libp2p_transport::protocols::{
-            gossipsub::{payload, Message, Payload},
-            kad,
-        },
-        Transport,
+    network::transport::protocols::{
+        gossipsub::{payload, Message, Payload},
+        kad,
     },
     utils::IndexedMap,
 };
+
+#[cfg(not(test))]
+use crate::network::transport::Transport;
+
+#[cfg(test)]
+use crate::network::transport::MockTransport as Transport;
 
 pub mod config;
 pub mod info;
@@ -81,13 +84,12 @@ enum Action {
     VoteCollectionDone([u8; 32]),
 }
 
-pub struct Committee<T, D, S>
+pub struct Committee<D, S>
 where
-    T: Transport + Send + Sync + 'static,
     D: Dkg + Send + Sync + 'static,
     S: Tss + 'static,
 {
-    transport: Arc<T>,
+    transport: Arc<Transport>,
     dkg: TokioRwLock<D>,
     tss: TokioRwLock<S>,
     secret_key: SecretKey,
@@ -101,14 +103,13 @@ where
     pending_election: TokioRwLock<Option<PendingElection>>,
 }
 
-impl<T, D, S> Committee<T, D, S>
+impl<D, S> Committee<D, S>
 where
-    T: Transport + Send + Sync + 'static,
     D: Dkg + Send + Sync + 'static,
     S: Tss + Send + Sync + 'static,
 {
     pub async fn new(
-        transport: Arc<T>,
+        transport: Arc<Transport>,
         dkg: D,
         tss: S,
         secret_key: SecretKey,
@@ -739,7 +740,7 @@ mod tests {
     };
 
     fn setup_mock_transport() -> Arc<MockTransport> {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
 
         transport
             .expect_self_peer()

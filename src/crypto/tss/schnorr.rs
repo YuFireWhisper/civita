@@ -12,9 +12,15 @@ use crate::{
         threshold,
         tss::schnorr::{collector::CollectionResult, signature::Signature},
     },
-    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    network::transport::protocols::gossipsub,
     utils::IndexedMap,
 };
+
+#[cfg(not(test))]
+use crate::network::transport::Transport;
+
+#[cfg(test)]
+use crate::network::transport::MockTransport as Transport;
 
 mod collector;
 pub mod signature;
@@ -57,18 +63,18 @@ pub struct Config {
     pub timeout: tokio::time::Duration,
 }
 
-pub struct Schnorr<D: Dkg, T: Transport + 'static> {
-    transport: Arc<T>,
+pub struct Schnorr<D: Dkg> {
+    transport: Arc<Transport>,
     dkg: D,
     secret: Option<Scalar>,
     global_pk: Option<Point>,
-    collector: collector::Collector<T>,
+    collector: collector::Collector,
     peer_index: Option<IndexedMap<libp2p::PeerId, ()>>,
     config: Config,
 }
 
-impl<D: Dkg, T: Transport> Schnorr<D, T> {
-    pub fn new(dkg: D, transport: Arc<T>, config: Config) -> Self {
+impl<D: Dkg> Schnorr<D> {
+    pub fn new(dkg: D, transport: Arc<Transport>, config: Config) -> Self {
         let collector_config = collector::Config {
             threshold_counter: config.threshold_counter,
             topic: config.topic.clone(),

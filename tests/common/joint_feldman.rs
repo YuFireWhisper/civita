@@ -10,15 +10,15 @@ use civita::{
         },
         keypair::{self, PublicKey},
     },
-    network::transport::{Libp2pTransport, Transport},
+    network::transport::Transport,
     utils::IndexedMap,
 };
 
 use crate::common::transport;
 
 pub struct PeerInfo {
-    pub transport: Arc<Libp2pTransport>,
-    pub joint_feldman: JointFeldman<Libp2pTransport>,
+    pub transport: Arc<Transport>,
+    pub joint_feldman: JointFeldman,
     pub pk: PublicKey,
 }
 
@@ -27,11 +27,7 @@ pub struct Context {
 }
 
 impl PeerInfo {
-    pub fn new(
-        transport: Arc<Libp2pTransport>,
-        joint_feldman: JointFeldman<Libp2pTransport>,
-        pk: PublicKey,
-    ) -> Self {
+    pub fn new(transport: Arc<Transport>, joint_feldman: JointFeldman, pk: PublicKey) -> Self {
         Self {
             transport,
             joint_feldman,

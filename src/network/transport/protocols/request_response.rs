@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use libp2p::PeerId;
 
-use crate::network::transport::libp2p_transport::{
+use crate::network::transport::{
     behaviour::Behaviour,
     dispatcher::{self, Dispatcher},
     protocols::request_response::payload::{Request, Response},

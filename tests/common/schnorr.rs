@@ -8,14 +8,13 @@ use civita::{
         dkg::joint_feldman::JointFeldman,
         tss::schnorr::{self, Schnorr, SignResult},
     },
-    network::transport::Libp2pTransport,
     utils::IndexedMap,
 };
 
 use crate::common::joint_feldman;
 
 pub struct Context {
-    schnorrs: IndexedMap<libp2p::PeerId, Schnorr<JointFeldman<Libp2pTransport>, Libp2pTransport>>,
+    schnorrs: IndexedMap<libp2p::PeerId, Schnorr<JointFeldman>>,
 }
 
 impl Context {
