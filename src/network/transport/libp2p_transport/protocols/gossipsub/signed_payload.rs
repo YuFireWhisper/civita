@@ -120,7 +120,7 @@ impl TryFrom<&[u8]> for SignedPayload {
 mod tests {
     use crate::{
         crypto::{
-            primitives::algebra::{Point, Scalar},
+            algebra::{Point, Scalar},
             tss::{schnorr, Signature},
         },
         network::transport::libp2p_transport::protocols::gossipsub::{

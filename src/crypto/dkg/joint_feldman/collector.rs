@@ -2,17 +2,13 @@ use std::{collections::VecDeque, sync::Arc};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::crypto::index_map::IndexedMap;
-use crate::crypto::keypair::PublicKey;
-use crate::crypto::primitives::algebra::Point;
-use crate::crypto::{
-    dkg::joint_feldman::collector::event::ActionNeeded, primitives::vss::DecryptedShares,
-};
 use crate::{
     crypto::{
-        dkg::joint_feldman::collector::context::Context,
-        keypair::{self, SecretKey},
-        primitives::algebra::{self},
+        algebra::{self, Point},
+        dkg::joint_feldman::{collector::context::Context, event::ActionNeeded},
+        index_map::IndexedMap,
+        keypair::{self, PublicKey, SecretKey},
+        vss::DecryptedShares,
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
 };
@@ -346,16 +342,14 @@ mod tests {
 
     use crate::{
         crypto::{
+            algebra::Scheme,
             dkg::joint_feldman::{
                 collector::{Collector, Config, Error},
                 event,
             },
             index_map::IndexedMap,
             keypair::{self, SecretKey},
-            primitives::{
-                algebra::Scheme,
-                vss::{DecryptedShares, Vss},
-            },
+            vss::{DecryptedShares, Vss},
         },
         mocks::MockError,
         network::transport::MockTransport,

@@ -1,14 +1,12 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::crypto::{
+    algebra::{self, Point, Scalar},
     index_map::IndexedMap,
     keypair::{self, PublicKey, SecretKey},
-    primitives::{
-        algebra::{self, Point, Scalar},
-        vss::{
-            encrypted_share::{self, EncryptedShare},
-            DecryptedShares, EncryptedShares,
-        },
+    vss::{
+        encrypted_share::{self, EncryptedShare},
+        DecryptedShares, EncryptedShares,
     },
 };
 
@@ -462,13 +460,11 @@ mod tests {
     use std::sync::Arc;
 
     use crate::crypto::{
+        algebra::{Point, Scheme},
         dkg::joint_feldman::event::{ActionNeeded, Event, Output, Status},
         index_map::IndexedMap,
         keypair::{self, PublicKey, SecretKey},
-        primitives::{
-            algebra::{Point, Scheme},
-            vss::{DecryptedShares, EncryptedShares, Vss},
-        },
+        vss::{DecryptedShares, EncryptedShares, Vss},
     };
 
     const NUM_PEERS: u16 = 3;

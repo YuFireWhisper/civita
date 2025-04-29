@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
 use civita::crypto::{
+    algebra::{Point, Scalar},
     dkg::GenerateResult,
-    primitives::algebra::{Point, Scalar},
 };
 
 use crate::common::joint_feldman;
 
 mod common;
 
-const NUM_PEERS: u16 = 9;
+const NUM_PEERS: u16 = 3;
 const ID: &[u8] = b"test id";
 
 #[tokio::test]

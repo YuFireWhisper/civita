@@ -1,6 +1,6 @@
 use tokio::time::Duration;
 
-use crate::crypto::primitives::{algebra::Scheme, threshold};
+use crate::crypto::{algebra::Scheme, threshold};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_GOSSIPSUB_TOPIC: &str = "DKG";

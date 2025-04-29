@@ -7,7 +7,7 @@ use curv::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::primitives::algebra::{point::Point, Error, Scheme};
+use crate::crypto::algebra::{Error, Point, Scheme};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -249,7 +249,7 @@ mod tests {
         elliptic::curves::{secp256_k1::Secp256k1 as CurvSecp256k1, Scalar as CurvScalar},
     };
 
-    use crate::crypto::primitives::{
+    use crate::crypto::{
         algebra::{Error, Point, Scalar, Scheme},
         vss::Vss,
     };

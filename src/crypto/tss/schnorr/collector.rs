@@ -10,11 +10,9 @@ use tokio::sync::{
 
 use crate::{
     crypto::{
+        algebra::{Point, Scalar},
         index_map::IndexedMap,
-        primitives::{
-            algebra::{Point, Scalar},
-            threshold,
-        },
+        threshold,
         tss::schnorr::collector::context::Context,
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},
@@ -238,13 +236,11 @@ mod tests {
 
     use crate::{
         crypto::{
+            algebra::{Point, Scheme},
             index_map::IndexedMap,
-            primitives::{
-                algebra::{Point, Scheme},
-                threshold,
-                vss::Vss,
-            },
+            threshold,
             tss::schnorr::collector::{CollectionResult, Collector, Config, Error},
+            vss::Vss,
         },
         mocks::MockError,
         network::transport::MockTransport,

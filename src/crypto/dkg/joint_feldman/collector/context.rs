@@ -3,16 +3,11 @@ use std::sync::Arc;
 use dashmap::{mapref::one::RefMut, DashMap, DashSet};
 
 use crate::crypto::{
+    algebra::{self, Point},
     dkg::joint_feldman::collector::event::{self, ActionNeeded, Event},
     index_map::IndexedMap,
     keypair::{PublicKey, SecretKey},
-    primitives::{
-        algebra::{self, Point},
-        vss::{
-            encrypted_share::{self, EncryptedShares},
-            DecryptedShares,
-        },
-    },
+    vss::{encrypted_share, DecryptedShares, EncryptedShares},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -171,13 +166,11 @@ mod tests {
     use std::sync::Arc;
 
     use crate::crypto::{
+        algebra::Scheme,
         dkg::joint_feldman::collector::context::{Context, Error},
         index_map::IndexedMap,
         keypair::{self, PublicKey},
-        primitives::{
-            algebra::Scheme,
-            vss::{EncryptedShares, Vss},
-        },
+        vss::{EncryptedShares, Vss},
     };
 
     const NUM_PEERS: u16 = 3;

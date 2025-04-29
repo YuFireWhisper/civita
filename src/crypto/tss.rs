@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     crypto::{
+        algebra::{Point, Scalar},
         index_map::IndexedMap,
-        primitives::algebra::{Point, Scalar},
     },
     mocks::MockError,
 };

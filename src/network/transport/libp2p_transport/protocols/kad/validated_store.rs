@@ -8,7 +8,7 @@ use libp2p::kad::{store::RecordStore, ProviderRecord, Record, RecordKey};
 use thiserror::Error;
 
 use crate::{
-    crypto::primitives::algebra::Point,
+    crypto::algebra::Point,
     network::transport::libp2p_transport::protocols::kad::{message, payload, Message},
 };
 
