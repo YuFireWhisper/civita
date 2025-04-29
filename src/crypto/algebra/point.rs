@@ -4,7 +4,7 @@ use curv::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::primitives::algebra::{Error, Scalar, Scheme};
+use crate::crypto::algebra::{Error, Scalar, Scheme};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -138,7 +138,7 @@ impl From<CurvPoint<CurvSecp256k1>> for Point {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::primitives::algebra::{Point, Scalar, Scheme};
+    use crate::crypto::algebra::{Point, Scalar, Scheme};
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;
 

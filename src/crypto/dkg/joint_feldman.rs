@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     crypto::{
+        algebra::{self, Scalar},
         dkg::{
             joint_feldman::{
                 collector::{event, Collector},
@@ -11,13 +12,7 @@ use crate::{
         },
         index_map::IndexedMap,
         keypair::{PublicKey, SecretKey},
-        primitives::{
-            algebra::{self, Scalar},
-            vss::{
-                decrypted_share::{self},
-                Vss,
-            },
-        },
+        vss::{decrypted_share, Vss},
     },
     network::transport::Transport,
 };

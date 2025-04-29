@@ -12,10 +12,10 @@ use tokio::sync::{mpsc::Receiver as TokioReceiver, Mutex as TokioMutex, RwLock a
 use crate::{
     committee::{config::Config, info::Info, pending_election::PendingElection, timer::Timer},
     crypto::{
+        algebra::{self, Point, Scalar},
         dkg::{self, Dkg},
         index_map::IndexedMap,
         keypair::{self, PublicKey, SecretKey, VrfProof},
-        primitives::algebra::{self, Point, Scalar},
         tss::{self, Tss},
     },
     network::transport::{
@@ -730,9 +730,9 @@ mod tests {
     use crate::{
         committee::{self},
         crypto::{
+            algebra::Point,
             dkg::MockDkg,
             keypair::{self},
-            primitives::algebra::Point,
             tss::MockTss,
         },
         network::transport::MockTransport,

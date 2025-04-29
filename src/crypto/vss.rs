@@ -4,7 +4,7 @@ use curv::{
 };
 use sha2::Sha256;
 
-use crate::crypto::primitives::algebra::{Point, Scheme};
+use crate::crypto::algebra::{Point, Scheme};
 
 pub mod decrypted_share;
 pub mod encrypted_share;

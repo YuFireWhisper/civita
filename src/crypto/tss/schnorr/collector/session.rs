@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::oneshot::Sender as TokioOneShotSender;
 
 use crate::crypto::{
-    primitives::algebra::{Point, Scalar},
+    algebra::{Point, Scalar},
     tss::schnorr::collector::CollectionResult,
 };
 
@@ -111,12 +111,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use crate::crypto::{
+        algebra::{Point, Scalar, Scheme},
         index_map::IndexedMap,
-        primitives::{
-            algebra::{Point, Scalar, Scheme},
-            vss::Vss,
-        },
         tss::schnorr::collector::{session::Session, CollectionResult},
+        vss::Vss,
     };
 
     const SCHEME: Scheme = Scheme::Secp256k1;

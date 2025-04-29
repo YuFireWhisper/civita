@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{index_map::IndexedMap, keypair::PublicKey, primitives::algebra::Point};
+use crate::crypto::{algebra::Point, index_map::IndexedMap, keypair::PublicKey};
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -64,7 +64,7 @@ impl TryFrom<&[u8]> for Info {
 
 #[cfg(test)]
 mod tests {
-    use crate::{committee::info::Info, crypto::primitives::algebra::Point};
+    use crate::{committee::info::Info, crypto::algebra::Point};
 
     #[test]
     fn convert_success() {

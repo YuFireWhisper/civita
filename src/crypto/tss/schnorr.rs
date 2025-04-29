@@ -7,12 +7,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     crypto::{
+        algebra::{self, Point, Scalar},
         dkg::{Dkg, GenerateResult},
         index_map::IndexedMap,
-        primitives::{
-            algebra::{self, Point, Scalar},
-            threshold,
-        },
+        threshold,
         tss::schnorr::{collector::CollectionResult, signature::Signature},
     },
     network::transport::{libp2p_transport::protocols::gossipsub, Transport},

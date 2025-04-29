@@ -3,8 +3,8 @@ use dashmap::{mapref::one::RefMut, DashMap};
 use tokio::sync::oneshot::Sender as TokioOneShotSender;
 
 use crate::crypto::{
+    algebra::{self, Point, Scalar},
     index_map::IndexedMap,
-    primitives::algebra::{self, Point, Scalar},
     tss::schnorr::collector::{session::Session, CollectionResult, SessionId},
 };
 
@@ -125,12 +125,10 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use crate::crypto::{
+        algebra::{Point, Scalar, Scheme},
         index_map::IndexedMap,
-        primitives::{
-            algebra::{Point, Scalar, Scheme},
-            vss::Vss,
-        },
         tss::schnorr::collector::{context::Context, SessionId},
+        vss::Vss,
     };
 
     const SCHEME: Scheme = Scheme::Secp256k1;

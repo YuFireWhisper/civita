@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
-    primitives::algebra::{Point, Scalar},
+    algebra::{Point, Scalar},
     tss::schnorr,
 };
 

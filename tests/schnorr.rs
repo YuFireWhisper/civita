@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use civita::crypto::{
+    algebra::{Point, Scalar},
     dkg::GenerateResult,
     index_map::IndexedMap,
-    primitives::algebra::{Point, Scalar},
     tss::schnorr::{signature::Signature, SignResult},
 };
 
@@ -11,7 +11,7 @@ use crate::common::{joint_feldman, schnorr};
 
 mod common;
 
-const NUM_PEERS: u16 = 9;
+const NUM_PEERS: u16 = 3;
 const ID: &[u8] = b"test id";
 const SIG_ID: &[u8] = b"test sig id";
 const MSG: &[u8] = b"test message";

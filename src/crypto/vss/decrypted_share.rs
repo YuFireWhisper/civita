@@ -3,11 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
+    algebra::{self, Point, Scalar},
     keypair::{self, SecretKey},
-    primitives::{
-        algebra::{self, Point, Scalar},
-        vss::encrypted_share::{self, EncryptedShares},
-    },
+    vss::{encrypted_share, EncryptedShares},
 };
 
 type Result<T> = std::result::Result<T, Error>;

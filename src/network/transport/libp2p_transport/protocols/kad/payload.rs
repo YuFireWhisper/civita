@@ -2,7 +2,7 @@ use bincode::{config, error::EncodeError, serde::encode_to_vec};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::crypto::primitives::algebra::Point;
+use crate::crypto::algebra::Point;
 
 type Result<T> = std::result::Result<T, Error>;
 

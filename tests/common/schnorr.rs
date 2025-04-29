@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use civita::{
     crypto::{
+        algebra::{Point, Scalar},
         dkg::joint_feldman::JointFeldman,
         index_map::IndexedMap,
-        primitives::algebra::{Point, Scalar},
         tss::schnorr::{self, Schnorr, SignResult},
     },
     network::transport::Libp2pTransport,
