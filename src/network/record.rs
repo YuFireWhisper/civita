@@ -193,30 +193,21 @@ mod tests {
 
     #[test]
     fn success_convert_with_bytes() {
-        let record = create_resident_record();
+        let resident_record = create_resident_record();
+        let proposal_record = create_proposal_record();
 
-        let bytes = record.to_bytes().unwrap();
-        let decoded = Record::<MockProposal>::from_bytes(&bytes).unwrap();
+        let resident_bytes = resident_record.to_bytes().unwrap();
+        let proposal_bytes = proposal_record.to_bytes().unwrap();
 
-        match decoded {
-            Record::Resident { cerdit, custom } => {
+        let resident_decoded = Record::<MockProposal>::from_bytes(&resident_bytes).unwrap();
+        let proposal_decoded = Record::<MockProposal>::from_bytes(&proposal_bytes).unwrap();
+
+        match (resident_decoded, proposal_decoded) {
+            (Record::Resident { cerdit, custom }, Record::Proposal(_)) => {
                 assert_eq!(cerdit, DEFAULT_CREDIT);
                 assert_eq!(custom, CUSTOM_VALUE_BYTES.to_vec());
             }
-            Record::Proposal(_) => panic!("Expected Resident record, got Proposal"),
-        }
-    }
-
-    #[test]
-    fn should_convert_proposal_to_bytes_and_back() {
-        let record = create_proposal_record();
-
-        let bytes = record.to_bytes().unwrap();
-        let decoded = Record::<MockProposal>::from_bytes(&bytes).unwrap();
-
-        match decoded {
-            Record::Proposal(_) => (),
-            Record::Resident { .. } => panic!("Expected Proposal record, got Resident"),
+            _ => panic!("Expected Resident and Proposal records"),
         }
     }
 
@@ -235,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn should_correctly_implement_clone() {
+    fn successfully_clones_record() {
         let resident_record = create_resident_record();
         let proposal_record = create_proposal_record();
 
