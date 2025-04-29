@@ -87,8 +87,8 @@ mod tests {
             keypair,
             primitives::{algebra::Scheme, vss::Vss},
         },
+        mocks::MockError,
         network::transport::MockTransport,
-        MockError,
     };
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;

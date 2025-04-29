@@ -2,11 +2,11 @@ use std::{collections::HashSet, error::Error};
 
 use crate::{
     crypto::tss::Signature,
+    mocks::MockError,
     network::transport::libp2p_transport::protocols::{
         gossipsub, kad,
         request_response::{self, payload::Request},
     },
-    MockError,
 };
 
 pub mod libp2p_transport;

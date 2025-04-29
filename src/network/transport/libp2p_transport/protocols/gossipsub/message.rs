@@ -105,7 +105,7 @@ impl TryFrom<Message> for Vec<u8> {
     type Error = Error;
 
     fn try_from(message: Message) -> Result<Vec<u8>> {
-        Vec::try_from(&message)
+        (&message).try_into()
     }
 }
 

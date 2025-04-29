@@ -6,7 +6,7 @@ use crate::{
         index_map::IndexedMap,
         primitives::algebra::{Point, Scalar},
     },
-    MockError,
+    mocks::MockError,
 };
 
 pub mod schnorr;
