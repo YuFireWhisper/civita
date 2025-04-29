@@ -10,7 +10,7 @@ use libp2p::{
 };
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::protocols::{
+use crate::network::transport::protocols::{
     kad::validated_store::ValidatedStore,
     request_response::payload::{Request, Response},
 };

@@ -2,7 +2,7 @@ use libp2p::{request_response::Event, PeerId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::network::transport::libp2p_transport::{
+use crate::network::transport::{
     dispatcher::Keyed,
     protocols::request_response::{
         payload::{Request, Response},

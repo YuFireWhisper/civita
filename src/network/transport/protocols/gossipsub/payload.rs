@@ -139,7 +139,7 @@ impl TryFrom<Vec<u8>> for Payload {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::transport::libp2p_transport::protocols::gossipsub::Payload;
+    use crate::network::transport::protocols::gossipsub::Payload;
 
     #[test]
     fn success_convert_with_vec() {

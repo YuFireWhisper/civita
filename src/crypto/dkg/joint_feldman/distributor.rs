@@ -9,9 +9,15 @@ use crate::{
             encrypted_share::{self, EncryptedShares},
         },
     },
-    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    network::transport::protocols::gossipsub,
     utils::IndexedMap,
 };
+
+#[cfg(not(test))]
+use crate::network::transport::Transport;
+
+#[cfg(test)]
+use crate::network::transport::MockTransport as Transport;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -28,13 +34,13 @@ pub enum Error {
     EncryptedShare(#[from] encrypted_share::Error),
 }
 
-pub struct Distributor<T: Transport + 'static> {
-    transport: Arc<T>,
+pub struct Distributor {
+    transport: Arc<Transport>,
     topic: String,
 }
 
-impl<T: Transport + 'static> Distributor<T> {
-    pub fn new(transport: Arc<T>, topic: &str) -> Self {
+impl Distributor {
+    pub fn new(transport: Arc<Transport>, topic: &str) -> Self {
         Self {
             transport,
             topic: topic.to_string(),
@@ -82,8 +88,7 @@ mod tests {
         crypto::{
             algebra::Scheme, dkg::joint_feldman::distributor::Distributor, keypair, vss::Vss,
         },
-        mocks::MockError,
-        network::transport::MockTransport,
+        network::transport::{self, MockTransport},
         utils::IndexedMap,
     };
 
@@ -112,7 +117,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_shares_success_valid_input() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
         transport
             .expect_publish()
             .with(eq(TOPIC.to_string()), always())
@@ -137,7 +142,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Number of peers must match the number of shares")]
     async fn peers_count_validation_works() {
-        let transport = MockTransport::new();
+        let transport = MockTransport::default();
         let distributor = Distributor::new(Arc::new(transport), TOPIC);
 
         let peers = generate_peers(NUM_PEERS - 1);
@@ -150,12 +155,12 @@ mod tests {
 
     #[tokio::test]
     async fn returns_error_transport_error() {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
         transport
             .expect_publish()
             .with(eq(TOPIC.to_string()), always())
             .times(1)
-            .returning(|_, _| Err(MockError));
+            .returning(|_, _| Err(transport::Error::MockError));
 
         let distributor = Distributor::new(Arc::new(transport), TOPIC);
         let peers = generate_peers(NUM_PEERS);

@@ -1,20 +1,19 @@
 use std::sync::Arc;
 
-use civita::network::transport::Transport;
 use libp2p::identity::Keypair;
 use libp2p::Multiaddr;
 
-use civita::network::transport::libp2p_transport::{config::Config, Libp2pTransport};
+use civita::network::transport::{config::Config, Transport};
 
 const LISTEN_ADDR: &str = "/ip4/127.0.0.1/tcp/0";
 
-pub async fn create_connected_transports(n: u16) -> Vec<Arc<Libp2pTransport>> {
-    let mut transports: Vec<Arc<Libp2pTransport>> = Vec::new();
+pub async fn create_connected_transports(n: u16) -> Vec<Arc<Transport>> {
+    let mut transports: Vec<Arc<Transport>> = Vec::new();
     let mut addrs: Vec<Multiaddr> = Vec::new();
 
     for _ in 0..n {
         let keypair = Keypair::generate_ed25519();
-        let transport = Libp2pTransport::new(
+        let transport = Transport::new(
             keypair.clone(),
             LISTEN_ADDR.parse().unwrap(),
             Config::default(),
@@ -35,7 +34,7 @@ pub async fn create_connected_transports(n: u16) -> Vec<Arc<Libp2pTransport>> {
     transports
 }
 
-async fn dial_peers(transports: &[Arc<Libp2pTransport>], addrs: Vec<Multiaddr>) {
+async fn dial_peers(transports: &[Arc<Transport>], addrs: Vec<Multiaddr>) {
     for (i, transport) in transports.iter().enumerate() {
         for (j, other) in transports.iter().enumerate() {
             if i != j {
@@ -48,7 +47,7 @@ async fn dial_peers(transports: &[Arc<Libp2pTransport>], addrs: Vec<Multiaddr>) 
     }
 }
 
-async fn listen_addr(transport: &Libp2pTransport) -> Vec<Multiaddr> {
+async fn listen_addr(transport: &Transport) -> Vec<Multiaddr> {
     let swarm = transport.swarm().await.expect("swarm not initialized");
     swarm.listeners().cloned().collect()
 }

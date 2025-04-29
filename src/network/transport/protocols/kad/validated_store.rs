@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{
     crypto::algebra::Point,
-    network::transport::libp2p_transport::protocols::kad::{message, payload, Message},
+    network::transport::protocols::kad::{message, payload, Message},
 };
 
 type Result<T> = std::result::Result<T, Error>;

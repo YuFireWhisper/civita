@@ -8,7 +8,7 @@ use libp2p::{
 
 use crate::{
     crypto::tss::Signature,
-    network::transport::libp2p_transport::{
+    network::transport::{
         behaviour::Behaviour,
         protocols::gossipsub::{dispatcher::Dispatcher, signed_payload::SignedPayload},
     },

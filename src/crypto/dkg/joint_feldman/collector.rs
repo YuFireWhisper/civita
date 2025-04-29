@@ -9,9 +9,15 @@ use crate::{
         keypair::{self, PublicKey, SecretKey},
         vss::DecryptedShares,
     },
-    network::transport::{libp2p_transport::protocols::gossipsub, Transport},
+    network::transport::protocols::gossipsub,
     utils::IndexedMap,
 };
+
+#[cfg(not(test))]
+use crate::network::transport::Transport;
+
+#[cfg(test)]
+use crate::network::transport::MockTransport as Transport;
 
 pub mod config;
 mod context;
@@ -65,22 +71,22 @@ struct Query {
     callback: oneshot::Sender<event::Output>,
 }
 
-struct WorkerContext<T: Transport> {
+struct WorkerContext {
     context: Context,
-    transport: Arc<T>,
+    transport: Arc<Transport>,
     topic: String,
 }
 
-pub struct Collector<T: Transport + 'static> {
-    transport: Arc<T>,
+pub struct Collector {
+    transport: Arc<Transport>,
     secret_key: Arc<SecretKey>,
     config: Config,
     command_tx: Option<mpsc::Sender<Command>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl<T: Transport + 'static> Collector<T> {
-    pub fn new(transport: Arc<T>, secret_key: Arc<SecretKey>, config: Config) -> Self {
+impl Collector {
+    pub fn new(transport: Arc<Transport>, secret_key: Arc<SecretKey>, config: Config) -> Self {
         Self {
             transport,
             secret_key,
@@ -121,7 +127,7 @@ impl<T: Transport + 'static> Collector<T> {
     }
 
     async fn run_worker(
-        worker_ctx: WorkerContext<T>,
+        worker_ctx: WorkerContext,
         mut command_rx: mpsc::Receiver<Command>,
         mut gossipsub_rx: mpsc::Receiver<gossipsub::Message>,
         timeout: tokio::time::Duration,
@@ -172,7 +178,7 @@ impl<T: Transport + 'static> Collector<T> {
         log::info!("Collector worker stopped");
     }
 
-    async fn process_message(worker_ctx: &WorkerContext<T>, msg: gossipsub::Message) -> Result<()> {
+    async fn process_message(worker_ctx: &WorkerContext, msg: gossipsub::Message) -> Result<()> {
         let (action_needed, id) = match msg.payload {
             gossipsub::Payload::VSSComponent {
                 id,
@@ -220,7 +226,7 @@ impl<T: Transport + 'static> Collector<T> {
     }
 
     async fn send_report_response(
-        transport: &Arc<T>,
+        transport: &Arc<Transport>,
         topic: &str,
         id: Vec<u8>,
         de_share: DecryptedShares,
@@ -239,7 +245,7 @@ impl<T: Transport + 'static> Collector<T> {
     }
 
     async fn handle_query(
-        worker_ctx: &WorkerContext<T>,
+        worker_ctx: &WorkerContext,
         id: Vec<u8>,
         de_share: DecryptedShares,
         comms: Vec<Point>,
@@ -328,7 +334,7 @@ impl<T: Transport + 'static> Collector<T> {
     }
 }
 
-impl<T: Transport> Drop for Collector<T> {
+impl Drop for Collector {
     fn drop(&mut self) {
         self.stop();
     }
@@ -350,8 +356,7 @@ mod tests {
             keypair::{self, SecretKey},
             vss::{DecryptedShares, Vss},
         },
-        mocks::MockError,
-        network::transport::MockTransport,
+        network::transport::{Error as TransportError, MockTransport},
         utils::IndexedMap,
     };
 
@@ -376,7 +381,7 @@ mod tests {
     }
 
     fn create_mock_transport(id: libp2p::PeerId) -> MockTransport {
-        let mut transport = MockTransport::new();
+        let mut transport = MockTransport::default();
         transport.expect_self_peer().return_once(move || id);
         transport
     }
@@ -429,7 +434,7 @@ mod tests {
         transport
             .expect_listen_on_topic()
             .with(eq(TOPIC))
-            .returning(move |_| Err(MockError));
+            .returning(move |_| Err(TransportError::MockError));
 
         let mut collector = Collector::new(Arc::new(transport), secret_key, config);
         let peers = IndexedMap::new();

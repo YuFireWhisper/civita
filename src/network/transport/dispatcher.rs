@@ -62,7 +62,7 @@ where
 mod tests {
     use tokio::sync::mpsc;
 
-    use crate::network::transport::libp2p_transport::dispatcher::{Dispatcher, Keyed};
+    use crate::network::transport::dispatcher::{Dispatcher, Keyed};
 
     const CHANNEL_SIZE: usize = 10;
 
