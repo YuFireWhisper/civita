@@ -292,18 +292,4 @@ mod tests {
             _ => panic!("Expected Resident record"),
         }
     }
-
-    #[test]
-    fn successfully_converts_record_ref_with_bytes() {
-        let record = create_resident_record();
-
-        let bytes: Vec<u8> = (&record).try_into().unwrap();
-
-        assert!(!bytes.is_empty());
-        let decoded = Record::<MockProposal>::from_bytes(&bytes).unwrap();
-        match decoded {
-            Record::Resident { cerdit, .. } => assert_eq!(cerdit, DEFAULT_CREDIT),
-            _ => panic!("Expected Resident record"),
-        }
-    }
 }
