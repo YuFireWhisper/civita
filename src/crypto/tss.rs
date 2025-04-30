@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use mockall::automock;
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +29,12 @@ pub enum Signature {
     Schnorr(schnorr::signature::Signature),
 }
 
+#[derive(Debug)]
+pub enum SignResult {
+    Success(Signature),
+    Failure(HashSet<libp2p::PeerId>),
+}
+
 #[automock(type Error=MockError;)]
 #[async_trait::async_trait]
 pub trait Tss: Send + Sync {
@@ -37,8 +45,7 @@ pub trait Tss: Send + Sync {
         secret_key: Scalar,
         partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
     ) -> Result<(), Self::Error>;
-    async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<Signature, Self::Error>;
-    fn verify(&self, msg: &[u8], sig: &Signature) -> bool;
+    async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<SignResult, Self::Error>;
 }
 
 impl Signature {

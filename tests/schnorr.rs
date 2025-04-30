@@ -4,7 +4,7 @@ use civita::{
     crypto::{
         algebra::{Point, Scalar},
         dkg::GenerateResult,
-        tss::schnorr::{signature::Signature, SignResult},
+        tss::{schnorr::signature::Signature, SignResult},
     },
     utils::IndexedMap,
 };
@@ -93,9 +93,13 @@ fn extract_signature(results: Vec<SignResult>) -> Vec<Signature> {
 
     results
         .into_iter()
-        .map(|result| match result {
-            SignResult::Success(sig) => sig,
-            _ => unreachable!(),
+        .map(|result| {
+            match result {
+                SignResult::Success(sig) => sig,
+                _ => unreachable!(),
+            }
+            .try_into()
+            .unwrap()
         })
         .collect()
 }

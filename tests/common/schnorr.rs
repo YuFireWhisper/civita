@@ -1,12 +1,15 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use civita::{
     crypto::{
         algebra::{Point, Scalar},
         dkg::joint_feldman::JointFeldman,
-        tss::schnorr::{self, Schnorr, SignResult},
+        tss::{
+            schnorr::{self, Schnorr},
+            SignResult,
+        },
     },
     utils::IndexedMap,
 };
@@ -25,7 +28,7 @@ impl Context {
             schnorrs.insert(
                 id,
                 Schnorr::new(
-                    info.joint_feldman,
+                    Arc::new(info.joint_feldman),
                     info.transport,
                     schnorr::Config::default(),
                 ),

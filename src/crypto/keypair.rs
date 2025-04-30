@@ -59,6 +59,12 @@ pub enum ResidentSignature {
 }
 
 impl SecretKey {
+    pub fn to_public_key(&self) -> PublicKey {
+        match self {
+            SecretKey::Secp256k1(sk) => PublicKey::Secp256k1(sk.to_public_key()),
+        }
+    }
+
     pub fn decrypt(&self, msg: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         match self {
             SecretKey::Secp256k1(sk) => sk.decrypt(msg).map_err(Error::from),

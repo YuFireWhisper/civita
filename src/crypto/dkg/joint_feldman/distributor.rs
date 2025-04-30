@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio::sync::MutexGuard;
+
 use crate::{
     crypto::{
         algebra::Point,
@@ -32,6 +34,9 @@ pub enum Error {
 
     #[error("Encrypted share error: {0}")]
     EncryptedShare(#[from] encrypted_share::Error),
+
+    #[error("Peer public keys is not set")]
+    NoPeerPublicKeys,
 }
 
 pub struct Distributor {
@@ -47,13 +52,15 @@ impl Distributor {
         }
     }
 
-    pub async fn send_shares(
+    pub async fn send_shares<'a>(
         &self,
         id: Vec<u8>,
-        peer_pks: &IndexedMap<libp2p::PeerId, keypair::PublicKey>,
+        peer_pks: MutexGuard<'a, Option<IndexedMap<libp2p::PeerId, keypair::PublicKey>>>,
         decrypted_shares: &DecryptedShares,
         commitments: Vec<Point>,
     ) -> Result<()> {
+        let peer_pks = peer_pks.as_ref().ok_or_else(|| Error::NoPeerPublicKeys)?;
+
         assert_eq!(
             peer_pks.len(),
             decrypted_shares.len(),
@@ -83,6 +90,7 @@ mod tests {
     use std::sync::Arc;
 
     use mockall::predicate::{always, eq};
+    use tokio::sync::Mutex;
 
     use crate::{
         crypto::{
@@ -103,7 +111,7 @@ mod tests {
         libp2p::gossipsub::MessageId::from(MESSAGE_ID)
     }
 
-    fn generate_peers(nums: u16) -> IndexedMap<libp2p::PeerId, keypair::PublicKey> {
+    fn generate_peers(nums: u16) -> Mutex<Option<IndexedMap<libp2p::PeerId, keypair::PublicKey>>> {
         let mut peers_map = IndexedMap::new();
 
         for _ in 0..nums {
@@ -112,7 +120,7 @@ mod tests {
             peers_map.insert(peer_id, public_key);
         }
 
-        peers_map
+        Mutex::new(Some(peers_map))
     }
 
     #[tokio::test]
@@ -125,11 +133,14 @@ mod tests {
             .returning(|_, _| Ok(create_message_id()));
 
         let distributor = Distributor::new(Arc::new(transport), TOPIC);
+
         let peers = generate_peers(NUM_PEERS);
+        let peers = peers.lock().await;
+
         let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
 
         let result = distributor
-            .send_shares(ID.to_vec(), &peers, &shares, commitments)
+            .send_shares(ID.to_vec(), peers, &shares, commitments)
             .await;
 
         assert!(
@@ -145,11 +156,13 @@ mod tests {
         let transport = MockTransport::default();
         let distributor = Distributor::new(Arc::new(transport), TOPIC);
 
-        let peers = generate_peers(NUM_PEERS - 1);
+        let peers = generate_peers(NUM_PEERS);
+        let peers = peers.lock().await;
+
         let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
 
         let _ = distributor
-            .send_shares(ID.to_vec(), &peers, &shares, commitments)
+            .send_shares(ID.to_vec(), peers, &shares, commitments)
             .await; // This should panic
     }
 
@@ -163,16 +176,38 @@ mod tests {
             .returning(|_, _| Err(transport::Error::MockError));
 
         let distributor = Distributor::new(Arc::new(transport), TOPIC);
+
         let peers = generate_peers(NUM_PEERS);
+        let peers = peers.lock().await;
+
         let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
 
         let result = distributor
-            .send_shares(ID.to_vec(), &peers, &shares, commitments)
+            .send_shares(ID.to_vec(), peers, &shares, commitments)
             .await;
 
         assert!(
             result.is_err(),
             "Expected send_shares to fail, but it succeeded",
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_no_peer_public_keys() {
+        let transport = MockTransport::default();
+        let distributor = Distributor::new(Arc::new(transport), TOPIC);
+
+        let peers = Mutex::new(None);
+
+        let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
+
+        let result = distributor
+            .send_shares(ID.to_vec(), peers.lock().await, &shares, commitments)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected send_shares to fail due to no peer public keys"
         );
     }
 }

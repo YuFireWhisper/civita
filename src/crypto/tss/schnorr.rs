@@ -10,7 +10,11 @@ use crate::{
         algebra::{self, Point, Scalar},
         dkg::{Dkg, GenerateResult},
         threshold,
-        tss::schnorr::{collector::CollectionResult, signature::Signature},
+        tss::{
+            self,
+            schnorr::{collector::CollectionResult, signature::Signature},
+            SignResult, Tss,
+        },
     },
     network::transport::protocols::gossipsub,
     utils::IndexedMap,
@@ -46,11 +50,6 @@ pub enum Error {
     Transport(String),
 }
 
-pub enum SignResult {
-    Success(Signature),
-    Failure(HashSet<libp2p::PeerId>),
-}
-
 enum RandomGenerateResult {
     Success((Scalar, Point)),
     Failure(HashSet<libp2p::PeerId>),
@@ -65,7 +64,7 @@ pub struct Config {
 
 pub struct Schnorr<D: Dkg> {
     transport: Arc<Transport>,
-    dkg: D,
+    dkg: Arc<D>,
     secret: Option<Scalar>,
     global_pk: Option<Point>,
     collector: collector::Collector,
@@ -74,7 +73,7 @@ pub struct Schnorr<D: Dkg> {
 }
 
 impl<D: Dkg> Schnorr<D> {
-    pub fn new(dkg: D, transport: Arc<Transport>, config: Config) -> Self {
+    pub fn new(dkg: Arc<D>, transport: Arc<Transport>, config: Config) -> Self {
         let collector_config = collector::Config {
             threshold_counter: config.threshold_counter,
             topic: config.topic.clone(),
@@ -146,7 +145,7 @@ impl<D: Dkg> Schnorr<D> {
                 let sig = Scalar::lagrange_interpolation(&indices, &shares)?;
                 let sig = Signature::new(sig, random_point);
 
-                Ok(SignResult::Success(sig))
+                Ok(SignResult::Success(tss::Signature::Schnorr(sig)))
             }
             collector::CollectionResult::Failure(invalid_peers) => {
                 Ok(SignResult::Failure(invalid_peers))
@@ -241,6 +240,23 @@ pub fn calculate_challenge(msg: &[u8], public_random: &Point, global_pk: &Point)
 
     let hash = Sha256::new().chain(&input).finalize();
     Ok(Scalar::from_bytes(hash.as_slice(), &public_random.scheme()))
+}
+
+#[async_trait::async_trait]
+impl<D: Dkg> Tss for Schnorr<D> {
+    type Error = Error;
+
+    async fn set_keypair(
+        &mut self,
+        secret_key: Scalar,
+        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+    ) -> Result<()> {
+        self.start(secret_key, partial_pks).await
+    }
+
+    async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<SignResult> {
+        self.sign(id, msg).await
+    }
 }
 
 impl Default for Config {
