@@ -16,6 +16,7 @@ libp2p = { version = "0.55", features = [
   "gossipsub",
   "serde",
   "cbor",
+  "secp256k1",
 ] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
