@@ -7,7 +7,6 @@ use crate::{
     crypto::tss::Signature,
     network::transport::{
         behaviour::Behaviour,
-        config::Config,
         protocols::{
             gossipsub,
             kad::{self},
@@ -22,6 +21,8 @@ pub mod config;
 pub mod protocols;
 
 mod dispatcher;
+
+pub use config::Config;
 
 type Result<T> = std::result::Result<T, Error>;
 

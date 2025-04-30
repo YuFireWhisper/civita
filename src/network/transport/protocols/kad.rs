@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::{crypto::tss::Signature, network::transport::behaviour::Behaviour};
+use crate::{
+    crypto::tss::Signature,
+    network::transport::behaviour::Behaviour,
+    traits::{byteable, Byteable},
+};
 
 pub mod key;
 pub mod message;
@@ -12,8 +16,6 @@ pub mod validated_store;
 pub use key::Key;
 pub use message::Message;
 pub use payload::Payload;
-
-pub const PEER_INFO_KEY: &str = "peer";
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -44,8 +46,8 @@ pub enum Error {
     #[error("{0}")]
     Key(#[from] key::Error),
 
-    #[error("Payload error: {0}")]
-    Payload(#[from] payload::Error),
+    #[error("{0}")]
+    Byteable(#[from] byteable::Error),
 }
 
 #[derive(Debug)]
@@ -156,7 +158,7 @@ impl Kad {
 
     pub async fn put(&self, key: Key, payload: Payload, signature: Signature) -> Result<()> {
         let key = key.to_storage_key()?;
-        let record_value = Message::new(payload, signature).to_vec()?;
+        let record_value = Message::new(payload, signature)?.to_vec()?;
         let record = libp2p::kad::Record::new(key, record_value);
 
         let mut swarm = self.swarm.lock().await;
@@ -183,7 +185,7 @@ impl Kad {
             tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
         match peer_record_opt {
             Some(peer_record) => {
-                let payload = Payload::try_from(peer_record.record)?;
+                let payload = Payload::from_slice(peer_record.record.value)?;
                 Ok(Some(payload))
             }
             None => Ok(None),

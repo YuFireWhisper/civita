@@ -9,7 +9,8 @@ use thiserror::Error;
 
 use crate::{
     crypto::algebra::Point,
-    network::transport::protocols::kad::{message, payload, Message},
+    network::transport::protocols::kad::{message, Message},
+    traits::{byteable, Byteable},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -19,8 +20,9 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("{0}")]
     Message(#[from] message::Error),
+
     #[error("{0}")]
-    Payload(#[from] payload::Error),
+    Byteable(#[from] byteable::Error),
 }
 
 #[derive(Debug)]
@@ -42,12 +44,12 @@ impl ValidatedStore {
             None => return Ok(false),
         };
 
-        let message = Message::from_bytes(&record.value)?;
+        let message = Message::from_slice(&record.value)?;
 
-        let signature = message.signature;
-        let raw_message = message.payload.to_vec()?;
+        let signature = message.signature();
+        let raw_message = message.payload_bytes();
 
-        Ok(signature.verify(&raw_message, pub_key))
+        Ok(signature.verify(raw_message, pub_key))
     }
 }
 

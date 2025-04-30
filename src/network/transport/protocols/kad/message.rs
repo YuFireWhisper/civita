@@ -1,52 +1,41 @@
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-use crate::{crypto::tss::Signature, network::transport::protocols::kad::Payload};
-
-type Result<T> = std::result::Result<T, Error>;
+use crate::{
+    crypto::tss::Signature, network::transport::protocols::kad::Payload, traits::Byteable,
+};
 
 #[derive(Debug)]
-#[derive(Error)]
+#[derive(thiserror::Error)]
 pub enum Error {
-    #[error("Failed to decode message: {0}")]
-    Decode(#[from] serde_json::Error),
+    #[error("{0}")]
+    Encode(String),
+
+    #[error("{0}")]
+    Eecode(String),
 }
 
-#[derive(Clone)]
 #[derive(Debug)]
-#[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub struct Message {
-    pub payload: Payload,
-    pub signature: Signature,
+    payload: Vec<u8>,
+    signature: Signature,
 }
 
 impl Message {
-    pub fn new(payload: Payload, signature: Signature) -> Self {
-        Self { payload, signature }
+    pub fn new(payload: Payload, signature: Signature) -> Result<Self, Error> {
+        let payload = payload.to_vec().map_err(|e| Error::Encode(e.to_string()))?;
+        Ok(Self { payload, signature })
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        bytes.try_into()
+    pub fn signature(&self) -> &Signature {
+        &self.signature
     }
 
-    pub fn to_vec(self) -> Result<Vec<u8>> {
-        self.try_into()
+    pub fn payload_bytes(&self) -> &[u8] {
+        &self.payload
     }
-}
 
-impl TryFrom<&[u8]> for Message {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
-        serde_json::from_slice(value).map_err(Error::from)
-    }
-}
-
-impl TryFrom<Message> for Vec<u8> {
-    type Error = Error;
-
-    fn try_from(message: Message) -> std::result::Result<Self, Self::Error> {
-        serde_json::to_vec(&message).map_err(Error::from)
+    pub fn payload(&self) -> Result<Payload, Error> {
+        Payload::from_slice(&self.payload).map_err(|e| Error::Eecode(e.to_string()))
     }
 }
