@@ -17,6 +17,7 @@ use crate::{
         },
     },
     network::transport::protocols::gossipsub,
+    traits::{byteable, Byteable},
     utils::IndexedMap,
 };
 
@@ -48,6 +49,9 @@ pub enum Error {
 
     #[error("Transport error: {0}")]
     Transport(String),
+
+    #[error("{0}")]
+    Byteable(#[from] byteable::Error),
 }
 
 enum RandomGenerateResult {
@@ -93,34 +97,20 @@ impl<D: Dkg> Schnorr<D> {
         }
     }
 
-    pub async fn start(
+    pub async fn set_keypair(
         &mut self,
         secret: Scalar,
-        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        public: Point,
+        global_commitments: Vec<Point>,
+        peers: IndexedMap<libp2p::PeerId, ()>,
     ) -> Result<()> {
-        let global_pk = Point::sum(
-            partial_pks
-                .values()
-                .map(|ps| ps.first().expect("Partial PKs not empty")),
-        )?;
-
         self.secret = Some(secret);
-        self.global_pk = Some(global_pk);
-        self.peer_index = Some(Self::convert_to_peer_index(&partial_pks));
+        self.global_pk = Some(public);
+        self.peer_index = Some(peers.clone());
         self.collector.stop().await;
-        self.collector.start(partial_pks).await?;
+        self.collector.start(global_commitments, peers).await?;
 
         Ok(())
-    }
-
-    fn convert_to_peer_index(
-        peer_pks: &IndexedMap<libp2p::PeerId, Vec<Point>>,
-    ) -> IndexedMap<libp2p::PeerId, ()> {
-        let mut peer_index = IndexedMap::new();
-        for peer_id in peer_pks.keys() {
-            peer_index.insert(*peer_id, ());
-        }
-        peer_index
     }
 
     pub async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<SignResult> {
@@ -181,13 +171,8 @@ impl<D: Dkg> Schnorr<D> {
             .map_err(|e| Error::Dkg(e.to_string()))?;
 
         match result {
-            GenerateResult::Success {
-                secret,
-                partial_publics,
-            } => {
-                let random_point =
-                    Point::sum(partial_publics.values().map(|p| p.first().unwrap()))?;
-                Ok(RandomGenerateResult::Success((secret, random_point)))
+            GenerateResult::Success { secret, public, .. } => {
+                Ok(RandomGenerateResult::Success((secret, public)))
             }
             GenerateResult::Failure { invalid_peers } => {
                 Ok(RandomGenerateResult::Failure(invalid_peers))
@@ -249,9 +234,12 @@ impl<D: Dkg> Tss for Schnorr<D> {
     async fn set_keypair(
         &mut self,
         secret_key: Scalar,
-        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        public_key: Point,
+        global_commitments: Vec<Point>,
+        peers: IndexedMap<libp2p::PeerId, ()>,
     ) -> Result<()> {
-        self.start(secret_key, partial_pks).await
+        self.set_keypair(secret_key, public_key, global_commitments, peers)
+            .await
     }
 
     async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<SignResult> {

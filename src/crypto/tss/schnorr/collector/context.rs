@@ -29,11 +29,11 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(threshold: u16, partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>) -> Self {
-        let (global_comms, peers_index) =
-            Self::calculate_global_comms_and_convert_to_set(partial_pks)
-                .expect("Failed to calculate global commitments");
-
+    pub fn new(
+        threshold: u16,
+        global_comms: Vec<Point>,
+        peers_index: IndexedMap<libp2p::PeerId, ()>,
+    ) -> Self {
         Self {
             session: DashMap::new(),
             threshold,
@@ -184,10 +184,41 @@ mod tests {
         SessionId::NonceShare(vec![0; n as usize])
     }
 
+    fn calculate_global_comms_and_convert_to_set(
+        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+    ) -> (Vec<Point>, IndexedMap<libp2p::PeerId, ()>) {
+        let mut set = IndexedMap::new();
+
+        let len = partial_pks
+            .values()
+            .next()
+            .expect("Partial PKs should not empty")
+            .len();
+        let scheme = partial_pks
+            .values()
+            .next()
+            .expect("Partial PKs should not empty")
+            .first()
+            .expect("Partial PKs should not empty")
+            .scheme();
+        let mut global_comms = vec![Point::zero(scheme); len];
+
+        for (peer_id, pks) in partial_pks.into_iter() {
+            for (i, pk) in pks.iter().enumerate() {
+                global_comms[i] = global_comms[i].add(pk).unwrap();
+            }
+
+            set.insert(peer_id, ());
+        }
+
+        (global_comms, set)
+    }
+
     #[test]
     fn initialize_with_correct_parameters() {
         let (peer_pks, _, threshold) = setup(NUM_PEERS);
-        let context = Context::new(threshold, peer_pks.clone());
+        let (global_comms, peers_index) = calculate_global_comms_and_convert_to_set(peer_pks);
+        let context = Context::new(threshold, global_comms, peers_index);
 
         assert_eq!(context.threshold, threshold);
         assert_eq!(context.global_comms.len(), threshold as usize);
@@ -204,7 +235,8 @@ mod tests {
             }
         }
 
-        let context = Context::new(threshold, peer_pks.clone());
+        let (global_comms, peer_pks) = calculate_global_comms_and_convert_to_set(peer_pks);
+        let context = Context::new(threshold, global_comms, peer_pks);
 
         assert_eq!(context.global_comms, expected_global_comms);
     }
@@ -212,7 +244,8 @@ mod tests {
     #[test]
     fn add_share_should_ignore_unknown_peers() {
         let (peer_pks, _, threshold) = setup(NUM_PEERS);
-        let context = Context::new(threshold, peer_pks.clone());
+        let (global_comms, peer_pks) = calculate_global_comms_and_convert_to_set(peer_pks);
+        let context = Context::new(threshold, global_comms, peer_pks);
 
         let peer_id = libp2p::PeerId::random();
         let share = Scalar::random(&SCHEME);
@@ -225,7 +258,8 @@ mod tests {
     #[test]
     fn add_valid_share_should_add_to_session() {
         let (peer_pks, _, threshold) = setup(NUM_PEERS);
-        let context = Context::new(threshold, peer_pks.clone());
+        let (global_comms, peer_pks) = calculate_global_comms_and_convert_to_set(peer_pks);
+        let context = Context::new(threshold, global_comms, peer_pks.clone());
 
         let peer_id = peer_pks.keys().next().unwrap();
         let share = Scalar::random(&SCHEME);
@@ -238,7 +272,8 @@ mod tests {
     #[test]
     fn register_callback_should_create_session_if_not_exists() {
         let (peer_pks, _, threshold) = setup(NUM_PEERS);
-        let context = Context::new(threshold, peer_pks.clone());
+        let (global_comms, peer_pks) = calculate_global_comms_and_convert_to_set(peer_pks);
+        let context = Context::new(threshold, global_comms, peer_pks);
 
         let session_id = create_session_id(1);
         let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -251,7 +286,8 @@ mod tests {
     #[test]
     fn cleanup_completed_sessions_should_remove_only_completed_sessions() {
         let (peer_pks, _, threshold) = setup(NUM_PEERS);
-        let context = Context::new(threshold, peer_pks.clone());
+        let (global_comms, peer_pks) = calculate_global_comms_and_convert_to_set(peer_pks);
+        let context = Context::new(threshold, global_comms, peer_pks);
 
         let completed_session_id = create_session_id(1);
         let (tx, _) = tokio::sync::oneshot::channel();

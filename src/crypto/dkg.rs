@@ -28,7 +28,8 @@ pub trait Dkg: Send + Sync {
 pub enum GenerateResult {
     Success {
         secret: Scalar,
-        partial_publics: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        public: Point,
+        global_commitments: Vec<Point>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,

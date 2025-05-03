@@ -43,7 +43,9 @@ pub trait Tss: Send + Sync {
     async fn set_keypair(
         &mut self,
         secret_key: Scalar,
-        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        public_key: Point,
+        global_commitments: Vec<Point>,
+        peers: IndexedMap<libp2p::PeerId, ()>,
     ) -> Result<(), Self::Error>;
     async fn sign(&self, id: Vec<u8>, msg: &[u8]) -> Result<SignResult, Self::Error>;
 }

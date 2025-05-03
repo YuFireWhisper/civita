@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     crypto::{
-        algebra::{self, Scalar},
+        algebra::{self, Point, Scalar},
         dkg::{
             joint_feldman::{
                 collector::{event, Collector},
@@ -136,16 +136,44 @@ impl JointFeldman {
 
         match result {
             event::Output::Success { shares, comms } => {
-                let share = Scalar::sum(shares.iter())?;
+                let secret = Scalar::sum(shares.iter())?;
+                let public = Point::sum(
+                    comms
+                        .iter()
+                        .map(|comm| comm.first().expect("Commitments not empty")),
+                )?;
+                let global_commitments = Self::calculate_global_comms(&comms);
+
                 Ok(GenerateResult::Success {
-                    secret: share,
-                    partial_publics: comms,
+                    secret,
+                    public,
+                    global_commitments,
                 })
             }
             event::Output::Failure { invalid_peers } => {
                 Ok(GenerateResult::Failure { invalid_peers })
             }
         }
+    }
+
+    fn calculate_global_comms(pks: &[Vec<Point>]) -> Vec<Point> {
+        let scheme = pks
+            .iter()
+            .next()
+            .expect("Partial PKs should not empty")
+            .first()
+            .expect("Partial PKs should not empty")
+            .scheme();
+
+        let mut global_comms = vec![Point::zero(scheme); pks.len() as usize];
+
+        for pks in pks.iter() {
+            for (i, pk) in pks.iter().enumerate() {
+                global_comms[i] = global_comms[i].add(pk).unwrap();
+            }
+        }
+
+        global_comms
     }
 
     async fn peers_len(&self) -> Result<u16> {

@@ -9,6 +9,7 @@ use crate::{
             DecryptedShares, EncryptedShares,
         },
     },
+    traits::{byteable, Byteable},
     utils::IndexedMap,
 };
 
@@ -28,13 +29,16 @@ pub enum Error {
 
     #[error("Encrypted share error: {0}")]
     EncryptedShare(#[from] encrypted_share::Error),
+
+    #[error("{0}")]
+    Byteable(#[from] byteable::Error),
 }
 
 #[derive(Debug)]
 pub enum Output {
     Success {
         shares: Vec<Scalar>,
-        comms: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        comms: Vec<Vec<Point>>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,
@@ -393,28 +397,24 @@ impl Event {
             };
         }
 
-        let mut comms = self
+        let comms = self
             .peer_infos
             .iter()
-            .filter_map(|(peer_id, peer_info)| {
+            .map(|(peer_id, peer_info)| {
                 if peer_id == &self.own_peer {
-                    return None;
+                    self.own_comms
+                        .as_ref()
+                        .expect("Own comms should be set")
+                        .to_owned()
+                } else {
+                    peer_info
+                        .comms
+                        .as_ref()
+                        .expect("comms should be set before output")
+                        .to_owned()
                 }
-                let comms = peer_info
-                    .comms
-                    .as_ref()
-                    .expect("comms should be set before output");
-                Some((*peer_id, comms.to_owned()))
             })
-            .collect::<IndexedMap<_, _>>();
-
-        comms.insert(
-            self.own_peer,
-            self.own_comms
-                .as_ref()
-                .expect("Own comms should be set before output")
-                .to_owned(),
-        );
+            .collect::<Vec<_>>();
 
         Output::Success {
             shares: self.own_shares,
@@ -621,7 +621,7 @@ mod tests {
         match output {
             Output::Success { shares, comms } => {
                 assert_eq!(shares.len(), expected_peer_count as usize);
-                assert_eq!(comms.len(), expected_peer_count);
+                assert_eq!(comms.len() as u16, expected_peer_count);
             }
             _ => panic!("Expected success output"),
         }

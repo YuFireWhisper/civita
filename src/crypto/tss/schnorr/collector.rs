@@ -88,8 +88,11 @@ impl Collector {
 
     pub async fn start(
         &mut self,
-        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        global_commitments: Vec<Point>,
+        peers: IndexedMap<libp2p::PeerId, ()>,
     ) -> Result<()> {
+        assert_eq!(global_commitments.len(), peers.len() as usize);
+
         let topic_rx = self
             .transport
             .listen_on_topic(&self.config.topic)
@@ -99,8 +102,8 @@ impl Collector {
         let (action_tx, action_rx) = tokio::sync::mpsc::channel(100);
         self.action_tx = Some(action_tx);
 
-        let threshold = self.config.threshold_counter.call(partial_pks.len()) - 1;
-        let ctx = Context::new(threshold, partial_pks);
+        let threshold = self.config.threshold_counter.call(peers.len()) - 1;
+        let ctx = Context::new(threshold, global_commitments, peers);
 
         tokio::spawn(async move {
             Self::run(ctx, topic_rx, action_rx).await;
@@ -283,6 +286,36 @@ mod tests {
         (0..n).map(|_| libp2p::PeerId::random()).collect()
     }
 
+    fn calculate_global_comms_and_convert_to_set(
+        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+    ) -> (Vec<Point>, IndexedMap<libp2p::PeerId, ()>) {
+        let mut set = IndexedMap::new();
+
+        let len = partial_pks
+            .values()
+            .next()
+            .expect("Partial PKs should not empty")
+            .len();
+        let scheme = partial_pks
+            .values()
+            .next()
+            .expect("Partial PKs should not empty")
+            .first()
+            .expect("Partial PKs should not empty")
+            .scheme();
+        let mut global_comms = vec![Point::zero(scheme); len];
+
+        for (peer_id, pks) in partial_pks.into_iter() {
+            for (i, pk) in pks.iter().enumerate() {
+                global_comms[i] = global_comms[i].add(pk).unwrap();
+            }
+
+            set.insert(peer_id, ());
+        }
+
+        (global_comms, set)
+    }
+
     #[tokio::test]
     async fn strat_initialize_successfully() {
         let mut transport = MockTransport::default();
@@ -298,8 +331,9 @@ mod tests {
         let config = create_config();
         let mut collector = Collector::new(transport.clone(), config);
         let partial_pks = generate_peers(NUM_PEERS);
+        let (global_comms, peers) = calculate_global_comms_and_convert_to_set(partial_pks);
 
-        let result = collector.start(partial_pks).await;
+        let result = collector.start(global_comms, peers).await;
 
         assert!(result.is_ok());
         assert!(collector.action_tx.is_some());
@@ -320,8 +354,9 @@ mod tests {
         let config = create_config();
         let mut collector = Collector::new(transport.clone(), config);
         let partial_pks = generate_peers(NUM_PEERS);
+        let (global_comms, peers) = calculate_global_comms_and_convert_to_set(partial_pks);
 
-        let result = collector.start(partial_pks).await;
+        let result = collector.start(global_comms, peers).await;
 
         assert!(matches!(result, Err(Error::Transport(_))));
     }
@@ -342,8 +377,9 @@ mod tests {
         let config = create_config();
         let mut collector = Collector::new(transport.clone(), config);
         let partial_pks = generate_peers(NUM_PEERS);
+        let (global_comms, peers) = calculate_global_comms_and_convert_to_set(partial_pks);
 
-        collector.start(partial_pks).await.unwrap();
+        collector.start(global_comms, peers).await.unwrap();
 
         let result = collector.query_signature_share(ID.to_vec()).await;
 
@@ -369,8 +405,9 @@ mod tests {
         let config = create_config();
         let mut collector = Collector::new(transport.clone(), config);
         let partial_pks = generate_peers(NUM_PEERS);
+        let (global_comms, peers) = calculate_global_comms_and_convert_to_set(partial_pks);
 
-        collector.start(partial_pks).await.unwrap();
+        collector.start(global_comms, peers).await.unwrap();
 
         collector.stop().await;
 
