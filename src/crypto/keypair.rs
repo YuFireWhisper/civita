@@ -1,4 +1,5 @@
 use bincode::{Decode, Encode};
+use libecvrf_k256::ECVRF;
 use serde::{Deserialize, Serialize};
 
 mod secp256k1;
@@ -27,6 +28,7 @@ pub enum KeyType {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Encode, Decode)]
+#[derive(Hash)]
 #[derive(Serialize, Deserialize)]
 pub enum SecretKey {
     Secp256k1(secp256k1::SecretKey),
@@ -35,6 +37,7 @@ pub enum SecretKey {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
+#[derive(Hash)]
 #[derive(Encode, Decode)]
 #[derive(Serialize, Deserialize)]
 pub enum PublicKey {
@@ -108,12 +111,24 @@ impl PublicKey {
     pub fn as_bytes(&self) -> &[u8] {
         self.as_ref()
     }
+
+    pub fn to_peer_id(&self) -> libp2p::PeerId {
+        match self {
+            PublicKey::Secp256k1(pk) => pk.to_peer_id(),
+        }
+    }
 }
 
 impl VrfProof {
     pub fn output(&self) -> [u8; 32] {
         match self {
             VrfProof::Secp256k1(proof) => proof.y.to_bytes().into(),
+        }
+    }
+
+    pub fn verify(&self, msg: impl AsRef<[u8]>, public_key: impl AsRef<[u8]>) -> bool {
+        match self {
+            VrfProof::Secp256k1(proof) => ECVRF::verify(msg.as_ref(), proof, public_key.as_ref()),
         }
     }
 }
@@ -153,6 +168,22 @@ impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
         match self {
             PublicKey::Secp256k1(pk) => pk.as_ref(),
+        }
+    }
+}
+
+impl From<SecretKey> for PublicKey {
+    fn from(secret_key: SecretKey) -> Self {
+        match secret_key {
+            SecretKey::Secp256k1(sk) => PublicKey::Secp256k1(sk.to_public_key()),
+        }
+    }
+}
+
+impl From<SecretKey> for libp2p::identity::Keypair {
+    fn from(secret_key: SecretKey) -> Self {
+        match secret_key {
+            SecretKey::Secp256k1(sk) => sk.into(),
         }
     }
 }
