@@ -13,6 +13,8 @@ pub mod joint_feldman;
 
 pub use joint_feldman::JointFeldman;
 
+pub const DEFALUT_DKG_PROCESSING_TIME: tokio::time::Duration = tokio::time::Duration::from_secs(1);
+
 #[mockall::automock(type Error=MockError;)]
 #[async_trait::async_trait]
 pub trait Dkg: Send + Sync {

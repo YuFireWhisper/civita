@@ -12,7 +12,6 @@ use crate::{
         algebra::{Point, Scalar},
         dkg::Dkg,
         keypair::{self, PublicKey, SecretKey, VrfProof},
-        threshold,
     },
     network::transport::{
         self,
@@ -31,8 +30,12 @@ use crate::network::transport::Transport;
 #[cfg(test)]
 use crate::network::transport::MockTransport as Transport;
 
+pub mod config;
+
 mod context;
 mod dkg_generator;
+
+pub use config::Config;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -96,17 +99,6 @@ pub enum ElectionResult {
     },
 }
 
-pub struct Config {
-    pub topic: String,
-    pub collection_duration: tokio::time::Duration,
-    pub consensus_timeout: tokio::time::Duration,
-    pub n_members: u16,
-    pub max_times: u64,
-    pub allowable_time_diff: tokio::time::Duration,
-    pub election_duration: tokio::time::Duration,
-    pub threshold_counter: threshold::Counter,
-}
-
 pub struct Validator {
     pub epoch: u64,
 }
@@ -126,8 +118,7 @@ impl<D: Dkg + 'static> Elector<D> {
         secret_key: SecretKey,
         config: Config,
     ) -> Self {
-        let generator_config = Self::create_dkg_generator_config(&config);
-        let generator = DkgGenerator::new(transport.clone(), dkg.clone(), generator_config);
+        let generator = DkgGenerator::new(transport.clone(), dkg.clone(), (&config).into());
         let public_key = secret_key.to_public_key();
 
         Self {
@@ -139,27 +130,17 @@ impl<D: Dkg + 'static> Elector<D> {
         }
     }
 
-    fn create_dkg_generator_config(config: &Config) -> dkg_generator::Config {
-        dkg_generator::Config {
-            topic: config.topic.clone(),
-            allowable_time_diff: config.allowable_time_diff,
-            consensus_timeout: config.consensus_timeout,
-            election_duration: config.election_duration,
-            threshold_counter: config.threshold_counter,
-        }
-    }
-
     pub async fn start<B: Behaviour>(
         &self,
         base_input: Vec<u8>,
         epoch: u64,
     ) -> Result<ElectionResult> {
         let factor = self.get_selector_factor().await?;
-        let mut ctx = Context::new(base_input, epoch, self.config.max_times, factor);
+        let mut ctx = Context::new(base_input, epoch, factor);
         let mut rx = self.transport.listen_on_topic(&self.config.topic).await?;
 
         loop {
-            if ctx.times >= self.config.max_times {
+            if ctx.times >= self.config.max_attempts {
                 break;
             }
 
@@ -200,7 +181,7 @@ impl<D: Dkg + 'static> Elector<D> {
 
         self.collect_proofs::<B>(ctx, rx).await?;
 
-        let candidates = ctx.get_n_candidates(self.config.n_members);
+        let candidates = ctx.get_n_candidates(self.config.max_members);
 
         if candidates.contains_key(&self.transport.self_peer()) {
             self.generate_dkg(ctx, candidates).await
@@ -302,7 +283,7 @@ impl<D: Dkg + 'static> Elector<D> {
         ctx: &mut Context,
         rx: &mut TokioReceiver<gossipsub::Message>,
     ) -> Result<()> {
-        let mut interval = tokio::time::interval(self.config.collection_duration);
+        let mut interval = tokio::time::interval(self.config.network_latency);
 
         loop {
             tokio::select! {
@@ -367,12 +348,7 @@ impl<D: Dkg + 'static> Elector<D> {
     }
 
     fn is_timestamp_valid(&self, ctx: &Context, timestamp: SystemTime) -> bool {
-        let diff = match timestamp.duration_since(ctx.start_time) {
-            Ok(diff) => diff,
-            Err(e) => e.duration(),
-        };
-
-        diff < self.config.allowable_time_diff
+        timestamp >= ctx.start_time
     }
 
     async fn generate_dkg(
@@ -418,9 +394,10 @@ impl<D: Dkg + 'static> Elector<D> {
         rx: &mut TokioReceiver<gossipsub::Message>,
         candidates: IndexedMap<libp2p::PeerId, PublicKey>,
     ) -> Result<Option<ElectionResult>> {
+        let validator = Validator { epoch: ctx.epoch };
         let collector = ConsensusCollector::new(
-            Validator { epoch: ctx.epoch },
-            self.config.consensus_timeout,
+            validator,
+            self.config.network_latency,
             self.config.threshold_counter,
         );
 
