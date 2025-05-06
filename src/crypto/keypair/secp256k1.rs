@@ -5,6 +5,8 @@ use k256::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::traits::Byteable;
+
 const SECRET_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 33;
 const SIGNATURE_LENGTH: usize = 64;
@@ -32,6 +34,7 @@ pub enum Error {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
+#[derive(Hash)]
 #[derive(PartialEq, Eq)]
 #[derive(Serialize, Deserialize)]
 pub struct SecretKey([u8; SECRET_KEY_LENGTH]);
@@ -39,6 +42,7 @@ pub struct SecretKey([u8; SECRET_KEY_LENGTH]);
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
+#[derive(Hash)]
 #[derive(PartialEq, Eq)]
 pub struct PublicKey([u8; PUBLIC_KEY_LENGTH]);
 
@@ -124,6 +128,10 @@ impl PublicKey {
     pub fn to_k256_verifying_key(&self) -> k256::schnorr::VerifyingKey {
         self.into()
     }
+
+    pub fn to_peer_id(&self) -> libp2p::PeerId {
+        self.into()
+    }
 }
 
 pub fn generate_keypair() -> (SecretKey, PublicKey) {
@@ -141,6 +149,17 @@ impl From<&k256::SecretKey> for SecretKey {
 impl From<&SecretKey> for k256::SecretKey {
     fn from(secret_key: &SecretKey) -> Self {
         k256::SecretKey::from_slice(secret_key.as_ref()).expect("Invalid secret key")
+    }
+}
+
+impl From<SecretKey> for libp2p::identity::Keypair {
+    fn from(secret_key: SecretKey) -> Self {
+        let mut key_bytes = secret_key.to_vec().unwrap();
+        let secret_key = libp2p::identity::secp256k1::SecretKey::try_from_bytes(&mut key_bytes)
+            .expect("Invalid secret key");
+        let keypair = libp2p::identity::secp256k1::Keypair::from(secret_key);
+
+        libp2p::identity::Keypair::from(keypair)
     }
 }
 
@@ -191,6 +210,23 @@ impl From<&PublicKey> for k256::schnorr::VerifyingKey {
             let public_key = k256::PublicKey::from_affine(affine).expect("Invalid public key");
             k256::schnorr::VerifyingKey::try_from(&public_key).expect("Invalid public key")
         })
+    }
+}
+
+impl From<PublicKey> for libp2p::PeerId {
+    fn from(public_key: PublicKey) -> Self {
+        (&public_key).into()
+    }
+}
+
+impl From<&PublicKey> for libp2p::PeerId {
+    fn from(public_key: &PublicKey) -> Self {
+        let public_key =
+            libp2p::identity::secp256k1::PublicKey::try_from_bytes(public_key.as_ref())
+                .expect("Invalid public key");
+        let public_key = libp2p::identity::PublicKey::from(public_key);
+
+        public_key.to_peer_id()
     }
 }
 
@@ -688,6 +724,19 @@ mod tests {
         assert_eq!(
             pk, recovered_pk,
             "Public key should remain the same after conversion"
+        );
+    }
+
+    #[test]
+    fn convert_keys_to_peer_id() {
+        let (sk, pk) = super::generate_keypair();
+
+        let peer_id = pk.to_peer_id();
+        let peer_id_from_sk = libp2p::identity::Keypair::from(sk).public().to_peer_id();
+
+        assert_eq!(
+            peer_id, peer_id_from_sk,
+            "Peer ID should be the same after conversion"
         );
     }
 }

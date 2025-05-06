@@ -64,31 +64,22 @@ fn extract_shares_and_public(results: HashMap<u16, GenerateResult>) -> (Vec<Scal
     };
 
     let mut secrets = vec![Scalar::zero(scheme); results.len()];
-    let first_partial_publics = match &results.values().next().unwrap() {
-        GenerateResult::Success {
-            partial_publics, ..
-        } => partial_publics.clone(),
+    let first_public = match &results.values().next().unwrap() {
+        GenerateResult::Success { public, .. } => public.clone(),
         _ => unreachable!(),
     };
 
     for (i, result) in results.into_iter() {
         match result {
-            GenerateResult::Success {
-                secret,
-                partial_publics,
-            } => {
-                assert!(
-                    partial_publics == first_partial_publics,
-                    "All public keys must be identical"
-                );
+            GenerateResult::Success { secret, public, .. } => {
+                assert!(public == first_public, "All public keys must be identical");
                 secrets[i as usize - 1] = secret;
             }
             _ => unreachable!(),
         }
     }
 
-    let public = Point::sum(first_partial_publics.values().map(|ps| ps.first().unwrap())).unwrap();
-    (secrets, public)
+    (secrets, first_public)
 }
 
 fn verify_secret(shares: &[Scalar], public: &Point, n: u16) -> bool {

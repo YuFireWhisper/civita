@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
     algebra::{Point, Scalar},
-    tss::schnorr,
+    tss::{self, schnorr},
 };
 
 #[derive(Clone)]
@@ -45,5 +45,21 @@ impl Signature {
         };
 
         left == right
+    }
+}
+
+impl From<Signature> for tss::Signature {
+    fn from(sig: Signature) -> Self {
+        tss::Signature::Schnorr(sig)
+    }
+}
+
+impl TryFrom<tss::Signature> for Signature {
+    type Error = tss::SignatureError;
+
+    fn try_from(sig: tss::Signature) -> Result<Self, Self::Error> {
+        match sig {
+            tss::Signature::Schnorr(sig) => Ok(sig),
+        }
     }
 }

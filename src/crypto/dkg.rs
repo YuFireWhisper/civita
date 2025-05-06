@@ -15,11 +15,11 @@ pub use joint_feldman::JointFeldman;
 
 #[mockall::automock(type Error=MockError;)]
 #[async_trait::async_trait]
-pub trait Dkg {
+pub trait Dkg: Send + Sync {
     type Error: std::error::Error;
 
     async fn set_peers(
-        &mut self,
+        &self,
         peers: IndexedMap<libp2p::PeerId, PublicKey>,
     ) -> Result<(), Self::Error>;
     async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult, Self::Error>;
@@ -28,7 +28,8 @@ pub trait Dkg {
 pub enum GenerateResult {
     Success {
         secret: Scalar,
-        partial_publics: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        public: Point,
+        global_commitments: Vec<Point>,
     },
     Failure {
         invalid_peers: HashSet<libp2p::PeerId>,

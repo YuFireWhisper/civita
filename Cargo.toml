@@ -16,6 +16,7 @@ libp2p = { version = "0.55", features = [
   "gossipsub",
   "serde",
   "cbor",
+  "secp256k1",
 ] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
@@ -35,6 +36,8 @@ libsecp256k1 = "0.7"
 k256 = { version = "0.13", features = ["hash2curve", "arithmetic"] }
 libecvrf-k256 = "1.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+blake3 = "1.8"
+trait-variant = "0.1.2"
 
 [dev-dependencies]
 tempfile = "3.17"

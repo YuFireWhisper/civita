@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     crypto::{
-        algebra::{self, Scalar},
+        algebra::{self, Point, Scalar},
         dkg::{
             joint_feldman::{
                 collector::{event, Collector},
@@ -27,6 +27,7 @@ mod config;
 mod distributor;
 
 pub use config::Config;
+use tokio::sync::{Mutex, MutexGuard};
 
 pub const VSS_SHARES_ID: &[u8] = b"vss_shares";
 pub const VSS_COMMITMENTS_ID: &[u8] = b"vss_commitments";
@@ -74,13 +75,16 @@ pub enum Error {
 
     #[error("Algebra error: {0}")]
     Algebra(#[from] algebra::Error),
+
+    #[error("Lock is poisoned")]
+    PoisonedLock,
 }
 
 pub struct JointFeldman {
     config: Config,
     collector: Collector,
     distributor: Distributor,
-    peer_pks: Option<IndexedMap<libp2p::PeerId, PublicKey>>,
+    peer_pks: Mutex<Option<IndexedMap<libp2p::PeerId, PublicKey>>>,
 }
 
 impl JointFeldman {
@@ -99,7 +103,7 @@ impl JointFeldman {
             config,
             collector,
             distributor,
-            peer_pks: None,
+            peer_pks: Mutex::new(None),
         }
     }
 
@@ -110,19 +114,17 @@ impl JointFeldman {
         self.collector.stop();
         self.collector.start(peer_pks.clone()).await?;
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        self.peer_pks = Some(peer_pks);
+        self.peer_pks = Mutex::new(Some(peer_pks));
         Ok(())
     }
 
     pub async fn generate(&self, id: Vec<u8>) -> Result<GenerateResult> {
-        assert!(self.peer_pks.is_some(), "Peers is empty");
-
-        let peers_len = self.peers_len()?;
+        let peers_len = self.peers_len().await?;
         let threshold = self.config.threshold_counter.call(peers_len);
         let (decrypted_shares, commitments) =
             Vss::share(&self.config.crypto_scheme, threshold, peers_len);
 
-        let peer_pks = self.peer_pks()?;
+        let peer_pks = self.lock_peer_pks().await;
         self.distributor
             .send_shares(id.clone(), peer_pks, &decrypted_shares, commitments.clone())
             .await?;
@@ -134,10 +136,18 @@ impl JointFeldman {
 
         match result {
             event::Output::Success { shares, comms } => {
-                let share = Scalar::sum(shares.iter())?;
+                let secret = Scalar::sum(shares.iter())?;
+                let public = Point::sum(
+                    comms
+                        .iter()
+                        .map(|comm| comm.first().expect("Commitments not empty")),
+                )?;
+                let global_commitments = Self::calculate_global_comms(&comms);
+
                 Ok(GenerateResult::Success {
-                    secret: share,
-                    partial_publics: comms,
+                    secret,
+                    public,
+                    global_commitments,
                 })
             }
             event::Output::Failure { invalid_peers } => {
@@ -146,14 +156,36 @@ impl JointFeldman {
         }
     }
 
-    fn peers_len(&self) -> Result<u16> {
-        self.peer_pks()
-            .map(|peer_pks| peer_pks.len())
-            .map_err(|_| Error::IndexNotFound)
+    fn calculate_global_comms(pks: &[Vec<Point>]) -> Vec<Point> {
+        let scheme = pks
+            .iter()
+            .next()
+            .expect("Partial PKs should not empty")
+            .first()
+            .expect("Partial PKs should not empty")
+            .scheme();
+
+        let mut global_comms = vec![Point::zero(scheme); pks.len()];
+
+        for pks in pks.iter() {
+            for (i, pk) in pks.iter().enumerate() {
+                global_comms[i] = global_comms[i].add(pk).unwrap();
+            }
+        }
+
+        global_comms
     }
 
-    fn peer_pks(&self) -> Result<&IndexedMap<libp2p::PeerId, PublicKey>> {
-        self.peer_pks.as_ref().ok_or(Error::PeersNotSet)
+    async fn peers_len(&self) -> Result<u16> {
+        self.lock_peer_pks()
+            .await
+            .as_ref()
+            .map(|peer_pks| peer_pks.len())
+            .ok_or(Error::PeersNotSet)
+    }
+
+    async fn lock_peer_pks(&self) -> MutexGuard<Option<IndexedMap<libp2p::PeerId, PublicKey>>> {
+        self.peer_pks.lock().await
     }
 }
 
@@ -161,7 +193,7 @@ impl JointFeldman {
 impl Dkg for JointFeldman {
     type Error = Error;
 
-    async fn set_peers(&mut self, peers: IndexedMap<libp2p::PeerId, PublicKey>) -> Result<()> {
+    async fn set_peers(&self, peers: IndexedMap<libp2p::PeerId, PublicKey>) -> Result<()> {
         self.set_peers(peers).await
     }
 

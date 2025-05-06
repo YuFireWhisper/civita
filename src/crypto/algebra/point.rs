@@ -63,10 +63,6 @@ impl Point {
         }
     }
 
-    pub fn to_vec(&self) -> Result<Vec<u8>> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(Error::from)
-    }
-
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
         bincode::serde::decode_from_slice(bytes, bincode::config::standard())
             .map(|(s, _)| s)
@@ -138,7 +134,10 @@ impl From<CurvPoint<CurvSecp256k1>> for Point {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::algebra::{Point, Scalar, Scheme};
+    use crate::{
+        crypto::algebra::{Point, Scalar, Scheme},
+        traits::Byteable,
+    };
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;
 

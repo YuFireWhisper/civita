@@ -112,10 +112,6 @@ impl Scalar {
         Ok(tail.fold(head.clone(), |acc, x| x + acc * &index_fe))
     }
 
-    pub fn to_vec(&self) -> Result<Vec<u8>> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(Error::from)
-    }
-
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
         bincode::serde::decode_from_slice(bytes, bincode::config::standard())
             .map(|(s, _)| s)
@@ -249,9 +245,12 @@ mod tests {
         elliptic::curves::{secp256_k1::Secp256k1 as CurvSecp256k1, Scalar as CurvScalar},
     };
 
-    use crate::crypto::{
-        algebra::{Error, Point, Scalar, Scheme},
-        vss::Vss,
+    use crate::{
+        crypto::{
+            algebra::{Error, Point, Scalar, Scheme},
+            vss::Vss,
+        },
+        traits::Byteable,
     };
 
     const DEFAULT_SCHEME: Scheme = Scheme::Secp256k1;

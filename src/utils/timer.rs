@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc, time::Duration};
+use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
 
 use tokio::{
     sync::{
@@ -87,7 +87,7 @@ impl<T: Send + 'static> Timer<T> {
         }
     }
 
-    pub async fn schedule(&self, data: T, delay: Duration) {
+    pub async fn schedule(&self, data: T, delay: tokio::time::Duration) {
         let trigger_at = Instant::now() + delay;
         let item = TimerItem { trigger_at, data };
 
@@ -133,16 +133,16 @@ impl<T: Send> Ord for TimerItem<T> {
 mod tests {
     use tokio::time::{self, Duration};
 
-    use crate::committee::timer::Timer;
+    use crate::utils::Timer;
 
     #[tokio::test]
     async fn none_item_time_has_not_passed() {
         const DELAY: Duration = Duration::from_millis(u64::MAX);
         const TEST_STR: &str = "test";
 
-        let (timer, mut rx) = Timer::<String>::new().await; 
+        let (timer, mut rx) = Timer::<String>::new().await;
         timer.schedule(TEST_STR.to_string(), DELAY).await;
-        
+
         let result = rx.recv().await;
 
         assert!(result.is_none(), "Expected None, but got {:?}", result);
@@ -153,13 +153,19 @@ mod tests {
         const DELAY: Duration = Duration::from_millis(0);
         const TEST_STR: &str = "test";
 
-        let (timer, mut rx) = Timer::<&'static str>::new().await;        
+        let (timer, mut rx) = Timer::<&'static str>::new().await;
         timer.schedule(TEST_STR, DELAY).await;
         time::sleep(Duration::from_millis(1)).await; // Ensure the timer has time to process
-        
+
         let result = rx.recv().await;
-        
-        assert_eq!(result, Some(TEST_STR), "Expected {:?}, but got {:?}", TEST_STR, result);
+
+        assert_eq!(
+            result,
+            Some(TEST_STR),
+            "Expected {:?}, but got {:?}",
+            TEST_STR,
+            result
+        );
     }
 
     #[tokio::test]
@@ -167,19 +173,19 @@ mod tests {
         const DELAY: Duration = Duration::from_millis(0);
 
         let (timer, mut rx) = Timer::<usize>::new().await;
-        
+
         for i in 0..5 {
             timer.schedule(i, DELAY).await;
         }
         time::sleep(Duration::from_millis(1)).await; // Ensure the timer has time to process
-        
+
         let mut results = Vec::new();
         for _ in 0..5 {
             if let Some(val) = rx.recv().await {
                 results.push(val);
             }
         }
-        
+
         assert_eq!(results.len(), 5);
         results.sort();
         assert_eq!(results, vec![0, 1, 2, 3, 4]);

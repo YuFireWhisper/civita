@@ -33,11 +33,11 @@ pub struct SignedPayload {
 
 impl SignedPayload {
     pub fn new(payload: Payload, committee_signature: Option<Signature>) -> Result<Self> {
-        if payload.require_committee_signature() && committee_signature.is_none() {
+        if payload.require_signature() && committee_signature.is_none() {
             return Err(Error::MissingSignature);
         }
 
-        if !payload.require_committee_signature() && committee_signature.is_some() {
+        if !payload.require_signature() && committee_signature.is_some() {
             return Err(Error::SignatureNotNeeded);
         }
 

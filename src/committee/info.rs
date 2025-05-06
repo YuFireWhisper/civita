@@ -1,9 +1,8 @@
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    crypto::{algebra::Point, keypair::PublicKey},
-    utils::IndexedMap,
-};
+use crate::{crypto::algebra::Point, network::transport::protocols::kad, utils::IndexedMap};
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -13,6 +12,9 @@ pub enum Error {
 
     #[error("Failed to decode: {0}")]
     Decode(#[from] bincode::error::DecodeError),
+
+    #[error("Payload variant is not info")]
+    NotInfoVariant,
 }
 
 #[derive(Clone)]
@@ -21,29 +23,27 @@ pub enum Error {
 #[derive(Serialize, Deserialize)]
 pub struct Info {
     pub epoch: u64,
-    pub members: IndexedMap<libp2p::PeerId, PublicKey>,
+
+    pub members: IndexedMap<libp2p::PeerId, ()>,
+
     pub public_key: Point,
+
+    pub end: SystemTime,
 }
 
 impl Info {
     pub fn new(
         epoch: u64,
-        members: IndexedMap<libp2p::PeerId, PublicKey>,
+        members: IndexedMap<libp2p::PeerId, ()>,
         public_key: Point,
+        end: SystemTime,
     ) -> Self {
         Self {
             epoch,
             members,
             public_key,
+            end,
         }
-    }
-
-    pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
-        self.try_into()
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, Error> {
-        Self::try_from(bytes)
     }
 }
 
@@ -65,15 +65,14 @@ impl TryFrom<&[u8]> for Info {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{committee::info::Info, crypto::algebra::Point};
+impl TryFrom<kad::Payload> for Info {
+    type Error = Error;
 
-    #[test]
-    fn convert_success() {
-        let info = Info::new(1, Default::default(), Point::secp256k1_zero());
-        let bytes = info.to_vec().unwrap();
-        let decoded_info = Info::from_slice(&bytes).unwrap();
-        assert_eq!(info, decoded_info);
+    fn try_from(payload: kad::Payload) -> Result<Self, Self::Error> {
+        if let kad::Payload::Committee(info) = payload {
+            Ok(info)
+        } else {
+            Err(Error::NotInfoVariant)
+        }
     }
 }
