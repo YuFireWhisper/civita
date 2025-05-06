@@ -10,7 +10,9 @@ on:
 
 jobs:
   test-and-coverage:
-    runs-on: ${{ vars.DEFAULT_RUNNER || 'ubuntu-latest' }}
+    runs-on: >
+      ${{ contains(github.event.pull_request.labels.*.name, 'self-hosted') && 'self-hosted' ||
+          vars.DEFAULT_RUNNER || 'ubuntu-latest' }}
 
     steps:
       - name: Checkout code
