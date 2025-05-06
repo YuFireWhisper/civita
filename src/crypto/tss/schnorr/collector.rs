@@ -91,7 +91,9 @@ impl Collector {
         global_commitments: Vec<Point>,
         peers: IndexedMap<libp2p::PeerId, ()>,
     ) -> Result<()> {
-        assert_eq!(global_commitments.len(), peers.len() as usize);
+        let threshold = self.config.threshold_counter.call(peers.len());
+
+        assert_eq!(global_commitments.len(), threshold as usize);
 
         let topic_rx = self
             .transport
@@ -102,8 +104,8 @@ impl Collector {
         let (action_tx, action_rx) = tokio::sync::mpsc::channel(100);
         self.action_tx = Some(action_tx);
 
-        let threshold = self.config.threshold_counter.call(peers.len()) - 1;
-        let ctx = Context::new(threshold, global_commitments, peers);
+        let require = threshold - 1; // Exclude self
+        let ctx = Context::new(require, global_commitments, peers);
 
         tokio::spawn(async move {
             Self::run(ctx, topic_rx, action_rx).await;
@@ -276,7 +278,7 @@ mod tests {
         peer_ids
             .into_iter()
             .map(|peer_id| {
-                let (_, comms) = Vss::share(&SCHEME, threshold - 1, n);
+                let (_, comms) = Vss::share(&SCHEME, threshold, n);
                 (peer_id, comms)
             })
             .collect()
