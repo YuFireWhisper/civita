@@ -41,8 +41,16 @@ impl Context {
     pub async fn start(
         &mut self,
         secrets: HashMap<u16, Scalar>,
-        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
+        public: Point,
+        global_commitments: Vec<Point>,
     ) {
+        let peers = self
+            .schnorrs
+            .keys()
+            .cloned()
+            .map(|peer_id| (peer_id, ()))
+            .collect::<IndexedMap<libp2p::PeerId, ()>>();
+
         let results = self
             .schnorrs
             .iter_indexed_values_mut()
@@ -51,11 +59,15 @@ impl Context {
                     .get(&index)
                     .expect("Secret not found for this peer")
                     .clone();
-                let partial_pks = partial_pks.clone();
 
-                async move {
+                async {
                     schnorr
-                        .start(secret, partial_pks)
+                        .set_keypair(
+                            secret,
+                            public.clone(),
+                            global_commitments.clone(),
+                            peers.clone(),
+                        )
                         .await
                         .expect("Failed to start Schnorr");
                 }

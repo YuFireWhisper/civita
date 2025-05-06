@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 
-use civita::{
-    crypto::{
-        algebra::{Point, Scalar},
-        dkg::GenerateResult,
-        tss::{schnorr::signature::Signature, SignResult},
-    },
-    utils::IndexedMap,
+use civita::crypto::{
+    algebra::{Point, Scalar},
+    dkg::GenerateResult,
+    tss::{schnorr::signature::Signature, SignResult},
 };
 
 use crate::common::{joint_feldman, schnorr};
@@ -23,11 +20,14 @@ async fn generate_valid_signature() {
     let mut ctx = joint_feldman::Context::new(NUM_PEERS).await;
     ctx.set_peers().await;
     let results = ctx.generate(ID.to_vec()).await;
-    let (secrets, publics) = extract_shares_and_public(results);
-    let public = calculate_public(&publics);
+
+    let (secrets, public, global_commitments) = extract_shares_and_public(results);
 
     let mut schnorr_ctx = schnorr::Context::from_joint_feldman_ctx(ctx);
-    schnorr_ctx.start(secrets, publics).await;
+    schnorr_ctx
+        .start(secrets, public.clone(), global_commitments)
+        .await;
+
     let sigs = schnorr_ctx.sign(SIG_ID.to_vec(), MSG).await;
     let sigs = extract_signature(sigs);
 
@@ -44,7 +44,7 @@ async fn generate_valid_signature() {
 
 fn extract_shares_and_public(
     results: HashMap<u16, GenerateResult>,
-) -> (HashMap<u16, Scalar>, IndexedMap<libp2p::PeerId, Vec<Point>>) {
+) -> (HashMap<u16, Scalar>, Point, Vec<Point>) {
     assert!(
         results
             .values()
@@ -53,10 +53,12 @@ fn extract_shares_and_public(
     );
 
     let mut secrets = HashMap::with_capacity(results.len());
-    let first_public = match &results.values().next().unwrap() {
+    let first = match &results.values().next().unwrap() {
         GenerateResult::Success {
-            partial_publics, ..
-        } => partial_publics.clone(),
+            public,
+            global_commitments,
+            ..
+        } => (public.clone(), global_commitments.clone()),
         _ => unreachable!(),
     };
 
@@ -64,11 +66,13 @@ fn extract_shares_and_public(
         match result {
             GenerateResult::Success {
                 secret,
-                partial_publics,
+                public,
+                global_commitments,
             } => {
-                assert!(
-                    partial_publics == first_public,
-                    "All public keys must be identical"
+                assert_eq!(
+                    (public, global_commitments),
+                    first,
+                    "All public keys must be identical",
                 );
                 secrets.insert(i, secret.clone());
             }
@@ -76,11 +80,7 @@ fn extract_shares_and_public(
         }
     }
 
-    (secrets, first_public)
-}
-
-fn calculate_public(partial_publics: &IndexedMap<libp2p::PeerId, Vec<Point>>) -> Point {
-    Point::sum(partial_publics.values().map(|ps| ps.first().unwrap())).unwrap()
+    (secrets, first.0, first.1)
 }
 
 fn extract_signature(results: Vec<SignResult>) -> Vec<Signature> {
