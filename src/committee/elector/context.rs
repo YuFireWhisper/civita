@@ -9,7 +9,7 @@ pub struct Context {
     pub base_input: Vec<u8>,
     pub current_input: Vec<u8>,
     pub epoch: u64,
-    pub times: u64,
+    pub times: u8,
     pub candidates: HashMap<libp2p::PeerId, (Vec<u8>, PublicKey)>,
     pub start_time: SystemTime,
     pub selection_factor: f64,
@@ -17,9 +17,7 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(base_input: Vec<u8>, epoch: u64, max_times: u64, selection_factor: f64) -> Self {
-        assert!(max_times > 0, "times must be greater than 0");
-
+    pub fn new(base_input: Vec<u8>, epoch: u64, selection_factor: f64) -> Self {
         let current_input = Self::create_input(base_input.clone(), 0);
 
         Self {
@@ -39,7 +37,7 @@ impl Context {
         self.current_input = Self::create_input(self.base_input.clone(), self.times);
     }
 
-    fn create_input(mut input: Vec<u8>, times: u64) -> Vec<u8> {
+    fn create_input(mut input: Vec<u8>, times: u8) -> Vec<u8> {
         input.extend(&times.to_be_bytes());
         input
     }
@@ -72,7 +70,6 @@ mod tests {
     use std::time::Duration;
 
     const TEST_EPOCH: u64 = 100;
-    const TEST_MAX_TIMES: u64 = 5;
     const TEST_SELECTION_FACTOR: f64 = 0.5;
     const DEFAULT_BASE_INPUT: [u8; 4] = [1, 2, 3, 4];
 
@@ -80,7 +77,6 @@ mod tests {
         Context::new(
             DEFAULT_BASE_INPUT.to_vec(),
             TEST_EPOCH,
-            TEST_MAX_TIMES,
             TEST_SELECTION_FACTOR,
         )
     }
@@ -93,20 +89,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "times must be greater than 0")]
-    fn constructor_should_panic_when_max_times_is_zero() {
-        let _context = Context::new(vec![1, 2, 3], TEST_EPOCH, 0, TEST_SELECTION_FACTOR);
-    }
-
-    #[test]
     fn constructor_initializes_context_with_correct_values() {
         let base_input = DEFAULT_BASE_INPUT.to_vec();
-        let context = Context::new(
-            base_input.clone(),
-            TEST_EPOCH,
-            TEST_MAX_TIMES,
-            TEST_SELECTION_FACTOR,
-        );
+        let context = Context::new(base_input.clone(), TEST_EPOCH, TEST_SELECTION_FACTOR);
 
         assert_eq!(context.base_input, base_input);
         assert_eq!(context.epoch, TEST_EPOCH);

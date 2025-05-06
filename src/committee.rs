@@ -77,13 +77,7 @@ where
 
         let (timer, timer_rx) = Timer::new().await;
         let input = committee_info.public_key.to_vec()?;
-        Self::set_timer(
-            &timer,
-            input,
-            committee_info.epoch,
-            config.election_duration,
-        )
-        .await;
+        Self::set_timer(&timer, input, committee_info.epoch, config.committee_term).await;
 
         let elector = Elector::new(
             transport.clone(),

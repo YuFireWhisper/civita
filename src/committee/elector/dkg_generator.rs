@@ -61,9 +61,8 @@ pub enum GenerateResult {
 #[derive(Debug)]
 pub struct Config {
     pub topic: String,
-    pub allowable_time_diff: tokio::time::Duration,
-    pub consensus_timeout: tokio::time::Duration,
-    pub election_duration: tokio::time::Duration,
+    pub network_latency: tokio::time::Duration,
+    pub committee_term: tokio::time::Duration,
     pub threshold_counter: threshold::Counter,
 }
 
@@ -72,8 +71,7 @@ pub struct Validator {
     proposal_peer: libp2p::PeerId,
     now: SystemTime,
     topic: String,
-    election_duration: tokio::time::Duration,
-    allowable_time_diff: tokio::time::Duration,
+    conmmittee_term: tokio::time::Duration,
 }
 
 pub struct DkgGenerator<D: Dkg> {
@@ -85,9 +83,10 @@ pub struct DkgGenerator<D: Dkg> {
 impl Validator {
     fn validate_time(&self, end_time: SystemTime) -> bool {
         if let Ok(duration) = end_time.duration_since(self.now) {
-            return duration <= self.election_duration + self.allowable_time_diff;
+            duration <= self.conmmittee_term
+        } else {
+            false
         }
-        false
     }
 
     async fn broadcast_response(&self, end_time: SystemTime, is_accepted: bool) -> Result<()> {
@@ -218,7 +217,7 @@ impl<D: Dkg> DkgGenerator<D> {
         let mut collector = self.create_consensus_collector(validator, expected_peers.clone());
 
         if proposal_peer == self.transport.self_peer() {
-            let end_time = now + self.config.election_duration;
+            let end_time = now + self.config.committee_term;
             self.broadcast_time_proposal(end_time).await?;
             collector =
                 collector.with_initial_item(&(end_time, true), self.transport.self_peer())?;
@@ -236,8 +235,7 @@ impl<D: Dkg> DkgGenerator<D> {
             proposal_peer,
             now,
             topic: self.config.topic.clone(),
-            election_duration: self.config.election_duration,
-            allowable_time_diff: self.config.allowable_time_diff,
+            conmmittee_term: self.config.committee_term,
         }
     }
 
@@ -248,7 +246,7 @@ impl<D: Dkg> DkgGenerator<D> {
     ) -> ConsensusCollector<(SystemTime, bool), Error, Validator> {
         ConsensusCollector::new(
             validator,
-            self.config.consensus_timeout,
+            self.config.network_latency,
             self.config.threshold_counter,
         )
         .with_expected_peers(expected_peers)
@@ -300,9 +298,8 @@ mod tests {
     fn create_test_config() -> Config {
         Config {
             topic: "test-topic".to_string(),
-            allowable_time_diff: tokio::time::Duration::from_secs(10),
-            consensus_timeout: tokio::time::Duration::from_secs(30),
-            election_duration: tokio::time::Duration::from_secs(60),
+            network_latency: tokio::time::Duration::from_secs(1),
+            committee_term: tokio::time::Duration::from_secs(30),
             threshold_counter: threshold::Counter::default(),
         }
     }
@@ -341,12 +338,8 @@ mod tests {
         let generator = DkgGenerator::new(transport, dkg, config.clone());
 
         assert_eq!(generator.config.topic, config.topic);
-        assert_eq!(
-            generator.config.allowable_time_diff,
-            config.allowable_time_diff
-        );
-        assert_eq!(generator.config.consensus_timeout, config.consensus_timeout);
-        assert_eq!(generator.config.election_duration, config.election_duration);
+        assert_eq!(generator.config.network_latency, config.network_latency);
+        assert_eq!(generator.config.committee_term, config.committee_term);
     }
 
     #[tokio::test]
@@ -484,56 +477,48 @@ mod tests {
 
     #[test]
     fn validator_validate_time_should_accept_valid_times() {
+        const COMMITTEE_TERM: u64 = 60;
         let self_peer = libp2p::PeerId::random();
         let transport = create_mock_transport(self_peer);
         let now = SystemTime::now();
-        let election_duration = tokio::time::Duration::from_secs(60);
-        let allowable_diff = tokio::time::Duration::from_secs(10);
+        let committee_term = tokio::time::Duration::from_secs(COMMITTEE_TERM);
 
         let validator = Validator {
             transport,
             proposal_peer: libp2p::PeerId::random(),
             now,
             topic: "test-topic".to_string(),
-            election_duration,
-            allowable_time_diff: allowable_diff,
+            conmmittee_term: committee_term,
         };
 
-        assert!(validator.validate_time(now + Duration::from_secs(30)));
-
-        assert!(validator.validate_time(now + Duration::from_secs(60)));
-
-        assert!(validator.validate_time(now + Duration::from_secs(65)));
-
-        assert!(validator.validate_time(now + Duration::from_secs(70)));
+        assert!(validator.validate_time(now + Duration::from_secs(COMMITTEE_TERM - 1)));
+        assert!(validator.validate_time(now + Duration::from_secs(COMMITTEE_TERM)));
     }
 
     #[test]
     fn validator_validate_time_should_reject_invalid_times() {
+        const COMMITTEE_TERM: u64 = 60;
+
         let self_peer = libp2p::PeerId::random();
         let transport = create_mock_transport(self_peer);
         let now = SystemTime::now();
-        let election_duration = tokio::time::Duration::from_secs(60);
-        let allowable_diff = tokio::time::Duration::from_secs(10);
+        let committee_term = tokio::time::Duration::from_secs(COMMITTEE_TERM);
 
         let validator = Validator {
             transport,
             proposal_peer: libp2p::PeerId::random(),
             now,
             topic: "test-topic".to_string(),
-            election_duration,
-            allowable_time_diff: allowable_diff,
+            conmmittee_term: committee_term,
         };
 
-        assert!(!validator.validate_time(now + Duration::from_secs(71)));
-
-        assert!(!validator.validate_time(now + Duration::from_secs(3600)));
-
-        assert!(!validator.validate_time(now - Duration::from_secs(10)));
+        assert!(!validator.validate_time(now + Duration::from_secs(COMMITTEE_TERM + 1)));
     }
 
     #[tokio::test]
     async fn validator_should_process_consensus_time_from_proposal_peer() {
+        const COMMITTEE_TERM: u64 = 60;
+
         let self_peer = libp2p::PeerId::random();
         let proposal_peer = libp2p::PeerId::random();
         let mut mock_transport = MockTransport::default();
@@ -547,15 +532,14 @@ mod tests {
 
         let transport = Arc::new(mock_transport);
         let now = SystemTime::now();
-        let end_time = now + Duration::from_secs(30);
+        let end_time = now + Duration::from_secs(COMMITTEE_TERM);
 
         let mut validator = Validator {
             transport,
             proposal_peer,
             now,
             topic: "test-topic".to_string(),
-            election_duration: tokio::time::Duration::from_secs(60),
-            allowable_time_diff: tokio::time::Duration::from_secs(10),
+            conmmittee_term: tokio::time::Duration::from_secs(COMMITTEE_TERM),
         };
 
         let message = gossipsub::Message {
@@ -579,6 +563,8 @@ mod tests {
 
     #[tokio::test]
     async fn validator_should_ignore_consensus_time_not_from_proposal_peer() {
+        const COMMITTEE_TERM: u64 = 60;
+
         let self_peer = libp2p::PeerId::random();
         let proposal_peer = libp2p::PeerId::random();
         let other_peer = libp2p::PeerId::random();
@@ -590,15 +576,14 @@ mod tests {
             proposal_peer,
             now,
             topic: "test-topic".to_string(),
-            election_duration: tokio::time::Duration::from_secs(60),
-            allowable_time_diff: tokio::time::Duration::from_secs(10),
+            conmmittee_term: tokio::time::Duration::from_secs(COMMITTEE_TERM),
         };
 
         let message = gossipsub::Message {
             message_id: create_message_id(),
             source: other_peer,
             payload: gossipsub::Payload::ConsensusTime {
-                end_time: now + Duration::from_secs(30),
+                end_time: now + Duration::from_secs(COMMITTEE_TERM),
             },
             topic: "test-topic".to_string(),
             committee_signature: None,
