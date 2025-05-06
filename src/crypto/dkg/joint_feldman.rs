@@ -165,7 +165,7 @@ impl JointFeldman {
             .expect("Partial PKs should not empty")
             .scheme();
 
-        let mut global_comms = vec![Point::zero(scheme); pks.len() as usize];
+        let mut global_comms = vec![Point::zero(scheme); pks.len()];
 
         for pks in pks.iter() {
             for (i, pk) in pks.iter().enumerate() {

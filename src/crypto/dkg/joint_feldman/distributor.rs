@@ -123,15 +123,19 @@ mod tests {
         Mutex::new(Some(peers_map))
     }
 
-    #[tokio::test]
-    async fn send_shares_success_valid_input() {
+    fn create_transport() -> MockTransport {
         let mut transport = MockTransport::default();
         transport
             .expect_publish()
             .with(eq(TOPIC.to_string()), always())
             .times(1)
             .returning(|_, _| Ok(create_message_id()));
+        transport
+    }
 
+    #[tokio::test]
+    async fn send_shares_success_valid_input() {
+        let transport = create_transport();
         let distributor = Distributor::new(Arc::new(transport), TOPIC);
 
         let peers = generate_peers(NUM_PEERS);
@@ -153,10 +157,10 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Number of peers must match the number of shares")]
     async fn peers_count_validation_works() {
-        let transport = MockTransport::default();
+        let transport = create_transport();
         let distributor = Distributor::new(Arc::new(transport), TOPIC);
 
-        let peers = generate_peers(NUM_PEERS);
+        let peers = generate_peers(NUM_PEERS - 1);
         let peers = peers.lock().await;
 
         let (shares, commitments) = Vss::share(&DEFAULT_SCHEME, THRESHOLD, NUM_PEERS);
