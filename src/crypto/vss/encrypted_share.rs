@@ -2,10 +2,13 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{
-    algebra::{self, Scalar},
-    keypair::{self, PublicKey, SecretKey},
-    vss::DecryptedShares,
+use crate::{
+    crypto::{
+        algebra::{self, Scalar},
+        keypair::{self, PublicKey, SecretKey},
+        vss::DecryptedShares,
+    },
+    traits::{byteable, Byteable},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -21,6 +24,9 @@ pub enum Error {
 
     #[error("Share not found for index: {0}")]
     ShareNotFound(u16),
+
+    #[error("{0}")]
+    Byteable(#[from] byteable::Error),
 }
 
 #[derive(Clone)]
