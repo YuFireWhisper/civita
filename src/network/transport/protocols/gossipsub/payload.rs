@@ -1,14 +1,14 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    committee,
     crypto::{
         algebra::{Point, Scalar},
         keypair::{PublicKey, VrfProof},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
-    utils::IndexedMap,
 };
 
 #[derive(Debug)]
@@ -52,35 +52,27 @@ pub enum Payload {
         share: Scalar,
     },
 
-    CommitteeCandidates {
-        count: u32,
-        candidates: IndexedMap<libp2p::PeerId, PublicKey>,
+    ElectionEligibilityProof {
+        proof: VrfProof,
+        public_key: PublicKey,
+        payload_hash: [u8; 32],
     },
 
-    CommitteeGenerateSuccess {
-        request_hash: [u8; 32],
-        committee_pub_key: Point,
+    ElectionSuccess {
+        info: committee::Info,
     },
 
-    CommitteeGenerateFailure {
-        request_hash: [u8; 32],
+    ElectionFailure {
         invalid_peers: HashSet<libp2p::PeerId>,
     },
 
-    CommitteeChange {
-        epoch: u64,
-        members: IndexedMap<libp2p::PeerId, PublicKey>,
-        public_key: Point,
+    ConsensusTime {
+        end_time: SystemTime,
     },
 
-    CommitteeElection {
-        seed: [u8; 32],
-    },
-
-    CommitteeElectionResponse {
-        seed: [u8; 32],
-        public_key: PublicKey,
-        proof: VrfProof,
+    ConsensusTimeResponse {
+        end_time: SystemTime,
+        is_accepted: bool,
     },
 
     // For testing
@@ -93,29 +85,12 @@ pub enum Payload {
 }
 
 impl Payload {
-    pub fn require_committee_signature(&self) -> bool {
-        match self {
-            // Need
-            Payload::CommitteeChange { .. } => true,
-            Payload::CommitteeElection { .. } => true,
-            Payload::RawWithSignature { .. } => true,
-
-            // Don't need
-            Payload::VSSComponent { .. } => false,
-            Payload::VSSReport { .. } => false,
-            Payload::VSSReportResponse { .. } => false,
-            Payload::TssNonceShare { .. } => false,
-            Payload::TssSignatureShare { .. } => false,
-            Payload::CommitteeCandidates { .. } => true,
-            Payload::CommitteeGenerateSuccess { .. } => false,
-            Payload::CommitteeGenerateFailure { .. } => false,
-            Payload::CommitteeElectionResponse { .. } => false,
-            Payload::Raw(_) => false,
-        }
-    }
-
     pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
         self.try_into()
+    }
+
+    pub fn require_signature(&self) -> bool {
+        matches!(self, Payload::RawWithSignature { .. })
     }
 }
 
@@ -150,26 +125,6 @@ mod tests {
         let payload_from_vec = Payload::try_from(payload_vec).unwrap();
 
         assert_eq!(payload, payload_from_vec);
-    }
-
-    #[test]
-    fn returns_true_when_committee_signature_required() {
-        let payload = Payload::RawWithSignature { raw: vec![] };
-
-        assert!(
-            payload.require_committee_signature(),
-            "Expected payload to require committee signature"
-        );
-    }
-
-    #[test]
-    fn returns_false_when_committee_signature_not_required() {
-        let payload = Payload::Raw(vec![]);
-
-        assert!(
-            !payload.require_committee_signature(),
-            "Expected payload to not require committee signature"
-        );
     }
 
     #[test]

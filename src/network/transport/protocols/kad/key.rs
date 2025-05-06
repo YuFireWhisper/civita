@@ -15,20 +15,14 @@ pub enum Error {
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub enum Key {
-    /// The PeerId of the resident
-    Resident(libp2p::PeerId),
+    LatestResident(libp2p::PeerId),
 
-    /// The hash of the proposal
-    Proposal([u8; 32]),
+    LatestCommittee,
 
-    /// Committee epoch
-    /// It will not include the current epoch
-    CommitteeInfo(u64),
+    LatestSelectionFactor,
 
-    /// Current Committee info
-    CurrentCommitteeInfo,
+    ByHash([u8; 32]),
 
-    /// For testing
     Raw,
 }
 

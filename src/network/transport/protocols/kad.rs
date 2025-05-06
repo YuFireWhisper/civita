@@ -48,6 +48,12 @@ pub enum Error {
 
     #[error("{0}")]
     Byteable(#[from] byteable::Error),
+
+    #[error("{0}")]
+    ConvertFromPayload(String),
+
+    #[error("No found payload for the given key")]
+    NotFound,
 }
 
 #[derive(Debug)]
@@ -173,6 +179,13 @@ impl Kad {
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
     }
 
+    pub async fn get_or_error(&self, key: Key) -> Result<Payload> {
+        match self.get(key).await? {
+            Some(payload) => Ok(payload),
+            None => Err(Error::NotFound),
+        }
+    }
+
     pub async fn get(&self, key: Key) -> Result<Option<Payload>> {
         let mut swarm = self.swarm.lock().await;
         let key = key.to_storage_key()?;
@@ -184,10 +197,7 @@ impl Kad {
         let peer_record_opt =
             tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
         match peer_record_opt {
-            Some(peer_record) => {
-                let payload = Payload::from_slice(peer_record.record.value)?;
-                Ok(Some(payload))
-            }
+            Some(peer_record) => Ok(Some(Payload::from_slice(peer_record.record.value)?)),
             None => Ok(None),
         }
     }

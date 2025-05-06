@@ -81,11 +81,13 @@ pub struct Transport {
 
 #[mockall::automock]
 impl Transport {
-    pub async fn new(
-        keypair: libp2p::identity::Keypair,
+    pub async fn new<T: Into<libp2p::identity::Keypair> + 'static>(
+        secret_key: T,
         listen_addr: libp2p::Multiaddr,
         config: Config,
     ) -> Result<Self> {
+        let keypair: libp2p::identity::Keypair = secret_key.into();
+
         let transport = Self::create_transport(keypair.clone());
         let behaviour = Behaviour::new(keypair.clone())?;
         let peer_id = PeerId::from_public_key(&keypair.public());
@@ -285,6 +287,10 @@ impl Transport {
 
     pub async fn get(&self, key: kad::Key) -> Result<Option<kad::Payload>> {
         self.kad.get(key).await.map_err(Error::from)
+    }
+
+    pub async fn get_or_error(&self, key: kad::Key) -> Result<kad::Payload> {
+        self.kad.get_or_error(key).await.map_err(Error::from)
     }
 
     pub fn self_peer(&self) -> PeerId {
