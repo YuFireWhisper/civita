@@ -404,7 +404,7 @@ impl Event {
                 if peer_id == &self.own_peer {
                     self.own_comms
                         .as_ref()
-                        .expect("Own comms should be set")
+                        .expect("Own comms should be set before output")
                         .to_owned()
                 } else {
                     peer_info
