@@ -57,6 +57,7 @@ pub enum GenerateResult {
     Failure(HashSet<libp2p::PeerId>),
 }
 
+#[derive(Clone)]
 #[derive(Debug)]
 pub struct Config {
     pub topic: String,
@@ -281,5 +282,331 @@ impl consensus_collector::Validator<(SystemTime, bool), Error> for Validator {
             } => Ok(Some((end_time, is_accepted))),
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::transport::MockTransport;
+    use crate::{crypto::dkg::MockDkg, mocks::MockError};
+    use crate::{
+        crypto::keypair::{self, PublicKey},
+        utils::consensus_collector::Validator as _,
+    };
+    use mockall::predicate::*;
+    use std::time::{Duration, SystemTime};
+
+    fn create_test_config() -> Config {
+        Config {
+            topic: "test-topic".to_string(),
+            allowable_time_diff: tokio::time::Duration::from_secs(10),
+            consensus_timeout: tokio::time::Duration::from_secs(30),
+            election_duration: tokio::time::Duration::from_secs(60),
+            threshold_counter: threshold::Counter::default(),
+        }
+    }
+
+    fn create_mock_transport(self_peer: libp2p::PeerId) -> Arc<MockTransport> {
+        let mut mock = MockTransport::default();
+        mock.expect_self_peer().return_const(self_peer);
+        Arc::new(mock)
+    }
+
+    fn create_mock_dkg() -> Arc<MockDkg> {
+        Arc::new(MockDkg::new())
+    }
+
+    fn create_candidates(peers: Vec<libp2p::PeerId>) -> IndexedMap<libp2p::PeerId, PublicKey> {
+        let mut candidates = IndexedMap::new();
+        for peer in peers {
+            let (_, pk) = keypair::generate_secp256k1();
+            candidates.insert(peer, pk);
+        }
+        candidates
+    }
+
+    fn create_message_id() -> libp2p::gossipsub::MessageId {
+        const MESSAGE_ID: [u8; 32] = [0; 32];
+        libp2p::gossipsub::MessageId::from(MESSAGE_ID)
+    }
+
+    #[test]
+    fn new_creates_dkg_generator_with_correct_configuration() {
+        let self_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+        let dkg = create_mock_dkg();
+        let config = create_test_config();
+
+        let generator = DkgGenerator::new(transport, dkg, config.clone());
+
+        assert_eq!(generator.config.topic, config.topic);
+        assert_eq!(
+            generator.config.allowable_time_diff,
+            config.allowable_time_diff
+        );
+        assert_eq!(generator.config.consensus_timeout, config.consensus_timeout);
+        assert_eq!(generator.config.election_duration, config.election_duration);
+    }
+
+    #[tokio::test]
+    async fn validate_self_in_candidates_should_succeed_when_self_present() {
+        let self_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+        let dkg = create_mock_dkg();
+        let config = create_test_config();
+
+        let generator = DkgGenerator::new(transport, dkg, config);
+        let candidates = create_candidates(vec![self_peer]);
+
+        let result = generator.validate_self_in_candidates(&candidates);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_self_in_candidates_should_fail_when_self_missing() {
+        let self_peer = libp2p::PeerId::random();
+        let other_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+        let dkg = create_mock_dkg();
+        let config = create_test_config();
+
+        let generator = DkgGenerator::new(transport, dkg, config);
+        let candidates = create_candidates(vec![other_peer]); // missing self_peer
+
+        let result = generator.validate_self_in_candidates(&candidates);
+        assert!(matches!(result, Err(Error::SelfPeerNotInCandidates)));
+    }
+
+    #[tokio::test]
+    async fn initialize_dkg_peers_should_call_set_peers() {
+        let self_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+
+        let mut mock_dkg = MockDkg::new();
+        mock_dkg
+            .expect_set_peers()
+            .with(always())
+            .times(1)
+            .returning(|_| Ok(()));
+
+        let dkg = Arc::new(mock_dkg);
+        let config = create_test_config();
+
+        let generator = DkgGenerator::new(transport, dkg, config);
+        let candidates = create_candidates(vec![self_peer]);
+
+        let result = generator.initialize_dkg_peers(&candidates).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn initialize_dkg_peers_should_propagate_error() {
+        let self_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+
+        let mut mock_dkg = MockDkg::new();
+        mock_dkg
+            .expect_set_peers()
+            .with(always())
+            .times(1)
+            .returning(|_| Err(MockError));
+
+        let dkg = Arc::new(mock_dkg);
+        let config = create_test_config();
+
+        let generator = DkgGenerator::new(transport, dkg, config);
+        let candidates = create_candidates(vec![self_peer]);
+
+        let result = generator.initialize_dkg_peers(&candidates).await;
+        assert!(matches!(result, Err(Error::Dkg(_))));
+    }
+
+    #[tokio::test]
+    async fn perform_dkg_generation_should_succeed() {
+        let self_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+
+        let mut mock_dkg = MockDkg::new();
+        mock_dkg
+            .expect_generate()
+            .with(eq(b"test-id".to_vec()))
+            .times(1)
+            .returning(|_| {
+                Ok(dkg::GenerateResult::Success {
+                    secret: Scalar::secp256k1_zero(),
+                    public: Point::secp256k1_zero(),
+                    global_commitments: vec![Point::secp256k1_zero()],
+                })
+            });
+
+        let dkg = Arc::new(mock_dkg);
+        let config = create_test_config();
+
+        let generator = DkgGenerator::new(transport, dkg, config);
+
+        let result = generator.perform_dkg_generation(b"test-id".to_vec()).await;
+        assert!(result.is_ok());
+        match result.unwrap() {
+            dkg::GenerateResult::Success { .. } => {}
+            _ => panic!("Expected Success result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn perform_dkg_generation_should_handle_failure() {
+        let self_peer = libp2p::PeerId::random();
+        let other_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+
+        let mut mock_dkg = MockDkg::new();
+        mock_dkg.expect_generate().times(1).returning(move |_| {
+            let mut invalid_peers = HashSet::new();
+            invalid_peers.insert(other_peer);
+            Ok(dkg::GenerateResult::Failure { invalid_peers })
+        });
+
+        let dkg = Arc::new(mock_dkg);
+        let config = create_test_config();
+
+        let generator = DkgGenerator::new(transport, dkg, config);
+
+        let result = generator.perform_dkg_generation(b"test-id".to_vec()).await;
+        assert!(result.is_ok());
+        match result.unwrap() {
+            dkg::GenerateResult::Failure { invalid_peers } => {
+                assert_eq!(invalid_peers.len(), 1);
+                assert!(invalid_peers.contains(&other_peer));
+            }
+            _ => panic!("Expected Failure result"),
+        }
+    }
+
+    #[test]
+    fn validator_validate_time_should_accept_valid_times() {
+        let self_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+        let now = SystemTime::now();
+        let election_duration = tokio::time::Duration::from_secs(60);
+        let allowable_diff = tokio::time::Duration::from_secs(10);
+
+        let validator = Validator {
+            transport,
+            proposal_peer: libp2p::PeerId::random(),
+            now,
+            topic: "test-topic".to_string(),
+            election_duration,
+            allowable_time_diff: allowable_diff,
+        };
+
+        assert!(validator.validate_time(now + Duration::from_secs(30)));
+
+        assert!(validator.validate_time(now + Duration::from_secs(60)));
+
+        assert!(validator.validate_time(now + Duration::from_secs(65)));
+
+        assert!(validator.validate_time(now + Duration::from_secs(70)));
+    }
+
+    #[test]
+    fn validator_validate_time_should_reject_invalid_times() {
+        let self_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+        let now = SystemTime::now();
+        let election_duration = tokio::time::Duration::from_secs(60);
+        let allowable_diff = tokio::time::Duration::from_secs(10);
+
+        let validator = Validator {
+            transport,
+            proposal_peer: libp2p::PeerId::random(),
+            now,
+            topic: "test-topic".to_string(),
+            election_duration,
+            allowable_time_diff: allowable_diff,
+        };
+
+        assert!(!validator.validate_time(now + Duration::from_secs(71)));
+
+        assert!(!validator.validate_time(now + Duration::from_secs(3600)));
+
+        assert!(!validator.validate_time(now - Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn validator_should_process_consensus_time_from_proposal_peer() {
+        let self_peer = libp2p::PeerId::random();
+        let proposal_peer = libp2p::PeerId::random();
+        let mut mock_transport = MockTransport::default();
+        mock_transport.expect_self_peer().return_const(self_peer);
+
+        mock_transport
+            .expect_publish()
+            .with(eq("test-topic".to_string()), always())
+            .times(1)
+            .returning(|_, _| Ok(create_message_id()));
+
+        let transport = Arc::new(mock_transport);
+        let now = SystemTime::now();
+        let end_time = now + Duration::from_secs(30);
+
+        let mut validator = Validator {
+            transport,
+            proposal_peer,
+            now,
+            topic: "test-topic".to_string(),
+            election_duration: tokio::time::Duration::from_secs(60),
+            allowable_time_diff: tokio::time::Duration::from_secs(10),
+        };
+
+        let message = gossipsub::Message {
+            message_id: create_message_id(),
+            topic: "test-topic".to_string(),
+            source: proposal_peer,
+            payload: gossipsub::Payload::ConsensusTime { end_time },
+            committee_signature: None,
+        };
+
+        let result = validator.validate(message).await;
+
+        assert!(result.is_ok());
+        if let Ok(Some((validated_end_time, is_accepted))) = result {
+            assert_eq!(validated_end_time, end_time);
+            assert!(is_accepted);
+        } else {
+            panic!("Expected Some((end_time, true))");
+        }
+    }
+
+    #[tokio::test]
+    async fn validator_should_ignore_consensus_time_not_from_proposal_peer() {
+        let self_peer = libp2p::PeerId::random();
+        let proposal_peer = libp2p::PeerId::random();
+        let other_peer = libp2p::PeerId::random();
+        let transport = create_mock_transport(self_peer);
+        let now = SystemTime::now();
+
+        let mut validator = Validator {
+            transport,
+            proposal_peer,
+            now,
+            topic: "test-topic".to_string(),
+            election_duration: tokio::time::Duration::from_secs(60),
+            allowable_time_diff: tokio::time::Duration::from_secs(10),
+        };
+
+        let message = gossipsub::Message {
+            message_id: create_message_id(),
+            source: other_peer,
+            payload: gossipsub::Payload::ConsensusTime {
+                end_time: now + Duration::from_secs(30),
+            },
+            topic: "test-topic".to_string(),
+            committee_signature: None,
+        };
+
+        let result = validator.validate(message).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }
