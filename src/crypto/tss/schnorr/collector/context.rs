@@ -10,8 +10,6 @@ use crate::{
     utils::IndexedMap,
 };
 
-type Result<T> = std::result::Result<T, Error>;
-
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -40,36 +38,6 @@ impl Context {
             global_comms,
             peers_index,
         }
-    }
-
-    fn calculate_global_comms_and_convert_to_set(
-        partial_pks: IndexedMap<libp2p::PeerId, Vec<Point>>,
-    ) -> Result<(Vec<Point>, IndexedMap<libp2p::PeerId, ()>)> {
-        let mut set = IndexedMap::new();
-
-        let len = partial_pks
-            .values()
-            .next()
-            .expect("Partial PKs should not empty")
-            .len();
-        let scheme = partial_pks
-            .values()
-            .next()
-            .expect("Partial PKs should not empty")
-            .first()
-            .expect("Partial PKs should not empty")
-            .scheme();
-        let mut global_comms = vec![Point::zero(scheme); len];
-
-        for (peer_id, pks) in partial_pks.into_iter() {
-            for (i, pk) in pks.iter().enumerate() {
-                global_comms[i] = global_comms[i].add(pk)?;
-            }
-
-            set.insert(peer_id, ());
-        }
-
-        Ok((global_comms, set))
     }
 
     pub fn add_share(&self, session_id: SessionId, peer_id: libp2p::PeerId, share: Scalar) {
