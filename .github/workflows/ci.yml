@@ -10,62 +10,61 @@ on:
 
 jobs:
   test-and-coverage:
-    runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'self-hosted') && 'self-hosted' || contains(github.event.pull_request.labels.*.name, 'ubuntu-latest') && 'ubuntu-latest' || vars.DEFAULT_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.DEFAULT_RUNNER || 'ubuntu-latest' }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Cache Rust dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          ~/.cargo/bin
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
-    # self-hosted only
-    - name: Install build dependencies
-      if: contains(runner.name, 'self-hosted')
-      run: |
-        if ! pkg-config --version; then
-          sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev pkg-config libgmp-dev
-        fi
+      - name: Install build dependencies
+        if: contains(github.event.pull_request.labels.*.name, 'self-hosted')
+        run: |
+          if ! pkg-config --version; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential libssl-dev pkg-config libgmp-dev
+          fi
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: nightly
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
 
-    - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-llvm-cov
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
-    - name: Set test mode
-      id: test-mode
-      run: |
-        if [[ "${{ contains(github.event.pull_request.labels.*.name, 'unit-tests-only') }}" == "true" ]]; then
-          echo "mode=lib" >> $GITHUB_OUTPUT
-        else
-          echo "mode=${{ vars.DEFAULT_TEST_MODE || 'full' }}" >> $GITHUB_OUTPUT
-        fi
+      - name: Set test mode
+        id: test-mode
+        run: |
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'unit-tests-only') }}" == "true" ]]; then
+            echo "mode=lib" >> $GITHUB_OUTPUT
+          else
+            echo "mode=${{ vars.DEFAULT_TEST_MODE || 'full' }}" >> $GITHUB_OUTPUT
+          fi
 
-    - name: Run tests and generate coverage
-      run: |
-        if [ "${{ steps.test-mode.outputs.mode }}" == "lib" ]; then
-          cargo llvm-cov --lcov --output-path lcov.info --lib
-        else
-          cargo llvm-cov --lcov --output-path lcov.info
-        fi
+      - name: Run tests and generate coverage
+        run: |
+          if [ "${{ steps.test-mode.outputs.mode }}" == "lib" ]; then
+            cargo llvm-cov --lcov --output-path lcov.info --lib
+          else
+            cargo llvm-cov --lcov --output-path lcov.info
+          fi
 
-    - name: Upload coverage to Codacy
-      uses: codacy/codacy-coverage-reporter-action@master
-      with:
-        project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-        coverage-reports: lcov.info
+      - name: Upload coverage to Codacy
+        uses: codacy/codacy-coverage-reporter-action@master
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: lcov.info
