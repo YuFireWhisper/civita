@@ -1,14 +1,13 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::SystemTime,
-};
+use std::{collections::HashSet, sync::Arc, time::SystemTime};
 
 use tokio::sync::mpsc::Receiver as TokioReceiver;
 
 use crate::{
     behaviour::Behaviour,
-    committee::{self, elector::dkg_generator::DkgGenerator},
+    committee::{
+        self,
+        elector::{context::Context, dkg_generator::DkgGenerator},
+    },
     crypto::{
         algebra::{Point, Scalar},
         dkg::Dkg,
@@ -32,6 +31,7 @@ use crate::network::transport::Transport;
 #[cfg(test)]
 use crate::network::transport::MockTransport as Transport;
 
+mod context;
 mod dkg_generator;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -107,17 +107,6 @@ pub struct Config {
     pub threshold_counter: threshold::Counter,
 }
 
-pub struct Context {
-    pub base_input: Vec<u8>,
-    pub current_input: Vec<u8>,
-    pub epoch: u64,
-    pub times: u64,
-    pub candidates: HashMap<libp2p::PeerId, (Vec<u8>, PublicKey)>,
-    pub start_time: SystemTime,
-    pub selection_factor: f64,
-    pub invalid_peers: HashSet<libp2p::PeerId>,
-}
-
 pub struct Validator {
     pub epoch: u64,
 }
@@ -128,55 +117,6 @@ pub struct Elector<D: Dkg + 'static> {
     secret_key: SecretKey,
     public_key: PublicKey,
     config: Config,
-}
-
-impl Context {
-    pub fn new(base_input: Vec<u8>, epoch: u64, max_times: u64, selection_factor: f64) -> Self {
-        assert!(max_times > 0, "times must be greater than 0");
-
-        let current_input = Self::create_input(base_input.clone(), 0);
-
-        Self {
-            base_input,
-            current_input,
-            epoch,
-            candidates: HashMap::new(),
-            times: 0,
-            start_time: SystemTime::now(),
-            selection_factor,
-            invalid_peers: HashSet::new(),
-        }
-    }
-
-    pub fn increment(&mut self) {
-        self.times += 1;
-        self.current_input = Self::create_input(self.base_input.clone(), self.times);
-    }
-
-    fn create_input(mut input: Vec<u8>, times: u64) -> Vec<u8> {
-        input.extend(&times.to_be_bytes());
-        input
-    }
-
-    pub fn clear_candidates(&mut self) {
-        self.candidates.clear();
-    }
-
-    pub fn add_candidate(
-        &mut self,
-        peer_id: libp2p::PeerId,
-        output: Vec<u8>,
-        public_key: PublicKey,
-    ) {
-        self.candidates.insert(peer_id, (output, public_key));
-    }
-
-    pub fn get_n_candidates(&mut self, n: u16) -> IndexedMap<libp2p::PeerId, PublicKey> {
-        let mut entries: Vec<_> = std::mem::take(&mut self.candidates).into_iter().collect();
-        entries.sort_by(|(_, (bytes_a, _)), (_, (bytes_b, _))| bytes_a.cmp(bytes_b));
-        entries.truncate(n as usize);
-        IndexedMap::from_iter(entries.into_iter().map(|(id, (_, key))| (id, key)))
-    }
 }
 
 impl<D: Dkg + 'static> Elector<D> {
