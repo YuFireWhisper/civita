@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct Node {
     data: Vec<u8>,
     links: HashSet<[u8; 32]>,
     parent: [u8; 32],
-    hash_cache: Option<[u8; 32]>,
+    hash_cache: OnceLock<[u8; 32]>,
 }
 
 impl Node {
@@ -14,7 +14,7 @@ impl Node {
             data,
             links: HashSet::new(),
             parent,
-            hash_cache: None,
+            hash_cache: OnceLock::new(),
         }
     }
 
@@ -27,7 +27,7 @@ impl Node {
     }
 
     fn invalidate_hash(&mut self) {
-        self.hash_cache = None;
+        self.hash_cache = OnceLock::new();
     }
 
     pub fn remove_link(&mut self, link: &[u8; 32]) -> bool {
@@ -50,25 +50,21 @@ impl Node {
         changed
     }
 
-    pub fn hash(&mut self) -> [u8; 32] {
-        if let Some(hash) = self.hash_cache {
-            return hash;
-        }
+    pub fn hash(&self) -> [u8; 32] {
+        *self.hash_cache.get_or_init(|| {
+            let mut hasher = blake3::Hasher::new();
 
-        let mut hasher = blake3::Hasher::new();
+            hasher.update(&self.data);
 
-        hasher.update(&self.data);
+            let mut sorted_links: Vec<&[u8; 32]> = self.links.iter().collect();
+            sorted_links.sort_unstable();
 
-        let mut sorted_links: Vec<&[u8; 32]> = self.links.iter().collect();
-        sorted_links.sort_unstable();
+            for link in sorted_links {
+                hasher.update(link);
+            }
 
-        for link in sorted_links {
-            hasher.update(link);
-        }
-
-        let hash = hasher.finalize().into();
-        self.hash_cache = Some(hash);
-        hash
+            hasher.finalize().into()
+        })
     }
 
     pub fn data(&self) -> &[u8] {
@@ -109,7 +105,7 @@ mod tests {
         assert_eq!(node.data(), &data);
         assert_eq!(node.parent(), TEST_PARENT_HASH);
         assert!(node.links().is_empty());
-        assert_eq!(node.hash_cache, None);
+        assert!(node.hash_cache.get().is_none());
     }
 
     #[test]
@@ -120,7 +116,7 @@ mod tests {
 
         assert!(result);
         assert!(node.links().contains(&TEST_LINK1));
-        assert_eq!(node.hash_cache, None);
+        assert!(node.hash_cache.get().is_none());
     }
 
     #[test]
@@ -144,7 +140,7 @@ mod tests {
 
         assert!(result);
         assert!(node.links().is_empty());
-        assert_eq!(node.hash_cache, None);
+        assert!(node.hash_cache.get().is_none());
     }
 
     #[test]
@@ -168,7 +164,7 @@ mod tests {
         assert!(result);
         assert!(!node.links().contains(&TEST_LINK1));
         assert!(node.links().contains(&TEST_LINK2));
-        assert_eq!(node.hash_cache, None);
+        assert!(node.hash_cache.get().is_none());
     }
 
     #[test]
@@ -191,7 +187,7 @@ mod tests {
         let result = node.change_link(TEST_LINK1, TEST_LINK1);
 
         assert!(!result);
-        assert!(node.hash_cache.is_some());
+        assert!(node.hash_cache.get().is_some());
     }
 
     #[test]
@@ -214,10 +210,10 @@ mod tests {
 
     #[test]
     fn hash_should_cache_result() {
-        let mut node = create_test_node();
+        let node = create_test_node();
 
         let hash1 = node.hash();
-        assert!(node.hash_cache.is_some());
+        assert!(node.hash_cache.get().is_some());
 
         let hash2 = node.hash();
         assert_eq!(hash1, hash2);
@@ -232,7 +228,7 @@ mod tests {
         node.set_data(new_data.clone());
 
         assert_eq!(node.data(), &new_data);
-        assert_eq!(node.hash_cache, None);
+        assert!(node.hash_cache.get().is_none());
         assert_ne!(node.hash(), original_hash);
     }
 
@@ -243,7 +239,7 @@ mod tests {
 
         node.invalidate_hash();
 
-        assert_eq!(node.hash_cache, None);
+        assert!(node.hash_cache.get().is_none());
     }
 
     #[test]
@@ -266,3 +262,4 @@ mod tests {
         assert_eq!(node.parent(), TEST_PARENT_HASH);
     }
 }
+

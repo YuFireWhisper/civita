@@ -24,7 +24,7 @@ pub struct MerkleDag {
 }
 
 impl MerkleDag {
-    pub fn new(mut root: Node, mut target: Node) -> Self {
+    pub fn new(root: Node, target: Node) -> Self {
         let root_hash = root.hash();
         let target_hash = target.hash();
 
@@ -40,14 +40,14 @@ impl MerkleDag {
         }
     }
 
-    pub fn insert(&mut self, mut node: Node) -> [u8; 32] {
+    pub fn insert(&mut self, node: Node) -> [u8; 32] {
         let hash = node.hash();
         self.nodes.insert(hash, node);
         hash
     }
 
     pub fn append(&mut self, data: Vec<u8>) -> [u8; 32] {
-        let mut node = Node::new(data, self.target);
+        let node = Node::new(data, self.target);
         let hash = node.hash();
 
         self.nodes.insert(hash, node);
@@ -267,9 +267,9 @@ mod tests {
 
     #[test]
     fn new_creates_dag_with_root_and_target() {
-        let mut root_node = create_node(b"root", [0u8; 32]);
+        let root_node = create_node(b"root", [0u8; 32]);
         let root_hash = root_node.hash();
-        let mut target_node = create_node(b"target", [0u8; 32]);
+        let target_node = create_node(b"target", [0u8; 32]);
         let target_hash = target_node.hash();
 
         let dag = MerkleDag::new(root_node, target_node);
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn insert_adds_node_to_dag() {
         let mut dag = create_empty_dag();
-        let mut new_node = create_node(b"new_node", [0u8; 32]);
+        let new_node = create_node(b"new_node", [0u8; 32]);
         let expected_hash = new_node.hash();
 
         let actual_hash = dag.insert(new_node);
