@@ -11,6 +11,7 @@ use crate::{
 pub mod key;
 pub mod message;
 pub mod payload;
+pub mod store;
 pub mod validated_store;
 
 pub use key::Key;
