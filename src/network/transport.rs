@@ -19,6 +19,7 @@ use crate::{
 pub mod behaviour;
 pub mod config;
 pub mod protocols;
+pub mod store;
 
 mod dispatcher;
 

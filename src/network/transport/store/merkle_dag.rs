@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::network::transport::protocols::kad::store::merkle_dag::node::Node;
+use crate::network::transport::store::merkle_dag::node::Node;
 
 mod node;
 
