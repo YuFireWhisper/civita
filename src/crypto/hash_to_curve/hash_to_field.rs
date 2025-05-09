@@ -87,21 +87,13 @@ fn ceil_log2(p: &'static [u64]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_ff::{Fp, MontBackend};
-
-    #[derive(ark_ff::MontConfig)]
-    #[modulus = "7"]
-    #[generator = "3"]
-    pub struct FqConfig;
-
-    type TestField = Fp<MontBackend<FqConfig, 1>, 1>;
 
     const TEST_DST: &[u8] = b"CIVITA-TEST-DST";
 
     #[test]
     fn hash_to_field_normal_operation() {
         let msg = b"test message";
-        let result = hash_to_field::<TestField>(msg, TEST_DST, 2);
+        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 2);
         assert!(result.is_ok());
         let elements = result.unwrap();
         assert_eq!(elements.len(), 2);
@@ -110,14 +102,14 @@ mod tests {
     #[test]
     fn hash_to_field_empty_message() {
         let msg = b"";
-        let result = hash_to_field::<TestField>(msg, TEST_DST, 1);
+        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 1);
         assert!(result.is_ok());
     }
 
     #[test]
     fn hash_to_field_count_zero_returns_empty() {
         let msg = b"test message";
-        let result = hash_to_field::<TestField>(msg, TEST_DST, 0);
+        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 0);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }
@@ -125,7 +117,7 @@ mod tests {
     #[test]
     fn hash_to_field_large_count_works() {
         let msg = b"test message";
-        let result = hash_to_field::<TestField>(msg, TEST_DST, 100);
+        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 100);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 100);
     }
@@ -134,8 +126,8 @@ mod tests {
     fn hash_to_field_different_messages_different_results() {
         let msg1 = b"test message 1";
         let msg2 = b"test message 2";
-        let result1 = hash_to_field::<TestField>(msg1, TEST_DST, 1).unwrap();
-        let result2 = hash_to_field::<TestField>(msg2, TEST_DST, 1).unwrap();
+        let result1 = hash_to_field::<ark_secp256k1::Fq>(msg1, TEST_DST, 1).unwrap();
+        let result2 = hash_to_field::<ark_secp256k1::Fq>(msg2, TEST_DST, 1).unwrap();
         assert_ne!(result1[0], result2[0]);
     }
 }
