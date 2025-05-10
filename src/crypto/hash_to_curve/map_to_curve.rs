@@ -1,15 +1,14 @@
 use ark_ec::{AffineRepr, CurveConfig};
 use ark_ff::MontFp;
 
+use crate::crypto::hash_to_curve::utils::Z;
+
 pub mod simple_swu;
-pub mod sw;
 
 pub trait MapToCurve<C: CurveConfig> {
-    fn map_to_curve(u: C::BaseField) -> impl AffineRepr<Config = C>;
-}
+    type Output: AffineRepr<Config = C>;
 
-trait Z<C: CurveConfig> {
-    const Z: C::BaseField;
+    fn map_to_curve(u: C::BaseField) -> Self::Output;
 }
 
 impl Z<ark_secp256k1::Config> for ark_secp256k1::Config {

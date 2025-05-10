@@ -1,33 +1,37 @@
-use ark_ec::short_weierstrass::{Affine, SWCurveConfig};
+use ark_ec::{
+    short_weierstrass::{self, SWCurveConfig},
+    AffineRepr, CurveConfig,
+};
 
-use crate::crypto::hash_to_curve::map_to_curve::sw;
+use crate::crypto::hash_to_curve::{map_to_curve::MapToCurve, utils::AbZero};
 
-mod clear_cofactor;
 mod expand_message_xmd;
 mod hash_to_field;
+mod iso_map;
 mod map_to_curve;
+mod utils;
 
-type Result<T> = std::result::Result<T, Error>;
+pub trait HashToCurve<C: CurveConfig + MapToCurve<C>> {
+    type Output: AffineRepr<Config = C>;
 
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    HashToField(#[from] hash_to_field::Error),
+    fn hash_to_curve(msg: impl AsRef<[u8]>) -> Self::Output;
 }
 
-pub fn hash_to_curve<C: SWCurveConfig>(
-    msg: impl AsRef<[u8]>,
-    dst: impl AsRef<[u8]>,
-    count: usize,
-) -> Result<Vec<Affine<C>>> {
-    let field_elements = hash_to_field::hash_to_field::<C::BaseField>(msg, dst, count)?;
+impl<C> HashToCurve<C> for C
+where
+    C: SWCurveConfig + MapToCurve<C, Output = short_weierstrass::Affine<C>>,
+{
+    type Output = short_weierstrass::Affine<C>;
 
-    Ok(field_elements
-        .into_iter()
-        .map(|u| {
-            let point = sw::map_to_curve::<C>(u);
-            clear_cofactor::clear_cofactor(point)
-        })
-        .collect())
+    fn hash_to_curve(msg: impl AsRef<[u8]>) -> Self::Output {
+        let u = hash_to_field::hash_to_field::<C::BaseField>(msg);
+        let p = C::map_to_curve(u);
+        p.mul_by_cofactor()
+    }
+}
+
+impl AbZero for ark_secp256k1::Config {
+    fn is_ab_zero() -> bool {
+        true
+    }
 }

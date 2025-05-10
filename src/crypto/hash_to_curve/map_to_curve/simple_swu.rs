@@ -1,16 +1,11 @@
-use ark_ec::{
-    short_weierstrass::{Affine, SWCurveConfig},
-    AffineRepr,
-};
+use ark_ec::short_weierstrass::{Affine, SWCurveConfig};
 use ark_ff::{Field, Zero};
 
 use crate::crypto::hash_to_curve::{
     iso_map::IsoMap,
     map_to_curve::{MapToCurve, Z},
-    utils::{inv0, sgn0},
+    utils::{inv0, sgn0, AbZero},
 };
-
-pub trait AbZero {}
 
 /// Implements the Simplified Shallue-van de Woestijne-Ulas Method.
 /// Note: The curve's coefficients A and B can't be zero.
@@ -57,21 +52,19 @@ fn map_to_curve_simple_swu<C: SWCurveConfig + Z<C>>(u: C::BaseField) -> Affine<C
     Affine::<C>::new(x, y)
 }
 
-impl<C: SWCurveConfig + Z<C>> MapToCurve<C> for C {
-    fn map_to_curve(u: C::BaseField) -> impl AffineRepr<Config = C> {
-        map_to_curve_simple_swu::<C>(u)
-    }
-}
-
 impl<C> MapToCurve<C> for C
 where
-    C: SWCurveConfig + AbZero + Z<C>,
+    C: SWCurveConfig + Z<C> + AbZero,
     Affine<C>: IsoMap,
 {
-    fn map_to_curve(u: C::BaseField) -> impl AffineRepr<Config = C> {
+    type Output = Affine<C>;
+
+    fn map_to_curve(u: C::BaseField) -> Self::Output {
         let point = map_to_curve_simple_swu::<C>(u);
-        point.iso_map()
+        if C::is_ab_zero() {
+            point.iso_map()
+        } else {
+            point
+        }
     }
 }
-
-impl AbZero for ark_secp256k1::FqConfig {}

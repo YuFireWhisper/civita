@@ -1,4 +1,13 @@
+use ark_ec::CurveConfig;
 use ark_ff::{BigInteger, Field, PrimeField, Zero};
+
+pub trait Z<C: CurveConfig> {
+    const Z: C::BaseField;
+}
+
+pub trait AbZero {
+    fn is_ab_zero() -> bool;
+}
 
 /// Implements the sgn0 function as defined in IETF spec 4.1
 /// Returns 0 or 1 based on the "sign" of the field element
