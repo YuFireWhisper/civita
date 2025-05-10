@@ -1,65 +1,49 @@
 use ark_ff::{Field, PrimeField};
 
-use crate::crypto::hash_to_curve::expand_message_xmd::{self, expand_message_xmd};
-
-type Result<T> = std::result::Result<T, Error>;
+use crate::crypto::{
+    hash_to_curve::expand_message_xmd::expand_message_xmd,
+    types::{CipherSuite, Dst},
+};
 
 // IETF Step: Security parameter k = 128 bits
 const K: usize = 128;
 
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    ExpandMessage(#[from] expand_message_xmd::Error),
-}
-
 /// Implementation of hash_to_field as defined in IETF specification section 5.2
-/// This function hashes a byte string into one or more elements of a field F
-pub fn hash_to_field<F>(
-    msg: impl AsRef<[u8]>,
-    dst: impl AsRef<[u8]>,
-    count: usize,
-) -> Result<Vec<F>>
+/// This function hashes a byte string into one element of a field F
+/// Optimized version that always returns a single field element (count=1)
+pub fn hash_to_field<F>(msg: impl AsRef<[u8]>) -> F
 where
     F: Field,
 {
     // IETF Step 0 (preparation): Calculate L = ceil((ceil(log2(p)) + k) / 8)
     let l = (ceil_log2(F::characteristic()) + K) / 8;
 
-    // IETF Step 1: Calculate len_in_bytes = count * m * L
+    // IETF Step 1: Calculate len_in_bytes = m * L (for count=1)
     // where m is the extension degree of F
-    let len_in_bytes = count * F::extension_degree() as usize * l;
+    let len_in_bytes = F::extension_degree() as usize * l;
 
     // IETF Step 2: Generate uniform bytes using expand_message
-    let uniform_bytes = expand_message_xmd(msg.as_ref(), dst.as_ref(), len_in_bytes)?;
+    let dst = Dst::new(CipherSuite::from_field::<F>().expect("Unsupported field type"));
+    let uniform_bytes = expand_message_xmd(msg.as_ref(), dst, len_in_bytes);
 
-    let mut u = Vec::with_capacity(count);
-    // IETF Step 3: Loop through count elements to generate
-    for i in 0..count {
-        let mut e: Vec<F::BasePrimeField> = Vec::with_capacity(F::extension_degree() as usize);
+    // For count=1, we only need one field element
+    let mut e: Vec<F::BasePrimeField> = Vec::with_capacity(F::extension_degree() as usize);
 
-        // IETF Step 4: For each component of the extension field
-        for j in 0..F::extension_degree() {
-            // IETF Step 5: Calculate element offset
-            let elm_offset = l * (j as usize + i * F::extension_degree() as usize);
+    // IETF Step 4: For each component of the extension field
+    for j in 0..F::extension_degree() {
+        // IETF Step 5: Calculate element offset (simplified for count=1)
+        let elm_offset = l * j as usize;
 
-            // IETF Step 6: Extract substring of uniform bytes
-            let tv = &uniform_bytes[elm_offset..elm_offset + l];
+        // IETF Step 6: Extract substring of uniform bytes
+        let tv = &uniform_bytes[elm_offset..elm_offset + l];
 
-            // IETF Step 7: Convert to integer and reduce modulo p
-            // (from_be_bytes_mod_order handles the OS2IP and modulo p operations)
-            let e_j = F::BasePrimeField::from_be_bytes_mod_order(tv);
-            e.push(e_j);
-        }
-
-        // IETF Step 8: Construct field element from components
-        let u_i = F::from_base_prime_field_elems(e).expect("e.len != F::extension_degree()");
-        u.push(u_i);
+        // IETF Step 7: Convert to integer and reduce modulo p
+        let e_j = F::BasePrimeField::from_be_bytes_mod_order(tv);
+        e.push(e_j);
     }
 
-    // IETF Step 9: Return the list of field elements
-    Ok(u)
+    // IETF Step 8: Construct field element from components
+    F::from_base_prime_field_elems(e).expect("e.len != F::extension_degree()")
 }
 
 /// Calculate ceiling of log2 of a prime represented as a big integer
@@ -88,46 +72,12 @@ fn ceil_log2(p: &'static [u64]) -> usize {
 mod tests {
     use super::*;
 
-    const TEST_DST: &[u8] = b"CIVITA-TEST-DST";
-
-    #[test]
-    fn hash_to_field_normal_operation() {
-        let msg = b"test message";
-        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 2);
-        assert!(result.is_ok());
-        let elements = result.unwrap();
-        assert_eq!(elements.len(), 2);
-    }
-
-    #[test]
-    fn hash_to_field_empty_message() {
-        let msg = b"";
-        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 1);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn hash_to_field_count_zero_returns_empty() {
-        let msg = b"test message";
-        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 0);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
-    }
-
-    #[test]
-    fn hash_to_field_large_count_works() {
-        let msg = b"test message";
-        let result = hash_to_field::<ark_secp256k1::Fq>(msg, TEST_DST, 100);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 100);
-    }
-
     #[test]
     fn hash_to_field_different_messages_different_results() {
         let msg1 = b"test message 1";
         let msg2 = b"test message 2";
-        let result1 = hash_to_field::<ark_secp256k1::Fq>(msg1, TEST_DST, 1).unwrap();
-        let result2 = hash_to_field::<ark_secp256k1::Fq>(msg2, TEST_DST, 1).unwrap();
-        assert_ne!(result1[0], result2[0]);
+        let result1 = hash_to_field::<ark_secp256k1::Fq>(msg1);
+        let result2 = hash_to_field::<ark_secp256k1::Fq>(msg2);
+        assert_ne!(result1, result2);
     }
 }

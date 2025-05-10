@@ -1,12 +1,16 @@
 use ark_ec::short_weierstrass::{Affine, SWCurveConfig};
-use ark_ff::{BigInteger, Field, PrimeField, Zero};
+use ark_ff::Field;
 
-/// Implements the Shallue-van de Woestijne map to curve method
-/// Following IETF spec 6.6.1 for Weierstrass curves
-pub fn map_to_curve<C: SWCurveConfig>(u: C::BaseField) -> Affine<C> {
+use crate::crypto::hash_to_curve::{
+    map_to_curve::Z,
+    utils::{inv0, sgn0},
+};
+
+/// Implements the Shallue-van de Woestijne map to curve method.
+/// Note: Has higher performance cost, so prefer specialized implementations when available.
+pub fn map_to_curve<C: SWCurveConfig + Z<C>>(u: C::BaseField) -> Affine<C> {
     // Precompute the constant Z
-    let z = find_z_svdw::<C>(1);
-    let g_z = g::<C>(z);
+    let g_z = g::<C>(C::Z);
 
     // IETF spec 6.6.1 step 1: tv1 = u^2 * g(Z)
     let tv1 = u.square() * g_z;
@@ -22,7 +26,7 @@ pub fn map_to_curve<C: SWCurveConfig>(u: C::BaseField) -> Affine<C> {
 
     // IETF spec 6.6.1 step 5: tv4 = sqrt(-g(Z) * (3 * Z^2 + 4 * A))
     let mut tv4 = (-(g_z)
-        * (C::BaseField::from(3) * z.square() + C::BaseField::from(4) * C::COEFF_A))
+        * (C::BaseField::from(3) * C::Z.square() + C::BaseField::from(4) * C::COEFF_A))
         .sqrt()
         .unwrap();
 
@@ -36,16 +40,16 @@ pub fn map_to_curve<C: SWCurveConfig>(u: C::BaseField) -> Affine<C> {
 
     // IETF spec 6.6.1 step 8: tv6 = -4 * g(Z) / (3 * Z^2 + 4 * A)
     let tv6 = -(C::BaseField::from(4) * g_z)
-        / (C::BaseField::from(3) * z.square() + C::BaseField::from(4) * C::COEFF_A);
+        / (C::BaseField::from(3) * C::Z.square() + C::BaseField::from(4) * C::COEFF_A);
 
     // IETF spec 6.6.1 step 9: x1 = -Z / 2 - tv5
-    let x1 = -z / C::BaseField::from(2) - tv5;
+    let x1 = -C::Z / C::BaseField::from(2) - tv5;
 
     // IETF spec 6.6.1 step 10: x2 = -Z / 2 + tv5
-    let x2 = -z / C::BaseField::from(2) + tv5;
+    let x2 = -C::Z / C::BaseField::from(2) + tv5;
 
     // IETF spec 6.6.1 step 11: x3 = Z + tv6 * (tv2^2 * tv3)^2
-    let x3 = z + tv6 * (tv2.square() * tv3).square();
+    let x3 = C::Z + tv6 * (tv2.square() * tv3).square();
 
     // IETF spec 6.6.1 steps 12-14: Choose valid x coordinate and y value
     let x;
@@ -73,104 +77,15 @@ pub fn map_to_curve<C: SWCurveConfig>(u: C::BaseField) -> Affine<C> {
     Affine::<C>::new(x, y)
 }
 
-/// Implements the sgn0 function as defined in IETF spec 4.1
-/// Returns 0 or 1 based on the "sign" of the field element
-fn sgn0<F: Field>(x: &F) -> i8 {
-    // IETF spec 4.1 step 1: sign = 0
-    let mut sign = 0i8;
-
-    // IETF spec 4.1 step 2: zero = 1 (true)
-    let mut zero = true;
-
-    // IETF spec 4.1 steps 3-7: iterate through all elements
-    for x_i in x.to_base_prime_field_elements() {
-        // IETF spec 4.1 step 4: sign_i = x_i mod 2
-        let sign_i = if x_i.into_bigint().is_odd() { 1i8 } else { 0i8 };
-
-        // IETF spec 4.1 step 5: zero_i = x_i == 0
-        let zero_i = x_i.is_zero();
-
-        // IETF spec 4.1 step 6: sign = sign OR (zero AND sign_i)
-        // Avoid short-circuit logic operations
-        sign |= (zero as i8) & sign_i;
-
-        // IETF spec 4.1 step 7: zero = zero AND zero_i
-        zero = zero && zero_i;
-    }
-
-    // IETF spec 4.1 step 8: return sign
-    sign
-}
-
-/// Finds a suitable Z value for the Shallue-van de Woestijne mapping
-/// Following IETF spec H.1 algorithm
-fn find_z_svdw<C: SWCurveConfig>(init_ctr: u64) -> C::BaseField {
-    // Define the h function as per IETF spec H.1
-    let h = |z: C::BaseField| -> Option<C::BaseField> {
-        let gz = g::<C>(z);
-        if gz.is_zero() {
-            return None;
-        }
-        let z_square = z.square();
-        let numerator =
-            -(C::BaseField::from(3u32) * z_square + C::BaseField::from(4u32) * C::COEFF_A);
-        let denominator = C::BaseField::from(4u32) * gz;
-        Some(numerator * inv0(denominator))
-    };
-
-    let mut ctr = init_ctr;
-    loop {
-        for z_cand in [C::BaseField::from(ctr), -C::BaseField::from(ctr)] {
-            // IETF spec H.1 Criterion 1: g(Z) != 0 in F
-            let gz = g::<C>(z_cand);
-            if gz.is_zero() {
-                continue;
-            }
-
-            let hz = match h(z_cand) {
-                Some(hz) => hz,
-                None => continue,
-            };
-
-            // IETF spec H.1 Criterion 2: -(3 * Z^2 + 4 * A) / (4 * g(Z)) != 0 in F
-            if hz.is_zero() {
-                continue;
-            }
-
-            // IETF spec H.1 Criterion 3: -(3 * Z^2 + 4 * A) / (4 * g(Z)) is square in F
-            if !hz.legendre().is_qr() {
-                continue;
-            }
-
-            // IETF spec H.1 Criterion 4: At least one of g(Z) and g(-Z/2) is square in F
-            let gz_is_square = gz.legendre().is_qr();
-
-            let neg_z_half = -z_cand * inv0(C::BaseField::from(2u32));
-            let g_neg_z_half = g::<C>(neg_z_half);
-            let g_neg_z_half_is_square = g_neg_z_half.legendre().is_qr();
-
-            if gz_is_square || g_neg_z_half_is_square {
-                return z_cand;
-            }
-        }
-
-        ctr += 1;
-    }
-}
-
 /// Calculates the Weierstrass curve equation g(x) = x^3 + A*x + B
 fn g<C: SWCurveConfig>(x: C::BaseField) -> C::BaseField {
     x.square() * x + C::COEFF_A * x + C::COEFF_B
 }
 
-/// Implementation of inv0 function - returns 0 when input is 0, otherwise returns 1/x
-fn inv0<F: Field>(x: F) -> F {
-    x.inverse().unwrap_or(F::zero())
-}
-
 #[cfg(test)]
 mod tests {
     use ark_ec::CurveConfig;
+    use ark_ff::Zero;
 
     use super::*;
 
