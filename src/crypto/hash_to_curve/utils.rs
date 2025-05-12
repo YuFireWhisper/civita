@@ -1,12 +1,12 @@
 use ark_ec::CurveConfig;
 use ark_ff::{BigInteger, Field, PrimeField, Zero};
 
-pub trait Z<C: CurveConfig> {
-    const Z: C::BaseField;
+pub trait Z: CurveConfig {
+    const Z: Self::BaseField;
 }
 
-pub trait AbZero {
-    fn is_ab_zero() -> bool;
+pub trait L: CurveConfig {
+    const L: usize;
 }
 
 /// Implements the sgn0 function as defined in IETF spec 4.1

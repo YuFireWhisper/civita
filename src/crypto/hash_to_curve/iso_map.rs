@@ -1,5 +1,5 @@
-pub mod secp256k1;
+use ark_ec::short_weierstrass::SWCurveConfig;
 
-pub trait IsoMap {
-    fn iso_map(self) -> Self;
+pub trait IsoMap: SWCurveConfig {
+    fn iso_map(x: Self::BaseField, y: Self::BaseField) -> (Self::BaseField, Self::BaseField);
 }

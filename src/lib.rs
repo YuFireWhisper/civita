@@ -1,3 +1,5 @@
+#![feature(specialization)]
+
 pub mod behaviour;
 pub mod committee;
 pub mod constants;

@@ -106,8 +106,6 @@ mod tests {
 
     const SIMPLE_MSG: &[u8] = b"abc";
     const SIMPLE_DST: &[u8] = b"QUUX-V01-CS02-with-expander-SHA256";
-    const EMPTY_MSG: &[u8] = b"";
-    const MAX_VALID_DST_LEN: usize = 255;
     const MAX_VALID_OUTPUT_LEN: usize = 65535;
 
     #[test]

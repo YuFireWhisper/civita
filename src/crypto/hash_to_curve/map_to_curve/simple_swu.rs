@@ -1,15 +1,10 @@
-use ark_ec::short_weierstrass::{Affine, SWCurveConfig};
-use ark_ff::{Field, Zero};
+use ark_ff::Field;
 
-use crate::crypto::hash_to_curve::{
-    iso_map::IsoMap,
-    map_to_curve::{MapToCurve, Z},
-    utils::{inv0, sgn0, AbZero},
-};
+use crate::crypto::hash_to_curve::utils::{inv0, sgn0};
 
 /// Implements the Simplified Shallue-van de Woestijne-Ulas Method.
 /// Note: The curve's coefficients A and B can't be zero.
-fn map_to_curve_simple_swu<C: SWCurveConfig + Z<C>>(u: C::BaseField) -> Affine<C> {
+pub fn map_to_curve_simple_swu<F: Field>(u: F, a: F, b: F, z: F) -> (F, F) {
     // The pseudocode in RFC 9380
     // ```
     // 1. tv1 = inv0(Z^2 * u^4 + Z * u^2)
@@ -24,16 +19,17 @@ fn map_to_curve_simple_swu<C: SWCurveConfig + Z<C>>(u: C::BaseField) -> Affine<C
     // 10. return (x, y)
     // ```
 
-    let tv1 = inv0(C::Z.square() * u.square() * u.square() + C::Z * u.square());
-    let mut x1 = (-C::COEFF_B / C::COEFF_A) * (C::BaseField::ONE + tv1);
+    let tv1 = inv0(z.square() * u.square() * u.square() + z * u.square());
+
+    let mut x1 = (-b / a) * (F::ONE + tv1);
 
     if tv1.is_zero() {
-        x1 = C::COEFF_B / (C::Z * C::COEFF_A);
+        x1 = b / (z * a);
     }
 
-    let gx1 = x1.square() * x1 + C::COEFF_A * x1 + C::COEFF_B;
-    let x2 = C::Z * u.square() * x1;
-    let gx2 = x2.square() * x2 + C::COEFF_A * x2 + C::COEFF_B;
+    let gx1 = x1.square() * x1 + a * x1 + b;
+    let x2 = z * u.square() * x1;
+    let gx2 = x2.square() * x2 + a * x2 + b;
 
     let x;
     let mut y;
@@ -49,22 +45,5 @@ fn map_to_curve_simple_swu<C: SWCurveConfig + Z<C>>(u: C::BaseField) -> Affine<C
         y = -y;
     }
 
-    Affine::<C>::new(x, y)
-}
-
-impl<C> MapToCurve<C> for C
-where
-    C: SWCurveConfig + Z<C> + AbZero,
-    Affine<C>: IsoMap,
-{
-    type Output = Affine<C>;
-
-    fn map_to_curve(u: C::BaseField) -> Self::Output {
-        let point = map_to_curve_simple_swu::<C>(u);
-        if C::is_ab_zero() {
-            point.iso_map()
-        } else {
-            point
-        }
-    }
+    (x, y)
 }

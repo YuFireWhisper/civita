@@ -1,16 +1,34 @@
-use ark_ec::{AffineRepr, CurveConfig};
-use ark_ff::MontFp;
+use ark_ec::{short_weierstrass::SWCurveConfig, CurveConfig};
 
-use crate::crypto::hash_to_curve::utils::Z;
+use crate::crypto::hash_to_curve::{iso_map::IsoMap, utils::Z};
 
 pub mod simple_swu;
 
-pub trait MapToCurve<C: CurveConfig> {
-    type Output: AffineRepr<Config = C>;
-
-    fn map_to_curve(u: C::BaseField) -> Self::Output;
+pub trait AbZero: SWCurveConfig {
+    const A_PRIME: Self::BaseField;
+    const B_PRIME: Self::BaseField;
 }
 
-impl Z<ark_secp256k1::Config> for ark_secp256k1::Config {
-    const Z: ark_secp256k1::Fq = MontFp!("-11");
+pub trait MapToCurve: CurveConfig {
+    fn map_to_curve(u: Self::BaseField) -> (Self::BaseField, Self::BaseField);
+}
+
+impl<C> MapToCurve for C
+where
+    C: SWCurveConfig + Z,
+{
+    default fn map_to_curve(u: C::BaseField) -> (C::BaseField, C::BaseField) {
+        simple_swu::map_to_curve_simple_swu(u, C::COEFF_A, C::COEFF_B, C::Z)
+    }
+}
+
+impl<C> MapToCurve for C
+where
+    C: SWCurveConfig + Z + AbZero + IsoMap,
+{
+    fn map_to_curve(u: C::BaseField) -> (C::BaseField, C::BaseField) {
+        let (x_prime, y_prime) =
+            simple_swu::map_to_curve_simple_swu(u, Self::A_PRIME, Self::B_PRIME, C::Z);
+        C::iso_map(x_prime, y_prime)
+    }
 }

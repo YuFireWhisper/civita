@@ -1,7 +1,14 @@
 use ark_ff::{Field, MontFp};
 use ark_secp256k1::Fq;
 
-use crate::crypto::hash_to_curve::iso_map::IsoMap;
+use crate::crypto::{
+    hash_to_curve::{
+        iso_map::IsoMap,
+        map_to_curve::AbZero,
+        utils::{self, Z},
+    },
+    types::dst::Name,
+};
 
 const K_1_0: Fq = MontFp!("0x8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa8c7");
 const K_1_1: Fq = MontFp!("0x7d3d4c80bc321d5b9f315cea7fd44c5d595d2fc0bf63b92dfff1044f17c6581");
@@ -20,28 +27,57 @@ const K_4_0: Fq = MontFp!("0xfffffffffffffffffffffffffffffffffffffffffffffffffff
 const K_4_1: Fq = MontFp!("0x7a06534bb8bdb49fd5e9e6632722c2989467c1bfc8e8d978dfb425d2685c2573");
 const K_4_2: Fq = MontFp!("0x6484aa716545ca2cf3a70c3fa8fe337e0a3d21162f0d6299a7bf8192bfd2a76f");
 
-impl IsoMap for ark_secp256k1::Affine {
-    fn iso_map(mut self) -> Self {
+const A_PRIME: Fq = MontFp!("0x3f8731abdd661adca08a5558f0f5d272e953d363cb6f0e5d405447c01a444533");
+const B_PRIME: Fq = MontFp!("1771");
+
+const L: usize = 48;
+
+const Z: Fq = MontFp!("-11");
+
+const NAME: &[u8] = b"secp256k1";
+
+impl IsoMap for ark_secp256k1::Config {
+    fn iso_map(
+        mut x: Self::BaseField,
+        mut y: Self::BaseField,
+    ) -> (Self::BaseField, Self::BaseField) {
         // x_num = k_(1,3) * x'^3 + k_(1,2) * x'^2 + k_(1,1) * x' + k_(1,0)
-        let x_num =
-            K_1_3 * self.x.square() * self.x + K_1_2 * self.x.square() + K_1_1 * self.x + K_1_0;
+        let x_num = K_1_3 * x.square() * x + K_1_2 * x.square() + K_1_1 * x + K_1_0;
 
         // x_den = x'^2 + k_(2,1) * x' + k_(2,0)
-        let x_den = self.x.square() + K_2_1 * self.x + K_2_0;
+        let x_den = x.square() + K_2_1 * x + K_2_0;
 
         // y_num = k_(3,3) * x'^3 + k_(3,2) * x'^2 + k_(3,1) * x' + k_(3,0)
-        let y_num =
-            K_3_3 * self.x.square() * self.x + K_3_2 * self.x.square() + K_3_1 * self.x + K_3_0;
+        let y_num = K_3_3 * x.square() * x + K_3_2 * x.square() + K_3_1 * x + K_3_0;
 
         // y_den = x'^3 + k_(4,2) * x'^2 + k_(4,1) * x' + k_(4,0)
-        let y_den = self.x.square() * self.x + K_4_2 * self.x.square() + K_4_1 * self.x + K_4_0;
+        let y_den = x.square() * x + K_4_2 * x.square() + K_4_1 * x + K_4_0;
 
         // x = x_num / x_den
-        self.x = x_num / x_den;
+        x = x_num / x_den;
 
         // y = y' * y_num / y_den
-        self.y = self.y * y_num / y_den;
+        y = y * y_num / y_den;
 
-        self
+        (x, y)
+    }
+}
+
+impl AbZero for ark_secp256k1::Config {
+    const A_PRIME: Fq = A_PRIME;
+    const B_PRIME: Fq = B_PRIME;
+}
+
+impl Z for ark_secp256k1::Config {
+    const Z: Fq = Z;
+}
+
+impl utils::L for ark_secp256k1::Config {
+    const L: usize = L;
+}
+
+impl Name for ark_secp256k1::Config {
+    fn name() -> Vec<u8> {
+        NAME.to_vec()
     }
 }
