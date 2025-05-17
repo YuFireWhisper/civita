@@ -80,7 +80,7 @@ impl Serialize for Node {
     where
         S: serde::Serializer,
     {
-        let mut bytes = Vec::with_capacity((1 + self.children.len()) * 32);
+        let mut bytes = Vec::with_capacity(self.children.len() * 33);
 
         for (&index, child) in &self.children {
             bytes.push(index);
