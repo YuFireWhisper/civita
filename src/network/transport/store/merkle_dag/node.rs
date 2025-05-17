@@ -1,87 +1,122 @@
-use std::{collections::HashSet, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap};
 
-#[derive(Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug)]
+#[derive(Default)]
 pub struct Node {
-    data: Vec<u8>,
-    links: HashSet<[u8; 32]>,
-    parent: [u8; 32],
-    hash_cache: OnceLock<[u8; 32]>,
+    children: HashMap<u8, [u8; 32]>,
+    hash_cache: RefCell<Option<[u8; 32]>>,
 }
 
 impl Node {
-    pub fn new(data: Vec<u8>, parent: [u8; 32]) -> Self {
-        Node {
-            data,
-            links: HashSet::new(),
-            parent,
-            hash_cache: OnceLock::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn add_link(&mut self, link: [u8; 32]) -> bool {
-        let changed = self.links.insert(link);
-        if changed {
-            self.invalidate_hash();
-        }
-        changed
-    }
-
-    fn invalidate_hash(&mut self) {
-        self.hash_cache = OnceLock::new();
-    }
-
-    pub fn remove_link(&mut self, link: &[u8; 32]) -> bool {
-        let changed = self.links.remove(link);
-        if changed {
-            self.invalidate_hash();
-        }
-        changed
-    }
-
-    pub fn change_link(&mut self, old_link: [u8; 32], new_link: [u8; 32]) -> bool {
-        if old_link == new_link {
-            return false;
-        }
-
-        let changed = self.remove_link(&old_link) && self.add_link(new_link);
-        if changed {
-            self.invalidate_hash();
-        }
-        changed
+    pub fn insert(&mut self, index: u8, value: [u8; 32]) -> Option<[u8; 32]> {
+        self.hash_cache.borrow_mut().take();
+        self.children.insert(index, value)
     }
 
     pub fn hash(&self) -> [u8; 32] {
-        *self.hash_cache.get_or_init(|| {
-            let mut hasher = blake3::Hasher::new();
+        if let Some(hash) = self.hash_cache.borrow().as_ref() {
+            return *hash;
+        }
 
-            hasher.update(&self.data);
+        let bytes = self.to_vec();
+        let hash = blake3::hash(&bytes).into();
 
-            let mut sorted_links: Vec<&[u8; 32]> = self.links.iter().collect();
-            sorted_links.sort_unstable();
+        // Store the hash in the cache
+        *self.hash_cache.borrow_mut() = Some(hash);
 
-            for link in sorted_links {
-                hasher.update(link);
-            }
+        hash
+    }
 
-            hasher.finalize().into()
+    pub fn child(&self, index: &u8) -> Option<&[u8; 32]> {
+        self.children.get(index)
+    }
+
+    pub fn from_slice(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        Self::try_from(slice)
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.into()
+    }
+}
+
+impl From<Node> for Vec<u8> {
+    fn from(node: Node) -> Self {
+        (&node).into()
+    }
+}
+
+impl From<&Node> for Vec<u8> {
+    fn from(node: &Node) -> Self {
+        bincode::serde::encode_to_vec(node, bincode::config::standard())
+            .expect("Failed to serialize node")
+    }
+}
+
+impl TryFrom<Vec<u8>> for Node {
+    type Error = bincode::error::DecodeError;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(bytes.as_slice())
+    }
+}
+
+impl TryFrom<&[u8]> for Node {
+    type Error = bincode::error::DecodeError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map(|(node, _)| node)
+    }
+}
+
+impl Serialize for Node {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut bytes = Vec::with_capacity((1 + self.children.len()) * 32);
+
+        for (&index, child) in &self.children {
+            bytes.push(index);
+            bytes.extend_from_slice(child);
+        }
+
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for Node {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+
+        // 1 byte for index + 32 bytes for child
+        if bytes.len() % 33 != 0 {
+            return Err(serde::de::Error::custom("Invalid byte length"));
+        }
+
+        let mut children = HashMap::with_capacity(bytes.len() / 33);
+
+        for chunk in bytes.chunks_exact(33) {
+            let index = chunk[0];
+            let child: [u8; 32] = chunk[1..]
+                .try_into()
+                .map_err(|_| serde::de::Error::custom("Failed to convert slice to array"))?;
+            children.insert(index, child);
+        }
+
+        Ok(Node {
+            children,
+            hash_cache: RefCell::new(None),
         })
-    }
-
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn links(&self) -> &HashSet<[u8; 32]> {
-        &self.links
-    }
-
-    pub fn parent(&self) -> [u8; 32] {
-        self.parent
-    }
-
-    pub fn set_data(&mut self, data: Vec<u8>) {
-        self.data = data;
-        self.invalidate_hash();
     }
 }
 
@@ -89,177 +124,155 @@ impl Node {
 mod tests {
     use super::*;
 
-    const TEST_PARENT_HASH: [u8; 32] = [1; 32];
-    const TEST_LINK1: [u8; 32] = [2; 32];
-    const TEST_LINK2: [u8; 32] = [3; 32];
-
-    fn create_test_node() -> Node {
-        Node::new(vec![1, 2, 3], TEST_PARENT_HASH)
+    #[test]
+    fn new_node_is_empty() {
+        let node = Node::new();
+        assert_eq!(node.children.len(), 0);
+        assert!(node.hash_cache.borrow().is_none());
     }
 
     #[test]
-    fn new_creates_node_with_correct_initial_state() {
-        let data = vec![1, 2, 3];
-        let node = Node::new(data.clone(), TEST_PARENT_HASH);
+    fn insert_adds_child() {
+        let mut node = Node::new();
+        let value = [1u8; 32];
+        let result = node.insert(5, value);
 
-        assert_eq!(node.data(), &data);
-        assert_eq!(node.parent(), TEST_PARENT_HASH);
-        assert!(node.links().is_empty());
-        assert!(node.hash_cache.get().is_none());
+        assert!(result.is_none());
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children.get(&5), Some(&value));
     }
 
     #[test]
-    fn add_link_when_new_returns_true() {
-        let mut node = create_test_node();
+    fn insert_replaces_existing_child() {
+        let mut node = Node::new();
+        let old_value = [1u8; 32];
+        let new_value = [2u8; 32];
 
-        let result = node.add_link(TEST_LINK1);
+        node.insert(5, old_value);
+        let result = node.insert(5, new_value);
 
-        assert!(result);
-        assert!(node.links().contains(&TEST_LINK1));
-        assert!(node.hash_cache.get().is_none());
+        assert_eq!(result, Some(old_value));
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children.get(&5), Some(&new_value));
     }
 
     #[test]
-    fn add_link_when_duplicate_returns_false() {
-        let mut node = create_test_node();
-        node.add_link(TEST_LINK1);
+    fn insert_invalidates_hash_cache() {
+        let mut node = Node::new();
 
-        let result = node.add_link(TEST_LINK1);
+        let _ = node.hash();
+        assert!(node.hash_cache.borrow().is_some());
 
-        assert!(!result);
-        assert_eq!(node.links().len(), 1);
+        node.insert(5, [1u8; 32]);
+        assert!(node.hash_cache.borrow().is_none());
     }
 
     #[test]
-    fn remove_link_when_exists_returns_true() {
-        let mut node = create_test_node();
-        node.add_link(TEST_LINK1);
-        node.hash();
-
-        let result = node.remove_link(&TEST_LINK1);
-
-        assert!(result);
-        assert!(node.links().is_empty());
-        assert!(node.hash_cache.get().is_none());
-    }
-
-    #[test]
-    fn remove_link_when_not_exists_returns_false() {
-        let mut node = create_test_node();
-        let hash_before = node.hash();
-
-        let result = node.remove_link(&TEST_LINK1);
-
-        assert!(!result);
-        assert_eq!(node.hash(), hash_before);
-    }
-
-    #[test]
-    fn change_link_should_update_links_when_old_exists() {
-        let mut node = create_test_node();
-        node.add_link(TEST_LINK1);
-
-        let result = node.change_link(TEST_LINK1, TEST_LINK2);
-
-        assert!(result);
-        assert!(!node.links().contains(&TEST_LINK1));
-        assert!(node.links().contains(&TEST_LINK2));
-        assert!(node.hash_cache.get().is_none());
-    }
-
-    #[test]
-    fn change_link_should_return_false_when_old_not_exists() {
-        let mut node = create_test_node();
-
-        let result = node.change_link(TEST_LINK1, TEST_LINK2);
-
-        assert!(!result);
-        assert!(!node.links().contains(&TEST_LINK1));
-        assert!(!node.links().contains(&TEST_LINK2));
-    }
-
-    #[test]
-    fn change_link_when_same_returns_false() {
-        let mut node = create_test_node();
-        node.add_link(TEST_LINK1);
-        node.hash();
-
-        let result = node.change_link(TEST_LINK1, TEST_LINK1);
-
-        assert!(!result);
-        assert!(node.hash_cache.get().is_some());
-    }
-
-    #[test]
-    fn hash_calculation_should_be_deterministic() {
-        let mut node1 = create_test_node();
-        node1.add_link(TEST_LINK1);
-        node1.add_link(TEST_LINK2);
-
-        let hash1 = node1.hash();
-        let hash2 = node1.hash();
-
-        assert_eq!(hash1, hash2);
-
-        let mut node2 = create_test_node();
-        node2.add_link(TEST_LINK2);
-        node2.add_link(TEST_LINK1);
-
-        assert_eq!(node1.hash(), node2.hash());
-    }
-
-    #[test]
-    fn hash_should_cache_result() {
-        let node = create_test_node();
+    fn hash_returns_consistent_value() {
+        let mut node = Node::new();
+        node.insert(1, [1u8; 32]);
+        node.insert(2, [2u8; 32]);
 
         let hash1 = node.hash();
-        assert!(node.hash_cache.get().is_some());
+        let hash2 = node.hash();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn hash_uses_cached_value() {
+        let mut node = Node::new();
+        node.insert(1, [1u8; 32]);
+
+        let hash1 = node.hash();
+        assert!(node.hash_cache.borrow().is_some());
 
         let hash2 = node.hash();
         assert_eq!(hash1, hash2);
     }
 
     #[test]
-    fn set_data_should_update_and_invalidate_hash() {
-        let mut node = create_test_node();
-        let original_hash = node.hash();
+    fn child_returns_correct_value() {
+        let mut node = Node::new();
+        let value = [3u8; 32];
+        node.insert(7, value);
 
-        let new_data = vec![4, 5, 6];
-        node.set_data(new_data.clone());
-
-        assert_eq!(node.data(), &new_data);
-        assert!(node.hash_cache.get().is_none());
-        assert_ne!(node.hash(), original_hash);
+        assert_eq!(node.child(&7), Some(&value));
     }
 
     #[test]
-    fn invalidate_hash_should_clear_hash_cache() {
-        let mut node = create_test_node();
-        node.hash();
-
-        node.invalidate_hash();
-
-        assert!(node.hash_cache.get().is_none());
+    fn child_nonexistent_returns_none() {
+        let node = Node::new();
+        assert_eq!(node.child(&42), None);
     }
 
     #[test]
-    fn links_getter_returns_correct_reference() {
-        let mut node = create_test_node();
-        node.add_link(TEST_LINK1);
-        node.add_link(TEST_LINK2);
+    fn serialization_roundtrip_preserves_data() {
+        let mut original = Node::new();
+        original.insert(1, [1u8; 32]);
+        original.insert(5, [5u8; 32]);
 
-        let links = node.links();
+        let bytes = original.to_vec();
+        let deserialized = Node::from_slice(&bytes).unwrap();
 
-        assert_eq!(links.len(), 2);
-        assert!(links.contains(&TEST_LINK1));
-        assert!(links.contains(&TEST_LINK2));
+        assert_eq!(original.children.len(), deserialized.children.len());
+        assert_eq!(original.child(&1), deserialized.child(&1));
+        assert_eq!(original.child(&5), deserialized.child(&5));
     }
 
     #[test]
-    fn parent_getter_returns_correct_value() {
-        let node = create_test_node();
+    fn serialization_empty_node_works() {
+        let original = Node::new();
+        let bytes = original.to_vec();
+        let deserialized = Node::from_slice(&bytes).unwrap();
 
-        assert_eq!(node.parent(), TEST_PARENT_HASH);
+        assert_eq!(deserialized.children.len(), 0);
+    }
+
+    #[test]
+    fn serialization_ordering_is_consistent() {
+        let mut node1 = Node::new();
+        node1.insert(1, [1u8; 32]);
+        node1.insert(2, [2u8; 32]);
+
+        let mut node2 = Node::new();
+        node2.insert(2, [2u8; 32]);
+        node2.insert(1, [1u8; 32]);
+
+        let mut bytes1 = node1.to_vec();
+        let mut bytes2 = node2.to_vec();
+        bytes1.sort();
+        bytes2.sort();
+
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn invalid_data_deserialize_fails() {
+        let invalid_bytes = vec![1, 2, 3];
+        let result = Node::from_slice(&invalid_bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tryfrom_vec_works() {
+        let mut original = Node::new();
+        original.insert(42, [42u8; 32]);
+
+        let bytes = original.to_vec();
+        let deserialized = Node::try_from(bytes).unwrap();
+
+        assert_eq!(original.child(&42), deserialized.child(&42));
+    }
+
+    #[test]
+    fn from_into_vec_works() {
+        let mut node = Node::new();
+        node.insert(10, [10u8; 32]);
+
+        let vec1: Vec<u8> = (&node).into();
+        let vec2: Vec<u8> = node.into();
+
+        assert_eq!(vec1, vec2);
     }
 }
-
