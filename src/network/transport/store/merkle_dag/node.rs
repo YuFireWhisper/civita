@@ -80,10 +80,19 @@ impl Serialize for Node {
     where
         S: serde::Serializer,
     {
-        let mut bytes = Vec::with_capacity(self.children.len() * 33);
+        use serde::ser::Error;
 
-        for (&index, child) in &self.children {
+        let mut keys: Vec<u8> = self.children.keys().copied().collect();
+        keys.sort();
+
+        let mut bytes = Vec::with_capacity(keys.len() * 33);
+
+        for &index in &keys {
             bytes.push(index);
+            let child = self
+                .children
+                .get(&index)
+                .ok_or_else(|| S::Error::custom("Missing child"))?;
             bytes.extend_from_slice(child);
         }
 
@@ -239,12 +248,7 @@ mod tests {
         node2.insert(2, [2u8; 32]);
         node2.insert(1, [1u8; 32]);
 
-        let mut bytes1 = node1.to_vec();
-        let mut bytes2 = node2.to_vec();
-        bytes1.sort();
-        bytes2.sort();
-
-        assert_eq!(bytes1, bytes2);
+        assert_eq!(node1.to_vec(), node2.to_vec());
     }
 
     #[test]
