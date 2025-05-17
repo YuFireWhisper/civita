@@ -2,7 +2,7 @@ use std::{f64, fmt::Display, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::committee;
+use crate::{committee, network::transport::store::merkle_dag};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -31,6 +31,7 @@ pub enum Variant {
     Proposal,
     SelectionFactorKey,
     SelectionFactor,
+    MerkleDagNode,
     Raw,
 }
 
@@ -57,6 +58,8 @@ pub enum Payload {
 
     SelectionFactor(f64),
 
+    MerkleDagNode(Vec<u8>),
+
     Raw(Vec<u8>),
 }
 
@@ -82,6 +85,7 @@ impl Payload {
             Payload::Proposal(_) => Variant::Proposal,
             Payload::SelectionFactorKey(_) => Variant::SelectionFactorKey,
             Payload::SelectionFactor(_) => Variant::SelectionFactor,
+            Payload::MerkleDagNode(_) => Variant::MerkleDagNode,
             Payload::Raw(_) => Variant::Raw,
         }
     }
@@ -97,6 +101,7 @@ impl Display for Variant {
             Variant::Proposal => write!(f, "Proposal"),
             Variant::SelectionFactorKey => write!(f, "SelectionFactorKey"),
             Variant::SelectionFactor => write!(f, "SelectionFactor"),
+            Variant::MerkleDagNode => write!(f, "MerkleDagNode"),
             Variant::Raw => write!(f, "Raw"),
         }
     }
@@ -156,6 +161,42 @@ impl TryFrom<Payload> for f64 {
                 EXPECTED_MESSAGE.to_string(),
                 payload.variant(),
             ))
+        }
+    }
+}
+
+impl TryFrom<Payload> for merkle_dag::Node {
+    type Error = Error;
+
+    fn try_from(payload: Payload) -> Result<Self> {
+        const EXPECTED_MESSAGE: &str = "Variant::MerkleDagNode";
+
+        if let Payload::MerkleDagNode(data) = payload {
+            let node = merkle_dag::Node::from_slice(&data)
+                .map_err(|e| Error::Conversion(e.to_string()))?;
+            Ok(node)
+        } else {
+            Err(Error::VariantFieldMismatch(
+                EXPECTED_MESSAGE.to_string(),
+                payload.variant(),
+            ))
+        }
+    }
+}
+
+impl TryFrom<Payload> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(payload: Payload) -> Result<Self> {
+        const EXPECTED_MESSAGE: &str = "Variant::MerkleDagNode, Variant::Raw";
+
+        match payload {
+            Payload::MerkleDagNode(data) => Ok(data),
+            Payload::Raw(data) => Ok(data),
+            _ => Err(Error::VariantFieldMismatch(
+                EXPECTED_MESSAGE.to_string(),
+                payload.variant(),
+            )),
         }
     }
 }
