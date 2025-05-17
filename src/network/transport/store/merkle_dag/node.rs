@@ -27,7 +27,6 @@ impl Node {
         let bytes = self.to_vec();
         let hash = blake3::hash(&bytes).into();
 
-        // Store the hash in the cache
         *self.hash_cache.borrow_mut() = Some(hash);
 
         hash
