@@ -2,11 +2,17 @@ use std::{cell::RefCell, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::network::transport::store::merkle_dag::{BanchingFactor, HashArray};
+
+const INDEX_SIZE: usize = std::mem::size_of::<BanchingFactor>();
+const HASH_SIZE: usize = std::mem::size_of::<HashArray>();
+const BASE_SIZE: usize = INDEX_SIZE + HASH_SIZE;
+
 #[derive(Debug)]
 #[derive(Default)]
 pub struct Node {
-    children: HashMap<u8, [u8; 32]>,
-    hash_cache: RefCell<Option<[u8; 32]>>,
+    children: HashMap<BanchingFactor, HashArray>,
+    hash_cache: RefCell<Option<HashArray>>,
 }
 
 impl Node {
@@ -14,12 +20,12 @@ impl Node {
         Self::default()
     }
 
-    pub fn insert(&mut self, index: u8, value: [u8; 32]) -> Option<[u8; 32]> {
+    pub fn insert(&mut self, index: BanchingFactor, value: HashArray) -> Option<HashArray> {
         self.hash_cache.borrow_mut().take();
         self.children.insert(index, value)
     }
 
-    pub fn hash(&self) -> [u8; 32] {
+    pub fn hash(&self) -> HashArray {
         if let Some(hash) = self.hash_cache.borrow().as_ref() {
             return *hash;
         }
@@ -32,7 +38,7 @@ impl Node {
         hash
     }
 
-    pub fn child(&self, index: &u8) -> Option<&[u8; 32]> {
+    pub fn child(&self, index: &BanchingFactor) -> Option<&HashArray> {
         self.children.get(index)
     }
 
@@ -81,13 +87,14 @@ impl Serialize for Node {
     {
         use serde::ser::Error;
 
-        let mut keys: Vec<u8> = self.children.keys().copied().collect();
+        let mut keys: Vec<u16> = self.children.keys().copied().collect();
+
         keys.sort();
 
-        let mut bytes = Vec::with_capacity(keys.len() * 33);
+        let mut bytes = Vec::with_capacity(keys.len() * BASE_SIZE);
 
         for &index in &keys {
-            bytes.push(index);
+            bytes.extend(index.to_be_bytes());
             let child = self
                 .children
                 .get(&index)
@@ -106,16 +113,16 @@ impl<'de> Deserialize<'de> for Node {
     {
         let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
 
-        // 1 byte for index + 32 bytes for child
-        if bytes.len() % 33 != 0 {
+        if bytes.len() % BASE_SIZE != 0 {
             return Err(serde::de::Error::custom("Invalid byte length"));
         }
 
-        let mut children = HashMap::with_capacity(bytes.len() / 33);
+        let mut children = HashMap::with_capacity(bytes.len() / BASE_SIZE);
 
-        for chunk in bytes.chunks_exact(33) {
-            let index = chunk[0];
-            let child: [u8; 32] = chunk[1..]
+        for chunk in bytes.chunks_exact(BASE_SIZE) {
+            let index_bytes = std::array::from_fn(|i| chunk[i]);
+            let index = u16::from_be_bytes(index_bytes);
+            let child: HashArray = chunk[INDEX_SIZE..]
                 .try_into()
                 .map_err(|_| serde::de::Error::custom("Failed to convert slice to array"))?;
             children.insert(index, child);

@@ -18,6 +18,12 @@ pub use node::Node;
 
 type Result<T> = std::result::Result<T, Error>;
 
+type BanchingFactor = u16;
+type KeyArray = [BanchingFactor; DEPTH];
+type HashArray = [u8; 32];
+
+const DEPTH: usize = 16;
+
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -37,8 +43,8 @@ pub enum Error {
 #[derive(Debug)]
 pub struct MerkleDag {
     transport: Arc<Transport>,
-    root_hash: [u8; 32],
-    nodes: HashMap<[u8; 32], Node>,
+    root_hash: HashArray,
+    nodes: HashMap<HashArray, Node>,
 }
 
 impl MerkleDag {
@@ -60,8 +66,8 @@ impl MerkleDag {
         }
     }
 
-    pub async fn insert(&mut self, key: [u8; 32], value: [u8; 32]) -> Result<()> {
-        let mut path = Vec::with_capacity(32);
+    pub async fn insert(&mut self, key: KeyArray, value: HashArray) -> Result<()> {
+        let mut path = Vec::with_capacity(DEPTH);
 
         let root = self
             .nodes
@@ -70,7 +76,7 @@ impl MerkleDag {
 
         path.push(root);
 
-        for index in key.iter().take(31) {
+        for index in key.iter().take(DEPTH - 1) {
             let current = path.last().expect("Path should not be empty");
 
             let child_hash = match current.child(index) {
@@ -91,8 +97,9 @@ impl MerkleDag {
         Ok(())
     }
 
-    async fn fetch_node(&self, hash: [u8; 32]) -> Result<Node> {
+    async fn fetch_node(&self, hash: HashArray) -> Result<Node> {
         let key = kad::Key::ByHash(hash);
+
         self.transport
             .get_or_error(key)
             .await?
@@ -100,7 +107,7 @@ impl MerkleDag {
             .map_err(Error::from)
     }
 
-    fn fill_nodes(&mut self, key: [u8; 32], value: [u8; 32], mut path: Vec<Node>) {
+    fn fill_nodes(&mut self, key: KeyArray, value: HashArray, mut path: Vec<Node>) {
         let mut child_hash = value;
 
         for index in key.iter().skip(path.len()).rev() {
@@ -118,11 +125,11 @@ impl MerkleDag {
             node.insert(key[last_index], child_hash);
         }
 
-        let indices: Vec<u8> = key.into_iter().take(path.len()).collect();
+        let indices: Vec<BanchingFactor> = key.into_iter().take(path.len()).collect();
         self.update_nodes(path, indices);
     }
 
-    fn update_nodes(&mut self, mut path: Vec<Node>, indices: Vec<u8>) {
+    fn update_nodes(&mut self, mut path: Vec<Node>, indices: Vec<BanchingFactor>) {
         for index in indices.into_iter().rev().skip(1) {
             let node = path.pop().expect("Path should not be empty");
             let node_hash = node.hash();
@@ -141,7 +148,7 @@ impl MerkleDag {
             .insert(hash, path.pop().expect("Path should not be empty"));
     }
 
-    pub async fn get(&mut self, key: [u8; 32]) -> Option<[u8; 32]> {
+    pub async fn get(&mut self, key: KeyArray) -> Option<HashArray> {
         let mut current = self.root_hash;
 
         for index in key.iter() {
@@ -160,7 +167,7 @@ impl MerkleDag {
         Some(current)
     }
 
-    async fn ensure_node_exists(&mut self, hash: [u8; 32]) -> bool {
+    async fn ensure_node_exists(&mut self, hash: HashArray) -> bool {
         if self.nodes.contains_key(&hash) {
             return true;
         }
@@ -174,10 +181,10 @@ impl MerkleDag {
         true
     }
 
-    pub async fn contains(&mut self, value: [u8; 32]) -> bool {
+    pub async fn contains(&mut self, key: KeyArray) -> bool {
         let mut current = self.root_hash;
 
-        for index in value.iter() {
+        for index in key.iter() {
             if !self.ensure_node_exists(current).await {
                 return false;
             }
@@ -201,27 +208,40 @@ mod tests {
     use crate::network::transport::{
         self,
         protocols::kad::{self, Key},
-        store::merkle_dag::{MerkleDag, Node},
+        store::merkle_dag::{BanchingFactor, HashArray, KeyArray, MerkleDag, Node, DEPTH},
         MockTransport,
     };
 
-    fn test_pair(key_val: u8, value_val: u8) -> ([u8; 32], [u8; 32]) {
-        let mut key = [0u8; 32];
-        let mut value = [0u8; 32];
-
-        key[0] = key_val;
-        value[0] = value_val;
+    fn test_pair(key_val: BanchingFactor, value_val: u8) -> (KeyArray, HashArray) {
+        let key = test_key(key_val);
+        let value = test_value(value_val);
 
         (key, value)
     }
 
+    fn test_key(key_val: BanchingFactor) -> KeyArray {
+        let mut key = KeyArray::default();
+
+        key[0] = key_val;
+        key
+    }
+
+    fn test_value(value_val: u8) -> HashArray {
+        let mut value = HashArray::default();
+
+        value[0] = value_val;
+        value
+    }
+
     #[tokio::test]
     async fn true_after_insert() {
+        const KEY_VAL: BanchingFactor = 1;
+        const VALUE_VAL: u8 = 10;
+
         let transport = Arc::new(MockTransport::default());
         let mut dag = MerkleDag::new(transport);
 
-        let key = [0u8; 32];
-        let value = [1u8; 32];
+        let (key, value) = test_pair(KEY_VAL, VALUE_VAL);
 
         dag.insert(key, value).await.unwrap();
 
@@ -230,11 +250,13 @@ mod tests {
 
     #[tokio::test]
     async fn get_same_value_after_insert() {
+        const KEY_VAL: BanchingFactor = 1;
+        const VALUE_VAL: u8 = 10;
+
         let transport = Arc::new(MockTransport::default());
         let mut dag = MerkleDag::new(transport);
 
-        let key = [0u8; 32];
-        let value = [1u8; 32];
+        let (key, value) = test_pair(KEY_VAL, VALUE_VAL);
 
         dag.insert(key, value).await.unwrap();
 
@@ -245,10 +267,12 @@ mod tests {
 
     #[tokio::test]
     async fn empty_dag_returns_none_for_get() {
+        const KEY_VAL: BanchingFactor = 1;
+
         let transport = Arc::new(MockTransport::default());
         let mut dag = MerkleDag::new(transport);
 
-        let key = [0u8; 32];
+        let key = test_key(KEY_VAL);
 
         let result = dag.get(key).await;
 
@@ -257,15 +281,18 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_key_returns_none() {
+        const KEY_VAL: BanchingFactor = 1;
+        const VALUE_VAL: u8 = 10;
+        const NONEXISTENT_KEY: BanchingFactor = KEY_VAL + 1;
+
         let transport = Arc::new(MockTransport::default());
         let mut dag = MerkleDag::new(transport);
 
-        let key = [0u8; 32];
-        let value = [1u8; 32];
+        let (key, value) = test_pair(KEY_VAL, VALUE_VAL);
 
         dag.insert(key, value).await.unwrap();
 
-        let nonexistent_key = [2u8; 32];
+        let nonexistent_key: KeyArray = [NONEXISTENT_KEY; DEPTH];
         let result = dag.get(nonexistent_key).await;
 
         assert!(result.is_none());
@@ -273,12 +300,16 @@ mod tests {
 
     #[tokio::test]
     async fn insert_same_key_twice_updates_value() {
+        const KEY_VAL: BanchingFactor = 1;
+        const VALUE1_VAL: u8 = 10;
+        const VALUE2_VAL: u8 = 20;
+
         let transport = Arc::new(MockTransport::default());
         let mut dag = MerkleDag::new(transport);
 
-        let key = [0u8; 32];
-        let value1 = [1u8; 32];
-        let value2 = [2u8; 32];
+        let key = test_key(KEY_VAL);
+        let value1 = test_value(VALUE1_VAL);
+        let value2 = test_value(VALUE2_VAL);
 
         dag.insert(key, value1).await.unwrap();
         assert_eq!(dag.get(key).await.unwrap(), value1);
@@ -308,15 +339,17 @@ mod tests {
 
     #[tokio::test]
     async fn deep_path_creation_works() {
+        const VALUE: u8 = 42;
+
         let transport = Arc::new(MockTransport::default());
         let mut dag = MerkleDag::new(transport);
 
-        let mut key = [0u8; 32];
+        let mut key = KeyArray::default();
         key.iter_mut().enumerate().for_each(|(i, byte)| {
-            *byte = i as u8;
+            *byte = i as BanchingFactor;
         });
 
-        let value = [0xFF; 32];
+        let value = test_value(VALUE);
 
         dag.insert(key, value).await.unwrap();
 
@@ -326,17 +359,19 @@ mod tests {
 
     #[tokio::test]
     async fn complex_tree_navigation_works() {
+        const KEY_VAL1: BanchingFactor = 1;
+        const KEY_VAL2: BanchingFactor = 2;
+        const VALUE_VAL1: u8 = 10;
+        const VALUE_VAL2: u8 = 20;
+
         let transport = Arc::new(MockTransport::default());
         let mut dag = MerkleDag::new(transport);
 
-        let mut key1 = [0u8; 32];
-        let mut key2 = [0u8; 32];
+        let key1 = test_key(KEY_VAL1);
+        let key2 = test_key(KEY_VAL2);
 
-        key1[15] = 1;
-        key2[15] = 2;
-
-        let value1 = [1u8; 32];
-        let value2 = [2u8; 32];
+        let value1 = test_value(VALUE_VAL1);
+        let value2 = test_value(VALUE_VAL2);
 
         dag.insert(key1, value1).await.unwrap();
         dag.insert(key2, value2).await.unwrap();
@@ -347,29 +382,36 @@ mod tests {
 
     #[tokio::test]
     async fn transport_error_propagates_during_insert() {
+        const ERROR_VAL: u8 = 42;
+        const KEY_VAL: BanchingFactor = 1;
+        const VALUE_VAL: u8 = 10;
+
         let mut transport = MockTransport::default();
 
-        let error_hash = [0xAA; 32];
+        let error_hash = test_value(ERROR_VAL);
         transport
             .expect_get_or_error()
             .withf(move |key| matches!(key, Key::ByHash(hash) if hash == &error_hash))
             .returning(|_| Err(transport::Error::MockError));
 
         let mut root = Node::new();
-        root.insert(1, error_hash);
+        root.insert(KEY_VAL, error_hash);
 
         let transport = Arc::new(transport);
         let mut dag = MerkleDag::new_with_root(transport, root);
 
-        let mut key = [0u8; 32];
-        key[0] = 1;
+        let key = test_key(KEY_VAL);
+        let value = test_value(VALUE_VAL);
 
-        let result = dag.insert(key, [0u8; 32]).await;
+        let result = dag.insert(key, value).await;
+
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn failed_node_fetch_returns_false_for_contains() {
+        const KEY_VAL: BanchingFactor = 1;
+
         let mut transport = MockTransport::default();
 
         transport
@@ -379,11 +421,16 @@ mod tests {
         let transport = Arc::new(transport);
         let mut dag = MerkleDag::new(transport);
 
-        assert!(!dag.contains([0xBB; 32]).await);
+        let key = test_key(KEY_VAL);
+
+        assert!(!dag.contains(key).await);
     }
 
     #[tokio::test]
     async fn new_with_root_initializes_properly() {
+        const KEY_VAL: BanchingFactor = 1;
+        const VALUE_VAL: u8 = 10;
+
         let transport = Arc::new(MockTransport::default());
         let root = Node::new();
         let root_hash = root.hash();
@@ -392,8 +439,7 @@ mod tests {
 
         assert_eq!(dag.root_hash, root_hash);
 
-        let key = [0u8; 32];
-        let value = [1u8; 32];
+        let (key, value) = test_pair(KEY_VAL, VALUE_VAL);
 
         dag.insert(key, value).await.unwrap();
         assert_eq!(dag.get(key).await.unwrap(), value);
@@ -401,24 +447,28 @@ mod tests {
 
     #[tokio::test]
     async fn kad_payload_error_propagates() {
+        const HASH_VAL: u8 = 42;
+        const KEY_VAL: BanchingFactor = 1;
+        const VALUE_VAL: u8 = 10;
+
         let mut transport = MockTransport::default();
 
-        let hash = [0xCC; 32];
+        let hash = test_value(HASH_VAL);
         transport
             .expect_get_or_error()
             .withf(move |key| matches!(key, Key::ByHash(h) if h == &hash))
             .returning(|_| Ok(kad::Payload::MerkleDagNode(vec![2, 1, 2])));
 
         let mut root = Node::new();
-        root.insert(1, hash);
+        root.insert(KEY_VAL, hash);
 
         let transport = Arc::new(transport);
         let mut dag = MerkleDag::new_with_root(transport, root);
 
-        let mut key = [0u8; 32];
-        key[0] = 1;
+        let key = test_key(KEY_VAL);
+        let value = test_value(VALUE_VAL);
 
-        let result = dag.insert(key, [0u8; 32]).await;
+        let result = dag.insert(key, value).await;
         assert!(
             matches!(result, Err(super::Error::KadPayload(_))),
             "Expected KadPayload error, got: {result:?}"
