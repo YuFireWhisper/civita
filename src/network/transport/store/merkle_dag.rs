@@ -1,4 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+
+use bincode::error::DecodeError;
 
 use crate::network::transport::{
     self,
@@ -13,7 +15,6 @@ use crate::network::transport::MockTransport as Transport;
 
 pub mod node;
 
-use bincode::error::DecodeError;
 pub use node::Node;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -43,8 +44,7 @@ pub enum Error {
 #[derive(Debug)]
 pub struct MerkleDag {
     transport: Arc<Transport>,
-    root_hash: HashArray,
-    nodes: HashMap<HashArray, Node>,
+    root: Node,
 }
 
 impl MerkleDag {
@@ -55,145 +55,76 @@ impl MerkleDag {
     }
 
     pub fn new_with_root(transport: Arc<Transport>, root: Node) -> Self {
-        let mut nodes = HashMap::new();
-        let root_hash = root.hash();
-        nodes.insert(root_hash, root);
-
-        Self {
-            transport,
-            root_hash,
-            nodes,
-        }
+        Self { transport, root }
     }
 
     pub async fn insert(&mut self, key: KeyArray, value: HashArray) -> Result<()> {
-        let mut path = Vec::with_capacity(DEPTH);
+        let transport = self.transport.clone();
+        let mut current = &mut self.root;
 
-        let root = self
-            .nodes
-            .remove(&self.root_hash)
-            .expect("Root node should exist");
+        for (depth, &index) in key.iter().enumerate() {
+            if depth == DEPTH - 1 {
+                let value_node = Node::new_with_hash(value);
+                current.insert(index, value_node);
+                break;
+            }
 
-        path.push(root);
+            if let Some(child) = current.child_mut(&index) {
+                if child.children().is_empty() {
+                    let mut node = Self::fetch_node(&transport, child.hash()).await?;
+                    child.insert_with_iter(node.children_take());
+                }
+            }
 
-        for index in key.iter().take(DEPTH - 1) {
-            let current = path.last().expect("Path should not be empty");
-
-            let child_hash = match current.child(index) {
-                Some(child) => child,
-                None => break,
-            };
-
-            let child = match self.nodes.remove(child_hash) {
-                Some(child) => child,
-                None => self.fetch_node(*child_hash).await?,
-            };
-
-            path.push(child);
+            current = current.children_mut().entry(index).or_default();
         }
 
-        self.fill_nodes(key, value, path);
+        self.root.update_hash();
 
         Ok(())
     }
 
-    async fn fetch_node(&self, hash: HashArray) -> Result<Node> {
-        let key = kad::Key::ByHash(hash);
-
-        self.transport
-            .get_or_error(key)
+    async fn fetch_node(transport: &Arc<Transport>, hash: HashArray) -> Result<Node> {
+        Ok(transport
+            .get_or_error(kad::Key::ByHash(hash))
             .await?
-            .extract::<Node>(Variant::MerkleDagNode)
-            .map_err(Error::from)
-    }
-
-    fn fill_nodes(&mut self, key: KeyArray, value: HashArray, mut path: Vec<Node>) {
-        let mut child_hash = value;
-
-        for index in key.iter().skip(path.len()).rev() {
-            let mut node = Node::new();
-            node.insert(*index, child_hash);
-
-            let hash = node.hash();
-            child_hash = hash;
-            self.nodes.insert(hash, node);
-        }
-
-        if !path.is_empty() {
-            let last_index = path.len() - 1;
-            let node = path.last_mut().expect("Path should not be empty");
-            node.insert(key[last_index], child_hash);
-        }
-
-        let indices: Vec<BanchingFactor> = key.into_iter().take(path.len()).collect();
-        self.update_nodes(path, indices);
-    }
-
-    fn update_nodes(&mut self, mut path: Vec<Node>, indices: Vec<BanchingFactor>) {
-        for index in indices.into_iter().rev().skip(1) {
-            let node = path.pop().expect("Path should not be empty");
-            let node_hash = node.hash();
-
-            self.nodes.insert(node_hash, node);
-
-            if let Some(parent) = path.last_mut() {
-                parent.insert(index, node_hash);
-            }
-        }
-
-        let hash = path.last().expect("Path should not be empty").hash();
-
-        self.root_hash = hash;
-        self.nodes
-            .insert(hash, path.pop().expect("Path should not be empty"));
+            .extract::<Node>(Variant::MerkleDagNode)?)
     }
 
     pub async fn get(&mut self, key: KeyArray) -> Option<HashArray> {
-        let mut current = self.root_hash;
+        let mut current = &mut self.root;
 
-        for index in key.iter() {
-            if !self.ensure_node_exists(current).await {
+        for (depth, &index) in key.iter().enumerate() {
+            if let Some(child) = current.child_mut(&index) {
+                if child.children().is_empty() && depth != DEPTH - 1 {
+                    let mut node = Self::fetch_node(&self.transport, child.hash())
+                        .await
+                        .expect("Node should exist");
+                    child.children_mut().extend(node.children_take());
+                }
+                current = child;
+            } else {
                 return None;
             }
-
-            let node = self.nodes.get(&current).expect("Node should exist");
-
-            match node.child(index) {
-                Some(child) => current = *child,
-                None => return None,
-            }
         }
 
-        Some(current)
-    }
-
-    async fn ensure_node_exists(&mut self, hash: HashArray) -> bool {
-        if self.nodes.contains_key(&hash) {
-            return true;
-        }
-
-        let node = match self.fetch_node(hash).await {
-            Ok(node) => node,
-            Err(_) => return false,
-        };
-
-        self.nodes.insert(hash, node);
-        true
+        Some(current.hash())
     }
 
     pub async fn contains(&mut self, key: KeyArray) -> bool {
-        let mut current = self.root_hash;
+        let mut current = &mut self.root;
 
-        for index in key.iter() {
-            if !self.ensure_node_exists(current).await {
+        for (depth, &index) in key.iter().enumerate() {
+            if let Some(child) = current.child_mut(&index) {
+                if child.children().is_empty() && depth != DEPTH - 1 {
+                    let mut node = Self::fetch_node(&self.transport, child.hash())
+                        .await
+                        .expect("Node should exist");
+                    child.children_mut().extend(node.children_take());
+                }
+                current = child;
+            } else {
                 return false;
-            }
-
-            let node = self.nodes.get(&current).expect("Node should exist");
-
-            match node.child(index) {
-                Some(child) => current = *child,
-                None => return false,
             }
         }
 
@@ -395,7 +326,8 @@ mod tests {
             .returning(|_| Err(transport::Error::MockError));
 
         let mut root = Node::new();
-        root.insert(KEY_VAL, error_hash);
+        let error_node = Node::new_with_hash(error_hash);
+        root.insert(KEY_VAL, error_node);
 
         let transport = Arc::new(transport);
         let mut dag = MerkleDag::new_with_root(transport, root);
@@ -437,7 +369,7 @@ mod tests {
 
         let mut dag = MerkleDag::new_with_root(transport, root);
 
-        assert_eq!(dag.root_hash, root_hash);
+        assert_eq!(dag.root.hash(), root_hash);
 
         let (key, value) = test_pair(KEY_VAL, VALUE_VAL);
 
@@ -460,7 +392,8 @@ mod tests {
             .returning(|_| Ok(kad::Payload::MerkleDagNode(vec![2, 1, 2])));
 
         let mut root = Node::new();
-        root.insert(KEY_VAL, hash);
+        let hash_node = Node::new_with_hash(hash);
+        root.insert(KEY_VAL, hash_node);
 
         let transport = Arc::new(transport);
         let mut dag = MerkleDag::new_with_root(transport, root);

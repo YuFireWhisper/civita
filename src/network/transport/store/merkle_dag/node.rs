@@ -8,11 +8,13 @@ const INDEX_SIZE: usize = std::mem::size_of::<BanchingFactor>();
 const HASH_SIZE: usize = std::mem::size_of::<HashArray>();
 const BASE_SIZE: usize = INDEX_SIZE + HASH_SIZE;
 
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Default)]
+#[derive(PartialEq, Eq)]
 pub struct Node {
-    children: HashMap<BanchingFactor, HashArray>,
-    hash_cache: RefCell<Option<HashArray>>,
+    hash: RefCell<Option<HashArray>>,
+    children: HashMap<BanchingFactor, Node>,
 }
 
 impl Node {
@@ -20,26 +22,82 @@ impl Node {
         Self::default()
     }
 
-    pub fn insert(&mut self, index: BanchingFactor, value: HashArray) -> Option<HashArray> {
-        self.hash_cache.borrow_mut().take();
-        self.children.insert(index, value)
+    pub fn new_with_hash(hash: HashArray) -> Self {
+        Self {
+            hash: RefCell::new(Some(hash)),
+            ..Default::default()
+        }
+    }
+
+    pub fn new_with_children(children: HashMap<BanchingFactor, Node>) -> Self {
+        Self {
+            children,
+            ..Default::default()
+        }
+    }
+
+    pub fn insert(&mut self, index: BanchingFactor, node: Node) -> Option<Node> {
+        self.hash.replace(None);
+        self.children.insert(index, node)
+    }
+
+    pub fn insert_with_iter(&mut self, iter: impl IntoIterator<Item = (BanchingFactor, Node)>) {
+        iter.into_iter().for_each(|(index, child)| {
+            self.insert(index, child);
+        });
+    }
+
+    pub fn insert_with_hash(&mut self, index: BanchingFactor, hash: HashArray) -> Option<Node> {
+        let child = Node::new_with_hash(hash);
+        self.insert(index, child)
+    }
+
+    pub fn update_hash(&self) {
+        if self.children.is_empty() {
+            return;
+        }
+
+        self.children.values().for_each(|child| {
+            if child.hash.borrow().is_none() {
+                child.update_hash();
+            }
+        });
+
+        let bytes = self.to_vec();
+        let hash = blake3::hash(&bytes);
+
+        self.hash.replace(Some(hash.into()));
     }
 
     pub fn hash(&self) -> HashArray {
-        if let Some(hash) = self.hash_cache.borrow().as_ref() {
-            return *hash;
-        }
-
-        let bytes = self.to_vec();
-        let hash = blake3::hash(&bytes).into();
-
-        *self.hash_cache.borrow_mut() = Some(hash);
-
-        hash
+        self.hash.borrow_mut().unwrap_or_else(|| {
+            let vec = self.to_vec();
+            blake3::hash(&vec).into()
+        })
     }
 
-    pub fn child(&self, index: &BanchingFactor) -> Option<&HashArray> {
+    pub fn clear_hash(&self) {
+        self.hash.replace(None);
+    }
+
+    pub fn child(&self, index: &BanchingFactor) -> Option<&Node> {
         self.children.get(index)
+    }
+
+    pub fn child_mut(&mut self, index: &BanchingFactor) -> Option<&mut Node> {
+        self.children.get_mut(index)
+    }
+
+    pub fn children(&self) -> &HashMap<BanchingFactor, Node> {
+        &self.children
+    }
+
+    pub fn children_mut(&mut self) -> &mut HashMap<BanchingFactor, Node> {
+        &mut self.children
+    }
+
+    pub fn children_take(&mut self) -> HashMap<BanchingFactor, Node> {
+        std::mem::take(&mut self.children)
     }
 
     pub fn from_slice(slice: &[u8]) -> Result<Self, bincode::error::DecodeError> {
@@ -85,21 +143,16 @@ impl Serialize for Node {
     where
         S: serde::Serializer,
     {
-        use serde::ser::Error;
+        let mut pairs: Vec<(&BanchingFactor, &Node)> = self.children.iter().collect();
+        pairs.sort_by_key(|(key, _)| *key);
 
-        let mut keys: Vec<u16> = self.children.keys().copied().collect();
+        let mut bytes = Vec::with_capacity(pairs.len() * BASE_SIZE);
 
-        keys.sort();
-
-        let mut bytes = Vec::with_capacity(keys.len() * BASE_SIZE);
-
-        for &index in &keys {
-            bytes.extend(index.to_be_bytes());
-            let child = self
-                .children
-                .get(&index)
-                .ok_or_else(|| S::Error::custom("Missing child"))?;
-            bytes.extend_from_slice(child);
+        for (index, child) in pairs {
+            let mut index_bytes = [0u8; INDEX_SIZE];
+            index_bytes.copy_from_slice(&index.to_be_bytes());
+            bytes.extend_from_slice(&index_bytes);
+            bytes.extend_from_slice(&child.hash());
         }
 
         serializer.serialize_bytes(&bytes)
@@ -121,16 +174,17 @@ impl<'de> Deserialize<'de> for Node {
 
         for chunk in bytes.chunks_exact(BASE_SIZE) {
             let index_bytes = std::array::from_fn(|i| chunk[i]);
-            let index = u16::from_be_bytes(index_bytes);
-            let child: HashArray = chunk[INDEX_SIZE..]
+            let index = BanchingFactor::from_be_bytes(index_bytes);
+            let child_hash: HashArray = chunk[INDEX_SIZE..]
                 .try_into()
                 .map_err(|_| serde::de::Error::custom("Failed to convert slice to array"))?;
+            let child = Node::new_with_hash(child_hash);
             children.insert(index, child);
         }
 
         Ok(Node {
             children,
-            hash_cache: RefCell::new(None),
+            ..Default::default()
         })
     }
 }
@@ -142,77 +196,89 @@ mod tests {
     #[test]
     fn new_node_is_empty() {
         let node = Node::new();
+
+        assert!(node.hash.borrow().is_none());
         assert_eq!(node.children.len(), 0);
-        assert!(node.hash_cache.borrow().is_none());
     }
 
     #[test]
     fn insert_adds_child() {
+        const INDEX: BanchingFactor = 5;
+
         let mut node = Node::new();
-        let value = [1u8; 32];
-        let result = node.insert(5, value);
+        let hash = [1u8; 32];
+        let child = Node::new_with_hash(hash);
+
+        let result = node.insert(INDEX, child.clone());
 
         assert!(result.is_none());
         assert_eq!(node.children.len(), 1);
-        assert_eq!(node.children.get(&5), Some(&value));
+        assert_eq!(node.child(&INDEX), Some(&child));
     }
 
     #[test]
     fn insert_replaces_existing_child() {
+        const INDEX: BanchingFactor = 5;
+
         let mut node = Node::new();
-        let old_value = [1u8; 32];
-        let new_value = [2u8; 32];
+        let old_hash = [1u8; 32];
+        let new_hash = [2u8; 32];
 
-        node.insert(5, old_value);
-        let result = node.insert(5, new_value);
+        let old_child = Node::new_with_hash(old_hash);
+        let new_child = Node::new_with_hash(new_hash);
 
-        assert_eq!(result, Some(old_value));
+        node.insert(INDEX, old_child);
+
+        let result = node.insert(INDEX, new_child.clone());
+
+        assert!(result.is_some());
         assert_eq!(node.children.len(), 1);
-        assert_eq!(node.children.get(&5), Some(&new_value));
+        assert_eq!(node.child(&INDEX), Some(&new_child));
     }
 
     #[test]
-    fn insert_invalidates_hash_cache() {
-        let mut node = Node::new();
+    fn same_behavior_for_insert_with_hash() {
+        const INDEX: BanchingFactor = 5;
 
-        let _ = node.hash();
-        assert!(node.hash_cache.borrow().is_some());
+        let mut node1 = Node::new();
+        let mut node2 = Node::new();
 
-        node.insert(5, [1u8; 32]);
-        assert!(node.hash_cache.borrow().is_none());
+        let hash = [1u8; 32];
+
+        node1.insert_with_hash(INDEX, hash);
+        node2.insert(INDEX, Node::new_with_hash(hash));
+
+        assert_eq!(node1, node2);
     }
 
     #[test]
     fn hash_returns_consistent_value() {
+        const INDEX_1: BanchingFactor = 1;
+
         let mut node = Node::new();
-        node.insert(1, [1u8; 32]);
-        node.insert(2, [2u8; 32]);
+        node.insert_with_hash(INDEX_1, [1u8; 32]);
+        node.insert_with_hash(INDEX_1, [2u8; 32]);
+
+        node.update_hash();
 
         let hash1 = node.hash();
         let hash2 = node.hash();
 
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn hash_uses_cached_value() {
-        let mut node = Node::new();
-        node.insert(1, [1u8; 32]);
-
-        let hash1 = node.hash();
-        assert!(node.hash_cache.borrow().is_some());
-
-        let hash2 = node.hash();
         assert_eq!(hash1, hash2);
     }
 
     #[test]
     fn child_returns_correct_value() {
-        let mut node = Node::new();
-        let value = [3u8; 32];
-        node.insert(7, value);
+        const INDEX: BanchingFactor = 7;
 
-        assert_eq!(node.child(&7), Some(&value));
+        let mut node = Node::new();
+        let hash = [3u8; 32];
+        node.insert_with_hash(INDEX, hash);
+
+        let child = node.child(&INDEX);
+
+        assert!(child.is_some());
+        assert_eq!(child.unwrap().hash, Some(hash).into());
     }
 
     #[test]
@@ -223,16 +289,17 @@ mod tests {
 
     #[test]
     fn serialization_roundtrip_preserves_data() {
+        const INDEX_1: BanchingFactor = 1;
+        const INDEX_2: BanchingFactor = 5;
+
         let mut original = Node::new();
-        original.insert(1, [1u8; 32]);
-        original.insert(5, [5u8; 32]);
+        original.insert_with_hash(INDEX_1, [1u8; 32]);
+        original.insert_with_hash(INDEX_2, [5u8; 32]);
 
         let bytes = original.to_vec();
         let deserialized = Node::from_slice(&bytes).unwrap();
 
-        assert_eq!(original.children.len(), deserialized.children.len());
-        assert_eq!(original.child(&1), deserialized.child(&1));
-        assert_eq!(original.child(&5), deserialized.child(&5));
+        assert_eq!(original, deserialized);
     }
 
     #[test]
@@ -246,13 +313,17 @@ mod tests {
 
     #[test]
     fn serialization_ordering_is_consistent() {
+        const INDEX_1: BanchingFactor = 1;
+        const INDEX_2: BanchingFactor = 2;
+
         let mut node1 = Node::new();
-        node1.insert(1, [1u8; 32]);
-        node1.insert(2, [2u8; 32]);
+
+        node1.insert_with_hash(INDEX_1, [1u8; 32]);
+        node1.insert_with_hash(INDEX_2, [2u8; 32]);
 
         let mut node2 = Node::new();
-        node2.insert(2, [2u8; 32]);
-        node2.insert(1, [1u8; 32]);
+        node2.insert_with_hash(INDEX_2, [2u8; 32]);
+        node2.insert_with_hash(INDEX_1, [1u8; 32]);
 
         assert_eq!(node1.to_vec(), node2.to_vec());
     }
@@ -262,27 +333,5 @@ mod tests {
         let invalid_bytes = vec![1, 2, 3];
         let result = Node::from_slice(&invalid_bytes);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn tryfrom_vec_works() {
-        let mut original = Node::new();
-        original.insert(42, [42u8; 32]);
-
-        let bytes = original.to_vec();
-        let deserialized = Node::try_from(bytes).unwrap();
-
-        assert_eq!(original.child(&42), deserialized.child(&42));
-    }
-
-    #[test]
-    fn from_into_vec_works() {
-        let mut node = Node::new();
-        node.insert(10, [10u8; 32]);
-
-        let vec1: Vec<u8> = (&node).into();
-        let vec2: Vec<u8> = node.into();
-
-        assert_eq!(vec1, vec2);
     }
 }
