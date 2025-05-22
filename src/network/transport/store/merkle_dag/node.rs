@@ -2,7 +2,7 @@ use std::{collections::HashMap, thread};
 
 use dashmap::{
     mapref::one::{Ref, RefMut},
-    DashMap,
+    DashMap, DashSet,
 };
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
@@ -209,21 +209,26 @@ impl Node {
         Ok(None)
     }
 
-    pub async fn update_hash(&self) {
+    pub async fn update_hash(&self) -> DashSet<HashArray> {
         if self.children.is_empty() {
-            return;
+            return DashSet::new();
         }
+
+        let mut updated = DashSet::new();
 
         for child in self.children.iter() {
             if child.value().hash_read().await.is_none() {
-                Box::pin(child.value().update_hash()).await;
+                updated.extend(Box::pin(child.value().update_hash()).await);
             }
         }
 
         let bytes = self.to_vec().await;
         let hash = blake3::hash(&bytes);
 
+        updated.insert(hash.into());
         self.hash.write().await.replace(hash.into());
+
+        updated
     }
 
     async fn hash_read(&self) -> RwLockReadGuard<Option<HashArray>> {
@@ -500,20 +505,24 @@ mod tests {
     async fn update_hash_with_no_children_does_nothing() {
         let node = Node::new();
 
-        node.update_hash().await;
+        let updated = node.update_hash().await;
 
         assert!(node.hash().await.is_none());
+        assert!(updated.is_empty());
     }
 
     #[tokio::test]
     async fn update_hash_with_children_calculates_hash() {
         let node = Node::new();
-        node.children.insert(1, Node::new_with_hash(HASH_1));
-        node.children.insert(2, Node::new_with_hash(HASH_2));
+        let transport = Transport::default();
 
-        node.update_hash().await;
+        node.insert(KEY_1, HASH_1, &transport).await.unwrap();
+        node.insert(KEY_2, HASH_2, &transport).await.unwrap();
+
+        let updated = node.update_hash().await;
 
         assert!(node.hash().await.is_some());
+        assert_eq!(updated.len(), (DEPTH * 2) - 1); // -1 for the root node
     }
 
     #[tokio::test]
