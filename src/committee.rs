@@ -21,6 +21,7 @@ pub mod config;
 pub mod info;
 
 mod elector;
+mod vrf_elector;
 
 pub use config::Config;
 pub use info::Info;
