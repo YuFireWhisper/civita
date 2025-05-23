@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use crate::network::transport::{
     self,
-    protocols::kad::{self, payload::Variant},
+    protocols::kad,
     store::merkle_dag::{BanchingFactor, HashArray, KeyArray, DEPTH},
 };
 
@@ -35,13 +35,13 @@ pub enum Error {
     Kad(#[from] kad::Error),
 
     #[error("{0}")]
-    KadPayload(#[from] kad::payload::Error),
-
-    #[error("{0}")]
     IO(#[from] std::io::Error),
 
     #[error("Invalid Byte Length")]
     InvalidByteLength,
+
+    #[error("Invalid kad payload")]
+    InvalidKadPayload,
 }
 
 #[derive(Debug)]
@@ -103,7 +103,7 @@ impl Node {
                     let lock = child.lock_fetch_lock().await;
 
                     if child.children.is_empty() {
-                        let fetched_node = Self::fetch_node(transport, hash).await?;
+                        let fetched_node = Self::fetch_node(transport, &hash).await?;
                         drop(lock);
                         child.children = fetched_node.children;
                     }
@@ -125,11 +125,14 @@ impl Node {
         self.fetch_lock.lock().await
     }
 
-    async fn fetch_node(transport: &Transport, hash: HashArray) -> Result<Node> {
-        Ok(transport
-            .get_or_error(kad::Key::ByHash(hash))
-            .await?
-            .extract::<Node>(Variant::MerkleDagNode)?)
+    async fn fetch_node(transport: &Transport, hash: &HashArray) -> Result<Node> {
+        match transport.get_or_error(hash).await? {
+            kad::Payload::MerkleDagNode(node) => {
+                let node = Node::from_slice(&node)?;
+                Ok(node)
+            }
+            _ => Err(Error::InvalidKadPayload),
+        }
     }
 
     pub async fn batch_insert(
@@ -192,7 +195,7 @@ impl Node {
                 if child.children.is_empty() {
                     let lock = child.lock_fetch_lock().await;
                     if child.children.is_empty() {
-                        let fetched_node = Self::fetch_node(transport, hash).await?;
+                        let fetched_node = Self::fetch_node(transport, &hash).await?;
                         drop(lock);
                         for (idx, node) in fetched_node.children.into_iter() {
                             child.children.insert(idx, node);

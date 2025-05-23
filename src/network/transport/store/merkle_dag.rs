@@ -13,14 +13,14 @@ use crate::network::transport::Transport;
 #[cfg(test)]
 use crate::network::transport::MockTransport as Transport;
 
-mod node;
+pub mod node;
 
 pub use node::Node;
 
 type Result<T> = std::result::Result<T, Error>;
 
 type BanchingFactor = u16;
-type KeyArray = [BanchingFactor; DEPTH];
+pub type KeyArray = [BanchingFactor; DEPTH];
 type HashArray = [u8; 32];
 
 const DEPTH: usize = 16;
@@ -33,9 +33,6 @@ pub enum Error {
 
     #[error("{0}")]
     Kad(#[from] kad::Error),
-
-    #[error("{0}")]
-    KadPayload(#[from] kad::payload::Error),
 
     #[error("{0}")]
     Encode(#[from] DecodeError),
