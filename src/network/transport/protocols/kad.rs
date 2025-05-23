@@ -3,17 +3,16 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use crate::{
+    constants::HashArray,
     crypto::tss::Signature,
     network::transport::behaviour::Behaviour,
     traits::{byteable, Byteable},
 };
 
-pub mod key;
 pub mod message;
 pub mod payload;
 pub mod validated_store;
 
-pub use key::Key;
 pub use message::Message;
 pub use payload::Payload;
 
@@ -42,9 +41,6 @@ pub enum Error {
 
     #[error("Store error: {0}")]
     Store(#[from] libp2p::kad::store::Error),
-
-    #[error("{0}")]
-    Key(#[from] key::Error),
 
     #[error("{0}")]
     Byteable(#[from] byteable::Error),
@@ -125,7 +121,7 @@ impl Kad {
             libp2p::kad::Event::OutboundQueryProgressed { id, result, .. } => {
                 self.handle_outbound(id, result);
             }
-            _ => log::trace!("Ignoring Kademlia event: {:?}", event),
+            _ => log::trace!("Ignoring Kademlia event: {event:?}"),
         }
     }
 
@@ -158,12 +154,12 @@ impl Kad {
                     }
                 }
             }
-            _ => log::debug!("Received unhandled query result: {:?}", result),
+            _ => log::debug!("Received unhandled query result: {result:?}"),
         }
     }
 
-    pub async fn put(&self, key: Key, payload: Payload, signature: Signature) -> Result<()> {
-        let key = key.to_storage_key()?;
+    pub async fn put(&self, key: &HashArray, payload: Payload, signature: Signature) -> Result<()> {
+        let key = libp2p::kad::RecordKey::new(&key);
         let record_value = Message::new(payload, signature)?.to_vec()?;
         let record = libp2p::kad::Record::new(key, record_value);
 
@@ -179,16 +175,16 @@ impl Kad {
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
     }
 
-    pub async fn get_or_error(&self, key: Key) -> Result<Payload> {
+    pub async fn get_or_error(&self, key: &HashArray) -> Result<Payload> {
         match self.get(key).await? {
             Some(payload) => Ok(payload),
             None => Err(Error::NotFound),
         }
     }
 
-    pub async fn get(&self, key: Key) -> Result<Option<Payload>> {
+    pub async fn get(&self, key: &HashArray) -> Result<Option<Payload>> {
         let mut swarm = self.swarm.lock().await;
-        let key = key.to_storage_key()?;
+        let key = libp2p::kad::RecordKey::new(key);
         let query_id = swarm.behaviour_mut().kad_mut().get_record(key);
 
         let (tx, rx) = tokio::sync::oneshot::channel();

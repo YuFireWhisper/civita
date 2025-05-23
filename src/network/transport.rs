@@ -4,6 +4,7 @@ use futures::StreamExt;
 use libp2p::PeerId;
 
 use crate::{
+    constants::HashArray,
     crypto::tss::Signature,
     network::transport::{
         behaviour::Behaviour,
@@ -276,7 +277,7 @@ impl Transport {
 
     pub async fn put(
         &self,
-        key: kad::Key,
+        key: &HashArray,
         payload: kad::Payload,
         signature: Signature,
     ) -> Result<()> {
@@ -286,11 +287,11 @@ impl Transport {
             .map_err(Error::from)
     }
 
-    pub async fn get(&self, key: kad::Key) -> Result<Option<kad::Payload>> {
+    pub async fn get(&self, key: &HashArray) -> Result<Option<kad::Payload>> {
         self.kad.get(key).await.map_err(Error::from)
     }
 
-    pub async fn get_or_error(&self, key: kad::Key) -> Result<kad::Payload> {
+    pub async fn get_or_error(&self, key: &HashArray) -> Result<kad::Payload> {
         self.kad.get_or_error(key).await.map_err(Error::from)
     }
 
