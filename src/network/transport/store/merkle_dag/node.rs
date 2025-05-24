@@ -126,13 +126,10 @@ impl Node {
     }
 
     async fn fetch_node(transport: &Transport, hash: &HashArray) -> Result<Node> {
-        match transport.get_or_error(hash).await? {
-            kad::Payload::MerkleDagNode(node) => {
-                let node = Node::from_slice(&node)?;
-                Ok(node)
-            }
-            _ => Err(Error::InvalidKadPayload),
-        }
+        transport
+            .get_or_error::<Node>(hash)
+            .await
+            .map_err(Error::from)
     }
 
     pub async fn batch_insert(
@@ -255,30 +252,7 @@ impl Node {
     }
 
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        if slice.is_empty() {
-            return Ok(Node::default());
-        }
-
-        if slice.len() % BASE_SIZE != 0 {
-            return Err(Error::InvalidByteLength);
-        }
-
-        let children = DashMap::with_capacity(slice.len() / BASE_SIZE);
-
-        for chunk in slice.chunks_exact(BASE_SIZE) {
-            let index_bytes = std::array::from_fn(|i| chunk[i]);
-            let index = BanchingFactor::from_be_bytes(index_bytes);
-            let child_hash: HashArray = chunk[INDEX_SIZE..]
-                .try_into()
-                .map_err(|_| Error::InvalidByteLength)?;
-            let child = Node::new_with_hash(child_hash);
-            children.insert(index, child);
-        }
-
-        Ok(Node {
-            children,
-            ..Default::default()
-        })
+        Self::try_from(slice)
     }
 
     pub async fn to_vec(&self) -> Vec<u8> {
@@ -307,6 +281,45 @@ impl Node {
     }
 }
 
+impl TryFrom<Vec<u8>> for Node {
+    type Error = Error;
+
+    fn try_from(vec: Vec<u8>) -> Result<Self> {
+        Self::try_from(vec.as_slice())
+    }
+}
+
+impl TryFrom<&[u8]> for Node {
+    type Error = Error;
+
+    fn try_from(slice: &[u8]) -> Result<Self> {
+        if slice.is_empty() {
+            return Ok(Node::default());
+        }
+
+        if slice.len() % BASE_SIZE != 0 {
+            return Err(Error::InvalidByteLength);
+        }
+
+        let children = DashMap::with_capacity(slice.len() / BASE_SIZE);
+
+        for chunk in slice.chunks_exact(BASE_SIZE) {
+            let index_bytes = std::array::from_fn(|i| chunk[i]);
+            let index = BanchingFactor::from_be_bytes(index_bytes);
+            let child_hash: HashArray = chunk[INDEX_SIZE..]
+                .try_into()
+                .map_err(|_| Error::InvalidByteLength)?;
+            let child = Node::new_with_hash(child_hash);
+            children.insert(index, child);
+        }
+
+        Ok(Node {
+            children,
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -321,7 +334,7 @@ mod tests {
     fn create_error_transport() -> Transport {
         let mut transport = Transport::default();
         transport
-            .expect_get_or_error()
+            .expect_get_or_error::<Vec<u8>>()
             .returning(|_| Err(transport::Error::MockError));
         transport
     }

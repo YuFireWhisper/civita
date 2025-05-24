@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 
 use dashmap::DashMap;
 
@@ -50,6 +50,9 @@ pub enum Error {
 
     #[error("No found payload for the given key")]
     NotFound,
+
+    #[error("{0}")]
+    ConvertFromVec(String),
 }
 
 #[derive(Debug)]
@@ -175,14 +178,17 @@ impl Kad {
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
     }
 
-    pub async fn get_or_error(&self, key: &HashArray) -> Result<Payload> {
-        match self.get(key).await? {
-            Some(payload) => Ok(payload),
-            None => Err(Error::NotFound),
-        }
+    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display>>(
+        &self,
+        key: &HashArray,
+    ) -> Result<T> {
+        self.get::<T>(key).await?.ok_or(Error::NotFound)
     }
 
-    pub async fn get(&self, key: &HashArray) -> Result<Option<Payload>> {
+    pub async fn get<T: TryFrom<Vec<u8>, Error: Display>>(
+        &self,
+        key: &HashArray,
+    ) -> Result<Option<T>> {
         let mut swarm = self.swarm.lock().await;
         let key = libp2p::kad::RecordKey::new(key);
         let query_id = swarm.behaviour_mut().kad_mut().get_record(key);
@@ -192,8 +198,13 @@ impl Kad {
 
         let peer_record_opt =
             tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
+
         match peer_record_opt {
-            Some(peer_record) => Ok(Some(Payload::from_slice(peer_record.record.value)?)),
+            Some(peer_record) => {
+                let t = T::try_from(peer_record.record.value)
+                    .map_err(|e| Error::ConvertFromVec(e.to_string()))?;
+                Ok(Some(t))
+            }
             None => Ok(None),
         }
     }

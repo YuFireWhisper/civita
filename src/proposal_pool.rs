@@ -12,9 +12,10 @@ use crate::{
     crypto::keypair::{PublicKey, SecretKey},
     network::transport::{
         self,
-        protocols::{gossipsub, kad},
+        protocols::gossipsub,
         store::merkle_dag::{self, KeyArray, Node},
     },
+    resident_record::ResidentRecord,
     vrf_elector::{self, Proof, VrfElector},
 };
 
@@ -137,9 +138,8 @@ impl ProposalPool {
     }
 
     async fn fetch_proposal(transport: &Transport, hash: HashArray) -> Result<bool> {
-        let key = kad::Key::ByHash(hash);
         transport
-            .get(key)
+            .get::<Node>(&hash)
             .await
             .map(|opt| opt.is_some())
             .map_err(Error::from)
@@ -262,12 +262,9 @@ impl ProposalPool {
 
         Ok(self
             .transport
-            .get(kad::Key::ByHash(hash))
+            .get::<ResidentRecord>(&hash)
             .await?
-            .and_then(|payload| match payload {
-                kad::Payload::Resident { stakes, .. } => Some(stakes),
-                _ => None,
-            }))
+            .and_then(|record| Some(record.stakes)))
     }
 
     fn vec_u8_to_key_array(vec: Vec<u8>) -> KeyArray {

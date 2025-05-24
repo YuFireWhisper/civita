@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io, sync::Arc};
+use std::{collections::HashSet, fmt::Display, io, sync::Arc};
 
 use futures::StreamExt;
 use libp2p::PeerId;
@@ -287,12 +287,18 @@ impl Transport {
             .map_err(Error::from)
     }
 
-    pub async fn get(&self, key: &HashArray) -> Result<Option<kad::Payload>> {
-        self.kad.get(key).await.map_err(Error::from)
+    pub async fn get<T: TryFrom<Vec<u8>, Error: Display> + 'static>(
+        &self,
+        key: &HashArray,
+    ) -> Result<Option<T>> {
+        self.kad.get::<T>(key).await.map_err(Error::from)
     }
 
-    pub async fn get_or_error(&self, key: &HashArray) -> Result<kad::Payload> {
-        self.kad.get_or_error(key).await.map_err(Error::from)
+    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display> + 'static>(
+        &self,
+        key: &HashArray,
+    ) -> Result<T> {
+        self.kad.get_or_error::<T>(key).await.map_err(Error::from)
     }
 
     pub fn self_peer(&self) -> PeerId {
