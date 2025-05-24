@@ -344,7 +344,7 @@ mod tests {
     fn create_error_transport() -> Transport {
         let mut transport = Transport::default();
         transport
-            .expect_get_or_error::<Vec<u8>>()
+            .expect_get_or_error::<Node>()
             .returning(|_| Err(transport::Error::MockError));
         transport
     }
