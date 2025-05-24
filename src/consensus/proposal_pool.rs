@@ -3,20 +3,25 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashSet;
 use libp2p::PeerId;
-use tokio::{task::JoinHandle, time::Duration};
+use tokio::time::Duration;
 
 use crate::{
-    consensus::vrf_elector::{self, VrfElector},
+    consensus::{
+        proposal_pool::{
+            member_manager::MemberManager, proposal_collector::ProposalCollector,
+            signature_collector::SignatureCollector, vote_manager::VoteManager,
+        },
+        signed_result::SignedResult,
+        vrf_elector::{self, VrfElector},
+    },
     constants::HashArray,
-    crypto::keypair::{PublicKey, SecretKey, VrfProof},
+    crypto::keypair::{self, PublicKey, ResidentSignature, SecretKey, VrfProof},
     network::transport::{
         self,
         protocols::gossipsub,
-        store::merkle_dag::{self, KeyArray, Node},
+        store::merkle_dag::{self, Node},
     },
-    resident::Record,
 };
 
 #[cfg(not(test))]
@@ -24,6 +29,11 @@ use crate::network::transport::Transport;
 
 #[cfg(test)]
 use crate::network::transport::MockTransport as Transport;
+
+mod member_manager;
+mod proposal_collector;
+mod signature_collector;
+mod vote_manager;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -38,6 +48,18 @@ pub enum Error {
 
     #[error("{0}")]
     Node(#[from] merkle_dag::node::Error),
+
+    #[error("{0}")]
+    Keypair(#[from] keypair::Error),
+
+    #[error("{0}")]
+    Collector(#[from] proposal_collector::Error),
+
+    #[error("Proposal pool not started")]
+    NotStarted,
+
+    #[error("{0}")]
+    MemberManager(#[from] member_manager::Error),
 }
 
 pub struct Config {
@@ -48,29 +70,45 @@ pub struct Config {
 }
 
 struct Context {
-    input: Vec<u8>,
-    handle: JoinHandle<()>,
-    proof: VrfProof,
-    times: u32,
+    proposal_collector: ProposalCollector,
+    own_proof: VrfProof,
+    own_weight: u32,
+    own_proposals: Option<HashSet<HashArray>>,
+    root: Option<Node>,
     total_stakes: u32,
-    proposals: Arc<DashSet<HashArray>>,
+    input: Vec<u8>,
 }
 
 pub struct ProposalPool {
     transport: Arc<Transport>,
+    secret_key: SecretKey,
     public_key: PublicKey,
     elector: Arc<VrfElector>,
     ctx: Option<Context>,
     config: Config,
 }
 
+impl Context {
+    pub fn own_proposals_or_unwrap(&self) -> HashSet<HashArray> {
+        self.own_proposals
+            .as_ref()
+            .expect("Proposals should be present")
+            .clone()
+    }
+
+    pub fn root_or_unwrap(&self) -> Node {
+        self.root.clone().expect("Root should be present")
+    }
+}
+
 impl ProposalPool {
     pub fn new(transport: Arc<Transport>, secret_key: SecretKey, config: Config) -> Self {
         let public_key = secret_key.to_public_key();
-        let elector = VrfElector::new(secret_key, config.num_members);
+        let elector = VrfElector::new(secret_key.clone(), config.num_members);
 
         Self {
             transport,
+            secret_key,
             public_key,
             elector: Arc::new(elector),
             ctx: None,
@@ -85,17 +123,17 @@ impl ProposalPool {
             return Ok(());
         }
 
-        let proposals = Arc::new(DashSet::new());
-
-        let handle = self.collect_proposals(proposals.clone()).await?;
+        let mut collector = ProposalCollector::new(self.transport.clone());
+        collector.start(&self.config.external_topic).await?;
 
         let ctx = Context {
-            input,
-            handle,
-            proof,
-            times,
+            proposal_collector: collector,
+            own_proof: proof,
+            own_weight: times,
+            own_proposals: None,
+            root: None,
             total_stakes,
-            proposals,
+            input,
         };
 
         self.ctx = Some(ctx);
@@ -103,58 +141,21 @@ impl ProposalPool {
         Ok(())
     }
 
-    async fn collect_proposals(
-        &mut self,
-        proposals: Arc<DashSet<HashArray>>,
-    ) -> Result<JoinHandle<()>> {
-        let mut rx = self
-            .transport
-            .listen_on_topic(&self.config.external_topic)
-            .await?;
+    pub async fn settle(&mut self, root: Node) -> Result<SignedResult<HashSet<HashArray>>> {
+        let mut ctx = self.ctx.take().ok_or(Error::NotStarted)?;
 
-        let transport = self.transport.clone();
+        ctx.own_proposals = Some(ctx.proposal_collector.settle().await?);
+        ctx.root = Some(root);
+        self.publish_proposals(&ctx).await?;
+        let (final_proposals, members) = self.collect_and_vote(&ctx).await?;
 
-        Ok(tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if let gossipsub::Payload::Proposal(hash) = msg.payload {
-                    match Self::fetch_proposal(&transport, hash).await {
-                        Ok(true) => {
-                            proposals.insert(hash);
-                        }
-                        Ok(false) => {
-                            continue;
-                        }
-                        Err(e) => {
-                            log::error!("Failed to fetch proposal: {e}");
-                            continue;
-                        }
-                    }
-                }
-            }
-        }))
+        self.consensus_result(final_proposals, members).await
     }
 
-    async fn fetch_proposal(transport: &Transport, hash: HashArray) -> Result<bool> {
-        transport
-            .get::<Node>(&hash)
-            .await
-            .map(|opt| opt.is_some())
-            .map_err(Error::from)
-    }
-
-    pub async fn settle(&mut self, root: &Node) -> Result<HashSet<HashArray>> {
-        let ctx = match self.ctx.take() {
-            Some(ctx) => ctx,
-            None => panic!("ProposalPool is not started"),
-        };
-
-        ctx.handle.abort();
-
-        let proposals = Self::get_proposals(&ctx);
-
-        let payload = gossipsub::Payload::ProposalSet {
-            proposals: proposals.clone(),
-            proof: ctx.proof,
+    async fn publish_proposals(&self, ctx: &Context) -> Result<()> {
+        let payload = gossipsub::Payload::ConsensusProposal {
+            proposal_set: ctx.own_proposals_or_unwrap(),
+            proof: ctx.own_proof.clone(),
             public_key: self.public_key.clone(),
         };
 
@@ -162,120 +163,124 @@ impl ProposalPool {
             .publish(&self.config.external_topic, payload)
             .await?;
 
-        let proposals = self
-            .collect_proposal_set(ctx.times, proposals, root)
-            .await?;
-
-        Ok(proposals)
+        Ok(())
     }
 
-    fn get_proposals(ctx: &Context) -> HashSet<HashArray> {
-        Arc::try_unwrap(ctx.proposals.clone())
-            .expect("Arc still has multiple owners")
-            .into_iter()
-            .collect()
-    }
-
-    async fn collect_proposal_set(
+    async fn collect_and_vote(
         &self,
-        times: u32,
-        set: HashSet<HashArray>,
-        root: &Node,
-    ) -> Result<HashSet<HashArray>> {
+        ctx: &Context,
+    ) -> Result<(HashSet<HashArray>, HashMap<PeerId, (PublicKey, VrfProof)>)> {
         let mut rx = self
             .transport
             .listen_on_topic(&self.config.internal_topic)
             .await?;
 
-        let input = self
-            .ctx
-            .as_ref()
-            .expect("ProposalPool is not started")
-            .input
-            .clone();
+        let mut member_manager = MemberManager::new(
+            self.transport.clone(),
+            self.elector.clone(),
+            ctx.input.clone(),
+            ctx.total_stakes,
+            ctx.root_or_unwrap(),
+        );
+        member_manager
+            .add_member(
+                self.transport.self_peer(),
+                self.public_key.clone(),
+                ctx.own_proof.clone(),
+            )
+            .await?;
 
-        let total_stakes = self
-            .ctx
-            .as_ref()
-            .expect("ProposalPool is not started")
-            .total_stakes;
-
-        let mut total_times = times;
-        let mut proposals: HashMap<HashArray, u32> = HashMap::new();
-
-        set.into_iter().for_each(|hash| {
-            proposals.insert(hash, times);
-        });
+        let mut vote_manager = VoteManager::new();
+        vote_manager.add_votes(ctx.own_proposals_or_unwrap().iter(), ctx.own_weight);
+        vote_manager.add_total_votes(ctx.own_weight);
 
         while let Some(msg) = rx.recv().await {
-            if let gossipsub::Payload::ProposalSet {
-                proposals: p,
+            if let gossipsub::Payload::ConsensusProposal {
+                proposal_set,
                 proof,
                 public_key,
             } = msg.payload
             {
-                if !public_key.verify_proof(&input, &proof) {
-                    continue;
+                if let Ok(Some(times)) = member_manager
+                    .add_member(msg.source, public_key, proof)
+                    .await
+                {
+                    vote_manager.add_votes(proposal_set.iter(), times);
+                    vote_manager.add_total_votes(times);
                 }
-
-                let stakes = match self.get_stakes(&msg.source, root).await? {
-                    Some(stakes) => stakes,
-                    None => {
-                        continue;
-                    }
-                };
-
-                let times = self
-                    .elector
-                    .calc_elected_times(stakes, total_stakes, &proof.output());
-
-                if times == 0 {
-                    continue;
-                }
-
-                p.into_iter().for_each(|hash| {
-                    proposals
-                        .entry(hash)
-                        .and_modify(|count| *count += times)
-                        .or_insert(times);
-                });
-
-                total_times += times;
             }
         }
 
-        let mut accepted = HashSet::new();
-        for (hash, count) in proposals {
-            if count * 3 > total_times * 2 {
-                accepted.insert(hash);
-            }
-        }
-
-        Ok(accepted)
+        Ok((
+            vote_manager.get_winners(),
+            member_manager.get_member_proofs(),
+        ))
     }
 
-    async fn get_stakes(&self, peer: &PeerId, root: &Node) -> Result<Option<u32>> {
-        let peer = Self::vec_u8_to_key_array(peer.to_bytes());
-        let Some(hash) = root.get(peer, &self.transport).await? else {
-            return Ok(None);
-        };
+    pub async fn consensus_result(
+        &self,
+        final_proposals: HashSet<HashArray>,
+        members: HashMap<PeerId, (PublicKey, VrfProof)>,
+    ) -> Result<SignedResult<HashSet<HashArray>>> {
+        let final_hash = self.calc_final_hash(&final_proposals);
 
-        Ok(self
+        let signature = self.secret_key.sign(final_hash)?;
+
+        self.publish_signature(signature).await?;
+
+        let signatures = self.collect_signatures(final_hash, members).await?;
+
+        Ok(SignedResult {
+            result: final_proposals,
+            members: signatures,
+        })
+    }
+
+    fn calc_final_hash(&self, final_proposals: &HashSet<HashArray>) -> HashArray {
+        let mut hasher = blake3::Hasher::new();
+        let mut sorted_proposals: Vec<_> = final_proposals.iter().collect();
+        sorted_proposals.sort();
+
+        for proposal in sorted_proposals {
+            hasher.update(proposal);
+        }
+
+        hasher.finalize().into()
+    }
+
+    async fn publish_signature(&self, signature: ResidentSignature) -> Result<()> {
+        let payload = gossipsub::Payload::ConsensusProposalResult { signature };
+
+        self.transport
+            .publish(&self.config.internal_topic, payload)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn collect_signatures(
+        &self,
+        final_hash: HashArray,
+        mut members: HashMap<PeerId, (PublicKey, VrfProof)>,
+    ) -> Result<HashMap<PublicKey, (VrfProof, ResidentSignature)>> {
+        let mut rx = self
             .transport
-            .get::<Record>(&hash)
-            .await?
-            .map(|record| record.stakes))
-    }
+            .listen_on_topic(&self.config.internal_topic)
+            .await?;
 
-    fn vec_u8_to_key_array(vec: Vec<u8>) -> KeyArray {
-        let mut result = KeyArray::default();
+        let mut collector = SignatureCollector::new(final_hash);
 
-        result.iter_mut().enumerate().for_each(|(i, v)| {
-            let high = vec[i * 2] as u16;
-            let low = vec[i * 2 + 1] as u16;
-            *v = (high << 8) | low;
-        });
+        while let Some(msg) = rx.recv().await {
+            let (public_key, proof) = match members.remove(&msg.source) {
+                Some((public_key, proof)) => (public_key, proof),
+                None => continue,
+            };
 
-        result
+            if let gossipsub::Payload::ConsensusProposalResult { signature } = msg.payload {
+                collector.add_signature(public_key, proof, signature);
+            }
+        }
+
+        Ok(collector.get_signatures())
     }
 }

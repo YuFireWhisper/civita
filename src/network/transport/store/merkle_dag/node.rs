@@ -281,6 +281,16 @@ impl Node {
     }
 }
 
+impl Clone for Node {
+    fn clone(&self) -> Self {
+        Node {
+            hash: RwLock::new(None),
+            children: self.children.clone(),
+            fetch_lock: Mutex::new(()),
+        }
+    }
+}
+
 impl TryFrom<Vec<u8>> for Node {
     type Error = Error;
 
