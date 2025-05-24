@@ -8,9 +8,9 @@ use libp2p::PeerId;
 use tokio::{task::JoinHandle, time::Duration};
 
 use crate::{
-    consensus::vrf_elector::{self, Proof, VrfElector},
+    consensus::vrf_elector::{self, VrfElector},
     constants::HashArray,
-    crypto::keypair::{PublicKey, SecretKey},
+    crypto::keypair::{PublicKey, SecretKey, VrfProof},
     network::transport::{
         self,
         protocols::gossipsub,
@@ -50,7 +50,8 @@ pub struct Config {
 struct Context {
     input: Vec<u8>,
     handle: JoinHandle<()>,
-    proof: Proof,
+    proof: VrfProof,
+    times: u32,
     total_stakes: u32,
     proposals: Arc<DashSet<HashArray>>,
 }
@@ -66,7 +67,7 @@ pub struct ProposalPool {
 impl ProposalPool {
     pub fn new(transport: Arc<Transport>, secret_key: SecretKey, config: Config) -> Self {
         let public_key = secret_key.to_public_key();
-        let elector = VrfElector::new(secret_key);
+        let elector = VrfElector::new(secret_key, config.num_members);
 
         Self {
             transport,
@@ -78,16 +79,11 @@ impl ProposalPool {
     }
 
     pub async fn start(&mut self, input: Vec<u8>, stake: u32, total_stakes: u32) -> Result<()> {
-        let proof =
-            match self
-                .elector
-                .generate(&input, stake, total_stakes, self.config.num_members)?
-            {
-                Some(proof) => proof,
-                None => {
-                    return Ok(());
-                }
-            };
+        let (proof, times) = self.elector.generate(&input, stake, total_stakes)?;
+
+        if times == 0 {
+            return Ok(());
+        }
 
         let proposals = Arc::new(DashSet::new());
 
@@ -97,6 +93,7 @@ impl ProposalPool {
             input,
             handle,
             proof,
+            times,
             total_stakes,
             proposals,
         };
@@ -157,7 +154,7 @@ impl ProposalPool {
 
         let payload = gossipsub::Payload::ProposalSet {
             proposals: proposals.clone(),
-            proof: ctx.proof.proof,
+            proof: ctx.proof,
             public_key: self.public_key.clone(),
         };
 
@@ -166,7 +163,7 @@ impl ProposalPool {
             .await?;
 
         let proposals = self
-            .collect_proposal_set(ctx.proof.times, proposals, root)
+            .collect_proposal_set(ctx.times, proposals, root)
             .await?;
 
         Ok(proposals)
@@ -217,6 +214,10 @@ impl ProposalPool {
                 public_key,
             } = msg.payload
             {
+                if !public_key.verify_proof(&input, &proof) {
+                    continue;
+                }
+
                 let stakes = match self.get_stakes(&msg.source, root).await? {
                     Some(stakes) => stakes,
                     None => {
@@ -224,14 +225,13 @@ impl ProposalPool {
                     }
                 };
 
-                let times = VrfElector::calc_elected_times_with_proof(
-                    &input,
-                    stakes,
-                    total_stakes,
-                    self.config.num_members,
-                    &proof,
-                    &public_key,
-                );
+                let times = self
+                    .elector
+                    .calc_elected_times(stakes, total_stakes, &proof.output());
+
+                if times == 0 {
+                    continue;
+                }
 
                 p.into_iter().for_each(|hash| {
                     proposals
