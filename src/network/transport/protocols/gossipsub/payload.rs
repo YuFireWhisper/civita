@@ -1,9 +1,10 @@
 use std::{collections::HashSet, time::SystemTime};
 
+use libp2p::gossipsub::MessageId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    committee,
+    constants::HashArray,
     crypto::{
         algebra::{Point, Scalar},
         keypair::{PublicKey, VrfProof},
@@ -58,10 +59,6 @@ pub enum Payload {
         payload_hash: [u8; 32],
     },
 
-    ElectionSuccess {
-        info: committee::Info,
-    },
-
     ElectionFailure {
         invalid_peers: HashSet<libp2p::PeerId>,
     },
@@ -73,6 +70,26 @@ pub enum Payload {
     ConsensusTimeResponse {
         end_time: SystemTime,
         is_accepted: bool,
+    },
+
+    QueryCommitteeState,
+
+    QueryCommitteeStateResponse {
+        message_id: MessageId,
+        state: Vec<u8>,
+    },
+
+    NewRoots {
+        roots: (Vec<u8>, Vec<u8>),
+        proof: VrfProof,
+    },
+
+    Proposal(HashArray),
+
+    ProposalSet {
+        proposals: HashSet<HashArray>,
+        proof: VrfProof,
+        public_key: PublicKey,
     },
 
     // For testing
