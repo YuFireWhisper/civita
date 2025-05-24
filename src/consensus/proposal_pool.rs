@@ -8,6 +8,7 @@ use libp2p::PeerId;
 use tokio::{task::JoinHandle, time::Duration};
 
 use crate::{
+    consensus::vrf_elector::{self, Proof, VrfElector},
     constants::HashArray,
     crypto::keypair::{PublicKey, SecretKey},
     network::transport::{
@@ -15,8 +16,7 @@ use crate::{
         protocols::gossipsub,
         store::merkle_dag::{self, KeyArray, Node},
     },
-    resident_record::ResidentRecord,
-    vrf_elector::{self, Proof, VrfElector},
+    resident::Record,
 };
 
 #[cfg(not(test))]
@@ -262,7 +262,7 @@ impl ProposalPool {
 
         Ok(self
             .transport
-            .get::<ResidentRecord>(&hash)
+            .get::<Record>(&hash)
             .await?
             .map(|record| record.stakes))
     }
