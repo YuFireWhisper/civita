@@ -264,7 +264,7 @@ impl ProposalPool {
             .transport
             .get::<ResidentRecord>(&hash)
             .await?
-            .and_then(|record| Some(record.stakes)))
+            .map(|record| record.stakes))
     }
 
     fn vec_u8_to_key_array(vec: Vec<u8>) -> KeyArray {
