@@ -12,10 +12,24 @@ pub struct Record {
     pub data: Vec<u8>,
 }
 
-impl TryFrom<Vec<u8>> for Record {
+impl Record {
+    pub fn new(stakes: u32, data: Vec<u8>) -> Self {
+        Record { stakes, data }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        Self::try_from(bytes.to_vec())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.into()
+    }
+}
+
+impl TryFrom<&[u8]> for Record {
     type Error = Error;
 
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() < U32_LENGTH {
             return Err(Error::InvalidLength);
         }
@@ -28,5 +42,28 @@ impl TryFrom<Vec<u8>> for Record {
         let data = value[U32_LENGTH..].to_vec();
 
         Ok(Record { stakes, data })
+    }
+}
+
+impl TryFrom<Vec<u8>> for Record {
+    type Error = Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        (value.as_slice()).try_into()
+    }
+}
+
+impl From<&Record> for Vec<u8> {
+    fn from(record: &Record) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(U32_LENGTH + record.data.len());
+        bytes.extend_from_slice(&record.stakes.to_le_bytes());
+        bytes.extend_from_slice(&record.data);
+        bytes
+    }
+}
+
+impl From<Record> for Vec<u8> {
+    fn from(record: Record) -> Vec<u8> {
+        (&record).into()
     }
 }
