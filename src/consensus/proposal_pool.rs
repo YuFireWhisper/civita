@@ -284,3 +284,399 @@ impl ProposalPool {
         Ok(collector.get_signatures())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        crypto::keypair::{self, KeyType},
+        network::transport::{
+            protocols::gossipsub::{Message, Payload},
+            MockTransport,
+        },
+    };
+    use libp2p::{gossipsub::MessageId, PeerId};
+    use mockall::predicate::*;
+    use std::collections::{HashMap, HashSet};
+    use tokio::sync::mpsc;
+
+    // Test constants
+    const TEST_EXTERNAL_TOPIC: &str = "test_external";
+    const TEST_INTERNAL_TOPIC: &str = "test_internal";
+    const TEST_NUM_MEMBERS: u32 = 5;
+    const TEST_STAKE: u32 = 100;
+    const TEST_TOTAL_STAKES: u32 = 1000;
+    const TEST_NETWORK_LATENCY_MS: u64 = 100;
+    const TEST_INPUT: &[u8] = b"test_input";
+
+    fn create_test_config() -> Config {
+        Config {
+            external_topic: TEST_EXTERNAL_TOPIC.to_string(),
+            internal_topic: TEST_INTERNAL_TOPIC.to_string(),
+            num_members: TEST_NUM_MEMBERS,
+            network_latency: Duration::from_millis(TEST_NETWORK_LATENCY_MS),
+        }
+    }
+
+    fn create_test_input() -> Vec<u8> {
+        TEST_INPUT.to_vec()
+    }
+
+    fn create_test_node() -> Node {
+        let hash = blake3::hash(b"test_data");
+        Node::new_with_hash(hash.into())
+    }
+
+    fn create_test_hash_set() -> HashSet<HashArray> {
+        let mut set = HashSet::new();
+        set.insert([1u8; 32]);
+        set.insert([2u8; 32]);
+        set
+    }
+
+    fn create_valid_keypair() -> (SecretKey, PublicKey) {
+        loop {
+            let (secret_key, public_key) = keypair::generate_keypair(KeyType::Secp256k1);
+            let elector = VrfElector::new(secret_key.clone(), TEST_NUM_MEMBERS);
+            let times = elector
+                .generate(TEST_INPUT, TEST_STAKE, TEST_TOTAL_STAKES)
+                .unwrap()
+                .1;
+
+            if times > 0 {
+                break (secret_key, public_key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn new_creates_proposal_pool_with_correct_config() {
+        let transport = Arc::new(MockTransport::default());
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let config = create_test_config();
+        let expected_public_key = secret_key.to_public_key();
+
+        let pool = ProposalPool::new(transport, secret_key, config);
+
+        assert_eq!(pool.public_key, expected_public_key);
+        assert_eq!(pool.config.external_topic, TEST_EXTERNAL_TOPIC);
+        assert_eq!(pool.config.internal_topic, TEST_INTERNAL_TOPIC);
+        assert_eq!(pool.config.num_members, TEST_NUM_MEMBERS);
+        assert!(pool.ctx.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_with_zero_times_returns_early() {
+        let transport = MockTransport::default();
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let config = create_test_config();
+        let input = create_test_input();
+
+        // No transport expectations since we should return early
+        let mut pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let result = pool.start(input, 0, TEST_TOTAL_STAKES).await;
+
+        assert!(result.is_ok());
+        assert!(pool.ctx.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_with_positive_times_initializes_context() {
+        let mut transport = MockTransport::default();
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TEST_EXTERNAL_TOPIC))
+            .times(1)
+            .returning(|_| {
+                let (tx, rx) = mpsc::channel(10);
+                drop(tx); // Close channel immediately
+                Ok(rx)
+            });
+
+        let (secret_key, _) = create_valid_keypair();
+        let config = create_test_config();
+        let input = create_test_input();
+
+        let mut pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let result = pool
+            .start(input.clone(), TEST_STAKE, TEST_TOTAL_STAKES)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(pool.ctx.is_some());
+
+        let ctx = pool.ctx.as_ref().unwrap();
+        assert_eq!(ctx.input, input);
+        assert_eq!(ctx.total_stakes, TEST_TOTAL_STAKES);
+        assert!(ctx.own_proposals.is_none());
+        assert!(ctx.root.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_transport_error_propagates() {
+        let mut transport = MockTransport::default();
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TEST_EXTERNAL_TOPIC))
+            .times(1)
+            .returning(|_| Err(transport::Error::MockError));
+
+        let (secret_key, _) = create_valid_keypair();
+        let config = create_test_config();
+
+        let mut pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let result = pool
+            .start(TEST_INPUT.to_vec(), TEST_STAKE, TEST_TOTAL_STAKES)
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Collector(_)));
+    }
+
+    #[tokio::test]
+    async fn settle_without_start_returns_not_started_error() {
+        let transport = Arc::new(MockTransport::default());
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let config = create_test_config();
+
+        let mut pool = ProposalPool::new(transport, secret_key, config);
+        let root = create_test_node();
+
+        let result = pool.settle(root).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::NotStarted));
+    }
+
+    #[tokio::test]
+    async fn calc_final_hash_produces_consistent_results() {
+        let transport = Arc::new(MockTransport::default());
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let config = create_test_config();
+
+        let pool = ProposalPool::new(transport, secret_key, config);
+        let proposals = create_test_hash_set();
+
+        let hash1 = pool.calc_final_hash(&proposals);
+        let hash2 = pool.calc_final_hash(&proposals);
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[tokio::test]
+    async fn calc_final_hash_different_for_different_proposals() {
+        let transport = Arc::new(MockTransport::default());
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let config = create_test_config();
+
+        let pool = ProposalPool::new(transport, secret_key, config);
+
+        let mut proposals1 = HashSet::new();
+        proposals1.insert([1u8; 32]);
+
+        let mut proposals2 = HashSet::new();
+        proposals2.insert([2u8; 32]);
+
+        let hash1 = pool.calc_final_hash(&proposals1);
+        let hash2 = pool.calc_final_hash(&proposals2);
+
+        assert_ne!(hash1, hash2);
+    }
+
+    #[tokio::test]
+    async fn publish_signature_calls_transport_publish() {
+        let mut transport = MockTransport::default();
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let signature = secret_key.sign(b"test").unwrap();
+
+        transport
+            .expect_publish()
+            .with(
+                eq(TEST_INTERNAL_TOPIC),
+                eq(Payload::ConsensusProposalResult {
+                    signature: signature.clone(),
+                }),
+            )
+            .times(1)
+            .returning(|_, _| Ok(MessageId::new(b"test_id")));
+
+        let config = create_test_config();
+        let pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let result = pool.publish_signature(signature).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn publish_signature_transport_error_propagates() {
+        let mut transport = MockTransport::default();
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let signature = secret_key.sign(b"test").unwrap();
+
+        transport
+            .expect_publish()
+            .times(1)
+            .returning(|_, _| Err(transport::Error::MockError));
+
+        let config = create_test_config();
+        let pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let result = pool.publish_signature(signature).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn collect_signatures_handles_empty_members() {
+        let mut transport = MockTransport::default();
+        let (tx, rx) = mpsc::channel(10);
+
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TEST_INTERNAL_TOPIC))
+            .times(1)
+            .return_once(move |_| Ok(rx));
+
+        drop(tx);
+
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let config = create_test_config();
+        let pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let final_hash = [0u8; 32];
+        let members = HashMap::new();
+
+        let result = pool.collect_signatures(final_hash, members).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_signatures_filters_unknown_peers() {
+        let mut transport = MockTransport::default();
+        let (tx, rx) = mpsc::channel(10);
+
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TEST_INTERNAL_TOPIC))
+            .times(1)
+            .return_once(move |_| Ok(rx));
+
+        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let signature = secret_key.sign(b"test").unwrap();
+
+        // Send message from unknown peer
+        let unknown_peer = PeerId::random();
+        let message = Message {
+            message_id: MessageId::new(b"test"),
+            source: unknown_peer,
+            topic: TEST_INTERNAL_TOPIC.to_string(),
+            payload: Payload::ConsensusProposalResult { signature },
+            committee_signature: None,
+        };
+
+        tokio::spawn(async move {
+            tx.send(message).await.unwrap();
+        });
+
+        let config = create_test_config();
+        let pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let final_hash = [0u8; 32];
+        let members = HashMap::new(); // No known members
+
+        let result = pool.collect_signatures(final_hash, members).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_signatures_processes_valid_signatures() {
+        let mut transport = MockTransport::default();
+        let (tx, rx) = mpsc::channel(10);
+
+        transport
+            .expect_listen_on_topic()
+            .with(eq(TEST_INTERNAL_TOPIC))
+            .times(1)
+            .return_once(move |_| Ok(rx));
+
+        let (secret_key, public_key) = keypair::generate_keypair(KeyType::Secp256k1);
+        let final_hash = [0u8; 32];
+        let signature = secret_key.sign(final_hash).unwrap();
+        let proof = secret_key.prove(b"test").unwrap();
+
+        let peer_id = PeerId::random();
+        let mut members = HashMap::new();
+        members.insert(peer_id, (public_key.clone(), proof.clone()));
+
+        let message = Message {
+            message_id: MessageId::new(b"test"),
+            source: peer_id,
+            topic: TEST_INTERNAL_TOPIC.to_string(),
+            payload: Payload::ConsensusProposalResult {
+                signature: signature.clone(),
+            },
+            committee_signature: None,
+        };
+
+        tokio::spawn(async move {
+            tx.send(message).await.unwrap();
+        });
+
+        let config = create_test_config();
+        let pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let result = pool.collect_signatures(final_hash, members).await;
+
+        assert!(result.is_ok());
+        let signatures = result.unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert!(signatures.contains_key(&public_key));
+    }
+
+    #[tokio::test]
+    async fn consensus_result_complete_flow() {
+        let mut transport = MockTransport::default();
+        let (secret_key, public_key) = keypair::generate_keypair(KeyType::Secp256k1);
+        let proof = secret_key.prove(b"test").unwrap();
+
+        // Setup expectations for publish_signature
+        transport
+            .expect_publish()
+            .times(1)
+            .returning(|_, _| Ok(MessageId::new(b"test_id")));
+
+        // Setup expectations for collect_signatures
+        let (tx, rx) = mpsc::channel(10);
+        transport
+            .expect_listen_on_topic()
+            .times(1)
+            .return_once(move |_| Ok(rx));
+
+        // Close channel to simulate no additional signatures
+        drop(tx);
+
+        let config = create_test_config();
+        let pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+
+        let final_proposals = create_test_hash_set();
+        let mut members = HashMap::new();
+        members.insert(PeerId::random(), (public_key.clone(), proof));
+
+        let result = pool
+            .consensus_result(final_proposals.clone(), members)
+            .await;
+
+        assert!(result.is_ok());
+        let signed_result = result.unwrap();
+        assert_eq!(signed_result.result, final_proposals);
+    }
+}
