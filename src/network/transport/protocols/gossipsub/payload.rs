@@ -7,7 +7,7 @@ use crate::{
     constants::HashArray,
     crypto::{
         algebra::{Point, Scalar},
-        keypair::{PublicKey, ResidentSignature, VrfProof},
+        keypair::{PublicKey, VrfProof},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
 };
@@ -87,13 +87,15 @@ pub enum Payload {
     Proposal(HashArray),
 
     ConsensusProposal {
-        proposal_set: HashSet<HashArray>,
+        proposals: HashSet<HashArray>,
         proof: VrfProof,
         public_key: PublicKey,
     },
 
-    ConsensusProposalResult {
-        signature: ResidentSignature,
+    ConsensusFinalProposal {
+        proposals: HashSet<HashArray>,
+        proof: VrfProof,
+        public_key: PublicKey,
     },
 
     // For testing
