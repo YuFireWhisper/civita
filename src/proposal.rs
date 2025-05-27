@@ -2,6 +2,10 @@ use std::{collections::HashMap, fmt::Display};
 
 use crate::constants::HashArray;
 
+pub mod collector;
+pub mod pool;
+pub mod vrf_elector;
+
 pub struct Diff {
     pub impacted_residents: Vec<HashArray>,
     pub total_stakes: i32,

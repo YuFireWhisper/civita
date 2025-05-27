@@ -7,16 +7,16 @@ use libp2p::PeerId;
 use tokio::time::Duration;
 
 use crate::{
-    consensus::{
-        collector::{self, Collector, Context},
-        vrf_elector::{self, VrfElector},
-    },
     constants::HashArray,
     crypto::keypair::{PublicKey, SecretKey, VrfProof},
     network::transport::{
         self,
         protocols::gossipsub,
         store::merkle_dag::{self, KeyArray, Node},
+    },
+    proposal::{
+        collector::{self, Collector, Context},
+        vrf_elector::{self, VrfElector},
     },
     resident::Record,
 };
@@ -73,7 +73,7 @@ struct VoteContext {
     root: Node,
 }
 
-pub struct ProposalPool {
+pub struct Pool {
     transport: Arc<Transport>,
     collector: Collector<ProposalContext>,
     public_key: PublicKey,
@@ -108,7 +108,7 @@ impl VoteContext {
     }
 }
 
-impl ProposalPool {
+impl Pool {
     pub fn new(transport: Arc<Transport>, secret_key: SecretKey, config: Config) -> Self {
         let public_key = secret_key.to_public_key();
         let elector = VrfElector::new(secret_key.clone(), config.num_members);
@@ -330,7 +330,7 @@ mod tests {
         let config = create_test_config();
         let expected_public_key = secret_key.to_public_key();
 
-        let pool = ProposalPool::new(transport, secret_key, config);
+        let pool = Pool::new(transport, secret_key, config);
 
         assert_eq!(pool.public_key, expected_public_key);
         assert_eq!(pool.config.external_topic, TEST_EXTERNAL_TOPIC);
@@ -346,7 +346,7 @@ mod tests {
         let input = create_test_input();
 
         // No transport expectations since we should return early
-        let mut pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+        let mut pool = Pool::new(Arc::new(transport), secret_key, config);
 
         let result = pool.start(input, 0, TEST_TOTAL_STAKES).await;
 
@@ -369,7 +369,7 @@ mod tests {
         let config = create_test_config();
         let input = create_test_input();
 
-        let mut pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+        let mut pool = Pool::new(Arc::new(transport), secret_key, config);
 
         let result = pool
             .start(input.clone(), TEST_STAKE, TEST_TOTAL_STAKES)
@@ -390,7 +390,7 @@ mod tests {
         let (secret_key, _) = create_valid_keypair();
         let config = create_test_config();
 
-        let mut pool = ProposalPool::new(Arc::new(transport), secret_key, config);
+        let mut pool = Pool::new(Arc::new(transport), secret_key, config);
 
         let result = pool
             .start(TEST_INPUT.to_vec(), TEST_STAKE, TEST_TOTAL_STAKES)
@@ -406,7 +406,7 @@ mod tests {
         let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
         let config = create_test_config();
 
-        let mut pool = ProposalPool::new(transport, secret_key, config);
+        let mut pool = Pool::new(transport, secret_key, config);
         let root = create_test_node();
 
         let result = pool.stop(root).await;
