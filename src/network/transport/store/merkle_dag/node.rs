@@ -1,4 +1,7 @@
-use std::{collections::HashMap, thread};
+use std::{
+    collections::{HashMap, HashSet},
+    thread,
+};
 
 use dashmap::{
     mapref::one::{Ref, RefMut},
@@ -207,6 +210,167 @@ impl Node {
         }
 
         Ok(None)
+    }
+
+    pub async fn batch_get(
+        &self,
+        keys: Vec<KeyArray>,
+        transport: &Transport,
+    ) -> Result<Vec<Option<HashArray>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut key_indices: HashMap<KeyArray, Vec<usize>> = HashMap::new();
+        for (idx, key) in keys.iter().enumerate() {
+            key_indices.entry(*key).or_default().push(idx);
+        }
+
+        let mut grouped: HashMap<BanchingFactor, Vec<KeyArray>> = HashMap::new();
+        for key in &keys {
+            grouped.entry(key[0]).or_default().push(*key);
+        }
+
+        let mut futures = FuturesUnordered::new();
+        let max_concurrent = thread::available_parallelism()?.get() * 2;
+
+        for (_, group) in grouped {
+            for chunk in group.chunks(max_concurrent) {
+                futures.push(self.batch_get_group(chunk.to_vec(), transport));
+            }
+        }
+
+        let mut result_map: HashMap<KeyArray, Option<HashArray>> = HashMap::new();
+        while let Some(group_results) = futures.next().await {
+            let results = group_results?;
+            results.into_iter().for_each(|(key, value)| {
+                if let Some(indices) = key_indices.get(&key) {
+                    for &idx in indices {
+                        result_map.insert(keys[idx], value);
+                    }
+                }
+            });
+        }
+
+        let mut results = Vec::with_capacity(keys.len());
+        for key in &keys {
+            results.push(result_map.get(key).cloned().unwrap_or(None));
+        }
+
+        Ok(results)
+    }
+
+    async fn batch_get_group(
+        &self,
+        keys: Vec<KeyArray>,
+        transport: &Transport,
+    ) -> Result<Vec<(KeyArray, Option<HashArray>)>> {
+        let mut results = Vec::with_capacity(keys.len());
+
+        let key_groups =
+            keys.into_iter()
+                .fold(HashMap::<u16, Vec<KeyArray>>::new(), |mut acc, key| {
+                    acc.entry(key[0]).or_default().push(key);
+                    acc
+                });
+
+        for (first_index, group_keys) in key_groups {
+            match self.child(&first_index) {
+                Some(child_ref) => {
+                    let child = child_ref.value();
+                    self.ensure_child_loaded(child, transport).await?;
+                    let child_results = child
+                        .batch_get_inner(1, group_keys.clone(), transport)
+                        .await?;
+
+                    for (key, result) in group_keys.into_iter().zip(child_results) {
+                        results.push((key, result));
+                    }
+                }
+                None => {
+                    for key in group_keys {
+                        results.push((key, None));
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn ensure_child_loaded(&self, child: &Node, transport: &Transport) -> Result<()> {
+        if let Some(hash) = child.hash().await {
+            if child.children.is_empty() {
+                let lock = child.lock_fetch_lock().await;
+                if child.children.is_empty() {
+                    let fetched_node = Self::fetch_node(transport, &hash).await?;
+                    drop(lock);
+                    for (idx, node) in fetched_node.children {
+                        child.children.insert(idx, node);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn batch_get_inner(
+        &self,
+        depth: usize,
+        keys: Vec<KeyArray>,
+        transport: &Transport,
+    ) -> Result<Vec<Option<HashArray>>> {
+        if depth == DEPTH - 1 {
+            let mut results = Vec::with_capacity(keys.len());
+            for key in keys {
+                let value = match self.child(&key[depth]) {
+                    Some(child) => child.value().hash().await,
+                    None => None,
+                };
+                results.push(value);
+            }
+            return Ok(results);
+        }
+
+        let mut ordered_groups: Vec<(u16, Vec<KeyArray>)> = Vec::new();
+        let mut seen_indices: HashSet<u16> = HashSet::new();
+
+        for key in &keys {
+            let index = key[depth];
+            if !seen_indices.contains(&index) {
+                seen_indices.insert(index);
+                ordered_groups.push((index, Vec::new()));
+            }
+        }
+
+        for key in keys {
+            let index = key[depth];
+            for (group_index, group_keys) in &mut ordered_groups {
+                if *group_index == index {
+                    group_keys.push(key);
+                    break;
+                }
+            }
+        }
+
+        let mut results = Vec::new();
+
+        for (index, group_keys) in ordered_groups {
+            match self.child(&index) {
+                Some(child_ref) => {
+                    let child = child_ref.value();
+                    self.ensure_child_loaded(child, transport).await?;
+                    let group_results =
+                        Box::pin(child.batch_get_inner(depth + 1, group_keys, transport)).await?;
+                    results.extend(group_results);
+                }
+                None => {
+                    results.extend(vec![None; group_keys.len()]);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     pub async fn update_hash(&self) -> DashSet<HashArray> {
@@ -525,6 +689,150 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_get_empty_keys_returns_empty() {
+        let root = Node::new();
+        let transport = Transport::default();
+
+        let results = root.batch_get(vec![], &transport).await.unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_get_single_key_works() {
+        let root = Node::new();
+        let transport = Transport::default();
+
+        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
+
+        let results = root.batch_get(vec![KEY_1], &transport).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results, vec![Some(HASH_1)]);
+    }
+
+    #[tokio::test]
+    async fn batch_get_multiple_keys_works() {
+        let root = Node::new();
+        let transport = Transport::default();
+
+        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
+        root.insert(KEY_2, HASH_2, &transport).await.unwrap();
+
+        let results = root
+            .batch_get(vec![KEY_1, KEY_2], &transport)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results, vec![Some(HASH_1), Some(HASH_2)]);
+    }
+
+    #[tokio::test]
+    async fn batch_get_nonexistent_keys_returns_none() {
+        let root = Node::new();
+        let transport = Transport::default();
+
+        let key_3: KeyArray = [3; DEPTH];
+        let key_4: KeyArray = [4; DEPTH];
+
+        let results = root
+            .batch_get(vec![key_3, key_4], &transport)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results, vec![None, None]);
+    }
+
+    #[tokio::test]
+    async fn batch_get_mixed_existing_and_nonexistent() {
+        let root = Node::new();
+        let transport = Transport::default();
+
+        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
+
+        let key_3: KeyArray = [3; DEPTH];
+
+        let results = root
+            .batch_get(vec![KEY_1, key_3], &transport)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results, vec![Some(HASH_1), None]);
+    }
+
+    #[tokio::test]
+    async fn batch_get_with_transport_error_fails() {
+        let root = Node::new();
+        let transport = create_error_transport();
+
+        root.children.insert(KEY_1[0], Node::new_with_hash(HASH_1));
+
+        let result = root.batch_get(vec![KEY_1], &transport).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_get_large_set_is_efficient() {
+        let root = Node::new();
+        let transport = Transport::default();
+
+        let mut keys = Vec::new();
+        for i in 0..100 {
+            let mut key = [0; DEPTH];
+            key[0] = (i % 10) as BanchingFactor; // Create some overlap in paths
+            key[1] = i as BanchingFactor;
+            keys.push(key);
+            root.insert(key, HASH_1, &transport).await.unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        let results = root.batch_get(keys.clone(), &transport).await.unwrap();
+        let duration = start.elapsed();
+
+        assert_eq!(results.len(), 100);
+        assert!(duration.as_millis() < 1000); // Should be fast due to batching
+
+        for value in results {
+            assert_eq!(value, Some(HASH_1));
+        }
+    }
+
+    #[tokio::test]
+    async fn ouput_order_same_as_input() {
+        const NUM: usize = 100;
+
+        let root = Node::new();
+        let transport = Transport::default();
+
+        let mut keys = Vec::with_capacity(NUM);
+        let mut expected_results = Vec::with_capacity(NUM);
+
+        for i in 0..NUM {
+            let mut key = KeyArray::default();
+            key[0] = i as BanchingFactor;
+
+            let mut value = HashArray::default();
+            value.fill(i as u8);
+
+            root.insert(key, value, &transport).await.unwrap();
+            keys.push(key);
+            expected_results.push(Some(value));
+        }
+
+        let results = root.batch_get(keys.clone(), &transport).await.unwrap();
+
+        assert_eq!(results.len(), NUM);
+        for (result, expected) in results.iter().zip(expected_results.iter()) {
+            assert_eq!(result, expected);
+        }
     }
 
     #[tokio::test]

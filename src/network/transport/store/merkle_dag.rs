@@ -19,7 +19,7 @@ pub use node::Node;
 
 type Result<T> = std::result::Result<T, Error>;
 
-type BanchingFactor = u16;
+pub type BanchingFactor = u16;
 pub type KeyArray = [BanchingFactor; DEPTH];
 type HashArray = [u8; 32];
 
@@ -81,6 +81,13 @@ impl MerkleDag {
     pub async fn get(&mut self, key: KeyArray) -> Result<Option<HashArray>> {
         self.root
             .get(key, &self.transport)
+            .await
+            .map_err(Error::from)
+    }
+
+    pub async fn batch_get(&mut self, keys: Vec<KeyArray>) -> Result<Vec<Option<HashArray>>> {
+        self.root
+            .batch_get(keys, &self.transport)
             .await
             .map_err(Error::from)
     }
