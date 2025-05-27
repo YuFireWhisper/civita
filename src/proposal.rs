@@ -1,9 +1,10 @@
 use std::{collections::HashMap, fmt::Display};
 
-use crate::constants::HashArray;
+use crate::{constants::HashArray, mocks};
 
 pub mod collector;
 pub mod pool;
+pub mod publisher;
 pub mod vrf_elector;
 
 pub struct Diff {
@@ -11,6 +12,7 @@ pub struct Diff {
     pub total_stakes: i32,
 }
 
+#[mockall::automock(type Error = mocks::MockError;)]
 pub trait Proposal: Sized {
     type Error: Display;
 

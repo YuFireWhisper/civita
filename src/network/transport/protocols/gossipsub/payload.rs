@@ -1,4 +1,7 @@
-use std::{collections::HashSet, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    time::SystemTime,
+};
 
 use libp2p::gossipsub::MessageId;
 use serde::{Deserialize, Serialize};
@@ -84,10 +87,10 @@ pub enum Payload {
         proof: VrfProof,
     },
 
-    Proposal(HashArray),
+    Proposal(Vec<u8>),
 
     ConsensusProposal {
-        proposals: HashSet<HashArray>,
+        proposals: HashMap<HashArray, (Vec<u8>, u64)>,
         proof: VrfProof,
         public_key: PublicKey,
     },
