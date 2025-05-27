@@ -1,10 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
+    marker::PhantomData,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use libp2p::PeerId;
+use serde::{Deserialize, Serialize};
 use tokio::time::{self, Duration};
 
 use crate::{
@@ -57,6 +59,9 @@ pub enum Error {
 
     #[error("Invalid peer or proof for message from {0}")]
     InvalidPeerOrProof(PeerId),
+
+    #[error("{0}")]
+    Proposal(String),
 }
 
 pub struct Config {
@@ -67,31 +72,37 @@ pub struct Config {
 }
 
 #[derive(Clone)]
-struct ProposalEntry<P> {
-    proposal: P,
+#[derive(Debug)]
+#[derive(PartialEq, Eq)]
+#[derive(Hash)]
+#[derive(Serialize, Deserialize)]
+pub struct RecordKey {
+    hash: HashArray,
+    key: KeyArray,
     timestamp: u64,
 }
 
 #[derive(Clone)]
 struct ProposalContext<P> {
-    proposals: HashMap<HashArray, ProposalEntry<P>>,
+    transport: Arc<Transport>,
+    records: HashMap<RecordKey, Record>,
     own_proof: VrfProof,
     own_weight: u32,
     total_stakes: u32,
     input: Vec<u8>,
+    root: Node,
+    _marker: PhantomData<P>,
 }
-
-type ProposalKey = (HashArray, u64);
 
 #[derive(Clone)]
-struct VoteEntry<P> {
+struct VoteEntry {
     count: u32,
-    proposal: P,
+    record: Record,
 }
 
-struct VoteContext<P> {
+struct VoteContext {
     transport: Arc<Transport>,
-    votes: HashMap<ProposalKey, VoteEntry<P>>,
+    votes: HashMap<RecordKey, VoteEntry>,
     voted_members: HashSet<PeerId>,
     total_times: u32,
     input: Vec<u8>,
@@ -100,7 +111,7 @@ struct VoteContext<P> {
     root: Node,
 }
 
-pub struct Pool<P: Proposal + Send + Sync + 'static> {
+pub struct Pool<P: Proposal> {
     transport: Arc<Transport>,
     collector: Collector<ProposalContext<P>>,
     public_key: PublicKey,
@@ -108,30 +119,95 @@ pub struct Pool<P: Proposal + Send + Sync + 'static> {
     config: Config,
 }
 
-impl<P: Proposal + Send + Sync + 'static> ProposalContext<P> {
-    pub fn new(input: Vec<u8>, own_proof: VrfProof, own_weight: u32, total_stakes: u32) -> Self {
+impl<P: Proposal> ProposalContext<P> {
+    pub fn new(
+        transport: Arc<Transport>,
+        input: Vec<u8>,
+        own_proof: VrfProof,
+        own_times: u32,
+        total_stakes: u32,
+        root: Node,
+    ) -> Self {
         Self {
-            proposals: HashMap::new(),
+            transport,
+            records: HashMap::new(),
             own_proof,
-            own_weight,
+            own_weight: own_times,
             total_stakes,
             input,
+            root,
+            _marker: PhantomData,
         }
     }
 
-    fn add_proposal(&mut self, proposal_vec: &[u8]) -> Result<()> {
+    async fn add_proposal(&mut self, proposal_vec: &[u8]) -> Result<()> {
+        let timestamp = Self::current_timestamp();
+
         let proposal =
             P::from_slice(proposal_vec).map_err(|e| Error::ProposalSerialization(e.to_string()))?;
 
-        let hash = Self::compute_hash(proposal_vec);
-        let timestamp = Self::current_timestamp();
+        let resident_keys = proposal
+            .impact()
+            .map_err(|e| Error::Proposal(e.to_string()))?;
+        let impacted_residents = self.get_impacted_residents(resident_keys.clone()).await?;
 
-        self.proposals.entry(hash).or_insert(ProposalEntry {
-            proposal,
-            timestamp,
+        let mut records: HashMap<_, _> =
+            resident_keys.into_iter().zip(impacted_residents).collect();
+
+        if !proposal
+            .verify(&records)
+            .map_err(|e| Error::Proposal(e.to_string()))?
+        {
+            log::warn!("Proposal verification failed");
+            return Ok(());
+        }
+
+        proposal
+            .apply(&mut records)
+            .map_err(|e| Error::Proposal(e.to_string()))?;
+
+        records.into_iter().for_each(|(key, record)| {
+            let hash = Self::compute_hash(&record.to_vec());
+
+            let key = RecordKey {
+                hash,
+                key: hash_to_key_array(key),
+                timestamp,
+            };
+
+            self.records.insert(key, record);
         });
 
         Ok(())
+    }
+
+    async fn get_impacted_residents(&self, hashes: Vec<HashArray>) -> Result<Vec<Record>> {
+        let keys: Vec<KeyArray> = hashes.into_iter().map(hash_to_key_array).collect();
+
+        let hashes = self.root.batch_get(keys, &self.transport).await?;
+
+        let futures = hashes
+            .into_iter()
+            .map(|hash_opt| async move {
+                if let Some(hash) = hash_opt {
+                    self.transport.get::<Record>(&hash).await
+                } else {
+                    Ok(Some(Record::default()))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let results = futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .map(|res| match res {
+                Ok(Some(record)) => Ok(record),
+                Ok(None) => Ok(Record::default()),
+                Err(e) => Err(Error::from(e)),
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(results)
     }
 
     fn compute_hash(data: &[u8]) -> HashArray {
@@ -147,7 +223,7 @@ impl<P: Proposal + Send + Sync + 'static> ProposalContext<P> {
     }
 }
 
-impl<P: Proposal + Send + Sync + 'static> VoteContext<P> {
+impl VoteContext {
     fn verify_source(
         &self,
         source: &PeerId,
@@ -187,7 +263,9 @@ impl<P: Proposal + Send + Sync + 'static> VoteContext<P> {
     }
 
     async fn get_peer_stakes(&self, peer_id: &PeerId) -> Result<Option<u32>> {
-        let key = Self::peer_to_key_array(peer_id);
+        let hash: HashArray = peer_id.to_bytes().try_into().unwrap();
+
+        let key = hash_to_key_array(hash);
         let hash = self.root.get(key, &self.transport).await?;
 
         match hash {
@@ -196,43 +274,26 @@ impl<P: Proposal + Send + Sync + 'static> VoteContext<P> {
         }
     }
 
-    fn peer_to_key_array(peer: &PeerId) -> KeyArray {
-        let bytes = peer.to_bytes();
-        let mut result = KeyArray::default();
-
-        for (i, chunk) in result.iter_mut().enumerate() {
-            let start_idx = i * 2;
-            if start_idx + 1 < bytes.len() {
-                *chunk = (bytes[start_idx] as u16) << 8 | (bytes[start_idx + 1] as u16);
-            }
-        }
-
-        result
-    }
-
     fn process_votes(
         &mut self,
-        proposals: HashMap<HashArray, (Vec<u8>, u64)>,
+        records: HashMap<RecordKey, Record>,
         voting_times: u32,
     ) -> Result<()> {
-        for (hash, (proposal_vec, timestamp)) in proposals {
-            let proposal = P::from_slice(&proposal_vec)
-                .map_err(|e| Error::ProposalSerialization(e.to_string()))?;
-
-            let key = (hash, timestamp);
+        for (key, record) in records {
             self.votes
                 .entry(key)
                 .and_modify(|entry| entry.count += voting_times)
                 .or_insert(VoteEntry {
                     count: voting_times,
-                    proposal,
+                    record,
                 });
         }
+
         Ok(())
     }
 }
 
-impl<P: Proposal + Send + Sync + 'static> Pool<P> {
+impl<P: Proposal> Pool<P> {
     pub fn new(transport: Arc<Transport>, secret_key: SecretKey, config: Config) -> Self {
         let public_key = secret_key.to_public_key();
         let elector = VrfElector::new(secret_key.clone(), config.num_members);
@@ -248,9 +309,11 @@ impl<P: Proposal + Send + Sync + 'static> Pool<P> {
 
     pub async fn start_proposal_phase(
         &mut self,
+        transport: Arc<Transport>,
         input: Vec<u8>,
         stake: u32,
         total_stakes: u32,
+        root: Node,
     ) -> Result<()> {
         let (proof, times) = self.elector.generate(&input, stake, total_stakes)?;
 
@@ -259,7 +322,7 @@ impl<P: Proposal + Send + Sync + 'static> Pool<P> {
             return Ok(());
         }
 
-        let ctx = ProposalContext::new(input, proof, times, total_stakes);
+        let ctx = ProposalContext::new(transport, input, proof, times, total_stakes, root);
         let rx = self
             .transport
             .listen_on_topic(&self.config.external_topic)
@@ -269,7 +332,7 @@ impl<P: Proposal + Send + Sync + 'static> Pool<P> {
         Ok(())
     }
 
-    pub async fn start_voting_phase(&mut self, root: Node) -> Result<Vec<P>> {
+    pub async fn start_voting_phase(&mut self, root: Node) -> Result<Vec<Record>> {
         let proposal_ctx = self.collector.stop().await?;
 
         self.publish_own_proposals(&proposal_ctx).await?;
@@ -289,24 +352,8 @@ impl<P: Proposal + Send + Sync + 'static> Pool<P> {
     }
 
     async fn publish_own_proposals(&self, ctx: &ProposalContext<P>) -> Result<()> {
-        let proposals = ctx
-            .proposals
-            .iter()
-            .map(|(hash, entry)| {
-                let proposal_vec = entry
-                    .proposal
-                    .to_vec()
-                    .map_err(|e| Error::ProposalSerialization(e.to_string()))?;
-                Ok((*hash, (proposal_vec, entry.timestamp)))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-
-        if proposals.is_empty() {
-            return Ok(());
-        }
-
         let payload = gossipsub::Payload::ConsensusProposal {
-            proposals,
+            proposals: ctx.records.clone(),
             proof: ctx.own_proof.clone(),
             public_key: self.public_key.clone(),
         };
@@ -315,11 +362,11 @@ impl<P: Proposal + Send + Sync + 'static> Pool<P> {
             .publish(&self.config.external_topic, payload)
             .await?;
 
-        log::info!("Published {} proposals", ctx.proposals.len());
+        log::info!("Published {} proposals", ctx.records.len());
         Ok(())
     }
 
-    async fn collect_votes_and_reach_consensus(&self, ctx: VoteContext<P>) -> Result<Vec<P>> {
+    async fn collect_votes_and_reach_consensus(&self, ctx: VoteContext) -> Result<Vec<Record>> {
         let rx = self
             .transport
             .listen_on_topic(&self.config.internal_topic)
@@ -334,7 +381,7 @@ impl<P: Proposal + Send + Sync + 'static> Pool<P> {
         self.compute_consensus_result(vote_ctx)
     }
 
-    fn compute_consensus_result(&self, ctx: VoteContext<P>) -> Result<Vec<P>> {
+    fn compute_consensus_result(&self, ctx: VoteContext) -> Result<Vec<Record>> {
         let threshold = ctx.total_times * 2 / 3;
 
         let mut accepted_entries: Vec<_> = ctx
@@ -343,24 +390,35 @@ impl<P: Proposal + Send + Sync + 'static> Pool<P> {
             .filter(|(_, entry)| entry.count >= threshold)
             .collect();
 
-        accepted_entries.sort_by(|((hash_a, ts_a), _), ((hash_b, ts_b), _)| {
-            ts_a.cmp(ts_b).then(hash_a.cmp(hash_b))
+        accepted_entries.sort_by(|(key_a, _), (key_b, _)| {
+            key_a
+                .timestamp
+                .cmp(&key_b.timestamp)
+                .then(key_a.hash.cmp(&key_b.hash))
         });
 
         let proposals: Vec<_> = accepted_entries
             .into_iter()
-            .map(|(_, entry)| entry.proposal)
+            .map(|(_, entry)| entry.record)
             .collect();
 
         Ok(proposals)
     }
 }
 
+pub fn hash_to_key_array(hash: HashArray) -> KeyArray {
+    unsafe { std::mem::transmute(hash) }
+}
+
+pub fn key_array_to_hash(key: KeyArray) -> HashArray {
+    unsafe { std::mem::transmute(key) }
+}
+
 #[async_trait::async_trait]
-impl<P: Proposal + Send + Sync + 'static> Context for ProposalContext<P> {
+impl<P: Proposal> Context for ProposalContext<P> {
     async fn handle_message(&mut self, msg: gossipsub::Message) -> bool {
         if let gossipsub::Payload::Proposal(data) = msg.payload {
-            if let Err(e) = self.add_proposal(&data) {
+            if let Err(e) = self.add_proposal(&data).await {
                 log::warn!("Failed to add proposal: {e}");
             }
         }
@@ -369,7 +427,7 @@ impl<P: Proposal + Send + Sync + 'static> Context for ProposalContext<P> {
 }
 
 #[async_trait::async_trait]
-impl<P: Proposal + Send + Sync + 'static> Context for VoteContext<P> {
+impl Context for VoteContext {
     async fn handle_message(&mut self, msg: gossipsub::Message) -> bool {
         let (proposals, proof, public_key) = match msg.payload {
             gossipsub::Payload::ConsensusProposal {
@@ -480,14 +538,18 @@ mod tests {
     #[tokio::test]
     async fn start_with_zero_times_returns_early() {
         let transport = MockTransport::default();
+        let transport = Arc::new(transport);
         let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
         let config = create_test_config();
         let input = create_test_input();
+        let root = create_test_node();
 
         // No transport expectations since we should return early
-        let mut pool = Pool::<MockProposal>::new(Arc::new(transport), secret_key, config);
+        let mut pool = Pool::<MockProposal>::new(transport.clone(), secret_key, config);
 
-        let result = pool.start_proposal_phase(input, 0, TEST_TOTAL_STAKES).await;
+        let result = pool
+            .start_proposal_phase(transport, input, 0, TEST_TOTAL_STAKES, root)
+            .await;
 
         assert!(result.is_ok());
     }
@@ -504,14 +566,22 @@ mod tests {
                 Ok(rx)
             });
 
+        let transport = Arc::new(transport);
         let (secret_key, _) = create_valid_keypair();
         let config = create_test_config();
         let input = create_test_input();
+        let root = create_test_node();
 
-        let mut pool = Pool::<MockProposal>::new(Arc::new(transport), secret_key, config);
+        let mut pool = Pool::<MockProposal>::new(transport.clone(), secret_key, config);
 
         let result = pool
-            .start_proposal_phase(input.clone(), TEST_STAKE, TEST_TOTAL_STAKES)
+            .start_proposal_phase(
+                transport,
+                input.clone(),
+                TEST_STAKE,
+                TEST_TOTAL_STAKES,
+                root,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -525,14 +595,22 @@ mod tests {
             .with(eq(TEST_EXTERNAL_TOPIC))
             .times(1)
             .returning(|_| Err(transport::Error::MockError));
+        let transport = Arc::new(transport);
 
         let (secret_key, _) = create_valid_keypair();
         let config = create_test_config();
+        let root = create_test_node();
 
-        let mut pool = Pool::<MockProposal>::new(Arc::new(transport), secret_key, config);
+        let mut pool = Pool::<MockProposal>::new(transport.clone(), secret_key, config);
 
         let result = pool
-            .start_proposal_phase(TEST_INPUT.to_vec(), TEST_STAKE, TEST_TOTAL_STAKES)
+            .start_proposal_phase(
+                transport,
+                TEST_INPUT.to_vec(),
+                TEST_STAKE,
+                TEST_TOTAL_STAKES,
+                root,
+            )
             .await;
 
         assert!(result.is_err());

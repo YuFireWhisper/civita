@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::constants::U32_LENGTH;
 
 #[derive(Debug)]
@@ -7,6 +9,11 @@ pub enum Error {
     InvalidLength,
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Default)]
+#[derive(PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 pub struct Record {
     pub stakes: u32,
     pub data: Vec<u8>,
@@ -17,11 +24,11 @@ impl Record {
         Record { stakes, data }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, Error> {
         Self::try_from(bytes.to_vec())
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_vec(&self) -> Vec<u8> {
         self.into()
     }
 }

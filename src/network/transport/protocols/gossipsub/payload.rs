@@ -13,6 +13,8 @@ use crate::{
         keypair::{PublicKey, VrfProof},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
+    proposal::pool::RecordKey,
+    resident::Record,
 };
 
 #[derive(Debug)]
@@ -90,7 +92,7 @@ pub enum Payload {
     Proposal(Vec<u8>),
 
     ConsensusProposal {
-        proposals: HashMap<HashArray, (Vec<u8>, u64)>,
+        proposals: HashMap<RecordKey, Record>,
         proof: VrfProof,
         public_key: PublicKey,
     },
