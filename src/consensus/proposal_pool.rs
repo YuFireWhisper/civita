@@ -148,7 +148,7 @@ impl ProposalPool {
         Ok(())
     }
 
-    pub async fn stop(&mut self, root: Node) -> Result<()> {
+    pub async fn stop(&mut self, root: Node) -> Result<HashSet<HashArray>> {
         let ctx = self.collector.stop().await?;
 
         let own_proposals = ctx.proposals.clone();
@@ -167,10 +167,7 @@ impl ProposalPool {
             root,
         };
 
-        let final_proposals = self.collect_and_vote(vote_ctx).await?;
-        self.publish_result(final_proposals, ctx.own_proof).await?;
-
-        Ok(())
+        self.collect_and_vote(vote_ctx).await
     }
 
     async fn publish_proposals(
@@ -211,24 +208,6 @@ impl ProposalPool {
             .filter(|(_, count)| count >= &threshold)
             .map(|(hash, _)| hash)
             .collect())
-    }
-
-    async fn publish_result(
-        &self,
-        final_proposals: HashSet<HashArray>,
-        proof: VrfProof,
-    ) -> Result<()> {
-        let payload = gossipsub::Payload::ConsensusFinalProposal {
-            proposals: final_proposals,
-            proof,
-            public_key: self.public_key.clone(),
-        };
-
-        self.transport
-            .publish(&self.config.internal_topic, payload)
-            .await?;
-
-        Ok(())
     }
 }
 
