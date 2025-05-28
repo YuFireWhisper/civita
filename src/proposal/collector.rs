@@ -70,6 +70,11 @@ impl<C: Context> Collector<C> {
             Err(_) => None,
         }
     }
+
+    pub async fn wait_until(&mut self, duration: Duration) -> Result<C> {
+        tokio::time::sleep(duration).await;
+        self.stop().await
+    }
 }
 
 impl<C: Context> Default for Collector<C> {

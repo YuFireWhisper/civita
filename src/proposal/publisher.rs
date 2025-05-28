@@ -7,8 +7,8 @@ use libp2p::PeerId;
 use tokio::time::Duration;
 
 use crate::{
-    constants::HashArray,
-    crypto::keypair::{self, PublicKey, ResidentSignature, VrfProof},
+    constants::{HashArray, HASH_ARRAY_LENGTH, U16_LENGTH},
+    crypto::keypair::{self, PublicKey, ResidentSignature, SecretKey, VrfProof},
     network::transport::{
         self,
         protocols::gossipsub,
@@ -16,8 +16,8 @@ use crate::{
     },
     proposal::{
         collector::{self, Collector, Context},
-        pool::{hash_to_key_array, CollectionResult},
-        vrf_elector::VrfElector,
+        pool::{hash_to_key_array, key_array_to_hash},
+        vrf_elector::{self, VrfElector},
     },
     resident::Record,
 };
@@ -29,6 +29,7 @@ use crate::network::transport::Transport;
 use crate::network::transport::MockTransport as Transport;
 
 type Result<T> = std::result::Result<T, Error>;
+type SplitedPairs = (Vec<(KeyArray, HashArray)>, Vec<(KeyArray, Record)>);
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -56,6 +57,12 @@ pub enum Error {
 
     #[error("{0}")]
     Collector(#[from] collector::Error),
+
+    #[error("{0}")]
+    Elector(#[from] vrf_elector::Error),
+
+    #[error("Peer {0} is already voted")]
+    AlreadyVoted(PeerId),
 }
 
 pub struct Config {
@@ -74,26 +81,68 @@ struct MemberInfo {
 }
 
 #[derive(Debug)]
+struct Candidate {
+    final_node: Vec<u8>,
+    processed: HashSet<HashArray>,
+    next: Vec<(KeyArray, Record)>,
+    hash: HashArray,
+}
+
+#[derive(Debug)]
 struct VoteContext {
     transport: Arc<Transport>,
     elector: Arc<VrfElector>,
-    votes: HashMap<Vec<u8>, (Vec<MemberInfo>, u32)>,
+    candidate: Candidate,
+    votes: Vec<MemberInfo>,
     voted: HashSet<PeerId>,
-    input: Vec<u8>,
-    total_stakes: u32,
+    goting_times: u32,
     total_times: u32,
     root: Node,
-    final_node: Option<Vec<u8>>,
 }
 
 pub struct Publisher {
     transport: Arc<Transport>,
     elector: Arc<VrfElector>,
+    secret_key: SecretKey,
+    public_key: PublicKey,
     merkle_dag: MerkleDag,
     config: Config,
 }
 
 impl MemberInfo {
+    pub fn new(
+        public_key: PublicKey,
+        proof: VrfProof,
+        signature: ResidentSignature,
+        hash: &HashArray,
+    ) -> Result<Self> {
+        if !public_key.verify_proof(proof.output(), &proof) {
+            return Err(Error::InvalidPeerOrProof(public_key.to_peer_id()));
+        }
+
+        if !public_key.verify_signature(hash, &signature) {
+            return Err(Error::InvalidPeerOrProof(public_key.to_peer_id()));
+        }
+
+        Ok(MemberInfo {
+            public_key,
+            proof,
+            signature,
+        })
+    }
+
+    pub fn new_unchecked(
+        public_key: PublicKey,
+        proof: VrfProof,
+        signature: ResidentSignature,
+    ) -> Self {
+        MemberInfo {
+            public_key,
+            proof,
+            signature,
+        }
+    }
+
     fn to_hash_map<I>(iter: I) -> HashMap<PublicKey, (VrfProof, ResidentSignature)>
     where
         I: IntoIterator<Item = Self>,
@@ -104,29 +153,101 @@ impl MemberInfo {
     }
 }
 
+impl Candidate {
+    pub fn new(
+        final_node: Vec<u8>,
+        processed: HashSet<HashArray>,
+        next: Vec<(KeyArray, Record)>,
+    ) -> Self {
+        let processed_bytes = Self::convert_processed_to_bytes(&processed);
+        let next_bytes = Self::convert_next_to_bytes(&next);
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&final_node);
+        hasher.update(&processed_bytes);
+        hasher.update(&next_bytes);
+        let hash = hasher.finalize().into();
+
+        Self {
+            final_node,
+            processed,
+            next,
+            hash,
+        }
+    }
+
+    fn convert_processed_to_bytes(processed: &HashSet<HashArray>) -> Vec<u8> {
+        let mut processed_vec = processed.iter().copied().collect::<Vec<_>>();
+        processed_vec.sort_unstable();
+
+        let mut bytes = Vec::with_capacity(processed.len() * HASH_ARRAY_LENGTH);
+        processed_vec.into_iter().for_each(|hash| {
+            bytes.extend(hash);
+        });
+
+        bytes
+    }
+
+    fn convert_next_to_bytes(next: &[(KeyArray, Record)]) -> Vec<u8> {
+        next.iter()
+            .cloned()
+            .flat_map(|(key, record)| {
+                let mut bytes = Vec::with_capacity(U16_LENGTH + HASH_ARRAY_LENGTH);
+                bytes.extend(key_array_to_hash(key));
+                bytes.extend(record.hash());
+                bytes
+            })
+            .collect()
+    }
+
+    pub fn hash(&self) -> &HashArray {
+        &self.hash
+    }
+}
+
 impl VoteContext {
-    fn verify_source(
-        &self,
-        source: &PeerId,
-        public_key: &PublicKey,
-        proof: &VrfProof,
-    ) -> Result<()> {
-        if &public_key.to_peer_id() != source {
-            return Err(Error::InvalidPeerOrProof(*source));
+    pub async fn add_vote(&mut self, peer_id: PeerId, member_info: MemberInfo) -> Result<()> {
+        if member_info.public_key.to_peer_id() != peer_id {
+            return Err(Error::InvalidPeerOrProof(peer_id));
         }
 
-        if !public_key.verify_proof(&self.input, proof) {
-            return Err(Error::InvalidPeerOrProof(*source));
+        if !self.voted.insert(peer_id) {
+            return Err(Error::AlreadyVoted(peer_id));
         }
 
-        if self.voted.contains(source) {
-            return Err(Error::InvalidPeerOrProof(*source));
+        let times = self
+            .get_voting_times(peer_id, &member_info.public_key, &member_info.proof)
+            .await?;
+
+        if member_info
+            .public_key
+            .verify_proof(self.candidate.hash(), &member_info.proof)
+        {
+            self.goting_times += times;
+            self.votes.push(member_info);
         }
+
+        self.total_times += times;
+        self.voted.insert(peer_id);
+        self.total_times += times;
 
         Ok(())
     }
 
-    async fn get_voting_times(&self, peer_id: PeerId, proof: &VrfProof) -> Result<u32> {
+    pub async fn add_vote_unchecked(
+        &mut self,
+        peer_id: PeerId,
+        member_info: MemberInfo,
+    ) -> Result<()> {
+        self.add_vote(peer_id, member_info).await
+    }
+
+    pub async fn get_voting_times(
+        &self,
+        peer_id: PeerId,
+        public_key: &PublicKey,
+        proof: &VrfProof,
+    ) -> Result<u32> {
         let stakes = self
             .get_peer_stakes(&peer_id)
             .await?
@@ -134,7 +255,7 @@ impl VoteContext {
 
         let times = self
             .elector
-            .calc_elected_times(stakes, self.total_stakes, &proof.output());
+            .calc_times_with_proof(stakes, public_key, proof)?;
 
         if times == 0 {
             return Err(Error::InsufficientStake(peer_id));
@@ -154,177 +275,162 @@ impl VoteContext {
             None => Ok(None),
         }
     }
+
+    pub fn get_result(self) -> Option<(Candidate, Vec<MemberInfo>)> {
+        if self.is_elected() {
+            Some((self.candidate, self.votes))
+        } else {
+            None
+        }
+    }
+
+    fn is_elected(&self) -> bool {
+        let threshold = self.total_times * 2 / 3;
+        self.goting_times >= threshold
+    }
 }
 
 impl Publisher {
-    pub fn new(transport: Arc<Transport>, elector: Arc<VrfElector>, config: Config) -> Self {
+    pub fn new(
+        transport: Arc<Transport>,
+        elector: Arc<VrfElector>,
+        secret_key: SecretKey,
+        public_key: PublicKey,
+        config: Config,
+    ) -> Self {
         let merkle_dag = MerkleDag::new(transport.clone(), config.batch_size);
 
         Self {
             transport,
             elector,
+            secret_key,
+            public_key,
             merkle_dag,
             config,
         }
     }
 
-    pub async fn generate_new_root(
+    pub fn set_elector(&mut self, elector: Arc<VrfElector>) {
+        self.elector = elector;
+    }
+
+    pub async fn publish(
         &mut self,
-        root: Node,
-        mut result: CollectionResult,
+        original: Node,
+        pairs: Vec<(KeyArray, Record)>,
+        proof: VrfProof,
+        times: u32,
     ) -> Result<()> {
-        let length = std::cmp::min(result.records.len(), self.config.per_time_max_records);
-        let mut pending = std::mem::take(&mut result.records);
-        let next = pending.split_off(length);
+        let (current, next) = self.split_pairs(pairs);
+        let current_set: HashSet<_> = current.iter().map(|(_, hash)| *hash).collect();
 
-        let pairs: Vec<(KeyArray, HashArray)> =
-            pending.iter().map(|(key, _)| (key.key, key.hash)).collect();
+        self.merkle_dag.change_root(original);
+        self.merkle_dag.batch_insert(current).await?;
 
-        self.merkle_dag.change_root(root);
-        self.merkle_dag.batch_insert(pairs).await?;
+        let root_bytes = self.merkle_dag.root().to_vec().await;
+        let candidate = Candidate::new(root_bytes, current_set, next);
+        let signature = self.publish_vote(*candidate.hash(), proof.clone()).await?;
 
-        let (final_node, proofs) = self.collect_votes(self.merkle_dag.root(), result).await?;
-
-        let payload = gossipsub::Payload::ProposalProcessingComplete {
-            final_node,
-            processed: pending
-                .iter()
-                .map(|(key, _)| key.hash)
-                .collect::<HashSet<_>>(),
-            next: next.into_iter().collect::<HashMap<_, _>>(),
-            proofs,
+        let mut ctx = VoteContext {
+            transport: self.transport.clone(),
+            elector: self.elector.clone(),
+            candidate,
+            votes: Vec::new(),
+            voted: HashSet::new(),
+            goting_times: 0,
+            total_times: times,
+            root: self.merkle_dag.root().clone(),
         };
 
-        self.transport
-            .publish(&self.config.external_topic, payload)
-            .await?;
+        ctx.add_vote_unchecked(
+            self.public_key.to_peer_id(),
+            MemberInfo::new_unchecked(self.public_key.clone(), proof, signature),
+        )
+        .await?;
+
+        if let Some((candidate, infos)) = self.collect_votes(ctx).await? {
+            let payload = gossipsub::Payload::ProposalProcessingComplete {
+                final_node: candidate.final_node,
+                processed: candidate.processed,
+                next: candidate.next,
+                proofs: MemberInfo::to_hash_map(infos),
+            };
+
+            self.transport
+                .publish(&self.config.external_topic, payload)
+                .await?;
+        }
 
         Ok(())
     }
 
-    async fn collect_votes(
-        &self,
-        root: &Node,
-        result: CollectionResult,
-    ) -> Result<(Vec<u8>, HashMap<PublicKey, (VrfProof, ResidentSignature)>)> {
-        let rx = self
-            .transport
-            .listen_on_topic(&self.config.internal_topic)
-            .await?;
+    fn split_pairs(&self, mut pairs: Vec<(KeyArray, Record)>) -> SplitedPairs {
+        let split_point = std::cmp::min(pairs.len(), self.config.per_time_max_records);
+        let next = pairs.split_off(split_point);
+        let current = pairs
+            .into_iter()
+            .map(|(key, record)| (key, record.hash()))
+            .collect();
 
-        let root_bytes = root.to_vec().await;
-        let proof = result.proof;
-        let public_key = result.public_key;
-        let signature = self.elector.secret_key().sign(&root_bytes)?;
+        (current, next)
+    }
 
-        let payload = gossipsub::Payload::ConsensusMerkleRoot {
-            root_bytes,
+    async fn publish_vote(&self, hash: HashArray, proof: VrfProof) -> Result<ResidentSignature> {
+        let signature = self.secret_key.sign(hash)?;
+
+        let payload = gossipsub::Payload::ConsensusCandidate {
             proof,
-            public_key,
-            signature,
+            public_key: self.public_key.clone(),
+            signature: signature.clone(),
         };
 
         self.transport
             .publish(&self.config.internal_topic, payload)
             .await?;
 
+        Ok(signature)
+    }
+
+    async fn collect_votes(
+        &self,
+        ctx: VoteContext,
+    ) -> Result<Option<(Candidate, Vec<MemberInfo>)>> {
+        let rx = self
+            .transport
+            .listen_on_topic(&self.config.internal_topic)
+            .await?;
+
         let mut collector = Collector::<VoteContext>::new();
+        collector.start(rx, ctx).await;
 
-        let vote_context = VoteContext {
-            transport: self.transport.clone(),
-            elector: self.elector.clone(),
-            votes: HashMap::new(),
-            voted: HashSet::new(),
-            input: result.input.clone(),
-            total_stakes: result.total_stakes,
-            total_times: result.total_times,
-            root: root.clone(),
-            final_node: None,
-        };
+        let ctx = collector.wait_until(self.config.network_latency).await?;
 
-        collector.start(rx, vote_context).await;
-
-        let mut ctx = collector
-            .wait_for_stop(self.config.network_latency)
-            .await
-            .ok_or(Error::ConsensusFailed)??;
-
-        let final_node = ctx.final_node.unwrap();
-
-        let proofs = ctx
-            .votes
-            .remove(&final_node)
-            .expect("Final node should have votes");
-
-        let iter = proofs.0.into_iter();
-        let proofs = MemberInfo::to_hash_map(iter);
-
-        Ok((final_node, proofs))
+        Ok(ctx.get_result())
     }
 }
 
 #[async_trait::async_trait]
 impl Context for VoteContext {
     async fn handle_message(&mut self, msg: gossipsub::Message) -> bool {
-        if let gossipsub::Payload::ConsensusMerkleRoot {
-            root_bytes,
+        if let gossipsub::Payload::ConsensusCandidate {
             proof,
             public_key,
             signature,
         } = msg.payload
         {
-            if let Err(e) = self.verify_source(&msg.source, &public_key, &proof) {
-                log::warn!("{e}");
+            let member_info =
+                match MemberInfo::new(public_key, proof, signature, self.candidate.hash()) {
+                    Ok(info) => info,
+                    Err(e) => {
+                        log::warn!("Invalid member info: {e}");
+                        return false;
+                    }
+                };
+
+            if let Err(e) = self.add_vote(msg.source, member_info).await {
+                log::warn!("Failed to get voting times: {e}");
                 return false;
             }
-
-            if !public_key.verify_signature(&root_bytes, &signature) {
-                log::warn!("Invalid signature for message from {}", msg.source);
-                return false;
-            }
-
-            let times = match self.get_voting_times(msg.source, &proof).await {
-                Ok(times) => times,
-                Err(e) => {
-                    log::warn!("{e}");
-                    return false;
-                }
-            };
-
-            if times == 0 {
-                log::warn!("Insufficient stake for peer {}", msg.source);
-                return false;
-            }
-
-            if let Err(e) = Node::from_slice(&root_bytes) {
-                log::warn!("Failed to deserialize root: {e}");
-                return false;
-            }
-
-            self.voted.insert(msg.source);
-
-            if self
-                .votes
-                .get(&root_bytes)
-                .is_some_and(|(_, count)| *count >= self.total_times - times)
-            {
-                self.final_node = Some(root_bytes);
-                return true;
-            }
-
-            let member_info = MemberInfo {
-                public_key,
-                proof,
-                signature,
-            };
-
-            let entry = self
-                .votes
-                .entry(root_bytes)
-                .or_insert_with(|| (Vec::new(), 0));
-
-            entry.0.push(member_info);
-            entry.1 += times;
         }
 
         false

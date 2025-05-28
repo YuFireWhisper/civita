@@ -13,6 +13,7 @@ use crate::{
         keypair::{PublicKey, ResidentSignature, VrfProof},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
+    network::transport::store::merkle_dag::KeyArray,
     proposal::pool::RecordKey,
     resident::Record,
 };
@@ -95,14 +96,13 @@ pub enum Payload {
     ProposalProcessingComplete {
         final_node: Vec<u8>,
         processed: HashSet<HashArray>,
-        next: HashMap<RecordKey, Record>,
+        next: Vec<(KeyArray, Record)>,
         proofs: HashMap<PublicKey, (VrfProof, ResidentSignature)>,
     },
 
-    ConsensusMerkleRoot {
-        root_bytes: Vec<u8>,
-        proof: VrfProof,
+    ConsensusCandidate {
         public_key: PublicKey,
+        proof: VrfProof,
         signature: ResidentSignature,
     },
 

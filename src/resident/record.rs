@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::constants::U32_LENGTH;
+use crate::constants::{HashArray, U32_LENGTH};
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -30,6 +30,10 @@ impl Record {
 
     pub fn to_vec(&self) -> Vec<u8> {
         self.into()
+    }
+
+    pub fn hash(&self) -> HashArray {
+        blake3::hash(&self.to_vec()).into()
     }
 }
 

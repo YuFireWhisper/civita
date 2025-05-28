@@ -2,7 +2,7 @@ use statrs::distribution::{Binomial, DiscreteCDF};
 
 use crate::{
     constants::HashArray,
-    crypto::keypair::{self, SecretKey, VrfProof},
+    crypto::keypair::{self, PublicKey, SecretKey, VrfProof},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -15,6 +15,9 @@ const HASH_BITS: usize = TRUNCATED_HASH_SIZE * 8;
 pub enum Error {
     #[error("{0}")]
     Keypair(#[from] keypair::Error),
+
+    #[error("Invalid VRF proof")]
+    InvalidVrfProof,
 }
 
 #[derive(Debug)]
@@ -41,7 +44,7 @@ impl VrfElector {
         Ok((vrf_proof, times_elected))
     }
 
-    pub fn calc_elected_times(&self, stakes: u32, vrf_output: &HashArray) -> u32 {
+    fn calc_elected_times(&self, stakes: u32, vrf_output: &HashArray) -> u32 {
         let hash: [u8; TRUNCATED_HASH_SIZE] = vrf_output[..TRUNCATED_HASH_SIZE]
             .try_into()
             .expect("slice with incorrect length");
@@ -65,5 +68,17 @@ impl VrfElector {
         let dist = Binomial::new(p, stakes as u64).expect("Invalid binomial distribution");
 
         dist.cdf(j as u64)
+    }
+
+    pub fn calc_times_with_proof(
+        &self,
+        stakes: u32,
+        public_key: &PublicKey,
+        vrf_proof: &VrfProof,
+    ) -> Result<u32> {
+        if !vrf_proof.verify(&self.input, public_key) {
+            return Err(Error::InvalidVrfProof);
+        }
+        Ok(self.calc_elected_times(stakes, &vrf_proof.output()))
     }
 }

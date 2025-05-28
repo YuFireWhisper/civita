@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     marker::PhantomData,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -7,11 +7,9 @@ use std::{
 
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
-use tokio::time::{self, Duration};
 
 use crate::{
     constants::HashArray,
-    crypto::keypair::{PublicKey, SecretKey, VrfProof},
     network::transport::{
         self,
         protocols::gossipsub,
@@ -19,8 +17,7 @@ use crate::{
     },
     proposal::{
         collector::{self, Collector, Context},
-        vrf_elector::{self, VrfElector},
-        Proposal,
+        vrf_elector, Proposal,
     },
     resident::Record,
 };
@@ -66,9 +63,6 @@ pub enum Error {
 
 pub struct Config {
     pub external_topic: String,
-    pub internal_topic: String,
-    pub num_members: u32,
-    pub network_latency: Duration,
 }
 
 #[derive(Clone)]
@@ -86,67 +80,21 @@ pub struct RecordKey {
 struct ProposalContext<P> {
     transport: Arc<Transport>,
     records: HashMap<RecordKey, Record>,
-    own_proof: VrfProof,
-    own_weight: u32,
-    total_stakes: u32,
-    input: Vec<u8>,
     root: Node,
     _marker: PhantomData<P>,
-}
-
-#[derive(Clone)]
-struct VoteEntry {
-    count: u32,
-    record: Record,
-}
-
-struct VoteContext {
-    transport: Arc<Transport>,
-    votes: HashMap<RecordKey, VoteEntry>,
-    voted_members: HashSet<PeerId>,
-    total_times: u32,
-    own_proof: VrfProof,
-    input: Vec<u8>,
-    total_stakes: u32,
-    elector: Arc<VrfElector>,
-    root: Node,
-}
-
-#[derive(Debug)]
-pub struct CollectionResult {
-    pub records: Vec<(RecordKey, Record)>,
-    pub proof: VrfProof,
-    pub public_key: PublicKey,
-    pub input: Vec<u8>,
-    pub total_stakes: u32,
-    pub total_times: u32,
-    pub members: HashSet<PeerId>,
 }
 
 pub struct Pool<P: Proposal> {
     transport: Arc<Transport>,
     collector: Collector<ProposalContext<P>>,
-    public_key: PublicKey,
-    elector: Arc<VrfElector>,
     config: Config,
 }
 
 impl<P: Proposal> ProposalContext<P> {
-    pub fn new(
-        transport: Arc<Transport>,
-        input: Vec<u8>,
-        own_proof: VrfProof,
-        own_times: u32,
-        total_stakes: u32,
-        root: Node,
-    ) -> Self {
+    pub fn new(transport: Arc<Transport>, root: Node) -> Self {
         Self {
             transport,
             records: HashMap::new(),
-            own_proof,
-            own_weight: own_times,
-            total_stakes,
-            input,
             root,
             _marker: PhantomData,
         }
@@ -235,198 +183,42 @@ impl<P: Proposal> ProposalContext<P> {
     }
 }
 
-impl VoteContext {
-    fn verify_source(
-        &self,
-        source: &PeerId,
-        public_key: &PublicKey,
-        proof: &VrfProof,
-    ) -> Result<()> {
-        if &public_key.to_peer_id() != source {
-            return Err(Error::InvalidPeerOrProof(*source));
-        }
-
-        if !public_key.verify_proof(&self.input, proof) {
-            return Err(Error::InvalidPeerOrProof(*source));
-        }
-
-        if self.voted_members.contains(source) {
-            return Err(Error::InvalidPeerOrProof(*source));
-        }
-
-        Ok(())
-    }
-
-    async fn get_voting_times(&self, peer_id: PeerId, proof: &VrfProof) -> Result<u32> {
-        let stakes = self
-            .get_peer_stakes(&peer_id)
-            .await?
-            .ok_or(Error::InsufficientStake(peer_id))?;
-
-        let times = self
-            .elector
-            .calc_elected_times(stakes, self.total_stakes, &proof.output());
-
-        if times == 0 {
-            return Err(Error::InsufficientStake(peer_id));
-        }
-
-        Ok(times)
-    }
-
-    async fn get_peer_stakes(&self, peer_id: &PeerId) -> Result<Option<u32>> {
-        let hash: HashArray = peer_id.to_bytes().try_into().unwrap();
-
-        let key = hash_to_key_array(hash);
-        let hash = self.root.get(key, &self.transport).await?;
-
-        match hash {
-            Some(hash) => Ok(self.transport.get::<Record>(&hash).await?.map(|r| r.stakes)),
-            None => Ok(None),
-        }
-    }
-
-    fn process_votes(
-        &mut self,
-        records: HashMap<RecordKey, Record>,
-        voting_times: u32,
-    ) -> Result<()> {
-        for (key, record) in records {
-            self.votes
-                .entry(key)
-                .and_modify(|entry| entry.count += voting_times)
-                .or_insert(VoteEntry {
-                    count: voting_times,
-                    record,
-                });
-        }
-
-        Ok(())
-    }
-}
-
 impl<P: Proposal> Pool<P> {
-    pub fn new(transport: Arc<Transport>, secret_key: SecretKey, config: Config) -> Self {
-        let public_key = secret_key.to_public_key();
-        let elector = VrfElector::new(secret_key.clone(), config.num_members);
-
+    pub fn new(transport: Arc<Transport>, config: Config) -> Self {
         Self {
             transport,
             collector: Collector::new(),
-            public_key,
-            elector: Arc::new(elector),
             config,
         }
     }
 
-    pub async fn start_proposal_phase(
-        &mut self,
-        transport: Arc<Transport>,
-        input: Vec<u8>,
-        stake: u32,
-        total_stakes: u32,
-        root: Node,
-    ) -> Result<()> {
-        let (proof, times) = self.elector.generate(&input, stake, total_stakes)?;
-
-        if times == 0 {
-            log::info!("No voting rights for this round");
-            return Ok(());
-        }
-
-        let ctx = ProposalContext::new(transport, input, proof, times, total_stakes, root);
+    pub async fn start(&mut self, root: Node) -> Result<()> {
+        let ctx = ProposalContext::<P>::new(self.transport.clone(), root);
         let rx = self
             .transport
             .listen_on_topic(&self.config.external_topic)
             .await?;
-
         self.collector.start(rx, ctx).await;
         Ok(())
     }
 
-    pub async fn start_voting_phase(&mut self, root: Node) -> Result<CollectionResult> {
-        let proposal_ctx = self.collector.stop().await?;
+    pub async fn stop(&mut self) -> Result<Vec<(KeyArray, Record)>> {
+        let ctx = self.collector.stop().await?;
+        let mut entries: Vec<_> = ctx.records.into_iter().collect();
 
-        self.publish_own_proposals(&proposal_ctx).await?;
-
-        let vote_ctx = VoteContext {
-            transport: self.transport.clone(),
-            votes: HashMap::new(),
-            voted_members: HashSet::new(),
-            own_proof: proposal_ctx.own_proof,
-            total_times: proposal_ctx.own_weight,
-            input: proposal_ctx.input,
-            total_stakes: proposal_ctx.total_stakes,
-            elector: self.elector.clone(),
-            root,
-        };
-
-        self.collect_votes_and_reach_consensus(vote_ctx).await
-    }
-
-    async fn publish_own_proposals(&self, ctx: &ProposalContext<P>) -> Result<()> {
-        let payload = gossipsub::Payload::ConsensusProposal {
-            proposals: ctx.records.clone(),
-            proof: ctx.own_proof.clone(),
-            public_key: self.public_key.clone(),
-        };
-
-        self.transport
-            .publish(&self.config.external_topic, payload)
-            .await?;
-
-        log::info!("Published {} proposals", ctx.records.len());
-        Ok(())
-    }
-
-    async fn collect_votes_and_reach_consensus(
-        &self,
-        ctx: VoteContext,
-    ) -> Result<CollectionResult> {
-        let rx = self
-            .transport
-            .listen_on_topic(&self.config.internal_topic)
-            .await?;
-
-        let mut collector = Collector::new();
-        collector.start(rx, ctx).await;
-
-        time::sleep(self.config.network_latency).await;
-
-        let vote_ctx = collector.stop().await?;
-        self.compute_consensus_result(vote_ctx)
-    }
-
-    fn compute_consensus_result(&self, ctx: VoteContext) -> Result<CollectionResult> {
-        let threshold = ctx.total_times * 2 / 3;
-
-        let mut accepted_entries: Vec<_> = ctx
-            .votes
-            .into_iter()
-            .filter(|(_, entry)| entry.count >= threshold)
-            .collect();
-
-        accepted_entries.sort_by(|(key_a, _), (key_b, _)| {
+        entries.sort_by(|(key_a, _), (key_b, _)| {
             key_a
                 .timestamp
                 .cmp(&key_b.timestamp)
                 .then(key_a.hash.cmp(&key_b.hash))
         });
 
-        let records: Vec<_> = accepted_entries
+        let records: Vec<_> = entries
             .into_iter()
-            .map(|(key, entry)| (key, entry.record))
+            .map(|(key, record)| (key.key, record))
             .collect();
 
-        Ok(CollectionResult {
-            records,
-            proof: ctx.own_proof,
-            public_key: self.public_key.clone(),
-            input: ctx.input,
-            total_stakes: ctx.total_stakes,
-            total_times: ctx.total_times,
-            members: ctx.voted_members,
-        })
+        Ok(records)
     }
 }
 
@@ -447,212 +239,5 @@ impl<P: Proposal> Context for ProposalContext<P> {
             }
         }
         false
-    }
-}
-
-#[async_trait::async_trait]
-impl Context for VoteContext {
-    async fn handle_message(&mut self, msg: gossipsub::Message) -> bool {
-        let (proposals, proof, public_key) = match msg.payload {
-            gossipsub::Payload::ConsensusProposal {
-                proposals,
-                proof,
-                public_key,
-            } => (proposals, proof, public_key),
-            _ => return false,
-        };
-
-        if let Err(e) = self.verify_source(&msg.source, &public_key, &proof) {
-            log::warn!("Invalid message source from {}: {}", msg.source, e);
-            return false;
-        }
-
-        let voting_times = match self.get_voting_times(msg.source, &proof).await {
-            Ok(times) => times,
-            Err(e) => {
-                log::warn!("Failed to get voting times for {}: {}", msg.source, e);
-                return false;
-            }
-        };
-
-        if let Err(e) = self.process_votes(proposals, voting_times) {
-            log::warn!("Failed to process votes from {}: {}", msg.source, e);
-            return false;
-        }
-
-        self.voted_members.insert(msg.source);
-        log::debug!(
-            "Processed votes from {} with {} times",
-            msg.source,
-            voting_times
-        );
-
-        false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use mockall::predicate::*;
-    use tokio::sync::mpsc;
-
-    use super::*;
-    use crate::{
-        crypto::keypair::{self, KeyType},
-        network::transport::MockTransport,
-        proposal::MockProposal,
-    };
-
-    const TEST_EXTERNAL_TOPIC: &str = "test_external";
-    const TEST_INTERNAL_TOPIC: &str = "test_internal";
-    const TEST_NUM_MEMBERS: u32 = 5;
-    const TEST_STAKE: u32 = 100;
-    const TEST_TOTAL_STAKES: u32 = 1000;
-    const TEST_NETWORK_LATENCY_MS: u64 = 100;
-    const TEST_INPUT: &[u8] = b"test_input";
-
-    fn create_test_config() -> Config {
-        Config {
-            external_topic: TEST_EXTERNAL_TOPIC.to_string(),
-            internal_topic: TEST_INTERNAL_TOPIC.to_string(),
-            num_members: TEST_NUM_MEMBERS,
-            network_latency: Duration::from_millis(TEST_NETWORK_LATENCY_MS),
-        }
-    }
-
-    fn create_test_input() -> Vec<u8> {
-        TEST_INPUT.to_vec()
-    }
-
-    fn create_test_node() -> Node {
-        let hash = blake3::hash(b"test_data");
-        Node::new_with_hash(hash.into())
-    }
-
-    fn create_valid_keypair() -> (SecretKey, PublicKey) {
-        loop {
-            let (secret_key, public_key) = keypair::generate_keypair(KeyType::Secp256k1);
-            let elector = VrfElector::new(secret_key.clone(), TEST_NUM_MEMBERS);
-            let times = elector
-                .generate(TEST_INPUT, TEST_STAKE, TEST_TOTAL_STAKES)
-                .unwrap()
-                .1;
-
-            if times > 0 {
-                break (secret_key, public_key);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn new_creates_proposal_pool_with_correct_config() {
-        let transport = Arc::new(MockTransport::default());
-        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
-        let config = create_test_config();
-        let expected_public_key = secret_key.to_public_key();
-
-        let pool = Pool::<MockProposal>::new(transport, secret_key, config);
-
-        assert_eq!(pool.public_key, expected_public_key);
-        assert_eq!(pool.config.external_topic, TEST_EXTERNAL_TOPIC);
-        assert_eq!(pool.config.internal_topic, TEST_INTERNAL_TOPIC);
-        assert_eq!(pool.config.num_members, TEST_NUM_MEMBERS);
-    }
-
-    #[tokio::test]
-    async fn start_with_zero_times_returns_early() {
-        let transport = MockTransport::default();
-        let transport = Arc::new(transport);
-        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
-        let config = create_test_config();
-        let input = create_test_input();
-        let root = create_test_node();
-
-        // No transport expectations since we should return early
-        let mut pool = Pool::<MockProposal>::new(transport.clone(), secret_key, config);
-
-        let result = pool
-            .start_proposal_phase(transport, input, 0, TEST_TOTAL_STAKES, root)
-            .await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn start_with_positive_times_initializes_context() {
-        let mut transport = MockTransport::default();
-        transport
-            .expect_listen_on_topic()
-            .with(eq(TEST_EXTERNAL_TOPIC))
-            .times(1)
-            .returning(|_| {
-                let (_, rx) = mpsc::channel(10);
-                Ok(rx)
-            });
-
-        let transport = Arc::new(transport);
-        let (secret_key, _) = create_valid_keypair();
-        let config = create_test_config();
-        let input = create_test_input();
-        let root = create_test_node();
-
-        let mut pool = Pool::<MockProposal>::new(transport.clone(), secret_key, config);
-
-        let result = pool
-            .start_proposal_phase(
-                transport,
-                input.clone(),
-                TEST_STAKE,
-                TEST_TOTAL_STAKES,
-                root,
-            )
-            .await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn start_transport_error_propagates() {
-        let mut transport = MockTransport::default();
-        transport
-            .expect_listen_on_topic()
-            .with(eq(TEST_EXTERNAL_TOPIC))
-            .times(1)
-            .returning(|_| Err(transport::Error::MockError));
-        let transport = Arc::new(transport);
-
-        let (secret_key, _) = create_valid_keypair();
-        let config = create_test_config();
-        let root = create_test_node();
-
-        let mut pool = Pool::<MockProposal>::new(transport.clone(), secret_key, config);
-
-        let result = pool
-            .start_proposal_phase(
-                transport,
-                TEST_INPUT.to_vec(),
-                TEST_STAKE,
-                TEST_TOTAL_STAKES,
-                root,
-            )
-            .await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Transport(_)));
-    }
-
-    #[tokio::test]
-    async fn stop_without_start_returns_not_started_error() {
-        let transport = Arc::new(MockTransport::default());
-        let (secret_key, _) = keypair::generate_keypair(KeyType::Secp256k1);
-        let config = create_test_config();
-
-        let mut pool = Pool::<MockProposal>::new(transport, secret_key, config);
-        let root = create_test_node();
-
-        let result = pool.start_voting_phase(root).await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Collector(_)));
     }
 }

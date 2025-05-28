@@ -24,7 +24,7 @@ pub type BanchingFactor = u16;
 pub type KeyArray = [BanchingFactor; DEPTH];
 type HashArray = [u8; 32];
 
-const DEPTH: usize = 16;
+pub const DEPTH: usize = 16;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
