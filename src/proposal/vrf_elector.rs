@@ -78,4 +78,8 @@ impl VrfElector {
 
         dist.cdf(j as u64)
     }
+
+    pub fn secret_key(&self) -> &SecretKey {
+        &self.secret_key
+    }
 }

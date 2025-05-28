@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::{
     sync::{mpsc::Receiver, oneshot},
     task::{JoinError, JoinHandle},
@@ -58,6 +60,15 @@ impl<C: Context> Collector<C> {
         let (handle, tx) = self.handle.take().ok_or(Error::NotStarted)?;
         tx.send(()).map_err(|_| Error::NotStarted)?;
         handle.await.map_err(Error::from)
+    }
+
+    pub async fn wait_for_stop(&mut self, duration: Duration) -> Option<Result<C>> {
+        let (handle, _) = self.handle.take()?;
+
+        match tokio::time::timeout(duration, handle).await {
+            Ok(join_result) => Some(join_result.map_err(Error::from)),
+            Err(_) => None,
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bincode::error::DecodeError;
+use dashmap::DashSet;
 
 use crate::network::transport::{
     self,
@@ -64,32 +65,44 @@ impl MerkleDag {
         }
     }
 
-    pub async fn insert(&mut self, key: KeyArray, value: HashArray) -> Result<()> {
+    pub async fn insert(&self, key: KeyArray, value: HashArray) -> Result<()> {
         self.root
             .insert(key, value, &self.transport)
             .await
             .map_err(Error::from)
     }
 
-    pub async fn batch_insert(&mut self, pairs: Vec<(KeyArray, HashArray)>) -> Result<()> {
+    pub async fn batch_insert(
+        &self,
+        pairs: Vec<(KeyArray, HashArray)>,
+    ) -> Result<DashSet<HashArray>> {
         self.root
             .batch_insert(pairs, &self.transport, self.batch_size)
-            .await
-            .map_err(Error::from)
+            .await?;
+
+        Ok(self.root.update_hash().await)
     }
 
-    pub async fn get(&mut self, key: KeyArray) -> Result<Option<HashArray>> {
+    pub async fn get(&self, key: KeyArray) -> Result<Option<HashArray>> {
         self.root
             .get(key, &self.transport)
             .await
             .map_err(Error::from)
     }
 
-    pub async fn batch_get(&mut self, keys: Vec<KeyArray>) -> Result<Vec<Option<HashArray>>> {
+    pub async fn batch_get(&self, keys: Vec<KeyArray>) -> Result<Vec<Option<HashArray>>> {
         self.root
             .batch_get(keys, &self.transport)
             .await
             .map_err(Error::from)
+    }
+
+    pub fn change_root(&mut self, new_root: Node) {
+        self.root = Arc::new(new_root);
+    }
+
+    pub fn root(&self) -> &Node {
+        &self.root
     }
 }
 

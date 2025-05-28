@@ -10,7 +10,7 @@ use crate::{
     constants::HashArray,
     crypto::{
         algebra::{Point, Scalar},
-        keypair::{PublicKey, VrfProof},
+        keypair::{PublicKey, ResidentSignature, VrfProof},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
     proposal::pool::RecordKey,
@@ -84,11 +84,6 @@ pub enum Payload {
         state: Vec<u8>,
     },
 
-    NewRoots {
-        roots: (Vec<u8>, Vec<u8>),
-        proof: VrfProof,
-    },
-
     Proposal(Vec<u8>),
 
     ConsensusProposal {
@@ -97,10 +92,18 @@ pub enum Payload {
         public_key: PublicKey,
     },
 
-    ConsensusFinalProposal {
-        proposals: HashSet<HashArray>,
+    ProposalProcessingComplete {
+        final_node: Vec<u8>,
+        processed: HashSet<HashArray>,
+        next: HashMap<RecordKey, Record>,
+        proofs: HashMap<PublicKey, (VrfProof, ResidentSignature)>,
+    },
+
+    ConsensusMerkleRoot {
+        root_bytes: Vec<u8>,
         proof: VrfProof,
         public_key: PublicKey,
+        signature: ResidentSignature,
     },
 
     // For testing

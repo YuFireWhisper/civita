@@ -77,9 +77,9 @@ pub struct Config {
 #[derive(Hash)]
 #[derive(Serialize, Deserialize)]
 pub struct RecordKey {
-    hash: HashArray,
-    key: KeyArray,
-    timestamp: u64,
+    pub hash: HashArray,
+    pub key: KeyArray,
+    pub timestamp: u64,
 }
 
 #[derive(Clone)]
@@ -105,10 +105,22 @@ struct VoteContext {
     votes: HashMap<RecordKey, VoteEntry>,
     voted_members: HashSet<PeerId>,
     total_times: u32,
+    own_proof: VrfProof,
     input: Vec<u8>,
     total_stakes: u32,
     elector: Arc<VrfElector>,
     root: Node,
+}
+
+#[derive(Debug)]
+pub struct CollectionResult {
+    pub records: Vec<(RecordKey, Record)>,
+    pub proof: VrfProof,
+    pub public_key: PublicKey,
+    pub input: Vec<u8>,
+    pub total_stakes: u32,
+    pub total_times: u32,
+    pub members: HashSet<PeerId>,
 }
 
 pub struct Pool<P: Proposal> {
@@ -332,7 +344,7 @@ impl<P: Proposal> Pool<P> {
         Ok(())
     }
 
-    pub async fn start_voting_phase(&mut self, root: Node) -> Result<Vec<Record>> {
+    pub async fn start_voting_phase(&mut self, root: Node) -> Result<CollectionResult> {
         let proposal_ctx = self.collector.stop().await?;
 
         self.publish_own_proposals(&proposal_ctx).await?;
@@ -341,6 +353,7 @@ impl<P: Proposal> Pool<P> {
             transport: self.transport.clone(),
             votes: HashMap::new(),
             voted_members: HashSet::new(),
+            own_proof: proposal_ctx.own_proof,
             total_times: proposal_ctx.own_weight,
             input: proposal_ctx.input,
             total_stakes: proposal_ctx.total_stakes,
@@ -366,7 +379,10 @@ impl<P: Proposal> Pool<P> {
         Ok(())
     }
 
-    async fn collect_votes_and_reach_consensus(&self, ctx: VoteContext) -> Result<Vec<Record>> {
+    async fn collect_votes_and_reach_consensus(
+        &self,
+        ctx: VoteContext,
+    ) -> Result<CollectionResult> {
         let rx = self
             .transport
             .listen_on_topic(&self.config.internal_topic)
@@ -381,7 +397,7 @@ impl<P: Proposal> Pool<P> {
         self.compute_consensus_result(vote_ctx)
     }
 
-    fn compute_consensus_result(&self, ctx: VoteContext) -> Result<Vec<Record>> {
+    fn compute_consensus_result(&self, ctx: VoteContext) -> Result<CollectionResult> {
         let threshold = ctx.total_times * 2 / 3;
 
         let mut accepted_entries: Vec<_> = ctx
@@ -397,12 +413,20 @@ impl<P: Proposal> Pool<P> {
                 .then(key_a.hash.cmp(&key_b.hash))
         });
 
-        let proposals: Vec<_> = accepted_entries
+        let records: Vec<_> = accepted_entries
             .into_iter()
-            .map(|(_, entry)| entry.record)
+            .map(|(key, entry)| (key, entry.record))
             .collect();
 
-        Ok(proposals)
+        Ok(CollectionResult {
+            records,
+            proof: ctx.own_proof,
+            public_key: self.public_key.clone(),
+            input: ctx.input,
+            total_stakes: ctx.total_stakes,
+            total_times: ctx.total_times,
+            members: ctx.voted_members,
+        })
     }
 }
 
