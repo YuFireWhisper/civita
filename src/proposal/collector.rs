@@ -21,7 +21,7 @@ pub enum Error {
 
 #[async_trait::async_trait]
 pub trait Context: Send + Sync + 'static {
-    async fn handle_message(&mut self, msg: gossipsub::Message) -> bool;
+    async fn handle_message(&mut self, msg: gossipsub::Message);
 }
 
 pub struct Collector<C: Context> {
@@ -40,9 +40,7 @@ impl<C: Context> Collector<C> {
             loop {
                 tokio::select! {
                     Some(msg) = rx.recv() => {
-                        if ctx.handle_message(msg).await {
-                            break;
-                        }
+                        ctx.handle_message(msg).await;
                     }
                     _ = &mut rx_shutdown => {
                         break;

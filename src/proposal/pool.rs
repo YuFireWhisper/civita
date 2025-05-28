@@ -70,7 +70,7 @@ pub struct Config {
 #[derive(PartialEq, Eq)]
 #[derive(Hash)]
 #[derive(Serialize, Deserialize)]
-pub struct RecordKey {
+struct RecordKey {
     pub hash: HashArray,
     pub key: KeyArray,
     pub timestamp: u64,
@@ -232,12 +232,11 @@ pub fn key_array_to_hash(key: KeyArray) -> HashArray {
 
 #[async_trait::async_trait]
 impl<P: Proposal> Context for ProposalContext<P> {
-    async fn handle_message(&mut self, msg: gossipsub::Message) -> bool {
+    async fn handle_message(&mut self, msg: gossipsub::Message) {
         if let gossipsub::Payload::Proposal(data) = msg.payload {
             if let Err(e) = self.add_proposal(&data).await {
                 log::warn!("Failed to add proposal: {e}");
             }
         }
-        false
     }
 }

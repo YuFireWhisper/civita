@@ -411,7 +411,7 @@ impl Publisher {
 
 #[async_trait::async_trait]
 impl Context for VoteContext {
-    async fn handle_message(&mut self, msg: gossipsub::Message) -> bool {
+    async fn handle_message(&mut self, msg: gossipsub::Message) {
         if let gossipsub::Payload::ConsensusCandidate {
             proof,
             public_key,
@@ -423,16 +423,13 @@ impl Context for VoteContext {
                     Ok(info) => info,
                     Err(e) => {
                         log::warn!("Invalid member info: {e}");
-                        return false;
+                        return;
                     }
                 };
 
             if let Err(e) = self.add_vote(msg.source, member_info).await {
                 log::warn!("Failed to get voting times: {e}");
-                return false;
             }
         }
-
-        false
     }
 }

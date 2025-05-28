@@ -14,7 +14,6 @@ use crate::{
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
     network::transport::store::merkle_dag::KeyArray,
-    proposal::pool::RecordKey,
     resident::Record,
 };
 
@@ -86,12 +85,6 @@ pub enum Payload {
     },
 
     Proposal(Vec<u8>),
-
-    ConsensusProposal {
-        proposals: HashMap<RecordKey, Record>,
-        proof: VrfProof,
-        public_key: PublicKey,
-    },
 
     ProposalProcessingComplete {
         final_node: Vec<u8>,
