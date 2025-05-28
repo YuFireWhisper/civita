@@ -15,44 +15,33 @@ const HASH_BITS: usize = TRUNCATED_HASH_SIZE * 8;
 pub enum Error {
     #[error("{0}")]
     Keypair(#[from] keypair::Error),
-
-    #[error("Invalid proof")]
-    InvalidProof,
 }
 
 #[derive(Debug)]
 pub struct VrfElector {
-    secret_key: SecretKey,
+    input: Vec<u8>,
+    total_stakes: u32,
     expected_num: u32,
 }
 
 impl VrfElector {
-    pub fn new(secret_key: SecretKey, expected_num: u32) -> Self {
+    pub fn new(input: Vec<u8>, total_stakes: u32, expected_num: u32) -> Self {
         Self {
-            secret_key,
+            input,
+            total_stakes,
             expected_num,
         }
     }
 
-    pub fn generate(
-        &self,
-        input: impl AsRef<[u8]>,
-        stakes: u32,
-        total_stakes: u32,
-    ) -> Result<(VrfProof, u32)> {
-        let vrf_proof = self.secret_key.prove(input.as_ref())?;
+    pub fn generate(&self, stakes: u32, secret_key: &SecretKey) -> Result<(VrfProof, u32)> {
+        let vrf_proof = secret_key.prove(&self.input)?;
 
-        let times_elected = self.calc_elected_times(stakes, total_stakes, &vrf_proof.output());
+        let times_elected = self.calc_elected_times(stakes, &vrf_proof.output());
 
         Ok((vrf_proof, times_elected))
     }
 
-    pub fn calc_elected_times(
-        &self,
-        stakes: u32,
-        total_stakes: u32,
-        vrf_output: &HashArray,
-    ) -> u32 {
+    pub fn calc_elected_times(&self, stakes: u32, vrf_output: &HashArray) -> u32 {
         let hash: [u8; TRUNCATED_HASH_SIZE] = vrf_output[..TRUNCATED_HASH_SIZE]
             .try_into()
             .expect("slice with incorrect length");
@@ -60,8 +49,7 @@ impl VrfElector {
         let hash_value = u64::from_be_bytes(hash) as f64;
 
         for j in 0..=stakes {
-            let threshold =
-                self.calc_threshold(stakes, total_stakes, j) * 2f64.powi(HASH_BITS as i32);
+            let threshold = self.calc_threshold(stakes, j) * 2f64.powi(HASH_BITS as i32);
 
             if hash_value <= threshold {
                 return j;
@@ -71,15 +59,11 @@ impl VrfElector {
         0
     }
 
-    fn calc_threshold(&self, stakes: u32, total_stakes: u32, j: u32) -> f64 {
-        let p = self.expected_num as f64 / total_stakes as f64;
+    fn calc_threshold(&self, stakes: u32, j: u32) -> f64 {
+        let p = self.expected_num as f64 / self.total_stakes as f64;
 
         let dist = Binomial::new(p, stakes as u64).expect("Invalid binomial distribution");
 
         dist.cdf(j as u64)
-    }
-
-    pub fn secret_key(&self) -> &SecretKey {
-        &self.secret_key
     }
 }
