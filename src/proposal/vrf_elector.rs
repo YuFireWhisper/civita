@@ -81,8 +81,11 @@ impl VrfElector {
 
         let hash_value = u64::from_be_bytes(hash) as f64;
 
+        let p = self.expected_num as f64 / ctx.total_stakes as f64;
+        let dist = Binomial::new(p, stakes as u64).expect("Invalid binomial distribution");
+
         for j in 0..=stakes {
-            let threshold = self.calc_threshold(stakes, j, ctx) * 2f64.powi(HASH_BITS as i32);
+            let threshold = dist.cdf(j as u64) * 2f64.powi(HASH_BITS as i32);
 
             if hash_value <= threshold {
                 return j;
@@ -90,14 +93,6 @@ impl VrfElector {
         }
 
         0
-    }
-
-    fn calc_threshold(&self, stakes: u32, j: u32, ctx: &Context) -> f64 {
-        let p = self.expected_num as f64 / ctx.total_stakes as f64;
-
-        let dist = Binomial::new(p, stakes as u64).expect("Invalid binomial distribution");
-
-        dist.cdf(j as u64)
     }
 
     pub fn calc_times_with_proof(
