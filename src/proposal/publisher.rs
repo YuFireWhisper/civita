@@ -17,7 +17,7 @@ use crate::{
     proposal::{
         collector::{self, Collector, Context},
         pool::{hash_to_key_array, key_array_to_hash, CollectedRecords},
-        vrf_elector::{self, VrfElector},
+        vrf_elector::{self, ElectionResult, VrfElector},
     },
     resident::Record,
 };
@@ -199,9 +199,7 @@ impl VoteContext {
             return Err(Error::AlreadyVoted(peer_id));
         }
 
-        let times = self
-            .get_voting_times(peer_id, &member_info.public_key, &member_info.proof)
-            .await?;
+        let times = self.get_voting_times(peer_id, &member_info.proof).await?;
 
         if member_info
             .public_key
@@ -226,12 +224,7 @@ impl VoteContext {
         self.add_vote(peer_id, member_info).await
     }
 
-    pub async fn get_voting_times(
-        &self,
-        peer_id: PeerId,
-        public_key: &PublicKey,
-        proof: &VrfProof,
-    ) -> Result<u32> {
+    pub async fn get_voting_times(&self, peer_id: PeerId, proof: &VrfProof) -> Result<u32> {
         let stakes = self
             .get_peer_stakes(&peer_id)
             .await?
@@ -239,7 +232,7 @@ impl VoteContext {
 
         let times = self
             .elector
-            .calc_times_with_proof(stakes, public_key, proof, &self.vrf_ctx)?;
+            .calc_times_with_proof(stakes, proof, &self.vrf_ctx)?;
 
         if times == 0 {
             return Err(Error::InsufficientStake(peer_id));
@@ -302,8 +295,7 @@ impl Publisher {
         &mut self,
         original: Node,
         records: CollectedRecords,
-        proof: VrfProof,
-        times: u32,
+        election_result: ElectionResult,
         vrf_ctx: vrf_elector::Context,
     ) -> Result<(CompleteItem, i32)> {
         let (current, next) = self.split_pairs(records.records);
@@ -314,7 +306,9 @@ impl Publisher {
 
         let root_bytes = self.merkle_dag.root().to_vec().await;
         let candidate = Candidate::new(root_bytes, current_set, next);
-        let signature = self.publish_vote(*candidate.hash(), proof.clone()).await?;
+        let signature = self
+            .publish_vote(*candidate.hash(), election_result.proof.clone())
+            .await?;
 
         let mut ctx = VoteContext {
             transport: self.transport.clone(),
@@ -323,14 +317,14 @@ impl Publisher {
             votes: Vec::new(),
             voted: HashSet::new(),
             goting_times: 0,
-            total_times: times,
+            total_times: election_result.times,
             root: self.merkle_dag.root().clone(),
             vrf_ctx,
         };
 
         ctx.add_vote_unchecked(
             self.public_key.to_peer_id(),
-            MemberInfo::new_unchecked(self.public_key.clone(), proof, signature),
+            MemberInfo::new_unchecked(self.public_key.clone(), election_result.proof, signature),
         )
         .await?;
 

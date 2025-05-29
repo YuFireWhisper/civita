@@ -1,8 +1,9 @@
+use serde::{Deserialize, Serialize};
 use statrs::distribution::{Binomial, DiscreteCDF};
 
 use crate::{
     constants::HashArray,
-    crypto::keypair::{self, PublicKey, SecretKey, VrfProof},
+    crypto::keypair::{self, SecretKey, VrfProof},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -25,6 +26,13 @@ pub enum Error {
 pub struct Context {
     pub input: HashArray,
     pub total_stakes: u32,
+}
+
+#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
+pub struct ElectionResult {
+    pub proof: VrfProof,
+    pub times: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -56,15 +64,14 @@ impl VrfElector {
         self
     }
 
-    pub fn generate(&self, stakes: u32, ctx: &Context) -> Result<(VrfProof, u32)> {
-        let vrf_proof = self
+    pub fn generate(&self, stakes: u32, ctx: &Context) -> Result<ElectionResult> {
+        let proof = self
             .secret_key
             .expect("Secret key must be set")
             .prove(ctx.input)?;
+        let times = self.calc_elected_times(stakes, &proof.output(), ctx);
 
-        let times_elected = self.calc_elected_times(stakes, &vrf_proof.output(), ctx);
-
-        Ok((vrf_proof, times_elected))
+        Ok(ElectionResult { proof, times })
     }
 
     fn calc_elected_times(&self, stakes: u32, vrf_output: &HashArray, ctx: &Context) -> u32 {
@@ -96,13 +103,9 @@ impl VrfElector {
     pub fn calc_times_with_proof(
         &self,
         stakes: u32,
-        public_key: &PublicKey,
         vrf_proof: &VrfProof,
         ctx: &Context,
     ) -> Result<u32> {
-        if !vrf_proof.verify(ctx.input, public_key) {
-            return Err(Error::InvalidVrfProof);
-        }
         Ok(self.calc_elected_times(stakes, &vrf_proof.output(), ctx))
     }
 }

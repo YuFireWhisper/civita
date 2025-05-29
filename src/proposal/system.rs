@@ -3,16 +3,17 @@ use std::{sync::Arc, time::SystemTime};
 use tokio::{sync::Mutex, time::Duration};
 
 use crate::{
-    crypto::keypair::{PublicKey, SecretKey, VrfProof},
+    constants::HashArray,
+    crypto::keypair::{PublicKey, ResidentSignature, SecretKey, VrfProof},
     network::transport::{
         self,
         protocols::{gossipsub, kad},
         store::merkle_dag::{self, Node},
     },
     proposal::{
-        pool::{self, hash_to_key_array, Pool},
+        pool::{self, hash_to_key_array, CollectedRecords, Pool},
         publisher::{self, generate_candidate_hash, CompleteItem, Publisher},
-        vrf_elector::{self, Context as VrfContext, VrfElector},
+        vrf_elector::{self, Context as VrfContext, ElectionResult, VrfElector},
         Proposal,
     },
     resident::Record,
@@ -80,241 +81,303 @@ pub struct System<P: Proposal> {
     config: Config,
 }
 
+struct ProcessingResult {
+    final_node: Node,
+    stakes_impact: i32,
+}
+
+#[derive(Clone)]
+struct TermState {
+    root: Node,
+    total_stakes: u32,
+    start: SystemTime,
+}
+
 impl<P: Proposal> System<P> {
     pub async fn new(
         transport: Arc<Transport>,
         secret_key: SecretKey,
-        total_stake: u32,
-        root: Node,
-        next_term: SystemTime,
         config: Config,
     ) -> Arc<Self> {
+        Arc::new(Self {
+            transport: transport.clone(),
+            pool: Self::create_pool(transport.clone()),
+            publisher: Mutex::new(Self::create_publisher(transport, secret_key, &config)),
+            elector: VrfElector::new(config.expected_num_publishers).with_secret_key(secret_key),
+            term_total_duration: Self::calculate_term_duration(&config),
+            config,
+        })
+    }
+
+    fn create_pool(transport: Arc<Transport>) -> Pool<P> {
         let pool_config = pool::Config {
             external_topic: POOL_EXTERNAL_TOPIC.to_string(),
         };
-        let pool = Pool::new(transport.clone(), pool_config);
-
-        let elector = VrfElector::new(config.expected_num_publishers).with_secret_key(secret_key);
-        let publisher = Publisher::new(transport.clone(), elector, secret_key, (&config).into());
-
-        let term_total_duration = config.proposal_collection_duration
-            + config.publisher_handle_duration
-            + config.network_latency;
-
-        let system = Arc::new(Self {
-            transport,
-            pool,
-            publisher: Mutex::new(publisher),
-            elector,
-            term_total_duration,
-            config,
-        });
-
-        tokio::spawn({
-            let system = system.clone();
-            async move {
-                system.run(root, total_stake, next_term).await;
-            }
-        });
-
-        system
+        Pool::new(transport, pool_config)
     }
 
-    async fn run(
-        self: Arc<Self>,
-        mut root: Node,
-        mut total_stakes: u32,
-        mut next_term: SystemTime,
-    ) {
-        loop {
-            let remaining_time = next_term
-                .duration_since(SystemTime::now())
-                .expect("Next term time should be in the future");
+    fn create_publisher(
+        transport: Arc<Transport>,
+        secret_key: SecretKey,
+        config: &Config,
+    ) -> Publisher {
+        Publisher::new(
+            transport,
+            VrfElector::new(config.expected_num_publishers),
+            secret_key,
+            config.into(),
+        )
+    }
 
-            tokio::time::sleep(remaining_time).await;
+    fn calculate_term_duration(config: &Config) -> Duration {
+        config.proposal_collection_duration
+            + config.publisher_handle_duration
+            + config.network_latency
+    }
 
-            match self.step(next_term, root.clone(), total_stakes).await {
-                Ok((new_root, new_total_stakes)) => {
-                    root = new_root;
-                    total_stakes = new_total_stakes;
-                    log::info!("Step completed");
-                }
-                Err(e) => {
-                    log::error!("Error during step: {e}");
-                    continue;
-                }
+    pub async fn start(self: Arc<Self>, root: Node, total_stakes: u32, start_time: SystemTime) {
+        tokio::spawn(async move {
+            let mut state = TermState {
+                root,
+                total_stakes,
+                start: start_time,
             };
 
-            next_term = next_term
-                .checked_add(self.term_total_duration)
-                .expect("Next term time overflowed");
-        }
+            loop {
+                match self.execute_term_cycle(&mut state).await {
+                    Ok(_) => {
+                        log::info!("Term cycle completed successfully");
+                    }
+                    Err(e) => {
+                        log::error!("Error during term cycle: {e}");
+                    }
+                }
+            }
+        });
     }
 
-    async fn step(&self, start: SystemTime, root: Node, total_stakes: u32) -> Result<(Node, u32)> {
-        let root_hash = root.hash().await.expect("Failed to hash root node");
-        let vrf_ctx = VrfContext::new(root_hash, total_stakes);
+    async fn execute_term_cycle(&self, state: &mut TermState) -> Result<()> {
+        Self::wait_for_term_start(state.start).await?;
 
-        let calc_result = self.calc_own_times(&root, &vrf_ctx).await?;
+        let vrf_ctx = Self::create_vrf_context(state).await?;
+        let election_result = self.check_election_status(&state.root, &vrf_ctx).await?;
 
-        let result = if let Some((proof, times)) = calc_result {
-            Some(
-                self.handle_elected(root.clone(), proof, times, vrf_ctx)
-                    .await?,
-            )
-        } else {
-            self.handle_not_elected(&root, start, &vrf_ctx).await?
+        let processing_result = match election_result {
+            Some(election) => {
+                self.handle_publisher_role(state.root.clone(), election, vrf_ctx)
+                    .await?
+            }
+            None => {
+                self.handle_observer_role(&state.root, state.start, &vrf_ctx)
+                    .await?
+            }
         };
 
-        if let Some((item, stakes_impact)) = result {
-            let total_stakes = safe_add(total_stakes, stakes_impact);
-            Ok((item.final_node, total_stakes))
-        } else {
-            Ok((root, total_stakes))
-        }
+        self.update_state(state, processing_result);
+
+        Ok(())
     }
 
-    async fn calc_own_times(
+    async fn wait_for_term_start(start: SystemTime) -> Result<()> {
+        let remaining_time = start.duration_since(SystemTime::now())?;
+        tokio::time::sleep(remaining_time).await;
+        Ok(())
+    }
+
+    async fn create_vrf_context(state: &TermState) -> Result<VrfContext> {
+        let root_hash = state.root.hash().await.expect("Failed to hash root node");
+        Ok(VrfContext::new(root_hash, state.total_stakes))
+    }
+
+    async fn check_election_status(
         &self,
         root: &Node,
-        ctx: &VrfContext,
-    ) -> Result<Option<(VrfProof, u32)>> {
-        self.get_peer_stakes(&self.transport.self_peer(), root)
+        vrf_ctx: &VrfContext,
+    ) -> Result<Option<ElectionResult>> {
+        Ok(self
+            .get_peer_stakes(&self.transport.self_peer(), root)
             .await?
-            .map(|stakes| self.elector.generate(stakes, ctx))
-            .transpose()
-            .map_err(Error::from)
+            .map(|stakes| self.elector.generate(stakes, vrf_ctx))
+            .transpose()?)
     }
 
     async fn get_peer_stakes(&self, peer_id: &libp2p::PeerId, root: &Node) -> Result<Option<u32>> {
         let key = hash_to_key_array(peer_id.to_bytes().try_into().unwrap());
 
-        if let Some(hash) = root.get(key, &self.transport).await? {
-            Ok(self.transport.get::<Record>(&hash).await?.map(|r| r.stakes))
-        } else {
-            Ok(None)
+        match root.get(key, &self.transport).await? {
+            Some(hash) => {
+                let record = self.transport.get::<Record>(&hash).await?;
+                Ok(record.map(|r| r.stakes))
+            }
+            None => Ok(None),
         }
     }
 
-    async fn handle_elected(
+    async fn handle_publisher_role(
         &self,
         root: Node,
-        proof: VrfProof,
-        times: u32,
+        election: ElectionResult,
+        ctx: VrfContext,
+    ) -> Result<Option<ProcessingResult>> {
+        let records = self.collect_proposals(root.clone()).await?;
+        let complete_item = self.publish_proposals(root, records, election, ctx).await?;
+
+        Ok(Some(ProcessingResult {
+            final_node: complete_item.0.final_node,
+            stakes_impact: complete_item.1,
+        }))
+    }
+
+    async fn collect_proposals(&self, root: Node) -> Result<CollectedRecords> {
+        self.pool.start(root).await?;
+        tokio::time::sleep(self.config.proposal_collection_duration).await;
+        self.pool.stop().await.map_err(Error::from)
+    }
+
+    async fn publish_proposals(
+        &self,
+        root: Node,
+        records: CollectedRecords,
+        election: ElectionResult,
         ctx: VrfContext,
     ) -> Result<(CompleteItem, i32)> {
-        self.pool.start(root.clone()).await?;
-
-        tokio::time::sleep(self.config.proposal_collection_duration).await;
-
-        let records = self.pool.stop().await?;
         self.publisher
             .lock()
             .await
-            .publish(root, records, proof, times, ctx)
+            .publish(root, records, election, ctx)
             .await
             .map_err(Error::from)
     }
 
-    async fn handle_not_elected(
+    async fn handle_observer_role(
         &self,
         root: &Node,
-        start: SystemTime,
+        start_time: SystemTime,
         ctx: &VrfContext,
-    ) -> Result<Option<(CompleteItem, i32)>> {
-        let mut rx = self
+    ) -> Result<Option<ProcessingResult>> {
+        let mut receiver = self
             .transport
             .listen_on_topic(PUBLISHER_EXTERNAL_TOPIC)
             .await?;
+        let timeout_duration = self.calculate_remaining_time(start_time)?;
 
-        let remaining_time = self.remaining_time(start)?;
-
-        tokio::time::sleep(remaining_time).await;
-
-        tokio::time::timeout(remaining_time, async {
-            while let Some(msg) = rx.recv().await {
-                if let gossipsub::Payload::ProposalProcessingComplete {
-                    final_node,
-                    total_stakes_impact,
-                    processed,
-                    next,
-                    proofs,
-                } = msg.payload
-                {
-                    let mut times = self.config.expected_num_publishers;
-                    let hash = generate_candidate_hash(&final_node, &processed, &next);
-
-                    for (pk, (proof, sign)) in proofs {
-                        if !pk.verify_proof(ctx.input, &proof) {
-                            log::warn!("Invalid VRF proof from peer: {}", msg.source);
-                            break;
-                        }
-
-                        if !pk.verify_signature(hash, &sign) {
-                            log::warn!("Invalid signature from peer: {}", msg.source);
-                            break;
-                        }
-
-                        match self
-                            .calc_peer_times(&pk.to_peer_id(), &pk, &proof, root, ctx)
-                            .await
-                        {
-                            Ok(Some(peer_times)) => {
-                                if peer_times == 0 {
-                                    log::warn!("Peer {} has zero times elected", msg.source);
-                                    break;
-                                }
-                                times = times.saturating_sub(peer_times);
-                                if times == 0 {
-                                    log::info!("All expected publishers have been processed");
-
-                                    let item = CompleteItem {
-                                        final_node: Node::from_slice(&final_node)
-                                            .expect("Failed to create node from final_node"),
-                                        processed,
-                                        next,
-                                    };
-
-                                    return Ok(Some((item, total_stakes_impact)));
-                                }
-                            }
-                            Ok(None) => {
-                                log::warn!("Failed to calculate peer times for: {}", msg.source);
-                                break;
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Error calculating peer times for {}: {}",
-                                    msg.source,
-                                    e
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-
-            Err(Error::ChannelClosed)
+        tokio::time::timeout(timeout_duration, async {
+            self.process_external_messages(&mut receiver, root, ctx)
+                .await
         })
         .await
         .unwrap_or_else(|_| {
-            log::warn!("Timeout while waiting for proposal processing complete messages");
+            log::warn!("Timeout while waiting for external messages");
             Ok(None)
         })
     }
 
-    fn remaining_time(&self, start: SystemTime) -> Result<Duration> {
-        let now = SystemTime::now();
+    fn calculate_remaining_time(&self, start: SystemTime) -> Result<Duration> {
+        let elapsed = SystemTime::now().duration_since(start)?;
         self.term_total_duration
-            .checked_sub(now.duration_since(start)?)
+            .checked_sub(elapsed)
             .ok_or(Error::TimeOverflow)
     }
 
-    async fn calc_peer_times(
+    async fn process_external_messages(
+        &self,
+        receiver: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
+        root: &Node,
+        ctx: &VrfContext,
+    ) -> Result<Option<ProcessingResult>> {
+        let mut remaining_publishers = self.config.expected_num_publishers;
+
+        while let Some(msg) = receiver.recv().await {
+            match self
+                .process_single_message(msg, root, ctx, &mut remaining_publishers)
+                .await?
+            {
+                Some(result) => return Ok(Some(result)),
+                None => continue,
+            }
+        }
+
+        Err(Error::ChannelClosed)
+    }
+
+    async fn process_single_message(
+        &self,
+        msg: gossipsub::Message,
+        root: &Node,
+        ctx: &VrfContext,
+        remaining_publishers: &mut u32,
+    ) -> Result<Option<ProcessingResult>> {
+        let gossipsub::Payload::ProposalProcessingComplete {
+            final_node,
+            total_stakes_impact,
+            processed,
+            next,
+            proofs,
+        } = msg.payload
+        else {
+            return Ok(None);
+        };
+
+        let candidate_hash = generate_candidate_hash(&final_node, &processed, &next);
+
+        for (public_key, (proof, signature)) in proofs {
+            if !self.validate_proof_and_signature(
+                &public_key,
+                &proof,
+                &signature,
+                ctx,
+                &candidate_hash,
+            ) {
+                log::warn!("Invalid proof or signature from peer: {}", msg.source);
+                break;
+            }
+
+            let times = match self
+                .get_peer_times(&public_key.to_peer_id(), &proof, root, ctx)
+                .await?
+            {
+                Some(times) => times,
+                None => {
+                    log::warn!("Failed to get peer times for: {}", msg.source);
+                    break;
+                }
+            };
+
+            if times == 0 {
+                log::warn!("Peer {} has zero election times", msg.source);
+                break;
+            }
+
+            *remaining_publishers = remaining_publishers.saturating_sub(times);
+
+            if *remaining_publishers == 0 {
+                log::info!("All expected publishers processed");
+                return Ok(Some(ProcessingResult {
+                    final_node: Node::from_slice(&final_node)
+                        .expect("Failed to create node from final_node"),
+                    stakes_impact: total_stakes_impact,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn validate_proof_and_signature(
+        &self,
+        public_key: &PublicKey,
+        proof: &VrfProof,
+        signature: &ResidentSignature,
+        ctx: &VrfContext,
+        candidate_hash: &HashArray,
+    ) -> bool {
+        public_key.verify_proof(ctx.input, proof)
+            && public_key.verify_signature(candidate_hash, signature)
+    }
+
+    async fn get_peer_times(
         &self,
         peer_id: &libp2p::PeerId,
-        public_key: &PublicKey,
         proof: &VrfProof,
         root: &Node,
         ctx: &VrfContext,
@@ -322,19 +385,29 @@ impl<P: Proposal> System<P> {
         Ok(self
             .get_peer_stakes(peer_id, root)
             .await?
-            .map(|stakes| {
-                self.elector
-                    .calc_times_with_proof(stakes, public_key, proof, ctx)
-            })
+            .map(|stakes| self.elector.calc_times_with_proof(stakes, proof, ctx))
             .transpose()?)
+    }
+
+    fn update_state(&self, state: &mut TermState, result: Option<ProcessingResult>) {
+        if let Some(result) = result {
+            state.root = result.final_node;
+            state.total_stakes = safe_add(state.total_stakes, result.stakes_impact);
+        }
+
+        state.start = state
+            .start
+            .checked_add(self.term_total_duration)
+            .expect("Next term time overflowed");
     }
 }
 
+#[inline]
 fn safe_add(a: u32, b: i32) -> u32 {
-    if b >= 0 {
-        a.saturating_add(b as u32)
-    } else {
-        a.saturating_sub((-b) as u32)
+    match b.cmp(&0) {
+        std::cmp::Ordering::Greater => a.saturating_add(b as u32),
+        std::cmp::Ordering::Less => a.saturating_sub((-b) as u32),
+        std::cmp::Ordering::Equal => a,
     }
 }
 
