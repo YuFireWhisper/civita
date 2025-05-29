@@ -7,7 +7,7 @@ use libp2p::PeerId;
 use tokio::time::Duration;
 
 use crate::{
-    constants::{HashArray, HASH_ARRAY_LENGTH, U16_LENGTH},
+    constants::{HashArray, DEFAULT_NETWORK_LATENCY, HASH_ARRAY_LENGTH, U16_LENGTH},
     crypto::keypair::{self, PublicKey, ResidentSignature, SecretKey, VrfProof},
     network::transport::{
         self,
@@ -16,7 +16,7 @@ use crate::{
     },
     proposal::{
         collector::{self, Collector, Context},
-        pool::{hash_to_key_array, key_array_to_hash},
+        pool::{hash_to_key_array, key_array_to_hash, CollectedRecords},
         vrf_elector::{self, VrfElector},
     },
     resident::Record,
@@ -30,6 +30,11 @@ use crate::network::transport::MockTransport as Transport;
 
 type Result<T> = std::result::Result<T, Error>;
 type SplitedPairs = (Vec<(KeyArray, HashArray)>, Vec<(KeyArray, Record)>);
+
+const DEFAULT_BATCH_SIZE: usize = 100;
+const DEFAULT_MAX_RECORDS_PER_TIME: usize = 1000;
+const DEFAULT_INTERNAL_TOPIC: &str = "proposal_publisher_internal";
+const DEFAULT_EXTERNAL_TOPIC: &str = "proposal_publisher_external";
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -65,12 +70,21 @@ pub enum Error {
     AlreadyVoted(PeerId),
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
 pub struct Config {
     pub batch_size: usize,
-    pub per_time_max_records: usize,
+    pub max_records_per_term: usize,
     pub network_latency: Duration,
     pub internal_topic: String,
     pub external_topic: String,
+}
+
+#[derive(Debug)]
+pub struct CompleteItem {
+    pub final_node: Node,
+    pub processed: HashSet<HashArray>,
+    pub next: Vec<(KeyArray, Record)>,
 }
 
 #[derive(Debug)]
@@ -81,7 +95,7 @@ struct MemberInfo {
 }
 
 #[derive(Debug)]
-struct Candidate {
+pub struct Candidate {
     final_node: Vec<u8>,
     processed: HashSet<HashArray>,
     next: Vec<(KeyArray, Record)>,
@@ -91,18 +105,19 @@ struct Candidate {
 #[derive(Debug)]
 struct VoteContext {
     transport: Arc<Transport>,
-    elector: Arc<VrfElector>,
+    elector: VrfElector,
     candidate: Candidate,
     votes: Vec<MemberInfo>,
     voted: HashSet<PeerId>,
     goting_times: u32,
     total_times: u32,
     root: Node,
+    vrf_ctx: vrf_elector::Context,
 }
 
 pub struct Publisher {
     transport: Arc<Transport>,
-    elector: Arc<VrfElector>,
+    elector: VrfElector,
     secret_key: SecretKey,
     public_key: PublicKey,
     merkle_dag: MerkleDag,
@@ -159,14 +174,7 @@ impl Candidate {
         processed: HashSet<HashArray>,
         next: Vec<(KeyArray, Record)>,
     ) -> Self {
-        let processed_bytes = Self::convert_processed_to_bytes(&processed);
-        let next_bytes = Self::convert_next_to_bytes(&next);
-
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&final_node);
-        hasher.update(&processed_bytes);
-        hasher.update(&next_bytes);
-        let hash = hasher.finalize().into();
+        let hash = generate_candidate_hash(&final_node, &processed, &next);
 
         Self {
             final_node,
@@ -174,30 +182,6 @@ impl Candidate {
             next,
             hash,
         }
-    }
-
-    fn convert_processed_to_bytes(processed: &HashSet<HashArray>) -> Vec<u8> {
-        let mut processed_vec = processed.iter().copied().collect::<Vec<_>>();
-        processed_vec.sort_unstable();
-
-        let mut bytes = Vec::with_capacity(processed.len() * HASH_ARRAY_LENGTH);
-        processed_vec.into_iter().for_each(|hash| {
-            bytes.extend(hash);
-        });
-
-        bytes
-    }
-
-    fn convert_next_to_bytes(next: &[(KeyArray, Record)]) -> Vec<u8> {
-        next.iter()
-            .cloned()
-            .flat_map(|(key, record)| {
-                let mut bytes = Vec::with_capacity(U16_LENGTH + HASH_ARRAY_LENGTH);
-                bytes.extend(key_array_to_hash(key));
-                bytes.extend(record.hash());
-                bytes
-            })
-            .collect()
     }
 
     pub fn hash(&self) -> &HashArray {
@@ -255,7 +239,7 @@ impl VoteContext {
 
         let times = self
             .elector
-            .calc_times_with_proof(stakes, public_key, proof)?;
+            .calc_times_with_proof(stakes, public_key, proof, &self.vrf_ctx)?;
 
         if times == 0 {
             return Err(Error::InsufficientStake(peer_id));
@@ -293,12 +277,12 @@ impl VoteContext {
 impl Publisher {
     pub fn new(
         transport: Arc<Transport>,
-        elector: Arc<VrfElector>,
+        elector: VrfElector,
         secret_key: SecretKey,
-        public_key: PublicKey,
         config: Config,
     ) -> Self {
         let merkle_dag = MerkleDag::new(transport.clone(), config.batch_size);
+        let public_key = secret_key.to_public_key();
 
         Self {
             transport,
@@ -310,18 +294,19 @@ impl Publisher {
         }
     }
 
-    pub fn set_elector(&mut self, elector: Arc<VrfElector>) {
-        self.elector = elector;
+    pub fn set_merkle_dag_root(&mut self, root: Node) {
+        self.merkle_dag.change_root(root);
     }
 
     pub async fn publish(
         &mut self,
         original: Node,
-        pairs: Vec<(KeyArray, Record)>,
+        records: CollectedRecords,
         proof: VrfProof,
         times: u32,
-    ) -> Result<()> {
-        let (current, next) = self.split_pairs(pairs);
+        vrf_ctx: vrf_elector::Context,
+    ) -> Result<(CompleteItem, i32)> {
+        let (current, next) = self.split_pairs(records.records);
         let current_set: HashSet<_> = current.iter().map(|(_, hash)| *hash).collect();
 
         self.merkle_dag.change_root(original);
@@ -333,13 +318,14 @@ impl Publisher {
 
         let mut ctx = VoteContext {
             transport: self.transport.clone(),
-            elector: self.elector.clone(),
+            elector: self.elector,
             candidate,
             votes: Vec::new(),
             voted: HashSet::new(),
             goting_times: 0,
             total_times: times,
             root: self.merkle_dag.root().clone(),
+            vrf_ctx,
         };
 
         ctx.add_vote_unchecked(
@@ -348,24 +334,37 @@ impl Publisher {
         )
         .await?;
 
-        if let Some((candidate, infos)) = self.collect_votes(ctx).await? {
-            let payload = gossipsub::Payload::ProposalProcessingComplete {
-                final_node: candidate.final_node,
+        let (candidate, infos) = self
+            .collect_votes(ctx)
+            .await?
+            .ok_or(Error::ConsensusFailed)?;
+
+        let payload = gossipsub::Payload::ProposalProcessingComplete {
+            final_node: candidate.final_node.clone(),
+            processed: candidate.processed.clone(),
+            next: candidate.next.clone(),
+            proofs: MemberInfo::to_hash_map(infos),
+            total_stakes_impact: records.total_stakes_impact,
+        };
+
+        self.transport
+            .publish(&self.config.external_topic, payload)
+            .await?;
+
+        let node = Node::from_slice(&candidate.final_node)?;
+
+        Ok((
+            CompleteItem {
+                final_node: node,
                 processed: candidate.processed,
                 next: candidate.next,
-                proofs: MemberInfo::to_hash_map(infos),
-            };
-
-            self.transport
-                .publish(&self.config.external_topic, payload)
-                .await?;
-        }
-
-        Ok(())
+            },
+            records.total_stakes_impact,
+        ))
     }
 
     fn split_pairs(&self, mut pairs: Vec<(KeyArray, Record)>) -> SplitedPairs {
-        let split_point = std::cmp::min(pairs.len(), self.config.per_time_max_records);
+        let split_point = std::cmp::min(pairs.len(), self.config.max_records_per_term);
         let next = pairs.split_off(split_point);
         let current = pairs
             .into_iter()
@@ -409,6 +408,45 @@ impl Publisher {
     }
 }
 
+pub fn generate_candidate_hash(
+    final_node: &[u8],
+    processed: &HashSet<HashArray>,
+    next: &[(KeyArray, Record)],
+) -> HashArray {
+    let processed_bytes = convert_processed_to_bytes(processed);
+    let next_bytes = convert_next_to_bytes(next);
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(final_node);
+    hasher.update(&processed_bytes);
+    hasher.update(&next_bytes);
+    hasher.finalize().into()
+}
+
+fn convert_processed_to_bytes(processed: &HashSet<HashArray>) -> Vec<u8> {
+    let mut processed_vec = processed.iter().copied().collect::<Vec<_>>();
+    processed_vec.sort_unstable();
+
+    let mut bytes = Vec::with_capacity(processed.len() * HASH_ARRAY_LENGTH);
+    processed_vec.into_iter().for_each(|hash| {
+        bytes.extend(hash);
+    });
+
+    bytes
+}
+
+fn convert_next_to_bytes(next: &[(KeyArray, Record)]) -> Vec<u8> {
+    next.iter()
+        .cloned()
+        .flat_map(|(key, record)| {
+            let mut bytes = Vec::with_capacity(U16_LENGTH + HASH_ARRAY_LENGTH);
+            bytes.extend(key_array_to_hash(key));
+            bytes.extend(record.hash());
+            bytes
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl Context for VoteContext {
     async fn handle_message(&mut self, msg: gossipsub::Message) {
@@ -430,6 +468,18 @@ impl Context for VoteContext {
             if let Err(e) = self.add_vote(msg.source, member_info).await {
                 log::warn!("Failed to get voting times: {e}");
             }
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            batch_size: DEFAULT_BATCH_SIZE,
+            max_records_per_term: DEFAULT_MAX_RECORDS_PER_TIME,
+            network_latency: DEFAULT_NETWORK_LATENCY,
+            internal_topic: DEFAULT_INTERNAL_TOPIC.to_string(),
+            external_topic: DEFAULT_EXTERNAL_TOPIC.to_string(),
         }
     }
 }

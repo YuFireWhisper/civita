@@ -88,6 +88,7 @@ pub enum Payload {
 
     ProposalProcessingComplete {
         final_node: Vec<u8>,
+        total_stakes_impact: i32,
         processed: HashSet<HashArray>,
         next: Vec<(KeyArray, Record)>,
         proofs: HashMap<PublicKey, (VrfProof, ResidentSignature)>,

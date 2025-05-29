@@ -5,6 +5,7 @@ use crate::{constants::HashArray, mocks, resident};
 pub mod collector;
 pub mod pool;
 pub mod publisher;
+pub mod system;
 pub mod vrf_elector;
 
 #[mockall::automock(type Error = mocks::MockError;)]

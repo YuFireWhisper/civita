@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use tokio::{
-    sync::{mpsc::Receiver, oneshot},
+    sync::{mpsc::Receiver, oneshot, Mutex},
     task::{JoinError, JoinHandle},
 };
 
@@ -25,7 +25,7 @@ pub trait Context: Send + Sync + 'static {
 }
 
 pub struct Collector<C: Context> {
-    handle: Option<(JoinHandle<C>, oneshot::Sender<()>)>,
+    handle: Mutex<Option<(JoinHandle<C>, oneshot::Sender<()>)>>,
 }
 
 impl<C: Context> Collector<C> {
@@ -33,7 +33,7 @@ impl<C: Context> Collector<C> {
         Self::default()
     }
 
-    pub async fn start(&mut self, mut rx: Receiver<gossipsub::Message>, mut ctx: C) {
+    pub async fn start(&self, mut rx: Receiver<gossipsub::Message>, mut ctx: C) {
         let (tx, mut rx_shutdown) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
@@ -51,17 +51,19 @@ impl<C: Context> Collector<C> {
             ctx
         });
 
-        self.handle = Some((handle, tx));
+        if let Some((h, _)) = self.handle.lock().await.replace((handle, tx)) {
+            h.abort()
+        }
     }
 
-    pub async fn stop(&mut self) -> Result<C> {
-        let (handle, tx) = self.handle.take().ok_or(Error::NotStarted)?;
+    pub async fn stop(&self) -> Result<C> {
+        let (handle, tx) = self.handle.lock().await.take().ok_or(Error::NotStarted)?;
         tx.send(()).map_err(|_| Error::NotStarted)?;
         handle.await.map_err(Error::from)
     }
 
     pub async fn wait_for_stop(&mut self, duration: Duration) -> Option<Result<C>> {
-        let (handle, _) = self.handle.take()?;
+        let (handle, _) = self.handle.lock().await.take()?;
 
         match tokio::time::timeout(duration, handle).await {
             Ok(join_result) => Some(join_result.map_err(Error::from)),
@@ -77,6 +79,8 @@ impl<C: Context> Collector<C> {
 
 impl<C: Context> Default for Collector<C> {
     fn default() -> Self {
-        Self { handle: None }
+        Self {
+            handle: Mutex::new(None),
+        }
     }
 }

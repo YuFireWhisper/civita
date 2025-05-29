@@ -61,6 +61,8 @@ pub enum Error {
     Proposal(String),
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
 pub struct Config {
     pub external_topic: String,
 }
@@ -81,7 +83,13 @@ struct ProposalContext<P> {
     transport: Arc<Transport>,
     records: HashMap<RecordKey, Record>,
     root: Node,
+    total_stakes_impact: i32,
     _marker: PhantomData<P>,
+}
+
+pub struct CollectedRecords {
+    pub records: Vec<(KeyArray, Record)>,
+    pub total_stakes_impact: i32,
 }
 
 pub struct Pool<P: Proposal> {
@@ -96,6 +104,7 @@ impl<P: Proposal> ProposalContext<P> {
             transport,
             records: HashMap::new(),
             root,
+            total_stakes_impact: 0,
             _marker: PhantomData,
         }
     }
@@ -124,6 +133,10 @@ impl<P: Proposal> ProposalContext<P> {
 
         proposal
             .apply(&mut records)
+            .map_err(|e| Error::Proposal(e.to_string()))?;
+
+        self.total_stakes_impact += proposal
+            .impact_stakes()
             .map_err(|e| Error::Proposal(e.to_string()))?;
 
         records.into_iter().for_each(|(key, record)| {
@@ -192,7 +205,7 @@ impl<P: Proposal> Pool<P> {
         }
     }
 
-    pub async fn start(&mut self, root: Node) -> Result<()> {
+    pub async fn start(&self, root: Node) -> Result<()> {
         let ctx = ProposalContext::<P>::new(self.transport.clone(), root);
         let rx = self
             .transport
@@ -202,7 +215,7 @@ impl<P: Proposal> Pool<P> {
         Ok(())
     }
 
-    pub async fn stop(&mut self) -> Result<Vec<(KeyArray, Record)>> {
+    pub async fn stop(&self) -> Result<CollectedRecords> {
         let ctx = self.collector.stop().await?;
         let mut entries: Vec<_> = ctx.records.into_iter().collect();
 
@@ -218,7 +231,10 @@ impl<P: Proposal> Pool<P> {
             .map(|(key, record)| (key.key, record))
             .collect();
 
-        Ok(records)
+        Ok(CollectedRecords {
+            records,
+            total_stakes_impact: ctx.total_stakes_impact,
+        })
     }
 }
 
