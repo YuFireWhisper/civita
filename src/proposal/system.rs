@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::SystemTime};
 
-use tokio::{sync::Mutex, time::Duration};
+use tokio::{
+    sync::{mpsc::Receiver, Mutex},
+    time::Duration,
+};
 
 use crate::{
     constants::HashArray,
@@ -11,8 +14,8 @@ use crate::{
         store::merkle_dag::{self, Node},
     },
     proposal::{
-        pool::{self, hash_to_key_array, CollectedRecords, Pool},
-        publisher::{self, generate_candidate_hash, CompleteItem, Publisher},
+        pool::{self, hash_to_key_array, Pool, RecordBatch},
+        publisher::{self, generate_candidate_hash, Publisher},
         vrf_elector::{self, Context as VrfContext, ElectionResult, VrfElector},
         Proposal,
     },
@@ -68,7 +71,7 @@ pub struct Config {
     pub publisher_handle_duration: Duration,
     pub network_latency: Duration,
     pub batch_size: usize,
-    pub max_records_per_term: usize,
+    pub num_proposals_per_batch: usize,
     pub expected_num_publishers: u32,
 }
 
@@ -91,6 +94,7 @@ struct TermState {
     root: Node,
     total_stakes: u32,
     start: SystemTime,
+    per_batches: Vec<RecordBatch>,
 }
 
 impl<P: Proposal> System<P> {
@@ -101,7 +105,7 @@ impl<P: Proposal> System<P> {
     ) -> Arc<Self> {
         Arc::new(Self {
             transport: transport.clone(),
-            pool: Self::create_pool(transport.clone()),
+            pool: Self::create_pool(transport.clone(), config.num_proposals_per_batch),
             publisher: Mutex::new(Self::create_publisher(transport, secret_key, &config)),
             elector: VrfElector::new(config.expected_num_publishers).with_secret_key(secret_key),
             term_total_duration: Self::calculate_term_duration(&config),
@@ -109,9 +113,10 @@ impl<P: Proposal> System<P> {
         })
     }
 
-    fn create_pool(transport: Arc<Transport>) -> Pool<P> {
+    fn create_pool(transport: Arc<Transport>, num_proposals_per_batch: usize) -> Pool<P> {
         let pool_config = pool::Config {
             external_topic: POOL_EXTERNAL_TOPIC.to_string(),
+            num_proposals_per_batch,
         };
         Pool::new(transport, pool_config)
     }
@@ -135,12 +140,19 @@ impl<P: Proposal> System<P> {
             + config.network_latency
     }
 
-    pub async fn start(self: Arc<Self>, root: Node, total_stakes: u32, start_time: SystemTime) {
+    pub async fn start(
+        self: Arc<Self>,
+        root: Node,
+        total_stakes: u32,
+        start_time: SystemTime,
+        per_batches: Vec<RecordBatch>,
+    ) {
         tokio::spawn(async move {
             let mut state = TermState {
                 root,
                 total_stakes,
                 start: start_time,
+                per_batches,
             };
 
             loop {
@@ -163,14 +175,8 @@ impl<P: Proposal> System<P> {
         let election_result = self.check_election_status(&state.root, &vrf_ctx).await?;
 
         let processing_result = match election_result {
-            Some(election) => {
-                self.handle_publisher_role(state.root.clone(), election, vrf_ctx)
-                    .await?
-            }
-            None => {
-                self.handle_observer_role(&state.root, state.start, &vrf_ctx)
-                    .await?
-            }
+            Some(election) => self.handle_publisher_role(state, election, vrf_ctx).await?,
+            None => self.handle_observer_role(state, &vrf_ctx).await?,
         };
 
         self.update_state(state, processing_result);
@@ -215,32 +221,55 @@ impl<P: Proposal> System<P> {
 
     async fn handle_publisher_role(
         &self,
-        root: Node,
+        state: &mut TermState,
         election: ElectionResult,
         ctx: VrfContext,
     ) -> Result<Option<ProcessingResult>> {
-        let records = self.collect_proposals(root.clone()).await?;
-        let complete_item = self.publish_proposals(root, records, election, ctx).await?;
+        let records = self.collect_proposals(state).await?;
+
+        if records.is_empty() {
+            log::warn!("No proposals collected in this term");
+            return Ok(None);
+        }
+
+        let stakes_impact = records.first().unwrap().total_stakes_impact;
+
+        let final_node = self
+            .publish_proposals(state.root.clone(), records, election, ctx)
+            .await?;
 
         Ok(Some(ProcessingResult {
-            final_node: complete_item.0.final_node,
-            stakes_impact: complete_item.1,
+            final_node,
+            stakes_impact,
         }))
     }
 
-    async fn collect_proposals(&self, root: Node) -> Result<CollectedRecords> {
-        self.pool.start(root).await?;
+    async fn collect_proposals(&self, state: &mut TermState) -> Result<Vec<RecordBatch>> {
+        self.pool
+            .start(state.root.clone(), std::mem::take(&mut state.per_batches))
+            .await?;
+
         tokio::time::sleep(self.config.proposal_collection_duration).await;
-        self.pool.stop().await.map_err(Error::from)
+
+        let record_batches = self.pool.stop().await?;
+
+        state.per_batches = record_batches.iter().skip(1).cloned().collect();
+
+        log::info!(
+            "Collected {} record batches in this term",
+            record_batches.len()
+        );
+
+        Ok(record_batches)
     }
 
     async fn publish_proposals(
         &self,
         root: Node,
-        records: CollectedRecords,
+        records: Vec<RecordBatch>,
         election: ElectionResult,
         ctx: VrfContext,
-    ) -> Result<(CompleteItem, i32)> {
+    ) -> Result<Node> {
         self.publisher
             .lock()
             .await
@@ -251,18 +280,17 @@ impl<P: Proposal> System<P> {
 
     async fn handle_observer_role(
         &self,
-        root: &Node,
-        start_time: SystemTime,
+        state: &TermState,
         ctx: &VrfContext,
     ) -> Result<Option<ProcessingResult>> {
-        let mut receiver = self
+        let mut rx = self
             .transport
             .listen_on_topic(PUBLISHER_EXTERNAL_TOPIC)
             .await?;
-        let timeout_duration = self.calculate_remaining_time(start_time)?;
+        let timeout_duration = self.calculate_remaining_time(state.start)?;
 
         tokio::time::timeout(timeout_duration, async {
-            self.process_external_messages(&mut receiver, root, ctx)
+            self.process_external_messages(&mut rx, &state.root, ctx)
                 .await
         })
         .await
@@ -281,13 +309,13 @@ impl<P: Proposal> System<P> {
 
     async fn process_external_messages(
         &self,
-        receiver: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
+        rx: &mut Receiver<gossipsub::Message>,
         root: &Node,
         ctx: &VrfContext,
     ) -> Result<Option<ProcessingResult>> {
         let mut remaining_publishers = self.config.expected_num_publishers;
 
-        while let Some(msg) = receiver.recv().await {
+        while let Some(msg) = rx.recv().await {
             match self
                 .process_single_message(msg, root, ctx, &mut remaining_publishers)
                 .await?
@@ -415,7 +443,6 @@ impl From<&Config> for publisher::Config {
     fn from(config: &Config) -> Self {
         publisher::Config {
             batch_size: config.batch_size,
-            max_records_per_term: config.max_records_per_term,
             network_latency: config.network_latency,
             external_topic: PUBLISHER_EXTERNAL_TOPIC.to_string(),
             internal_topic: PUBLISHER_INTERNAL_TOPIC.to_string(),

@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    marker::PhantomData,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
@@ -65,31 +60,26 @@ pub enum Error {
 #[derive(Debug)]
 pub struct Config {
     pub external_topic: String,
+    pub num_proposals_per_batch: usize,
 }
 
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Default)]
+#[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
-struct RecordKey {
-    pub hash: HashArray,
-    pub key: KeyArray,
-    pub timestamp: u64,
+pub struct RecordBatch {
+    pub records: Vec<(KeyArray, Record)>,
+    pub total_stakes_impact: i32,
 }
 
 #[derive(Clone)]
 struct ProposalContext<P> {
     transport: Arc<Transport>,
-    records: HashMap<RecordKey, Record>,
+    batches: Vec<RecordBatch>,
     root: Node,
-    total_stakes_impact: i32,
+    num_proposals_per_batch: usize,
     _marker: PhantomData<P>,
-}
-
-pub struct CollectedRecords {
-    pub records: Vec<(KeyArray, Record)>,
-    pub total_stakes_impact: i32,
 }
 
 pub struct Pool<P: Proposal> {
@@ -99,21 +89,24 @@ pub struct Pool<P: Proposal> {
 }
 
 impl<P: Proposal> ProposalContext<P> {
-    pub fn new(transport: Arc<Transport>, root: Node) -> Self {
+    pub fn new(
+        transport: Arc<Transport>,
+        root: Node,
+        batches: Vec<RecordBatch>,
+        num_proposals_per_batch: usize,
+    ) -> Self {
         Self {
             transport,
-            records: HashMap::new(),
+            batches,
             root,
-            total_stakes_impact: 0,
+            num_proposals_per_batch,
             _marker: PhantomData,
         }
     }
 
-    async fn add_proposal(&mut self, proposal_vec: &[u8]) -> Result<()> {
-        let timestamp = Self::current_timestamp();
-
+    async fn add_proposal(&mut self, slice: &[u8]) -> Result<()> {
         let proposal =
-            P::from_slice(proposal_vec).map_err(|e| Error::ProposalSerialization(e.to_string()))?;
+            P::from_slice(slice).map_err(|e| Error::ProposalSerialization(e.to_string()))?;
 
         let resident_keys = proposal
             .impact()
@@ -135,21 +128,22 @@ impl<P: Proposal> ProposalContext<P> {
             .apply(&mut records)
             .map_err(|e| Error::Proposal(e.to_string()))?;
 
-        self.total_stakes_impact += proposal
+        let impact_stakes = proposal
             .impact_stakes()
             .map_err(|e| Error::Proposal(e.to_string()))?;
 
-        records.into_iter().for_each(|(key, record)| {
-            let hash = Self::compute_hash(&record.to_vec());
+        if self.batches.is_empty()
+            || self.batches.last().unwrap().records.len() >= self.num_proposals_per_batch
+        {
+            self.batches.push(RecordBatch::default());
+        }
 
-            let key = RecordKey {
-                hash,
-                key: hash_to_key_array(key),
-                timestamp,
-            };
+        let last_batch = self.batches.last_mut().unwrap();
 
-            self.records.insert(key, record);
-        });
+        last_batch.total_stakes_impact += impact_stakes;
+        last_batch
+            .records
+            .extend(records.into_iter().map(|(k, v)| (hash_to_key_array(k), v)));
 
         Ok(())
     }
@@ -182,18 +176,6 @@ impl<P: Proposal> ProposalContext<P> {
 
         Ok(results)
     }
-
-    fn compute_hash(data: &[u8]) -> HashArray {
-        blake3::hash(data).into()
-    }
-
-    fn current_timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time should not be before UNIX_EPOCH")
-            .as_secs()
-            / 60
-    }
 }
 
 impl<P: Proposal> Pool<P> {
@@ -205,8 +187,13 @@ impl<P: Proposal> Pool<P> {
         }
     }
 
-    pub async fn start(&self, root: Node) -> Result<()> {
-        let ctx = ProposalContext::<P>::new(self.transport.clone(), root);
+    pub async fn start(&self, root: Node, per_batches: Vec<RecordBatch>) -> Result<()> {
+        let ctx = ProposalContext::<P>::new(
+            self.transport.clone(),
+            root,
+            per_batches,
+            self.config.num_proposals_per_batch,
+        );
         let rx = self
             .transport
             .listen_on_topic(&self.config.external_topic)
@@ -215,26 +202,9 @@ impl<P: Proposal> Pool<P> {
         Ok(())
     }
 
-    pub async fn stop(&self) -> Result<CollectedRecords> {
+    pub async fn stop(&self) -> Result<Vec<RecordBatch>> {
         let ctx = self.collector.stop().await?;
-        let mut entries: Vec<_> = ctx.records.into_iter().collect();
-
-        entries.sort_by(|(key_a, _), (key_b, _)| {
-            key_a
-                .timestamp
-                .cmp(&key_b.timestamp)
-                .then(key_a.hash.cmp(&key_b.hash))
-        });
-
-        let records: Vec<_> = entries
-            .into_iter()
-            .map(|(key, record)| (key.key, record))
-            .collect();
-
-        Ok(CollectedRecords {
-            records,
-            total_stakes_impact: ctx.total_stakes_impact,
-        })
+        Ok(ctx.batches)
     }
 }
 
@@ -242,7 +212,7 @@ pub fn hash_to_key_array(hash: HashArray) -> KeyArray {
     unsafe { std::mem::transmute(hash) }
 }
 
-pub fn key_array_to_hash(key: KeyArray) -> HashArray {
+pub fn key_to_hash_array(key: KeyArray) -> HashArray {
     unsafe { std::mem::transmute(key) }
 }
 

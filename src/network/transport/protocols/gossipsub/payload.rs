@@ -13,8 +13,7 @@ use crate::{
         keypair::{PublicKey, ResidentSignature, VrfProof},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
-    network::transport::store::merkle_dag::KeyArray,
-    resident::Record,
+    proposal::pool::RecordBatch,
 };
 
 #[derive(Debug)]
@@ -90,7 +89,7 @@ pub enum Payload {
         final_node: Vec<u8>,
         total_stakes_impact: i32,
         processed: HashSet<HashArray>,
-        next: Vec<(KeyArray, Record)>,
+        next: Vec<RecordBatch>,
         proofs: HashMap<PublicKey, (VrfProof, ResidentSignature)>,
     },
 

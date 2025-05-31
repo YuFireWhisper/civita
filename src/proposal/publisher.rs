@@ -7,16 +7,16 @@ use libp2p::PeerId;
 use tokio::time::Duration;
 
 use crate::{
-    constants::{HashArray, DEFAULT_NETWORK_LATENCY, HASH_ARRAY_LENGTH, U16_LENGTH},
+    constants::{HashArray, DEFAULT_NETWORK_LATENCY, HASH_ARRAY_LENGTH, I32_LENGTH},
     crypto::keypair::{self, PublicKey, ResidentSignature, SecretKey, VrfProof},
     network::transport::{
         self,
         protocols::gossipsub,
-        store::merkle_dag::{self, KeyArray, MerkleDag, Node},
+        store::merkle_dag::{self, MerkleDag, Node},
     },
     proposal::{
         collector::{self, Collector, Context},
-        pool::{hash_to_key_array, key_array_to_hash, CollectedRecords},
+        pool::{hash_to_key_array, key_to_hash_array, RecordBatch},
         vrf_elector::{self, ElectionResult, VrfElector},
     },
     resident::Record,
@@ -29,10 +29,8 @@ use crate::network::transport::Transport;
 use crate::network::transport::MockTransport as Transport;
 
 type Result<T> = std::result::Result<T, Error>;
-type SplitedPairs = (Vec<(KeyArray, HashArray)>, Vec<(KeyArray, Record)>);
 
 const DEFAULT_BATCH_SIZE: usize = 100;
-const DEFAULT_MAX_RECORDS_PER_TIME: usize = 1000;
 const DEFAULT_INTERNAL_TOPIC: &str = "proposal_publisher_internal";
 const DEFAULT_EXTERNAL_TOPIC: &str = "proposal_publisher_external";
 
@@ -74,17 +72,9 @@ pub enum Error {
 #[derive(Debug)]
 pub struct Config {
     pub batch_size: usize,
-    pub max_records_per_term: usize,
     pub network_latency: Duration,
     pub internal_topic: String,
     pub external_topic: String,
-}
-
-#[derive(Debug)]
-pub struct CompleteItem {
-    pub final_node: Node,
-    pub processed: HashSet<HashArray>,
-    pub next: Vec<(KeyArray, Record)>,
 }
 
 #[derive(Debug)]
@@ -98,7 +88,7 @@ struct MemberInfo {
 pub struct Candidate {
     final_node: Vec<u8>,
     processed: HashSet<HashArray>,
-    next: Vec<(KeyArray, Record)>,
+    next: Vec<RecordBatch>,
     hash: HashArray,
 }
 
@@ -169,11 +159,7 @@ impl MemberInfo {
 }
 
 impl Candidate {
-    pub fn new(
-        final_node: Vec<u8>,
-        processed: HashSet<HashArray>,
-        next: Vec<(KeyArray, Record)>,
-    ) -> Self {
+    pub fn new(final_node: Vec<u8>, processed: HashSet<HashArray>, next: Vec<RecordBatch>) -> Self {
         let hash = generate_candidate_hash(&final_node, &processed, &next);
 
         Self {
@@ -294,18 +280,29 @@ impl Publisher {
     pub async fn publish(
         &mut self,
         original: Node,
-        records: CollectedRecords,
+        mut record_batches: Vec<RecordBatch>,
         election_result: ElectionResult,
         vrf_ctx: vrf_elector::Context,
-    ) -> Result<(CompleteItem, i32)> {
-        let (current, next) = self.split_pairs(records.records);
-        let current_set: HashSet<_> = current.iter().map(|(_, hash)| *hash).collect();
+    ) -> Result<Node> {
+        let total_stakes_impact = record_batches[0].total_stakes_impact;
+
+        let mut records_hashes = HashSet::new();
+        let records_to_insert: Vec<_> = record_batches
+            .remove(0)
+            .records
+            .into_iter()
+            .map(|(key, record)| {
+                let hash = record.hash();
+                records_hashes.insert(hash);
+                (key, hash)
+            })
+            .collect();
 
         self.merkle_dag.change_root(original);
-        self.merkle_dag.batch_insert(current).await?;
+        self.merkle_dag.batch_insert(records_to_insert).await?;
 
         let root_bytes = self.merkle_dag.root().to_vec().await;
-        let candidate = Candidate::new(root_bytes, current_set, next);
+        let candidate = Candidate::new(root_bytes, records_hashes, record_batches);
         let signature = self
             .publish_vote(*candidate.hash(), election_result.proof.clone())
             .await?;
@@ -333,39 +330,21 @@ impl Publisher {
             .await?
             .ok_or(Error::ConsensusFailed)?;
 
+        let node = Node::from_slice(&candidate.final_node)?;
+
         let payload = gossipsub::Payload::ProposalProcessingComplete {
-            final_node: candidate.final_node.clone(),
-            processed: candidate.processed.clone(),
-            next: candidate.next.clone(),
+            final_node: candidate.final_node,
+            processed: candidate.processed,
+            next: candidate.next,
             proofs: MemberInfo::to_hash_map(infos),
-            total_stakes_impact: records.total_stakes_impact,
+            total_stakes_impact,
         };
 
         self.transport
             .publish(&self.config.external_topic, payload)
             .await?;
 
-        let node = Node::from_slice(&candidate.final_node)?;
-
-        Ok((
-            CompleteItem {
-                final_node: node,
-                processed: candidate.processed,
-                next: candidate.next,
-            },
-            records.total_stakes_impact,
-        ))
-    }
-
-    fn split_pairs(&self, mut pairs: Vec<(KeyArray, Record)>) -> SplitedPairs {
-        let split_point = std::cmp::min(pairs.len(), self.config.max_records_per_term);
-        let next = pairs.split_off(split_point);
-        let current = pairs
-            .into_iter()
-            .map(|(key, record)| (key, record.hash()))
-            .collect();
-
-        (current, next)
+        Ok(node)
     }
 
     async fn publish_vote(&self, hash: HashArray, proof: VrfProof) -> Result<ResidentSignature> {
@@ -405,7 +384,7 @@ impl Publisher {
 pub fn generate_candidate_hash(
     final_node: &[u8],
     processed: &HashSet<HashArray>,
-    next: &[(KeyArray, Record)],
+    next: &[RecordBatch],
 ) -> HashArray {
     let processed_bytes = convert_processed_to_bytes(processed);
     let next_bytes = convert_next_to_bytes(next);
@@ -429,13 +408,18 @@ fn convert_processed_to_bytes(processed: &HashSet<HashArray>) -> Vec<u8> {
     bytes
 }
 
-fn convert_next_to_bytes(next: &[(KeyArray, Record)]) -> Vec<u8> {
+fn convert_next_to_bytes(next: &[RecordBatch]) -> Vec<u8> {
     next.iter()
-        .cloned()
-        .flat_map(|(key, record)| {
-            let mut bytes = Vec::with_capacity(U16_LENGTH + HASH_ARRAY_LENGTH);
-            bytes.extend(key_array_to_hash(key));
-            bytes.extend(record.hash());
+        .flat_map(|batch| {
+            let per_size = std::mem::size_of::<(HashArray, HashArray)>();
+            let mut bytes = Vec::with_capacity(batch.records.len() * per_size + I32_LENGTH);
+
+            batch.records.iter().for_each(|(key, record)| {
+                bytes.extend(key_to_hash_array(*key));
+                bytes.extend(record.hash());
+            });
+            bytes.extend(batch.total_stakes_impact.to_le_bytes());
+
             bytes
         })
         .collect()
@@ -470,7 +454,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             batch_size: DEFAULT_BATCH_SIZE,
-            max_records_per_term: DEFAULT_MAX_RECORDS_PER_TIME,
             network_latency: DEFAULT_NETWORK_LATENCY,
             internal_topic: DEFAULT_INTERNAL_TOPIC.to_string(),
             external_topic: DEFAULT_EXTERNAL_TOPIC.to_string(),
