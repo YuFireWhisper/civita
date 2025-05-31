@@ -1,19 +1,18 @@
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 
 use dashmap::DashMap;
 
 use crate::{
+    constants::HashArray,
     crypto::tss::Signature,
     network::transport::behaviour::Behaviour,
     traits::{byteable, Byteable},
 };
 
-pub mod key;
 pub mod message;
 pub mod payload;
 pub mod validated_store;
 
-pub use key::Key;
 pub use message::Message;
 pub use payload::Payload;
 
@@ -44,9 +43,6 @@ pub enum Error {
     Store(#[from] libp2p::kad::store::Error),
 
     #[error("{0}")]
-    Key(#[from] key::Error),
-
-    #[error("{0}")]
     Byteable(#[from] byteable::Error),
 
     #[error("{0}")]
@@ -54,6 +50,9 @@ pub enum Error {
 
     #[error("No found payload for the given key")]
     NotFound,
+
+    #[error("{0}")]
+    ConvertFromVec(String),
 }
 
 #[derive(Debug)]
@@ -125,7 +124,7 @@ impl Kad {
             libp2p::kad::Event::OutboundQueryProgressed { id, result, .. } => {
                 self.handle_outbound(id, result);
             }
-            _ => log::trace!("Ignoring Kademlia event: {:?}", event),
+            _ => log::trace!("Ignoring Kademlia event: {event:?}"),
         }
     }
 
@@ -158,12 +157,12 @@ impl Kad {
                     }
                 }
             }
-            _ => log::debug!("Received unhandled query result: {:?}", result),
+            _ => log::debug!("Received unhandled query result: {result:?}"),
         }
     }
 
-    pub async fn put(&self, key: Key, payload: Payload, signature: Signature) -> Result<()> {
-        let key = key.to_storage_key()?;
+    pub async fn put(&self, key: &HashArray, payload: Payload, signature: Signature) -> Result<()> {
+        let key = libp2p::kad::RecordKey::new(&key);
         let record_value = Message::new(payload, signature)?.to_vec()?;
         let record = libp2p::kad::Record::new(key, record_value);
 
@@ -179,16 +178,19 @@ impl Kad {
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
     }
 
-    pub async fn get_or_error(&self, key: Key) -> Result<Payload> {
-        match self.get(key).await? {
-            Some(payload) => Ok(payload),
-            None => Err(Error::NotFound),
-        }
+    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display>>(
+        &self,
+        key: &HashArray,
+    ) -> Result<T> {
+        self.get::<T>(key).await?.ok_or(Error::NotFound)
     }
 
-    pub async fn get(&self, key: Key) -> Result<Option<Payload>> {
+    pub async fn get<T: TryFrom<Vec<u8>, Error: Display>>(
+        &self,
+        key: &HashArray,
+    ) -> Result<Option<T>> {
         let mut swarm = self.swarm.lock().await;
-        let key = key.to_storage_key()?;
+        let key = libp2p::kad::RecordKey::new(key);
         let query_id = swarm.behaviour_mut().kad_mut().get_record(key);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -196,8 +198,13 @@ impl Kad {
 
         let peer_record_opt =
             tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
+
         match peer_record_opt {
-            Some(peer_record) => Ok(Some(Payload::from_slice(peer_record.record.value)?)),
+            Some(peer_record) => {
+                let t = T::try_from(peer_record.record.value)
+                    .map_err(|e| Error::ConvertFromVec(e.to_string()))?;
+                Ok(Some(t))
+            }
             None => Ok(None),
         }
     }

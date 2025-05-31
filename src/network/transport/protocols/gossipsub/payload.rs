@@ -1,14 +1,19 @@
-use std::{collections::HashSet, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    time::SystemTime,
+};
 
+use libp2p::gossipsub::MessageId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    committee,
+    constants::HashArray,
     crypto::{
         algebra::{Point, Scalar},
-        keypair::{PublicKey, VrfProof},
+        keypair::{PublicKey, ResidentSignature, VrfProof},
         vss::{encrypted_share::EncryptedShares, DecryptedShares},
     },
+    proposal::pool::RecordBatch,
 };
 
 #[derive(Debug)]
@@ -58,10 +63,6 @@ pub enum Payload {
         payload_hash: [u8; 32],
     },
 
-    ElectionSuccess {
-        info: committee::Info,
-    },
-
     ElectionFailure {
         invalid_peers: HashSet<libp2p::PeerId>,
     },
@@ -73,6 +74,29 @@ pub enum Payload {
     ConsensusTimeResponse {
         end_time: SystemTime,
         is_accepted: bool,
+    },
+
+    QueryCommitteeState,
+
+    QueryCommitteeStateResponse {
+        message_id: MessageId,
+        state: Vec<u8>,
+    },
+
+    Proposal(Vec<u8>),
+
+    ProposalProcessingComplete {
+        final_node: Vec<u8>,
+        total_stakes_impact: i32,
+        processed: HashSet<HashArray>,
+        next: Vec<RecordBatch>,
+        proofs: HashMap<PublicKey, (VrfProof, ResidentSignature)>,
+    },
+
+    ConsensusCandidate {
+        public_key: PublicKey,
+        proof: VrfProof,
+        signature: ResidentSignature,
     },
 
     // For testing

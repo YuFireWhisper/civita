@@ -5,51 +5,20 @@ use std::{
 };
 
 use libp2p::kad::{store::RecordStore, ProviderRecord, Record, RecordKey};
-use thiserror::Error;
-
-use crate::{
-    crypto::algebra::Point,
-    network::transport::protocols::kad::{message, Message},
-    traits::{byteable, Byteable},
-};
-
-type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug)]
-#[derive(Error)]
-pub enum Error {
-    #[error("{0}")]
-    Message(#[from] message::Error),
-
-    #[error("{0}")]
-    Byteable(#[from] byteable::Error),
-}
 
 #[derive(Debug)]
 #[derive(Default)]
 pub struct ValidatedStore {
-    pub_key: Option<Point>,
     records: HashMap<RecordKey, Record>,
     providers: HashMap<RecordKey, Vec<ProviderRecord>>,
 }
 
 impl ValidatedStore {
-    pub fn set_pub_key(&mut self, pub_key: Point) {
-        self.pub_key = Some(pub_key);
-    }
+    fn validate_record(&self, record: &Record) -> bool {
+        let key = record.key.as_ref();
+        let value_hash = blake3::hash(&record.value);
 
-    fn validate_record(&self, record: &Record) -> Result<bool> {
-        let pub_key = match self.pub_key {
-            Some(ref key) => key,
-            None => return Ok(false),
-        };
-
-        let message = Message::from_slice(&record.value)?;
-
-        let signature = message.signature();
-        let raw_message = message.payload_bytes();
-
-        Ok(signature.verify(raw_message, pub_key))
+        key == value_hash.as_bytes()
     }
 }
 
@@ -63,10 +32,9 @@ impl RecordStore for ValidatedStore {
     }
 
     fn put(&mut self, r: Record) -> libp2p::kad::store::Result<()> {
-        if let Ok(true) = self.validate_record(&r) {
+        if self.validate_record(&r) {
             self.records.insert(r.key.clone(), r);
         }
-
         Ok(())
     }
 

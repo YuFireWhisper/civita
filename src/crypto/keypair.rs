@@ -24,7 +24,7 @@ pub enum KeyType {
     Secp256k1,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Encode, Decode)]

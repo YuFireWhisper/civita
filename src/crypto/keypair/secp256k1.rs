@@ -31,7 +31,7 @@ pub enum Error {
     InvalidSignatureLength(usize),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[derive(Debug)]
 #[derive(Encode, Decode)]
 #[derive(Hash)]
