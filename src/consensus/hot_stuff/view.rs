@@ -79,6 +79,14 @@ impl View {
         }
     }
 
+    pub fn verify_qc(&self) -> bool {
+        let input = self.generate_input();
+
+        self.qcs
+            .iter()
+            .all(|qc| qc.public_key.verify_signature(input, &qc.signature))
+    }
+
     fn generate_input(&self) -> HashArray {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.number.to_le_bytes());
@@ -129,6 +137,8 @@ impl TryFrom<&[u8]> for View {
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::keypair::{self, KeyType};
+
     use super::*;
 
     fn generate_random_view() -> View {
@@ -163,5 +173,32 @@ mod tests {
         assert_eq!(view.qcs, deserialized.qcs);
         assert_eq!(view.state, deserialized.state);
         assert_eq!(view.height, deserialized.height);
+    }
+
+    #[test]
+    fn generate_qc_and_verify() {
+        let mut view = generate_random_view();
+
+        let (sk, _) = keypair::generate_keypair(KeyType::Secp256k1);
+
+        let qc = view.generate_qc(&sk);
+        view.qcs = vec![qc];
+
+        assert!(view.verify_qc(), "QC verification failed");
+    }
+
+    #[test]
+    fn false_when_qc_invalid() {
+        let mut view = generate_random_view();
+
+        let (sk, _) = keypair::generate_keypair(KeyType::Secp256k1);
+        let qc = view.generate_qc(&sk);
+        view.qcs = vec![qc];
+
+        if let Some(qc) = view.qcs.first_mut() {
+            qc.signature = ResidentSignature::random();
+        }
+
+        assert!(!view.verify_qc(), "QC verification should have failed");
     }
 }
