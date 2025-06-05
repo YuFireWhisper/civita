@@ -140,8 +140,12 @@ impl ResidentSignature {
     }
 
     #[cfg(test)]
-    pub fn zero() -> Self {
-        Self([0u8; SIGNATURE_LENGTH])
+    pub fn random() -> Self {
+        const MESSAGE: &[u8] = b"test message";
+
+        let (sk, _) = generate_keypair();
+
+        sk.sign(MESSAGE).expect("Failed to sign message")
     }
 }
 

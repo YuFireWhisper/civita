@@ -141,8 +141,8 @@ impl ResidentSignature {
     }
 
     #[cfg(test)]
-    pub fn zero() -> Self {
-        ResidentSignature::Secp256k1(secp256k1::ResidentSignature::zero())
+    pub fn random() -> Self {
+        ResidentSignature::Secp256k1(secp256k1::ResidentSignature::random())
     }
 }
 
