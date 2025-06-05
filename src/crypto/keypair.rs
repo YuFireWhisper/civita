@@ -139,6 +139,11 @@ impl ResidentSignature {
             ResidentSignature::Secp256k1(sig) => sig.as_bytes().to_vec(),
         }
     }
+
+    #[cfg(test)]
+    pub fn zero() -> Self {
+        ResidentSignature::Secp256k1(secp256k1::ResidentSignature::zero())
+    }
 }
 
 pub fn generate_keypair(t: KeyType) -> (SecretKey, PublicKey) {

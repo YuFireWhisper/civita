@@ -138,6 +138,11 @@ impl ResidentSignature {
     pub fn as_bytes(&self) -> &[u8] {
         self.as_ref()
     }
+
+    #[cfg(test)]
+    pub fn zero() -> Self {
+        Self([0u8; SIGNATURE_LENGTH])
+    }
 }
 
 pub fn generate_keypair() -> (SecretKey, PublicKey) {
