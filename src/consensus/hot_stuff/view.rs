@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
 
 use crate::{
-    consensus::THRESHOLD_MEMBERS, constants::HashArray, crypto::keypair::ResidentSignature,
+    consensus::THRESHOLD_MEMBERS,
+    constants::HashArray,
+    crypto::keypair::{PublicKey, ResidentSignature},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -26,6 +28,15 @@ pub enum State {
     Commit,
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize, Deserialize)]
+pub struct QuorumCertificate {
+    pub public_key: PublicKey,
+    pub signature: ResidentSignature,
+}
+
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub struct View {
@@ -37,10 +48,26 @@ pub struct View {
     pub root_hash: HashArray,
     pub parent_ref: HashArray,
 
-    #[serde(serialize_with = "serialize_qc", deserialize_with = "deserialize_qc")]
-    pub qc: [ResidentSignature; THRESHOLD_MEMBERS],
+    #[serde(serialize_with = "serialize_qcs", deserialize_with = "deserialize_qcs")]
+    pub qcs: [QuorumCertificate; THRESHOLD_MEMBERS],
     pub state: State,
     pub height: u64,
+}
+
+impl QuorumCertificate {
+    #[cfg(test)]
+    pub fn random() -> Self {
+        use crate::crypto::keypair;
+
+        const MSG: &[u8] = b"test message";
+
+        let (sk, pk) = keypair::generate_keypair(keypair::KeyType::Secp256k1);
+
+        Self {
+            public_key: pk,
+            signature: sk.sign(MSG).expect("Failed to sign message"),
+        }
+    }
 }
 
 impl View {
@@ -54,23 +81,24 @@ impl View {
     }
 }
 
-fn serialize_qc<S>(
-    qc: &[ResidentSignature; THRESHOLD_MEMBERS],
+fn serialize_qcs<S>(
+    qcs: &[QuorumCertificate; THRESHOLD_MEMBERS],
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    qc.to_vec().serialize(serializer)
+    qcs.serialize(serializer)
 }
 
-fn deserialize_qc<'de, D>(
+fn deserialize_qcs<'de, D>(
     deserializer: D,
-) -> std::result::Result<[ResidentSignature; THRESHOLD_MEMBERS], D::Error>
+) -> std::result::Result<[QuorumCertificate; THRESHOLD_MEMBERS], D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let vec = Vec::<ResidentSignature>::deserialize(deserializer)?;
+    let vec = Vec::<QuorumCertificate>::deserialize(deserializer)?;
+
     if vec.len() != THRESHOLD_MEMBERS {
         return Err(serde::de::Error::custom(format!(
             "Expected {} elements, got {}",
@@ -118,8 +146,6 @@ impl TryFrom<&[u8]> for View {
 mod tests {
     use super::*;
 
-    use crate::crypto::keypair::ResidentSignature;
-
     #[test]
     fn correct_serialization() {
         let view = View {
@@ -129,7 +155,7 @@ mod tests {
             proposals: HashSet::from([vec![1, 2, 3]]),
             root_hash: HashArray::from([3; 32]),
             parent_ref: HashArray::from([2; 32]),
-            qc: std::array::from_fn::<_, THRESHOLD_MEMBERS, _>(|_| ResidentSignature::random()),
+            qcs: std::array::from_fn::<_, THRESHOLD_MEMBERS, _>(|_| QuorumCertificate::random()),
             state: State::Prepare,
             height: 1,
         };
@@ -145,7 +171,7 @@ mod tests {
         assert_eq!(view.root_hash, deserialized.root_hash);
         assert_eq!(view.parent_ref, deserialized.parent_ref);
 
-        assert_eq!(view.qc, deserialized.qc);
+        assert_eq!(view.qcs, deserialized.qcs);
         assert_eq!(view.state, deserialized.state);
         assert_eq!(view.height, deserialized.height);
     }
