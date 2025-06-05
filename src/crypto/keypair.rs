@@ -133,6 +133,14 @@ impl VrfProof {
     }
 }
 
+impl ResidentSignature {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            ResidentSignature::Secp256k1(sig) => sig.as_bytes().to_vec(),
+        }
+    }
+}
+
 pub fn generate_keypair(t: KeyType) -> (SecretKey, PublicKey) {
     match t {
         KeyType::Secp256k1 => generate_secp256k1(),

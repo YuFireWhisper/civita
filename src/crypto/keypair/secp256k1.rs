@@ -134,6 +134,12 @@ impl PublicKey {
     }
 }
 
+impl ResidentSignature {
+    pub fn as_bytes(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
 pub fn generate_keypair() -> (SecretKey, PublicKey) {
     let secret_key = SecretKey::random();
     let public_key = PublicKey::from_secret_key(&secret_key);
