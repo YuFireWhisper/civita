@@ -1,5 +1,6 @@
 #![feature(specialization)]
 
+pub mod consensus;
 pub mod constants;
 pub mod crypto;
 pub mod mocks;
