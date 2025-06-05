@@ -1,5 +1,6 @@
 use std::fmt::Display;
 
+use serde::{Deserialize, Serialize};
 use statrs::distribution::{Binomial, DiscreteCDF};
 
 use crate::{
@@ -30,6 +31,7 @@ pub enum Role {
 }
 
 #[derive(Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct DrawResult {
     pub proof: VrfProof,
     pub weight: u32,
