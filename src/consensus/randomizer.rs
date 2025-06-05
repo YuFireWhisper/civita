@@ -31,6 +31,8 @@ pub enum Role {
 }
 
 #[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub struct DrawResult {
     pub proof: VrfProof,
