@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
 
 use crate::{
-    consensus::THRESHOLD_MEMBERS,
     constants::HashArray,
     crypto::keypair::{PublicKey, ResidentSignature},
 };
@@ -48,8 +47,7 @@ pub struct View {
     pub root_hash: HashArray,
     pub parent_ref: HashArray,
 
-    #[serde(serialize_with = "serialize_qcs", deserialize_with = "deserialize_qcs")]
-    pub qcs: [QuorumCertificate; THRESHOLD_MEMBERS],
+    pub qcs: Vec<QuorumCertificate>,
     pub state: State,
     pub height: u64,
 }
@@ -79,36 +77,6 @@ impl View {
         bincode::serde::encode_to_vec(self, bincode::config::standard())
             .expect("Failed to serialize View")
     }
-}
-
-fn serialize_qcs<S>(
-    qcs: &[QuorumCertificate; THRESHOLD_MEMBERS],
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    qcs.serialize(serializer)
-}
-
-fn deserialize_qcs<'de, D>(
-    deserializer: D,
-) -> std::result::Result<[QuorumCertificate; THRESHOLD_MEMBERS], D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let vec = Vec::<QuorumCertificate>::deserialize(deserializer)?;
-
-    if vec.len() != THRESHOLD_MEMBERS {
-        return Err(serde::de::Error::custom(format!(
-            "Expected {} elements, got {}",
-            THRESHOLD_MEMBERS,
-            vec.len()
-        )));
-    }
-
-    vec.try_into()
-        .map_err(|_| serde::de::Error::custom("Failed to convert to array"))
 }
 
 impl From<View> for Vec<u8> {
@@ -155,7 +123,7 @@ mod tests {
             proposals: HashSet::from([vec![1, 2, 3]]),
             root_hash: HashArray::from([3; 32]),
             parent_ref: HashArray::from([2; 32]),
-            qcs: std::array::from_fn::<_, THRESHOLD_MEMBERS, _>(|_| QuorumCertificate::random()),
+            qcs: vec![QuorumCertificate::random()],
             state: State::Prepare,
             height: 1,
         };
