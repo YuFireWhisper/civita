@@ -1,4 +1,5 @@
 mod hot_stuff;
+mod randomizer;
 
 const THRESHOLD: f32 = 0.685;
 
