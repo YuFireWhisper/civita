@@ -6,7 +6,7 @@ use tokio::time::Duration;
 
 use crate::{
     constants::HashArray,
-    crypto::keypair::{PublicKey, ResidentSignature},
+    crypto::keypair::{PublicKey, ResidentSignature, SecretKey},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -69,6 +69,23 @@ impl QuorumCertificate {
 }
 
 impl View {
+    pub fn generate_qc(&self, sk: &SecretKey) -> QuorumCertificate {
+        let input = self.generate_input();
+        let signature = sk.sign(input).expect("Failed to sign input");
+
+        QuorumCertificate {
+            public_key: sk.to_public_key(),
+            signature,
+        }
+    }
+
+    fn generate_input(&self) -> HashArray {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.number.to_le_bytes());
+        hasher.update(&self.leader.as_ref().to_bytes());
+        hasher.finalize().into()
+    }
+
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
         Self::try_from(slice)
     }
@@ -114,9 +131,8 @@ impl TryFrom<&[u8]> for View {
 mod tests {
     use super::*;
 
-    #[test]
-    fn correct_serialization() {
-        let view = View {
+    fn generate_random_view() -> View {
+        View {
             number: 1,
             leader: PeerId::random(),
             timeout: Duration::from_secs(5),
@@ -126,7 +142,12 @@ mod tests {
             qcs: vec![QuorumCertificate::random()],
             state: State::Prepare,
             height: 1,
-        };
+        }
+    }
+
+    #[test]
+    fn correct_serialization() {
+        let view = generate_random_view();
 
         let serialized = view.to_bytes();
         let deserialized: View = serialized.try_into().expect("Failed to deserialize View");
