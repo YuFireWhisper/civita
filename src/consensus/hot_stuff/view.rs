@@ -1,13 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
 
-use crate::{
-    constants::HashArray,
-    crypto::keypair::{PublicKey, ResidentSignature, SecretKey},
-};
+use crate::{consensus::randomizer::DrawResult, constants::HashArray, crypto::keypair::PublicKey};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -18,6 +14,7 @@ pub enum Error {
     Deserialize(#[from] bincode::error::DecodeError),
 }
 
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
@@ -32,67 +29,50 @@ pub enum State {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub struct QuorumCertificate {
-    pub public_key: PublicKey,
-    pub signature: ResidentSignature,
+    pub view_number: u64,
+    pub root_hash: HashArray,
+    pub state: State,
+
+    pub leader_pk: PublicKey,
+    pub leader_result: DrawResult,
+
+    pub validators: HashMap<PublicKey, DrawResult>,
 }
 
 #[derive(Debug)]
+#[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub struct View {
     pub number: u64,
-    pub leader: PeerId,
     pub timeout: Duration,
 
+    pub leader_pk: PublicKey,
+    pub leader_result: DrawResult,
+
     pub root_hash: HashArray,
-    pub total_stakes: u64,
+    pub total_stakes: u32,
     pub proposals: HashSet<Vec<u8>>,
 
-    pub parent_ref: HashArray,
-    pub parent_qcs: Vec<QuorumCertificate>,
+    pub parent_hash: HashArray,
+    pub parent_qcs: QuorumCertificate,
 
     pub state: State,
     pub height: u64,
 }
 
-impl QuorumCertificate {
-    #[cfg(test)]
-    pub fn random() -> Self {
-        use crate::crypto::keypair;
-
-        const MSG: &[u8] = b"test message";
-
-        let (sk, pk) = keypair::generate_keypair(keypair::KeyType::Secp256k1);
-
-        Self {
-            public_key: pk,
-            signature: sk.sign(MSG).expect("Failed to sign message"),
-        }
+impl State {
+    pub fn to_u8(&self) -> u8 {
+        self.into()
     }
 }
 
 impl View {
-    pub fn generate_qc(&self, sk: &SecretKey) -> QuorumCertificate {
-        let input = self.generate_input();
-        let signature = sk.sign(input).expect("Failed to sign input");
-
-        QuorumCertificate {
-            public_key: sk.to_public_key(),
-            signature,
-        }
-    }
-
-    pub fn verify_qc(&self) -> bool {
-        let input = self.generate_input();
-
-        self.parent_qcs
-            .iter()
-            .all(|qc| qc.public_key.verify_signature(input, &qc.signature))
-    }
-
-    fn generate_input(&self) -> HashArray {
+    pub fn generate_draw_seed(&self) -> HashArray {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.number.to_le_bytes());
-        hasher.update(&self.leader.as_ref().to_bytes());
+        hasher.update(&self.root_hash);
+        hasher.update(&[self.state.to_u8()]);
+        hasher.update(self.leader_pk.as_bytes());
         hasher.finalize().into()
     }
 
@@ -103,6 +83,16 @@ impl View {
     pub fn to_bytes(&self) -> Vec<u8> {
         bincode::serde::encode_to_vec(self, bincode::config::standard())
             .expect("Failed to serialize View")
+    }
+}
+
+impl From<&State> for u8 {
+    fn from(state: &State) -> Self {
+        match state {
+            State::Prepare => 0,
+            State::PreCommit => 1,
+            State::Commit => 2,
+        }
     }
 }
 
@@ -139,25 +129,64 @@ impl TryFrom<&[u8]> for View {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::keypair::{self, KeyType};
+    use crate::{
+        constants::HASH_ARRAY_LENGTH,
+        crypto::keypair::{self, KeyType, SecretKey},
+    };
 
     use super::*;
 
+    const VIEW_NUMBER: u64 = 1;
+    const ROOT_HASH: HashArray = [1; HASH_ARRAY_LENGTH];
+    const STATE: State = State::Prepare;
+
+    fn generate_qc(pk: PublicKey, leader_result: DrawResult) -> QuorumCertificate {
+        QuorumCertificate {
+            view_number: VIEW_NUMBER,
+            root_hash: ROOT_HASH,
+            state: STATE,
+
+            leader_pk: pk,
+            leader_result,
+
+            validators: HashMap::new(),
+        }
+    }
+
+    fn generate_draw_result(sk: &SecretKey, msg: &[u8], weight: u32) -> DrawResult {
+        let proof = sk.prove(msg).expect("Failed to generate proof");
+        DrawResult { proof, weight }
+    }
+
     fn generate_random_view() -> View {
+        const TIMEOUT: Duration = Duration::from_secs(5);
+        const MSG: &[u8] = b"test message";
+        const WEIGHT: u32 = 1000;
+        const TOTAL_STAKES: u32 = 1000;
+        const PROPOSAL: [u8; 3] = [1, 2, 3];
+        const PARENT_HASH: HashArray = [2; HASH_ARRAY_LENGTH];
+        const HEIGHT: u64 = 1;
+
+        let (sk, pk) = keypair::generate_keypair(KeyType::Secp256k1);
+
+        let parent_qc = generate_qc(pk.clone(), generate_draw_result(&sk, MSG, WEIGHT));
+
         View {
-            number: 1,
-            leader: PeerId::random(),
-            timeout: Duration::from_secs(5),
+            number: VIEW_NUMBER,
+            timeout: TIMEOUT,
 
-            root_hash: HashArray::from([3; 32]),
-            total_stakes: 1000,
-            proposals: HashSet::from([vec![1, 2, 3]]),
+            leader_pk: pk,
+            leader_result: generate_draw_result(&sk, MSG, WEIGHT),
 
-            parent_ref: HashArray::from([2; 32]),
-            parent_qcs: vec![QuorumCertificate::random()],
+            root_hash: ROOT_HASH,
+            total_stakes: TOTAL_STAKES,
+            proposals: HashSet::from([PROPOSAL.to_vec()]),
 
-            state: State::Prepare,
-            height: 1,
+            parent_hash: PARENT_HASH,
+            parent_qcs: parent_qc,
+
+            state: STATE,
+            height: HEIGHT,
         }
     }
 
@@ -168,43 +197,6 @@ mod tests {
         let serialized = view.to_bytes();
         let deserialized: View = serialized.try_into().expect("Failed to deserialize View");
 
-        assert_eq!(view.number, deserialized.number);
-        assert_eq!(view.leader, deserialized.leader);
-        assert_eq!(view.timeout, deserialized.timeout);
-
-        assert_eq!(view.proposals, deserialized.proposals);
-        assert_eq!(view.root_hash, deserialized.root_hash);
-        assert_eq!(view.parent_ref, deserialized.parent_ref);
-
-        assert_eq!(view.parent_qcs, deserialized.parent_qcs);
-        assert_eq!(view.state, deserialized.state);
-        assert_eq!(view.height, deserialized.height);
-    }
-
-    #[test]
-    fn generate_qc_and_verify() {
-        let mut view = generate_random_view();
-
-        let (sk, _) = keypair::generate_keypair(KeyType::Secp256k1);
-
-        let qc = view.generate_qc(&sk);
-        view.parent_qcs = vec![qc];
-
-        assert!(view.verify_qc(), "QC verification failed");
-    }
-
-    #[test]
-    fn false_when_qc_invalid() {
-        let mut view = generate_random_view();
-
-        let (sk, _) = keypair::generate_keypair(KeyType::Secp256k1);
-        let qc = view.generate_qc(&sk);
-        view.parent_qcs = vec![qc];
-
-        if let Some(qc) = view.parent_qcs.first_mut() {
-            qc.signature = ResidentSignature::random();
-        }
-
-        assert!(!view.verify_qc(), "QC verification should have failed");
+        assert_eq!(view, deserialized);
     }
 }
