@@ -30,35 +30,18 @@ enum Action<P: Proposal> {
     Remove(BTreeSet<P>),
 }
 
-struct Channel<P: Proposal> {
+pub struct ProposalPool<P: Proposal> {
+    handle: JoinHandle<()>,
     action_tx: Sender<Action<P>>,
     result_rx: Receiver<BTreeSet<P>>,
 }
 
-pub struct ProposalPool<P: Proposal> {
-    handle: Option<(JoinHandle<()>, Channel<P>)>,
-    capacity: usize,
-}
-
 impl<P: Proposal> ProposalPool<P> {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            handle: None,
-            capacity,
-        }
-    }
-
-    pub async fn start(&mut self, mut rx: Receiver<gossipsub::Message>) {
+    pub fn new(mut rx: Receiver<gossipsub::Message>, capacity: usize) -> Self {
         const CHANNEL_CAPACITY: usize = 100;
-
-        if self.handle.is_some() {
-            return;
-        }
 
         let (action_tx, mut action_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (result_tx, result_rx) = mpsc::channel(CHANNEL_CAPACITY);
-
-        let capacity = self.capacity;
 
         let handle = tokio::spawn(async move {
             let mut proposals = BTreeSet::new();
@@ -85,12 +68,11 @@ impl<P: Proposal> ProposalPool<P> {
             }
         });
 
-        let channel = Channel {
+        Self {
+            handle,
             action_tx,
             result_rx,
-        };
-
-        self.handle = Some((handle, channel));
+        }
     }
 
     fn handle_message(
@@ -130,24 +112,28 @@ impl<P: Proposal> ProposalPool<P> {
     }
 
     pub async fn get(&mut self) -> Result<BTreeSet<P>> {
-        let (_, channel) = self.handle.as_mut().ok_or(Error::NotStarted)?;
+        while self.result_rx.try_recv().is_ok() {}
 
-        while channel.result_rx.try_recv().is_ok() {}
-
-        channel
-            .action_tx
+        self.action_tx
             .send(Action::Get)
             .await
             .map_err(|_| Error::ChannelClosed)?;
 
-        Ok(channel.result_rx.recv().await.unwrap_or_default())
+        Ok(self.result_rx.recv().await.unwrap_or_default())
+    }
+
+    pub async fn remove(&self, proposals: BTreeSet<P>) -> Result<()> {
+        self.action_tx
+            .send(Action::Remove(proposals))
+            .await
+            .map_err(|_| Error::ChannelClosed)?;
+
+        Ok(())
     }
 }
 
 impl<P: Proposal> Drop for ProposalPool<P> {
     fn drop(&mut self) {
-        if let Some((handle, _)) = self.handle.take() {
-            handle.abort();
-        }
+        self.handle.abort();
     }
 }
