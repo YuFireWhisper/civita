@@ -43,11 +43,12 @@ pub struct View {
     pub leader: PeerId,
     pub timeout: Duration,
 
-    pub proposals: HashSet<Vec<u8>>,
     pub root_hash: HashArray,
-    pub parent_ref: HashArray,
+    pub proposals: HashSet<Vec<u8>>,
 
-    pub qcs: Vec<QuorumCertificate>,
+    pub parent_ref: HashArray,
+    pub parent_qcs: Vec<QuorumCertificate>,
+
     pub state: State,
     pub height: u64,
 }
@@ -82,7 +83,7 @@ impl View {
     pub fn verify_qc(&self) -> bool {
         let input = self.generate_input();
 
-        self.qcs
+        self.parent_qcs
             .iter()
             .all(|qc| qc.public_key.verify_signature(input, &qc.signature))
     }
@@ -149,7 +150,7 @@ mod tests {
             proposals: HashSet::from([vec![1, 2, 3]]),
             root_hash: HashArray::from([3; 32]),
             parent_ref: HashArray::from([2; 32]),
-            qcs: vec![QuorumCertificate::random()],
+            parent_qcs: vec![QuorumCertificate::random()],
             state: State::Prepare,
             height: 1,
         }
@@ -170,7 +171,7 @@ mod tests {
         assert_eq!(view.root_hash, deserialized.root_hash);
         assert_eq!(view.parent_ref, deserialized.parent_ref);
 
-        assert_eq!(view.qcs, deserialized.qcs);
+        assert_eq!(view.parent_qcs, deserialized.parent_qcs);
         assert_eq!(view.state, deserialized.state);
         assert_eq!(view.height, deserialized.height);
     }
@@ -182,7 +183,7 @@ mod tests {
         let (sk, _) = keypair::generate_keypair(KeyType::Secp256k1);
 
         let qc = view.generate_qc(&sk);
-        view.qcs = vec![qc];
+        view.parent_qcs = vec![qc];
 
         assert!(view.verify_qc(), "QC verification failed");
     }
@@ -193,9 +194,9 @@ mod tests {
 
         let (sk, _) = keypair::generate_keypair(KeyType::Secp256k1);
         let qc = view.generate_qc(&sk);
-        view.qcs = vec![qc];
+        view.parent_qcs = vec![qc];
 
-        if let Some(qc) = view.qcs.first_mut() {
+        if let Some(qc) = view.parent_qcs.first_mut() {
             qc.signature = ResidentSignature::random();
         }
 
