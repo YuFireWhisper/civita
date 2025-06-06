@@ -32,6 +32,7 @@ pub struct QuorumCertificate {
     pub view_number: u64,
     pub root_hash: HashArray,
     pub state: State,
+    pub height: u64,
 
     pub leader_pk: PublicKey,
     pub leader_result: DrawResult,
@@ -72,6 +73,7 @@ impl View {
         hasher.update(&self.number.to_le_bytes());
         hasher.update(&self.root_hash);
         hasher.update(&[self.state.to_u8()]);
+        hasher.update(&self.height.to_le_bytes());
         hasher.update(self.leader_pk.as_bytes());
         hasher.finalize().into()
     }
@@ -139,12 +141,14 @@ mod tests {
     const VIEW_NUMBER: u64 = 1;
     const ROOT_HASH: HashArray = [1; HASH_ARRAY_LENGTH];
     const STATE: State = State::Prepare;
+    const HEIGHT: u64 = 1;
 
     fn generate_qc(pk: PublicKey, leader_result: DrawResult) -> QuorumCertificate {
         QuorumCertificate {
             view_number: VIEW_NUMBER,
             root_hash: ROOT_HASH,
             state: STATE,
+            height: HEIGHT,
 
             leader_pk: pk,
             leader_result,
@@ -165,7 +169,6 @@ mod tests {
         const TOTAL_STAKES: u32 = 1000;
         const PROPOSAL: [u8; 3] = [1, 2, 3];
         const PARENT_HASH: HashArray = [2; HASH_ARRAY_LENGTH];
-        const HEIGHT: u64 = 1;
 
         let (sk, pk) = keypair::generate_keypair(KeyType::Secp256k1);
 
