@@ -44,6 +44,7 @@ pub struct View {
     pub timeout: Duration,
 
     pub root_hash: HashArray,
+    pub total_stakes: u64,
     pub proposals: HashSet<Vec<u8>>,
 
     pub parent_ref: HashArray,
@@ -147,10 +148,14 @@ mod tests {
             number: 1,
             leader: PeerId::random(),
             timeout: Duration::from_secs(5),
-            proposals: HashSet::from([vec![1, 2, 3]]),
+
             root_hash: HashArray::from([3; 32]),
+            total_stakes: 1000,
+            proposals: HashSet::from([vec![1, 2, 3]]),
+
             parent_ref: HashArray::from([2; 32]),
             parent_qcs: vec![QuorumCertificate::random()],
+
             state: State::Prepare,
             height: 1,
         }
