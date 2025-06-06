@@ -25,22 +25,22 @@ pub enum Error {
     Deserialize(String),
 }
 
-enum Action<P: Proposal + Ord> {
+enum Action<P: Proposal> {
     Get,
     Remove(BTreeSet<P>),
 }
 
-struct Channel<P: Proposal + Ord> {
+struct Channel<P: Proposal> {
     action_tx: Sender<Action<P>>,
     result_rx: Receiver<BTreeSet<P>>,
 }
 
-pub struct ProposalPool<P: Proposal + Ord> {
+pub struct ProposalPool<P: Proposal> {
     handle: Option<(JoinHandle<()>, Channel<P>)>,
     capacity: usize,
 }
 
-impl<P: Proposal + Ord> ProposalPool<P> {
+impl<P: Proposal> ProposalPool<P> {
     pub fn new(capacity: usize) -> Self {
         Self {
             handle: None,
@@ -144,7 +144,7 @@ impl<P: Proposal + Ord> ProposalPool<P> {
     }
 }
 
-impl<P: Proposal + Ord> Drop for ProposalPool<P> {
+impl<P: Proposal> Drop for ProposalPool<P> {
     fn drop(&mut self) {
         if let Some((handle, _)) = self.handle.take() {
             handle.abort();
