@@ -1,14 +1,11 @@
-use std::{
-    collections::{HashMap, HashSet},
-    thread,
-};
+use std::collections::HashMap;
 
 use dashmap::{
     mapref::one::{Ref, RefMut},
     DashMap, DashSet,
 };
-use futures::{stream::FuturesUnordered, StreamExt};
-use tokio::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use futures::{future::OptionFuture, stream::FuturesUnordered, StreamExt};
+use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 
 use crate::network::transport::{
     self,
@@ -93,76 +90,83 @@ impl Node {
         self.clear_hash().await;
 
         if depth == DEPTH - 1 {
-            let new = Node::new_with_hash(value);
-            self.children.insert(key[depth], new);
+            self.children.insert(key[depth], Node::new_with_hash(value));
             return Ok(());
         }
 
-        match self.child_mut(&key[depth]) {
-            Some(mut child) => {
-                let child = child.value_mut();
+        let mut child_ref = self.children.entry(key[depth]).or_default();
+        let child = child_ref.value_mut();
 
-                if let Some(hash) = child.hash().await {
-                    let lock = child.lock_fetch_lock().await;
+        child.ensure_loaded(transport).await?;
 
-                    if child.children.is_empty() {
-                        let fetched_node = Self::fetch_node(transport, &hash).await?;
-                        drop(lock);
-                        child.children = fetched_node.children;
-                    }
-                }
+        Box::pin(child.insert_inner(depth + 1, key, value, transport)).await
+    }
 
-                return Box::pin(child.insert_inner(depth + 1, key, value, transport)).await;
-            }
-            None => {
-                let new = Node::new();
-                Box::pin(new.insert_inner(depth + 1, key, value, transport)).await?;
-                self.children.insert(key[depth], new);
+    async fn ensure_loaded(&mut self, transport: &Transport) -> Result<()> {
+        if self.is_stub().await {
+            let _lock = self.fetch_lock.lock().await;
+
+            if self.children.is_empty() {
+                let hash = self.hash().await.unwrap(); // safe to unwrap since we check is_stub
+                let fetched_node = Self::fetch_node(transport, &hash).await?;
+                self.children = fetched_node.children;
             }
         }
-
         Ok(())
     }
 
-    async fn lock_fetch_lock(&self) -> MutexGuard<()> {
-        self.fetch_lock.lock().await
+    async fn is_stub(&self) -> bool {
+        self.hash_read().await.is_some() && self.children.is_empty()
     }
 
     async fn fetch_node(transport: &Transport, hash: &HashArray) -> Result<Node> {
-        transport
-            .get_or_error::<Node>(hash)
-            .await
-            .map_err(Error::from)
+        transport.get_or_error(hash).await.map_err(Error::from)
     }
 
     pub async fn batch_insert(
         &self,
         pairs: Vec<(KeyArray, HashArray)>,
         transport: &Transport,
-        batch_size: usize,
+        _batch_size: usize,
     ) -> Result<()> {
-        let mut grouped: HashMap<BanchingFactor, Vec<(KeyArray, HashArray)>> = HashMap::new();
+        self.batch_insert_inner(0, pairs, transport).await
+    }
 
-        for (key, value) in pairs {
-            grouped.entry(key[0]).or_default().push((key, value));
+    async fn batch_insert_inner(
+        &self,
+        depth: usize,
+        pairs: Vec<(KeyArray, HashArray)>,
+        transport: &Transport,
+    ) -> Result<()> {
+        self.clear_hash().await;
+
+        if depth == DEPTH - 1 {
+            pairs.iter().for_each(|(key, value)| {
+                self.children
+                    .insert(key[depth], Node::new_with_hash(*value));
+            });
+            return Ok(());
         }
 
-        let mut futures = FuturesUnordered::new();
-        let max_concurrent = thread::available_parallelism()?.get() * 2;
+        let grouped: HashMap<_, Vec<_>> =
+            pairs
+                .into_iter()
+                .fold(HashMap::new(), |mut acc, (key, value)| {
+                    acc.entry(key[depth]).or_default().push((key, value));
+                    acc
+                });
 
-        for (_, group) in grouped {
-            for chunk in group.chunks(batch_size) {
-                if futures.len() >= max_concurrent {
-                    if let Some(result) = futures.next().await {
-                        result?;
-                    }
+        let mut futures: FuturesUnordered<_> = grouped
+            .into_iter()
+            .map(|(index, group)| {
+                let mut child_ref = self.children.entry(index).or_default();
+                async move {
+                    let child = child_ref.value_mut();
+                    child.ensure_loaded(transport).await?;
+                    child.batch_insert_inner(depth + 1, group, transport).await
                 }
-
-                for (key, value) in chunk {
-                    futures.push(self.insert(*key, *value, transport));
-                }
-            }
-        }
+            })
+            .collect();
 
         while let Some(result) = futures.next().await {
             result?;
@@ -181,35 +185,20 @@ impl Node {
         key: KeyArray,
         transport: &Transport,
     ) -> Result<Option<HashArray>> {
+        let mut child_ref = match self.children.get_mut(&key[depth]) {
+            Some(child) => child,
+            None => return Ok(None),
+        };
+
+        let child = child_ref.value_mut();
+
         if depth == DEPTH - 1 {
-            return Ok(match self.child(&key[depth]) {
-                Some(child) => child.value().hash().await,
-                None => None,
-            });
+            return Ok(child.hash().await);
         }
 
-        if let Some(child_ref) = self.child(&key[depth]) {
-            let child = child_ref.value();
+        child.ensure_loaded(transport).await?;
 
-            if let Some(hash) = child.hash().await {
-                if child.children.is_empty() {
-                    let lock = child.lock_fetch_lock().await;
-                    if child.children.is_empty() {
-                        let fetched_node = Self::fetch_node(transport, &hash).await?;
-                        drop(lock);
-                        for (idx, node) in fetched_node.children.into_iter() {
-                            child.children.insert(idx, node);
-                        }
-                    } else {
-                        drop(lock);
-                    }
-                }
-            }
-
-            return Box::pin(child.get_inner(depth + 1, key, transport)).await;
-        }
-
-        Ok(None)
+        Box::pin(child.get_inner(depth + 1, key, transport)).await
     }
 
     pub async fn batch_get(
@@ -221,156 +210,66 @@ impl Node {
             return Ok(Vec::new());
         }
 
-        let mut key_indices: HashMap<KeyArray, Vec<usize>> = HashMap::new();
-        for (idx, key) in keys.iter().enumerate() {
-            key_indices.entry(*key).or_default().push(idx);
-        }
+        let results = DashMap::with_capacity(keys.len());
 
-        let mut grouped: HashMap<BanchingFactor, Vec<KeyArray>> = HashMap::new();
-        for key in &keys {
-            grouped.entry(key[0]).or_default().push(*key);
-        }
+        self.batch_get_inner(0, keys.clone(), &results, transport)
+            .await?;
 
-        let mut futures = FuturesUnordered::new();
-        let max_concurrent = thread::available_parallelism()?.get() * 2;
+        let mut matched_results: Vec<Option<HashArray>> = Vec::with_capacity(results.len());
 
-        for (_, group) in grouped {
-            for chunk in group.chunks(max_concurrent) {
-                futures.push(self.batch_get_group(chunk.to_vec(), transport));
-            }
-        }
+        keys.into_iter().for_each(|key| {
+            matched_results.push(results.remove(&key).map(|(_, hash)| hash));
+        });
 
-        let mut result_map: HashMap<KeyArray, Option<HashArray>> = HashMap::new();
-        while let Some(group_results) = futures.next().await {
-            let results = group_results?;
-            results.into_iter().for_each(|(key, value)| {
-                if let Some(indices) = key_indices.get(&key) {
-                    for &idx in indices {
-                        result_map.insert(keys[idx], value);
-                    }
-                }
-            });
-        }
-
-        let mut results = Vec::with_capacity(keys.len());
-        for key in &keys {
-            results.push(result_map.get(key).cloned().unwrap_or(None));
-        }
-
-        Ok(results)
-    }
-
-    async fn batch_get_group(
-        &self,
-        keys: Vec<KeyArray>,
-        transport: &Transport,
-    ) -> Result<Vec<(KeyArray, Option<HashArray>)>> {
-        let mut results = Vec::with_capacity(keys.len());
-
-        let key_groups =
-            keys.into_iter()
-                .fold(HashMap::<u16, Vec<KeyArray>>::new(), |mut acc, key| {
-                    acc.entry(key[0]).or_default().push(key);
-                    acc
-                });
-
-        for (first_index, group_keys) in key_groups {
-            match self.child(&first_index) {
-                Some(child_ref) => {
-                    let child = child_ref.value();
-                    self.ensure_child_loaded(child, transport).await?;
-                    let child_results = child
-                        .batch_get_inner(1, group_keys.clone(), transport)
-                        .await?;
-
-                    for (key, result) in group_keys.into_iter().zip(child_results) {
-                        results.push((key, result));
-                    }
-                }
-                None => {
-                    for key in group_keys {
-                        results.push((key, None));
-                    }
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
-    async fn ensure_child_loaded(&self, child: &Node, transport: &Transport) -> Result<()> {
-        if let Some(hash) = child.hash().await {
-            if child.children.is_empty() {
-                let lock = child.lock_fetch_lock().await;
-                if child.children.is_empty() {
-                    let fetched_node = Self::fetch_node(transport, &hash).await?;
-                    drop(lock);
-                    for (idx, node) in fetched_node.children {
-                        child.children.insert(idx, node);
-                    }
-                }
-            }
-        }
-        Ok(())
+        Ok(matched_results)
     }
 
     async fn batch_get_inner(
         &self,
         depth: usize,
-        keys: Vec<KeyArray>,
+        jobs: Vec<KeyArray>,
+        results: &DashMap<KeyArray, HashArray>,
         transport: &Transport,
-    ) -> Result<Vec<Option<HashArray>>> {
+    ) -> Result<()> {
         if depth == DEPTH - 1 {
-            let mut results = Vec::with_capacity(keys.len());
-            for key in keys {
-                let value = match self.child(&key[depth]) {
-                    Some(child) => child.value().hash().await,
-                    None => None,
-                };
-                results.push(value);
+            for key in jobs {
+                OptionFuture::from(self.children.get(&key[depth]).map(|child| async move {
+                    let hash = child.value().hash().await;
+                    results.insert(key, hash.expect("Child node should have a hash"));
+                }))
+                .await;
             }
-            return Ok(results);
+            return Ok(());
         }
 
-        let mut ordered_groups: Vec<(u16, Vec<KeyArray>)> = Vec::new();
-        let mut seen_indices: HashSet<u16> = HashSet::new();
-
-        for key in &keys {
-            let index = key[depth];
-            if !seen_indices.contains(&index) {
-                seen_indices.insert(index);
-                ordered_groups.push((index, Vec::new()));
-            }
-        }
-
-        for key in keys {
-            let index = key[depth];
-            for (group_index, group_keys) in &mut ordered_groups {
-                if *group_index == index {
-                    group_keys.push(key);
-                    break;
+        let grouped: HashMap<_, Vec<_>> =
+            jobs.into_iter().fold(HashMap::new(), |mut grouped, key| {
+                let index = key[depth];
+                if self.child(&index).is_some() {
+                    grouped.entry(key[depth]).or_default().push(key);
                 }
-            }
+                grouped
+            });
+
+        let mut futures: FuturesUnordered<_> = grouped
+            .into_iter()
+            .map(|(index, keys)| {
+                let mut child_ref = self.child_mut(&index).unwrap();
+                async move {
+                    let child = child_ref.value_mut();
+                    child.ensure_loaded(transport).await?;
+                    child
+                        .batch_get_inner(depth + 1, keys, results, transport)
+                        .await
+                }
+            })
+            .collect();
+
+        while let Some(result) = futures.next().await {
+            result?;
         }
 
-        let mut results = Vec::new();
-
-        for (index, group_keys) in ordered_groups {
-            match self.child(&index) {
-                Some(child_ref) => {
-                    let child = child_ref.value();
-                    self.ensure_child_loaded(child, transport).await?;
-                    let group_results =
-                        Box::pin(child.batch_get_inner(depth + 1, group_keys, transport)).await?;
-                    results.extend(group_results);
-                }
-                None => {
-                    results.extend(vec![None; group_keys.len()]);
-                }
-            }
-        }
-
-        Ok(results)
+        Ok(())
     }
 
     pub async fn update_hash(&self) -> DashSet<HashArray> {
@@ -496,8 +395,6 @@ impl TryFrom<&[u8]> for Node {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     const KEY_1: KeyArray = [1; DEPTH];
@@ -961,23 +858,5 @@ mod tests {
         let serialized2 = node2.to_vec().await;
 
         assert_eq!(serialized1, serialized2);
-    }
-
-    #[tokio::test]
-    async fn fetch_lock_prevents_concurrent_fetches() {
-        let node = Node::new();
-
-        let lock1 = node.lock_fetch_lock().await;
-
-        let lock_future = node.lock_fetch_lock();
-        let timeout_result = tokio::time::timeout(Duration::from_millis(100), lock_future).await;
-
-        assert!(timeout_result.is_err());
-
-        drop(lock1);
-
-        let _lock2 = tokio::time::timeout(Duration::from_millis(100), node.lock_fetch_lock())
-            .await
-            .expect("Failed to acquire lock after previous was released");
     }
 }
