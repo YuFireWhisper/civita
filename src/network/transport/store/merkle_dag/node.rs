@@ -56,33 +56,15 @@ impl Node {
         value: HashArray,
         transport: &Transport,
     ) -> Result<HashSet<HashArray>> {
-        let mut changed = HashSet::new();
-        self.insert_inner(key, value, transport, &mut changed)
-            .await?;
-        Ok(changed)
-    }
-
-    async fn insert_inner(
-        &self,
-        key: KeyArray,
-        value: HashArray,
-        transport: &Transport,
-        changed: &mut HashSet<HashArray>,
-    ) -> Result<()> {
         if self.is_last_stub() {
             self.insert_child(key[self.depth], value);
-            changed.insert(self.recalc_hash());
-            return Ok(());
+            return Ok(HashSet::from([self.recalc_hash()]));
         }
 
         let entry = self.get_or_insert(key[self.depth]);
 
         entry.value().ensure_loaded(transport).await?;
-        Box::pin(entry.value().insert_inner(key, value, transport, changed)).await?;
-
-        changed.insert(self.recalc_hash());
-
-        Ok(())
+        Box::pin(entry.value().insert(key, value, transport)).await
     }
 
     fn is_last_stub(&self) -> bool {
@@ -100,7 +82,7 @@ impl Node {
     }
 
     async fn ensure_loaded(&self, transport: &Transport) -> Result<()> {
-        if !self.is_leaf() && self.children.is_empty() && self.hash.load() != HashArray::default() {
+        if self.is_missing() {
             let fetched = transport.get_or_error::<Node>(&self.hash()).await?;
 
             self.children.clear();
@@ -110,6 +92,10 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    fn is_missing(&self) -> bool {
+        !self.is_leaf() && self.children.is_empty() && self.hash.load() == HashArray::default()
     }
 
     fn is_leaf(&self) -> bool {
