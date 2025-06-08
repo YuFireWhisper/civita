@@ -1,16 +1,6 @@
-use crate::crypto::{
-    self,
-    traits::{public_key::PublicKey, secret_key::SecretKey},
-};
+use crate::crypto::{self, traits::secret_key::SecretKey};
 
-pub trait Signer: SecretKey {
-    type Signature;
-
-    fn sign(&self, msg: &[u8]) -> Result<Self::Signature, crypto::Error>;
-}
-
-pub trait Verifier: PublicKey {
-    type Signature;
-
-    fn verify(&self, msg: &[u8], sig: &Self::Signature) -> Result<bool, crypto::Error>;
+pub trait Signature<S: SecretKey> {
+    fn sign(sk: &S, msg: &[u8]) -> Result<Vec<u8>, crypto::Error>;
+    fn verify(pk: &S::PublicKey, msg: &[u8], sig: &[u8]) -> Result<bool, crypto::Error>;
 }
