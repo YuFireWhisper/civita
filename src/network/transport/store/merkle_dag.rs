@@ -1,11 +1,17 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    mem,
+    sync::Arc,
+};
 
 use bincode::error::DecodeError;
-use dashmap::DashSet;
 
-use crate::network::transport::{
-    self,
-    protocols::kad::{self},
+use crate::{
+    constants::HashArray,
+    network::transport::{
+        self,
+        protocols::kad::{self},
+    },
 };
 
 #[cfg(not(test))]
@@ -18,13 +24,12 @@ pub mod node;
 
 pub use node::Node;
 
-type Result<T> = std::result::Result<T, Error>;
-
 pub type BanchingFactor = u16;
 pub type KeyArray = [BanchingFactor; DEPTH];
-type HashArray = [u8; 32];
 
 pub const DEPTH: usize = 16;
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -36,74 +41,68 @@ pub enum Error {
     Kad(#[from] kad::Error),
 
     #[error("{0}")]
-    Encode(#[from] DecodeError),
-
-    #[error("{0}")]
-    Node(#[from] node::Error),
+    Decode(#[from] DecodeError),
 }
 
 #[derive(Debug)]
 pub struct MerkleDag {
     transport: Arc<Transport>,
-    root: Arc<Node>,
-    batch_size: usize,
+    root: Node,
 }
 
 impl MerkleDag {
-    pub fn new(transport: Arc<Transport>, batch_size: usize) -> Self {
-        let root = Node::new();
-        Self::new_with_root(transport, root, batch_size)
+    pub fn new(transport: Arc<Transport>) -> Self {
+        let root = Node::default();
+        MerkleDag { transport, root }
     }
 
-    pub fn new_with_root(transport: Arc<Transport>, root: Node, batch_size: usize) -> Self {
-        let root = Arc::new(root);
-
-        MerkleDag {
-            transport,
-            root,
-            batch_size,
-        }
+    pub fn new_with_root(transport: Arc<Transport>, root: Node) -> Self {
+        MerkleDag { transport, root }
     }
 
-    pub async fn insert(&self, key: KeyArray, value: HashArray) -> Result<()> {
+    pub async fn insert(&self, key: HashArray, value: HashArray) -> Result<HashSet<HashArray>> {
         self.root
-            .insert(key, value, &self.transport)
+            .insert(hash_to_key(key), value, &self.transport)
             .await
-            .map_err(Error::from)
     }
 
-    pub async fn batch_insert(
-        &self,
-        pairs: Vec<(KeyArray, HashArray)>,
-    ) -> Result<DashSet<HashArray>> {
+    pub async fn batch_insert<I>(&self, iter: I) -> Result<HashSet<HashArray>>
+    where
+        I: IntoIterator<Item = (HashArray, HashArray)>,
+    {
         self.root
-            .batch_insert(pairs, &self.transport, self.batch_size)
-            .await?;
-
-        Ok(self.root.update_hash().await)
-    }
-
-    pub async fn get(&self, key: KeyArray) -> Result<Option<HashArray>> {
-        self.root
-            .get(key, &self.transport)
+            .batch_insert(
+                iter.into_iter().map(|(k, v)| (hash_to_key(k), v)),
+                &self.transport,
+            )
             .await
-            .map_err(Error::from)
     }
 
-    pub async fn batch_get(&self, keys: Vec<KeyArray>) -> Result<Vec<Option<HashArray>>> {
+    pub async fn get(&self, key: HashArray) -> Result<Option<HashArray>> {
+        self.root.get(hash_to_key(key), &self.transport).await
+    }
+
+    pub async fn batch_get<I>(&self, iter: I) -> Result<HashMap<HashArray, HashArray>>
+    where
+        I: IntoIterator<Item = HashArray>,
+    {
         self.root
-            .batch_get(keys, &self.transport)
+            .batch_get(iter.into_iter().map(hash_to_key), &self.transport)
             .await
-            .map_err(Error::from)
-    }
-
-    pub fn change_root(&mut self, new_root: Node) {
-        self.root = Arc::new(new_root);
+            .map(|map| map.into_iter().map(|(k, v)| (key_to_hash(k), v)).collect())
     }
 
     pub fn root(&self) -> &Node {
         &self.root
     }
+}
+
+fn hash_to_key(hash: HashArray) -> KeyArray {
+    unsafe { mem::transmute::<HashArray, KeyArray>(hash) }
+}
+
+fn key_to_hash(key: KeyArray) -> HashArray {
+    unsafe { mem::transmute::<KeyArray, HashArray>(key) }
 }
 
 #[cfg(test)]

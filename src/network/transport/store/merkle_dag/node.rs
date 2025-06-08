@@ -1,16 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use dashmap::{
-    mapref::one::{Ref, RefMut},
-    DashMap, DashSet,
-};
-use futures::{future::OptionFuture, stream::FuturesUnordered, StreamExt};
-use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
+use crossbeam::atomic::AtomicCell;
+use crossbeam_skiplist::{map::Entry, SkipMap};
+use futures::{stream::FuturesUnordered, StreamExt};
+use serde::{Deserialize, Serialize};
 
-use crate::network::transport::{
-    self,
-    protocols::kad,
-    store::merkle_dag::{BanchingFactor, HashArray, KeyArray, DEPTH},
+use crate::{
+    constants::{HASH_ARRAY_LENGTH, USIZE_LENGTH},
+    network::transport::store::merkle_dag::{
+        BanchingFactor, Error, HashArray, KeyArray, Result, DEPTH,
+    },
 };
 
 #[cfg(not(test))]
@@ -19,54 +18,34 @@ use crate::network::transport::Transport;
 #[cfg(test)]
 use crate::network::transport::MockTransport as Transport;
 
-type Result<T> = std::result::Result<T, Error>;
-
-const INDEX_SIZE: usize = std::mem::size_of::<BanchingFactor>();
-const HASH_SIZE: usize = std::mem::size_of::<HashArray>();
-const BASE_SIZE: usize = INDEX_SIZE + HASH_SIZE;
-
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Transport(#[from] transport::Error),
-
-    #[error("{0}")]
-    Kad(#[from] kad::Error),
-
-    #[error("{0}")]
-    IO(#[from] std::io::Error),
-
-    #[error("Invalid Byte Length")]
-    InvalidByteLength,
-
-    #[error("Invalid kad payload")]
-    InvalidKadPayload,
-}
-
 #[derive(Debug)]
 #[derive(Default)]
 pub struct Node {
-    hash: RwLock<Option<HashArray>>,
-    children: DashMap<BanchingFactor, Node>,
-    fetch_lock: Mutex<()>,
+    hash: AtomicCell<HashArray>,
+    children: SkipMap<BanchingFactor, Node>,
+    depth: usize,
 }
 
 impl Node {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn new_with_hash(hash: HashArray) -> Self {
-        Self {
-            hash: RwLock::new(Some(hash)),
+    pub fn with_hash(hash: HashArray, depth: usize) -> Self {
+        Node {
+            hash: AtomicCell::new(hash),
+            depth,
             ..Default::default()
         }
     }
 
-    pub fn new_with_children(children: HashMap<BanchingFactor, Node>) -> Self {
-        Self {
-            children: children.into_iter().collect(),
+    pub fn with_children(children: SkipMap<BanchingFactor, Node>, depth: usize) -> Self {
+        Node {
+            hash: AtomicCell::new(calc_hash(&children)),
+            children,
+            depth,
+        }
+    }
+
+    pub fn with_depth(depth: usize) -> Self {
+        Node {
+            depth,
             ..Default::default()
         }
     }
@@ -76,177 +55,165 @@ impl Node {
         key: KeyArray,
         value: HashArray,
         transport: &Transport,
-    ) -> Result<()> {
-        self.insert_inner(0, key, value, transport).await
+    ) -> Result<HashSet<HashArray>> {
+        let mut changed = HashSet::new();
+        self.insert_inner(key, value, transport, &mut changed)
+            .await?;
+        Ok(changed)
     }
 
     async fn insert_inner(
         &self,
-        depth: usize,
         key: KeyArray,
         value: HashArray,
         transport: &Transport,
+        changed: &mut HashSet<HashArray>,
     ) -> Result<()> {
-        self.clear_hash().await;
-
-        if depth == DEPTH - 1 {
-            self.children.insert(key[depth], Node::new_with_hash(value));
+        if self.is_last_stub() {
+            self.insert_child(key[self.depth], value);
+            changed.insert(self.recalc_hash());
             return Ok(());
         }
 
-        let mut child_ref = self.children.entry(key[depth]).or_default();
-        let child = child_ref.value_mut();
+        let entry = self.get_or_insert(key[self.depth]);
 
-        child.ensure_loaded(transport).await?;
+        entry.value().ensure_loaded(transport).await?;
+        Box::pin(entry.value().insert_inner(key, value, transport, changed)).await?;
 
-        Box::pin(child.insert_inner(depth + 1, key, value, transport)).await
-    }
+        changed.insert(self.recalc_hash());
 
-    async fn ensure_loaded(&mut self, transport: &Transport) -> Result<()> {
-        if self.is_stub().await {
-            let _lock = self.fetch_lock.lock().await;
-
-            if self.children.is_empty() {
-                let hash = self.hash().await.unwrap(); // safe to unwrap since we check is_stub
-                let fetched_node = Self::fetch_node(transport, &hash).await?;
-                self.children = fetched_node.children;
-            }
-        }
         Ok(())
     }
 
-    async fn is_stub(&self) -> bool {
-        self.hash_read().await.is_some() && self.children.is_empty()
+    fn is_last_stub(&self) -> bool {
+        self.depth == DEPTH - 1
     }
 
-    async fn fetch_node(transport: &Transport, hash: &HashArray) -> Result<Node> {
-        transport.get_or_error(hash).await.map_err(Error::from)
+    fn insert_child(&self, index: BanchingFactor, hash: HashArray) {
+        self.children
+            .insert(index, Node::with_hash(hash, self.depth + 1));
     }
 
-    pub async fn batch_insert(
-        &self,
-        pairs: Vec<(KeyArray, HashArray)>,
-        transport: &Transport,
-        _batch_size: usize,
-    ) -> Result<()> {
-        self.batch_insert_inner(0, pairs, transport).await
+    fn get_or_insert(&self, index: BanchingFactor) -> Entry<BanchingFactor, Node> {
+        self.children
+            .get_or_insert(index, Node::with_depth(self.depth + 1))
     }
 
-    async fn batch_insert_inner(
-        &self,
-        depth: usize,
-        pairs: Vec<(KeyArray, HashArray)>,
-        transport: &Transport,
-    ) -> Result<()> {
-        self.clear_hash().await;
+    async fn ensure_loaded(&self, transport: &Transport) -> Result<()> {
+        if !self.is_leaf() && self.children.is_empty() && self.hash.load() != HashArray::default() {
+            let fetched = transport.get_or_error::<Node>(&self.hash()).await?;
 
-        if depth == DEPTH - 1 {
-            pairs.iter().for_each(|(key, value)| {
-                self.children
-                    .insert(key[depth], Node::new_with_hash(*value));
+            self.children.clear();
+            fetched.children.into_iter().for_each(|(index, child)| {
+                self.children.insert(index, child);
             });
-            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    fn is_leaf(&self) -> bool {
+        self.depth == DEPTH
+    }
+
+    fn recalc_hash(&self) -> HashArray {
+        if self.children.is_empty() {
+            return self.hash.load();
+        }
+
+        let new_hash = calc_hash(&self.children);
+        self.hash.store(new_hash);
+        new_hash
+    }
+
+    pub async fn batch_insert<I>(
+        &self,
+        iter: I,
+        transport: &Transport,
+    ) -> Result<HashSet<HashArray>>
+    where
+        I: IntoIterator<Item = (KeyArray, HashArray)>,
+    {
+        if self.is_last_stub() {
+            iter.into_iter().for_each(|(key, value)| {
+                self.insert_child(key[self.depth], value);
+            });
+
+            return Ok(HashSet::from([self.recalc_hash()]));
         }
 
         let grouped: HashMap<_, Vec<_>> =
-            pairs
-                .into_iter()
+            iter.into_iter()
                 .fold(HashMap::new(), |mut acc, (key, value)| {
-                    acc.entry(key[depth]).or_default().push((key, value));
+                    acc.entry(key[self.depth]).or_default().push((key, value));
                     acc
                 });
 
         let mut futures: FuturesUnordered<_> = grouped
             .into_iter()
             .map(|(index, group)| {
-                let mut child_ref = self.children.entry(index).or_default();
+                let entry = self.get_or_insert(index);
+
                 async move {
-                    let child = child_ref.value_mut();
-                    child.ensure_loaded(transport).await?;
-                    child.batch_insert_inner(depth + 1, group, transport).await
+                    entry.value().ensure_loaded(transport).await?;
+                    entry
+                        .value()
+                        .batch_insert(group.into_iter(), transport)
+                        .await
                 }
             })
             .collect();
 
+        let mut changed = HashSet::new();
+
         while let Some(result) = futures.next().await {
-            result?;
+            changed.extend(result?);
         }
 
-        Ok(())
+        changed.insert(self.recalc_hash());
+
+        Ok(changed)
     }
 
     pub async fn get(&self, key: KeyArray, transport: &Transport) -> Result<Option<HashArray>> {
-        self.get_inner(0, key, transport).await
-    }
-
-    async fn get_inner(
-        &self,
-        depth: usize,
-        key: KeyArray,
-        transport: &Transport,
-    ) -> Result<Option<HashArray>> {
-        let mut child_ref = match self.children.get_mut(&key[depth]) {
-            Some(child) => child,
+        let entry = match self.children.get(&key[self.depth]) {
+            Some(entry) => entry,
             None => return Ok(None),
         };
 
-        let child = child_ref.value_mut();
+        let child = entry.value();
 
-        if depth == DEPTH - 1 {
-            return Ok(child.hash().await);
+        if child.is_leaf() {
+            return Ok(Some(child.hash()));
         }
 
         child.ensure_loaded(transport).await?;
 
-        Box::pin(child.get_inner(depth + 1, key, transport)).await
+        Box::pin(child.get(key, transport)).await
     }
 
-    pub async fn batch_get(
+    pub async fn batch_get<I>(
         &self,
-        keys: Vec<KeyArray>,
+        iter: I,
         transport: &Transport,
-    ) -> Result<Vec<Option<HashArray>>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let results = DashMap::with_capacity(keys.len());
-
-        self.batch_get_inner(0, keys.clone(), &results, transport)
-            .await?;
-
-        let mut matched_results: Vec<Option<HashArray>> = Vec::with_capacity(results.len());
-
-        keys.into_iter().for_each(|key| {
-            matched_results.push(results.remove(&key).map(|(_, hash)| hash));
-        });
-
-        Ok(matched_results)
-    }
-
-    async fn batch_get_inner(
-        &self,
-        depth: usize,
-        jobs: Vec<KeyArray>,
-        results: &DashMap<KeyArray, HashArray>,
-        transport: &Transport,
-    ) -> Result<()> {
-        if depth == DEPTH - 1 {
-            for key in jobs {
-                OptionFuture::from(self.children.get(&key[depth]).map(|child| async move {
-                    let hash = child.value().hash().await;
-                    results.insert(key, hash.expect("Child node should have a hash"));
-                }))
-                .await;
-            }
-            return Ok(());
+    ) -> Result<HashMap<KeyArray, HashArray>>
+    where
+        I: IntoIterator<Item = KeyArray>,
+    {
+        if self.is_last_stub() {
+            return Ok(iter.into_iter().fold(HashMap::new(), |mut acc, key| {
+                if let Some(entry) = self.children.get(&key[self.depth]) {
+                    acc.insert(key, entry.value().hash());
+                }
+                acc
+            }));
         }
 
         let grouped: HashMap<_, Vec<_>> =
-            jobs.into_iter().fold(HashMap::new(), |mut grouped, key| {
-                let index = key[depth];
+            iter.into_iter().fold(HashMap::new(), |mut grouped, key| {
+                let index = key[self.depth];
                 if self.child(&index).is_some() {
-                    grouped.entry(key[depth]).or_default().push(key);
+                    grouped.entry(index).or_default().push(key);
                 }
                 grouped
             });
@@ -254,103 +221,66 @@ impl Node {
         let mut futures: FuturesUnordered<_> = grouped
             .into_iter()
             .map(|(index, keys)| {
-                let mut child_ref = self.child_mut(&index).unwrap();
+                // safe to unwrap because we checked if the child exists
+                let entry = self.children.get(&index).unwrap();
+
                 async move {
-                    let child = child_ref.value_mut();
-                    child.ensure_loaded(transport).await?;
-                    child
-                        .batch_get_inner(depth + 1, keys, results, transport)
-                        .await
+                    entry.value().ensure_loaded(transport).await?;
+                    entry.value().batch_get(keys, transport).await
                 }
             })
             .collect();
 
+        let mut collected = HashMap::new();
+
         while let Some(result) = futures.next().await {
-            result?;
+            collected.extend(result?);
         }
 
-        Ok(())
+        Ok(collected)
     }
 
-    pub async fn update_hash(&self) -> DashSet<HashArray> {
-        if self.children.is_empty() {
-            return DashSet::new();
-        }
-
-        let mut updated = DashSet::new();
-
-        for child in self.children.iter() {
-            if child.value().hash_read().await.is_none() {
-                updated.extend(Box::pin(child.value().update_hash()).await);
-            }
-        }
-
-        let bytes = self.to_vec().await;
-        let hash = blake3::hash(&bytes);
-
-        updated.insert(hash.into());
-        self.hash.write().await.replace(hash.into());
-
-        updated
+    pub fn hash(&self) -> HashArray {
+        self.hash.load()
     }
 
-    async fn hash_read(&self) -> RwLockReadGuard<Option<HashArray>> {
-        self.hash.read().await
-    }
-
-    pub async fn hash(&self) -> Option<HashArray> {
-        *self.hash_read().await
-    }
-
-    pub async fn clear_hash(&self) {
-        self.hash.write().await.take();
-    }
-
-    pub fn child(&self, index: &BanchingFactor) -> Option<Ref<BanchingFactor, Node>> {
+    pub fn child(&self, index: &BanchingFactor) -> Option<Entry<BanchingFactor, Node>> {
         self.children.get(index)
-    }
-
-    pub fn child_mut(&self, index: &BanchingFactor) -> Option<RefMut<BanchingFactor, Node>> {
-        self.children.get_mut(index)
     }
 
     pub fn from_slice(slice: &[u8]) -> Result<Self> {
         Self::try_from(slice)
     }
 
-    pub async fn to_vec(&self) -> Vec<u8> {
-        let mut entries = Vec::with_capacity(self.children.len());
-
-        for entry in self.children.iter() {
-            entries.push((
-                *entry.key(),
-                entry
-                    .value()
-                    .hash()
-                    .await
-                    .expect("Child node does not have a hash"),
-            ));
-        }
-
-        entries.sort_by_key(|(key, _)| *key);
-
-        let mut bytes = Vec::with_capacity(entries.len() * BASE_SIZE);
-        for (key, hash) in entries {
-            bytes.extend_from_slice(&key.to_be_bytes());
-            bytes.extend_from_slice(&hash);
-        }
-
-        bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.into()
     }
 }
 
-impl Clone for Node {
-    fn clone(&self) -> Self {
-        Node {
-            hash: RwLock::new(None),
-            children: self.children.clone(),
-            fetch_lock: Mutex::new(()),
-        }
+fn calc_hash(children: &SkipMap<BanchingFactor, Node>) -> HashArray {
+    if children.is_empty() {
+        return HashArray::default();
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    children.iter().for_each(|entry| {
+        hasher.update(&entry.value().hash());
+    });
+
+    hasher.finalize().into()
+}
+
+impl From<Node> for Vec<u8> {
+    fn from(node: Node) -> Self {
+        bincode::serde::encode_to_vec(&node, bincode::config::standard())
+            .expect("Failed to serialize Node")
+    }
+}
+
+impl From<&Node> for Vec<u8> {
+    fn from(node: &Node) -> Self {
+        bincode::serde::encode_to_vec(node, bincode::config::standard())
+            .expect("Failed to serialize Node")
     }
 }
 
@@ -366,30 +296,80 @@ impl TryFrom<&[u8]> for Node {
     type Error = Error;
 
     fn try_from(slice: &[u8]) -> Result<Self> {
-        if slice.is_empty() {
-            return Ok(Node::default());
+        bincode::serde::decode_from_slice(slice, bincode::config::standard())
+            .map(|(n, _)| n)
+            .map_err(Error::from)
+    }
+}
+
+impl Serialize for Node {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut bytes = Vec::new();
+
+        bytes.extend(self.depth.to_be_bytes());
+
+        self.children.iter().for_each(|entry| {
+            bytes.extend(entry.key().to_be_bytes());
+            bytes.extend(entry.value().hash());
+        });
+
+        if self.is_leaf() {
+            bytes.extend(self.hash());
         }
 
-        if slice.len() % BASE_SIZE != 0 {
-            return Err(Error::InvalidByteLength);
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for Node {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const INDEX_LENGTH: usize = std::mem::size_of::<BanchingFactor>();
+        const CHILDREN_SIZE: usize = INDEX_LENGTH + HASH_ARRAY_LENGTH;
+
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+
+        if bytes.len() < USIZE_LENGTH {
+            return Err(serde::de::Error::custom("Byte length too short"));
         }
 
-        let children = DashMap::with_capacity(slice.len() / BASE_SIZE);
-
-        for chunk in slice.chunks_exact(BASE_SIZE) {
-            let index_bytes = std::array::from_fn(|i| chunk[i]);
-            let index = BanchingFactor::from_be_bytes(index_bytes);
-            let child_hash: HashArray = chunk[INDEX_SIZE..]
-                .try_into()
-                .map_err(|_| Error::InvalidByteLength)?;
-            let child = Node::new_with_hash(child_hash);
-            children.insert(index, child);
+        let len = bytes.len() - USIZE_LENGTH;
+        match len {
+            HASH_ARRAY_LENGTH => {}
+            _ if len % CHILDREN_SIZE == 0 => {}
+            _ => {
+                return Err(serde::de::Error::custom("Invalid byte length"));
+            }
         }
 
-        Ok(Node {
-            children,
-            ..Default::default()
-        })
+        match usize::from_be_bytes(std::array::from_fn(|i| bytes[i])) {
+            DEPTH => {
+                let hash = std::array::from_fn(|i| bytes[USIZE_LENGTH + i]);
+                Ok(Node::with_hash(hash, DEPTH))
+            }
+
+            depth if depth < DEPTH => {
+                let children_depth = depth + 1;
+                let children = SkipMap::new();
+
+                bytes[USIZE_LENGTH..]
+                    .chunks_exact(CHILDREN_SIZE)
+                    .for_each(|chunk| {
+                        let index =
+                            BanchingFactor::from_be_bytes(std::array::from_fn(|i| chunk[i]));
+                        let hash = std::array::from_fn(|i| chunk[INDEX_LENGTH + i]);
+                        children.insert(index, Node::with_hash(hash, children_depth));
+                    });
+
+                Ok(Node::with_children(children, depth))
+            }
+            _ => Err(serde::de::Error::custom("Invalid depth")),
+        }
     }
 }
 
@@ -399,464 +379,56 @@ mod tests {
 
     const KEY_1: KeyArray = [1; DEPTH];
     const KEY_2: KeyArray = [2; DEPTH];
-    const HASH_1: HashArray = [1; HASH_SIZE];
-    const HASH_2: HashArray = [2; HASH_SIZE];
 
-    fn create_error_transport() -> Transport {
-        let mut transport = Transport::default();
-        transport
-            .expect_get_or_error::<Node>()
-            .returning(|_| Err(transport::Error::MockError));
-        transport
-    }
+    const HASH_1: HashArray = [1; HASH_ARRAY_LENGTH];
+    const HASH_2: HashArray = [2; HASH_ARRAY_LENGTH];
 
     #[tokio::test]
-    async fn new_node_is_empty() {
-        let node = Node::new();
-
-        assert!(node.hash().await.is_none());
-        assert!(node.children.is_empty());
-    }
-
-    #[tokio::test]
-    async fn new_with_hash_initializes_correctly() {
-        let node = Node::new_with_hash(HASH_1);
-
-        assert_eq!(node.hash().await, Some(HASH_1));
-        assert!(node.children.is_empty());
-    }
-
-    #[tokio::test]
-    async fn new_with_children_initializes_correctly() {
-        let mut children = HashMap::new();
-        children.insert(1, Node::new_with_hash(HASH_1));
-        children.insert(2, Node::new_with_hash(HASH_2));
-
-        let node = Node::new_with_children(children);
-
-        assert!(node.hash().await.is_none());
-        assert_eq!(node.children.len(), 2);
-        assert_eq!(node.child(&1).unwrap().value().hash().await, Some(HASH_1));
-        assert_eq!(node.child(&2).unwrap().value().hash().await, Some(HASH_2));
-    }
-
-    #[tokio::test]
-    async fn insert_adds_child() {
-        let root = Node::new();
+    async fn insert_and_get() {
+        let node = Node::default();
         let transport = Transport::default();
 
-        let result = root.insert(KEY_1, HASH_1, &transport).await;
+        let changed = node.insert(KEY_1, HASH_1, &transport).await.unwrap();
 
-        assert!(result.is_ok());
-        assert_eq!(root.children.len(), 1);
+        let same = node.get(KEY_1, &transport).await.unwrap();
+        let different = node.get(KEY_2, &transport).await.unwrap();
+
+        assert_eq!(same, Some(HASH_1));
+        assert_eq!(different, None);
+        assert_eq!(changed.len(), DEPTH);
+        assert_ne!(node.hash(), HashArray::default());
+        assert!(changed.contains(&node.hash()));
     }
 
     #[tokio::test]
-    async fn insert_multiple_keys_adds_multiple_children() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-        root.insert(KEY_2, HASH_2, &transport).await.unwrap();
-
-        assert_eq!(root.children.len(), 2);
-        let result1 = root.get(KEY_1, &transport).await.unwrap();
-        let result2 = root.get(KEY_2, &transport).await.unwrap();
-
-        assert_eq!(result1, Some(HASH_1));
-        assert_eq!(result2, Some(HASH_2));
-    }
-
-    #[tokio::test]
-    async fn insert_overwrites_existing_value() {
-        let root = Node::new();
-        let transport = Transport::default();
-        let new_hash: HashArray = [3; HASH_SIZE];
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-        root.insert(KEY_1, new_hash, &transport).await.unwrap();
-
-        let result = root.get(KEY_1, &transport).await.unwrap();
-
-        assert_eq!(result, Some(new_hash));
-    }
-
-    #[tokio::test]
-    async fn insert_clears_parent_hash() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        *root.hash.write().await = Some(HASH_1);
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-
-        assert!(root.hash().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn insert_with_transport_error_fails() {
-        let root = Node::new();
-        let transport = create_error_transport();
-
-        root.children.insert(KEY_1[0], Node::new_with_hash(HASH_1));
-
-        let result = root.insert(KEY_1, HASH_2, &transport).await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Transport(_)));
-    }
-
-    #[tokio::test]
-    async fn batch_insert_adds_multiple_values() {
-        let root = Node::new();
+    async fn batch_insert_and_get() {
+        let node = Node::default();
         let transport = Transport::default();
 
         let pairs = vec![(KEY_1, HASH_1), (KEY_2, HASH_2)];
+        let _ = node.batch_insert(pairs, &transport).await.unwrap();
 
-        let result = root.batch_insert(pairs, &transport, 1).await;
-
-        assert!(result.is_ok());
-        assert_eq!(root.get(KEY_1, &transport).await.unwrap(), Some(HASH_1));
-        assert_eq!(root.get(KEY_2, &transport).await.unwrap(), Some(HASH_2));
-    }
-
-    #[tokio::test]
-    async fn batch_insert_with_transport_error_fails() {
-        let root = Node::new();
-        let transport = create_error_transport();
-
-        root.children.insert(KEY_1[0], Node::new_with_hash(HASH_1));
-
-        let pairs = vec![(KEY_1, HASH_2)];
-
-        let result = root.batch_insert(pairs, &transport, 1).await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Transport(_)));
-    }
-
-    #[tokio::test]
-    async fn batch_insert_respects_batch_size() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        let mut pairs = Vec::new();
-        for i in 0..10 {
-            let mut key = [0; DEPTH];
-            key[0] = i as BanchingFactor;
-            pairs.push((key, HASH_1));
-        }
-
-        let result = root.batch_insert(pairs, &transport, 5).await;
-
-        assert!(result.is_ok());
-        assert_eq!(root.children.len(), 10);
-    }
-
-    #[tokio::test]
-    async fn get_returns_none_for_nonexistent_key() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        let result = root.get(KEY_1, &transport).await.unwrap();
-
-        assert_eq!(result, None);
-    }
-
-    #[tokio::test]
-    async fn get_returns_value_after_insert() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-
-        let result = root.get(KEY_1, &transport).await.unwrap();
-
-        assert_eq!(result, Some(HASH_1));
-    }
-
-    #[tokio::test]
-    async fn get_with_transport_error_fails() {
-        let root = Node::new();
-        let transport = create_error_transport();
-
-        root.children.insert(KEY_1[0], Node::new_with_hash(HASH_1));
-
-        let result = root.get(KEY_1, &transport).await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Transport(_)));
-    }
-
-    #[tokio::test]
-    async fn batch_get_empty_keys_returns_empty() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        let results = root.batch_get(vec![], &transport).await.unwrap();
-
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn batch_get_single_key_works() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-
-        let results = root.batch_get(vec![KEY_1], &transport).await.unwrap();
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results, vec![Some(HASH_1)]);
-    }
-
-    #[tokio::test]
-    async fn batch_get_multiple_keys_works() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-        root.insert(KEY_2, HASH_2, &transport).await.unwrap();
-
-        let results = root
+        let results = node
             .batch_get(vec![KEY_1, KEY_2], &transport)
             .await
             .unwrap();
 
-        assert_eq!(results.len(), 2);
-        assert_eq!(results, vec![Some(HASH_1), Some(HASH_2)]);
-    }
-
-    #[tokio::test]
-    async fn batch_get_nonexistent_keys_returns_none() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        let key_3: KeyArray = [3; DEPTH];
-        let key_4: KeyArray = [4; DEPTH];
-
-        let results = root
-            .batch_get(vec![key_3, key_4], &transport)
-            .await
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results, vec![None, None]);
-    }
-
-    #[tokio::test]
-    async fn batch_get_mixed_existing_and_nonexistent() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-
-        let key_3: KeyArray = [3; DEPTH];
-
-        let results = root
-            .batch_get(vec![KEY_1, key_3], &transport)
-            .await
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results, vec![Some(HASH_1), None]);
-    }
-
-    #[tokio::test]
-    async fn batch_get_with_transport_error_fails() {
-        let root = Node::new();
-        let transport = create_error_transport();
-
-        root.children.insert(KEY_1[0], Node::new_with_hash(HASH_1));
-
-        let result = root.batch_get(vec![KEY_1], &transport).await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::Transport(_)));
-    }
-
-    #[tokio::test]
-    async fn batch_get_large_set_is_efficient() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        let mut keys = Vec::new();
-        for i in 0..100 {
-            let mut key = [0; DEPTH];
-            key[0] = (i % 10) as BanchingFactor; // Create some overlap in paths
-            key[1] = i as BanchingFactor;
-            keys.push(key);
-            root.insert(key, HASH_1, &transport).await.unwrap();
-        }
-
-        let start = std::time::Instant::now();
-        let results = root.batch_get(keys.clone(), &transport).await.unwrap();
-        let duration = start.elapsed();
-
-        assert_eq!(results.len(), 100);
-        assert!(duration.as_millis() < 1000); // Should be fast due to batching
-
-        for value in results {
-            assert_eq!(value, Some(HASH_1));
-        }
-    }
-
-    #[tokio::test]
-    async fn ouput_order_same_as_input() {
-        const NUM: usize = 100;
-
-        let root = Node::new();
-        let transport = Transport::default();
-
-        let mut keys = Vec::with_capacity(NUM);
-        let mut expected_results = Vec::with_capacity(NUM);
-
-        for i in 0..NUM {
-            let mut key = KeyArray::default();
-            key[0] = i as BanchingFactor;
-
-            let mut value = HashArray::default();
-            value.fill(i as u8);
-
-            root.insert(key, value, &transport).await.unwrap();
-            keys.push(key);
-            expected_results.push(Some(value));
-        }
-
-        let results = root.batch_get(keys.clone(), &transport).await.unwrap();
-
-        assert_eq!(results.len(), NUM);
-        for (result, expected) in results.iter().zip(expected_results.iter()) {
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn update_hash_with_no_children_does_nothing() {
-        let node = Node::new();
-
-        let updated = node.update_hash().await;
-
-        assert!(node.hash().await.is_none());
-        assert!(updated.is_empty());
-    }
-
-    #[tokio::test]
-    async fn update_hash_with_children_calculates_hash() {
-        let node = Node::new();
-        let transport = Transport::default();
-
-        node.insert(KEY_1, HASH_1, &transport).await.unwrap();
-        node.insert(KEY_2, HASH_2, &transport).await.unwrap();
-
-        let updated = node.update_hash().await;
-
-        assert!(node.hash().await.is_some());
-        assert_eq!(updated.len(), (DEPTH * 2) - 1); // -1 for the root node
-    }
-
-    #[tokio::test]
-    async fn hash_returns_consistent_value() {
-        let root = Node::new();
-        let transport = Transport::default();
-
-        root.insert(KEY_1, HASH_1, &transport).await.unwrap();
-        root.update_hash().await;
-
-        let hash1 = root.hash().await;
-        let hash2 = root.hash().await;
-
-        assert!(hash1.is_some());
-        assert!(hash2.is_some());
-        assert_eq!(hash1, hash2);
-    }
-
-    #[tokio::test]
-    async fn clear_hash_removes_hash() {
-        let node = Node::new_with_hash(HASH_1);
-
-        node.clear_hash().await;
-
-        assert!(node.hash().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn update_hash_recursively_updates_children() {
-        let root = Node::new();
-        let child = Node::new();
-        let grandchild = Node::new();
-
-        grandchild.children.insert(1, Node::new_with_hash(HASH_1));
-        child.children.insert(1, grandchild);
-        root.children.insert(1, child);
-
-        root.update_hash().await;
-
-        assert!(root.hash().await.is_some());
-        assert!(root.child(&1).unwrap().value().hash().await.is_some());
-        assert!(root
-            .child(&1)
-            .unwrap()
-            .value()
-            .child(&1)
-            .unwrap()
-            .value()
-            .hash()
-            .await
-            .is_some());
+        assert_eq!(results.get(&KEY_1), Some(&HASH_1));
+        assert_eq!(results.get(&KEY_2), Some(&HASH_2));
     }
 
     #[tokio::test]
     async fn serialize_and_deserialize() {
-        let node = Node::new();
-        node.children.insert(0, Node::new_with_hash(HASH_1));
-        node.children.insert(1, Node::new_with_hash(HASH_1));
+        let node = Node::default();
+        let transport = Transport::default();
 
-        node.update_hash().await;
+        node.insert(KEY_1, HASH_1, &transport).await.unwrap();
 
-        let serialized = node.to_vec().await;
-        let deserialized = Node::from_slice(&serialized).expect("Failed to deserialize");
+        let serialized = node.to_bytes();
+        let deserialized = Node::from_slice(&serialized).unwrap();
 
-        deserialized.update_hash().await;
-
-        assert!(deserialized.hash().await.is_some());
-        assert_eq!(node.hash().await, deserialized.hash().await);
+        assert_eq!(node.depth, deserialized.depth);
         assert_eq!(node.children.len(), deserialized.children.len());
-    }
-
-    #[tokio::test]
-    async fn deserialize_invalid_data_fails() {
-        let invalid_data = vec![1, 2, 3];
-
-        let result = Node::from_slice(&invalid_data);
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn serialize_empty_node_gives_empty_vector() {
-        let node = Node::new();
-
-        let serialized = node.to_vec().await;
-
-        assert!(serialized.is_empty());
-    }
-
-    #[tokio::test]
-    async fn serialize_order_is_consistent() {
-        let node1 = Node::new();
-        let node2 = Node::new();
-
-        node1.children.insert(1, Node::new_with_hash(HASH_1));
-        node1.children.insert(2, Node::new_with_hash(HASH_2));
-
-        node2.children.insert(2, Node::new_with_hash(HASH_2));
-        node2.children.insert(1, Node::new_with_hash(HASH_1));
-
-        let serialized1 = node1.to_vec().await;
-        let serialized2 = node2.to_vec().await;
-
-        assert_eq!(serialized1, serialized2);
+        assert_eq!(node.hash(), deserialized.hash());
     }
 }
