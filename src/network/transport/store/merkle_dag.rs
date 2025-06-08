@@ -24,12 +24,11 @@ pub mod node;
 
 pub use node::Node;
 
-pub type BanchingFactor = u16;
-pub type KeyArray = [BanchingFactor; DEPTH];
-
-pub const DEPTH: usize = 16;
-
+type BanchingFactor = u16;
+type KeyArray = [BanchingFactor; DEPTH];
 type Result<T> = std::result::Result<T, Error>;
+
+const DEPTH: usize = 16;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
