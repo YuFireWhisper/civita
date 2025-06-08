@@ -1,7 +1,5 @@
 use sha2::{Digest, Sha256};
 
-use crate::crypto::types::Dst;
-
 // RFC Step: b_in_bytes, b / 8 for b the output size of H in bits
 // SHA-256 has 256-bit output, so b_in_bytes = 32
 const B_IN_BYTES: usize = 32;
@@ -19,16 +17,17 @@ const S_IN_BYTES: usize = 64;
 ///
 /// # Returns
 /// * `Result<Vec<u8>>` - Uniformly random byte string or error
-pub fn expand_message_xmd(msg: impl AsRef<[u8]>, dst: Dst, len_in_bytes: usize) -> Vec<u8> {
-    // Calculate maximum valid output length as min(255 * B_IN_BYTES, 65535)
-    let max_output_len = std::cmp::min(255 * B_IN_BYTES, 65535);
-
+pub fn expand_message_xmd(
+    msg: impl AsRef<[u8]>,
+    dst: impl AsRef<[u8]>,
+    len_in_bytes: usize,
+) -> Vec<u8> {
     // RFC Step 1: ell = ceil(len_in_bytes / b_in_bytes)
     let ell = len_in_bytes.div_ceil(B_IN_BYTES);
 
     // RFC Step 2: ABORT if ell > 255 or len_in_bytes > 65535 or len(DST) > 255
-    if ell > 255 || len_in_bytes > max_output_len {
-        panic!("Invalid input: ell > 255 or len_in_bytes > 65535");
+    if ell > 255 || len_in_bytes > 65535 || dst.as_ref().len() > 255 {
+        panic!("Invalid input: ell > 255 or len_in_bytes > 65535 or len(DST) > 255");
     }
 
     // RFC Step 3: DST_prime = DST || I2OSP(len(DST), 1)
@@ -111,11 +110,7 @@ mod tests {
     #[test]
     fn when_len_in_bytes_smaller_than_b_in_bytes_truncates_correctly() {
         let small_len = 16;
-        let result = expand_message_xmd(
-            SIMPLE_MSG,
-            Dst::new_unchecked(SIMPLE_DST.to_vec()),
-            small_len,
-        );
+        let result = expand_message_xmd(SIMPLE_MSG, SIMPLE_DST, small_len);
 
         assert_eq!(result.len(), small_len);
     }
@@ -123,35 +118,30 @@ mod tests {
     #[test]
     fn when_len_in_bytes_larger_than_b_in_bytes_generates_multiple_blocks() {
         let large_len = B_IN_BYTES * 3 + 5;
-        let result = expand_message_xmd(
-            SIMPLE_MSG,
-            Dst::new_unchecked(SIMPLE_DST.to_vec()),
-            large_len,
-        );
+        let result = expand_message_xmd(SIMPLE_MSG, SIMPLE_DST, large_len);
 
         assert_eq!(result.len(), large_len);
     }
 
     #[test]
-    #[should_panic(expected = "Invalid input: ell > 255 or len_in_bytes > 65535")]
+    #[should_panic(expected = "Invalid input: ell > 255 or len_in_bytes > 65535 or len(DST) > 255")]
     fn when_ell_exceeds_255_panics() {
         let invalid_len = B_IN_BYTES * 256;
-        expand_message_xmd(
-            SIMPLE_MSG,
-            Dst::new_unchecked(SIMPLE_DST.to_vec()),
-            invalid_len,
-        ); // This should panic
+        expand_message_xmd(SIMPLE_MSG, SIMPLE_DST, invalid_len); // This should panic
     }
 
     #[test]
-    #[should_panic(expected = "Invalid input: ell > 255 or len_in_bytes > 65535")]
+    #[should_panic(expected = "Invalid input: ell > 255 or len_in_bytes > 65535 or len(DST) > 255")]
     fn when_len_in_bytes_exceeds_limit_panics() {
         let invalid_len = MAX_VALID_OUTPUT_LEN + 1;
-        expand_message_xmd(
-            SIMPLE_MSG,
-            Dst::new_unchecked(SIMPLE_DST.to_vec()),
-            invalid_len,
-        ); // This should panic
+        expand_message_xmd(SIMPLE_MSG, SIMPLE_DST, invalid_len); // This should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid input: ell > 255 or len_in_bytes > 65535 or len(DST) > 255")]
+    fn when_dst_length_exceeds_255_panics() {
+        let long_dst = vec![0u8; 256]; // 256 bytes long
+        expand_message_xmd(SIMPLE_MSG, long_dst, B_IN_BYTES); // This should panic
     }
 
     #[rstest]
@@ -212,11 +202,7 @@ mod tests {
     ) {
         let dst = "QUUX-V01-CS02-with-expander-SHA256-128";
 
-        let result = expand_message_xmd(
-            msg,
-            Dst::new_unchecked(dst.as_bytes().to_vec()),
-            len_in_bytes,
-        );
+        let result = expand_message_xmd(msg, dst, len_in_bytes);
         let hex_result = hex::encode(result);
 
         assert_eq!(hex_result, expected_output);
