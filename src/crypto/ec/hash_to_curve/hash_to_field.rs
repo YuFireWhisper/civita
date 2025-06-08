@@ -5,7 +5,7 @@ use ark_ff::{
 };
 
 use crate::crypto::{
-    hash_to_curve::{expand_message_xmd::expand_message_xmd, utils::L},
+    ec::hash_to_curve::{expand_message_xmd::expand_message_xmd, utils::L},
     types::{dst::Name, Dst},
 };
 

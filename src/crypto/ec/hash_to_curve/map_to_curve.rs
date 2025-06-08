@@ -1,6 +1,6 @@
 use ark_ec::{short_weierstrass::SWCurveConfig, CurveConfig};
 
-use crate::crypto::hash_to_curve::{iso_map::IsoMap, utils::Z};
+use crate::crypto::ec::hash_to_curve::{iso_map::IsoMap, utils::Z};
 
 pub mod simple_swu;
 

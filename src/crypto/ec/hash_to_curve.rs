@@ -5,7 +5,7 @@ use ark_ec::{
 };
 
 use crate::crypto::{
-    hash_to_curve::{map_to_curve::MapToCurve, utils::L},
+    ec::hash_to_curve::{map_to_curve::MapToCurve, utils::L},
     types::dst::Name,
 };
 
@@ -48,7 +48,7 @@ mod tests {
     use num_traits::Num;
     use rstest::rstest;
 
-    use crate::crypto::hash_to_curve::HashToCurve;
+    use crate::crypto::ec::hash_to_curve::HashToCurve;
 
     fn hex_to_string(hex: &str) -> String {
         let hex = hex.trim_start_matches("0x");

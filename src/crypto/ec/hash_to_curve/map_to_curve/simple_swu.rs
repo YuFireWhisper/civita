@@ -1,6 +1,6 @@
 use ark_ff::Field;
 
-use crate::crypto::hash_to_curve::utils::{inv0, sgn0};
+use crate::crypto::ec::hash_to_curve::utils::{inv0, sgn0};
 
 /// Implements the Simplified Shallue-van de Woestijne-Ulas Method.
 /// Note: The curve's coefficients A and B can't be zero.
