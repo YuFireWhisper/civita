@@ -1,4 +1,4 @@
-use crate::crypto::ec::hash_to_curve::{config::Hasher, expand_message::ExpandMessage};
+use crate::crypto::{ec::hash_to_curve::expand_message::ExpandMessage, traits::hasher::Hasher};
 
 #[derive(Debug)]
 #[derive(Default)]

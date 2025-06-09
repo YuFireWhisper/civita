@@ -1,6 +1,11 @@
 use sha2::Digest;
 
-use crate::crypto::ec::hash_to_curve::config::Hasher;
+pub trait Hasher {
+    const BLOCK_SIZE_IN_BYTES: usize;
+    const OUTPUT_SIZE_IN_BIT: usize;
+
+    fn hash(msg: &[u8]) -> Vec<u8>;
+}
 
 impl Hasher for sha2::Sha256 {
     const OUTPUT_SIZE_IN_BIT: usize = 256;
