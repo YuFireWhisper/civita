@@ -30,8 +30,12 @@ const B_PRIME: Fq = MontFp!("1771");
 const L: usize = 48;
 const Z: Fq = MontFp!("-11");
 
+const CRATE_NAME: &str = "civita-"; // Len: 7
+const VERSION: &str = "v1-"; // Len: 3
+const SUITE_ID: &str = "secp256k1_XMD:SHA-256_SSWU_RO_"; // Len: 30
+
 #[allow(dead_code)]
-const DST: &[u8] = concat!("civita-", "v1", "secp256k1", "_XMD:SHA-256_SSWU").as_bytes();
+const DST: &[u8] = &concat_str_slices::<40>(CRATE_NAME, VERSION, SUITE_ID);
 
 impl MapToCurve<Fq> for ark_secp256k1::Config {
     fn map_to_curve(u: Fq) -> (Fq, Fq) {
@@ -76,4 +80,49 @@ impl Config for ark_secp256k1::Config {
     const DST: &'static [u8] = b"QUUX-V01-CS02-with-secp256k1_XMD:SHA-256_SSWU_RO_";
 
     type ExpandMessage = expand_message::Xmd<sha2::Sha256>;
+}
+
+const fn concat_str_slices<const N: usize>(a: &str, b: &str, c: &str) -> [u8; N] {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let c_bytes = c.as_bytes();
+
+    let mut result = [0u8; N];
+    let mut i = 0;
+
+    while i < a_bytes.len() {
+        result[i] = a_bytes[i];
+        i += 1;
+    }
+
+    let mut j = 0;
+    while j < b_bytes.len() {
+        result[i + j] = b_bytes[j];
+        j += 1;
+    }
+
+    let mut k = 0;
+    while k < c_bytes.len() {
+        result[i + j + k] = c_bytes[k];
+        k += 1;
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn correct_concat_str_slices() {
+        let expected: [u8; 40] = [
+            99, 105, 118, 105, 116, 97, 45, 118, 49, 45, 115, 101, 99, 112, 50, 53, 54, 107, 49,
+            95, 88, 77, 68, 58, 83, 72, 65, 45, 50, 53, 54, 95, 83, 83, 87, 85, 95, 82, 79, 95,
+        ];
+
+        let result = concat_str_slices::<40>("civita-", "v1-", "secp256k1_XMD:SHA-256_SSWU_RO_");
+
+        assert_eq!(result, expected);
+    }
 }
