@@ -1,25 +1,18 @@
-use ark_ec::CurveConfig;
 use ark_ff::{
     fields::{Field, Zero},
     PrimeField,
 };
 
-use crate::crypto::{
-    ec::hash_to_curve::{expand_message_xmd::expand_message_xmd, utils::L},
-    types::{dst::Name, Dst},
-};
+use crate::crypto::ec::hash_to_curve::{config::Config, expand_message::ExpandMessage};
 
 /// Implementation of hash_to_field as defined in IETF specification section 5.2
 /// This function hashes a byte string into one element of a field F
-pub fn hash_to_field<C: CurveConfig + Name + L, const N: usize>(
-    msg: impl AsRef<[u8]>,
-) -> [C::BaseField; N] {
+pub fn hash_to_field<C: Config, const N: usize>(msg: impl AsRef<[u8]>) -> [C::BaseField; N] {
     let degree = C::BaseField::extension_degree() as usize;
 
     let len_in_bytes = N * degree * C::L;
 
-    let dst = Dst::new::<C>();
-    let uniform_bytes = expand_message_xmd(msg.as_ref(), dst, len_in_bytes);
+    let uniform_bytes = C::ExpandMessage::expand_message(msg.as_ref(), C::DST, len_in_bytes);
 
     let mut u = [C::BaseField::zero(); N];
 

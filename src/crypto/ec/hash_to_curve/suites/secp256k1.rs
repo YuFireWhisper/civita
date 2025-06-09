@@ -1,13 +1,10 @@
 use ark_ff::{Field, MontFp};
 use ark_secp256k1::Fq;
 
-use crate::crypto::{
-    hash_to_curve::{
-        iso_map::IsoMap,
-        map_to_curve::AbZero,
-        utils::{self, Z},
-    },
-    types::dst::Name,
+use crate::crypto::ec::hash_to_curve::{
+    config::Config,
+    expand_message,
+    map_to_curve::{simple_swu, MapToCurve},
 };
 
 const K_1_0: Fq = MontFp!("0x8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa8c7");
@@ -31,53 +28,52 @@ const A_PRIME: Fq = MontFp!("0x3f8731abdd661adca08a5558f0f5d272e953d363cb6f0e5d4
 const B_PRIME: Fq = MontFp!("1771");
 
 const L: usize = 48;
-
 const Z: Fq = MontFp!("-11");
 
-const NAME: &[u8] = b"secp256k1";
+#[allow(dead_code)]
+const DST: &[u8] = concat!("civita-", "v1", "secp256k1", "_XMD:SHA-256_SSWU").as_bytes();
 
-impl IsoMap for ark_secp256k1::Config {
-    fn iso_map(
-        mut x: Self::BaseField,
-        mut y: Self::BaseField,
-    ) -> (Self::BaseField, Self::BaseField) {
-        // x_num = k_(1,3) * x'^3 + k_(1,2) * x'^2 + k_(1,1) * x' + k_(1,0)
-        let x_num = K_1_3 * x.square() * x + K_1_2 * x.square() + K_1_1 * x + K_1_0;
-
-        // x_den = x'^2 + k_(2,1) * x' + k_(2,0)
-        let x_den = x.square() + K_2_1 * x + K_2_0;
-
-        // y_num = k_(3,3) * x'^3 + k_(3,2) * x'^2 + k_(3,1) * x' + k_(3,0)
-        let y_num = K_3_3 * x.square() * x + K_3_2 * x.square() + K_3_1 * x + K_3_0;
-
-        // y_den = x'^3 + k_(4,2) * x'^2 + k_(4,1) * x' + k_(4,0)
-        let y_den = x.square() * x + K_4_2 * x.square() + K_4_1 * x + K_4_0;
-
-        // x = x_num / x_den
-        x = x_num / x_den;
-
-        // y = y' * y_num / y_den
-        y = y * y_num / y_den;
-
-        (x, y)
+impl MapToCurve<Fq> for ark_secp256k1::Config {
+    fn map_to_curve(u: Fq) -> (Fq, Fq) {
+        let (x_prime, y_prime) = simple_swu::map_to_curve_simple_swu(u, A_PRIME, B_PRIME, Z);
+        iso_map(x_prime, y_prime)
     }
 }
 
-impl AbZero for ark_secp256k1::Config {
-    const A_PRIME: Fq = A_PRIME;
-    const B_PRIME: Fq = B_PRIME;
+fn iso_map(mut x: Fq, mut y: Fq) -> (Fq, Fq) {
+    // x_num = k_(1,3) * x'^3 + k_(1,2) * x'^2 + k_(1,1) * x' + k_(1,0)
+    let x_num = K_1_3 * x.square() * x + K_1_2 * x.square() + K_1_1 * x + K_1_0;
+
+    // x_den = x'^2 + k_(2,1) * x' + k_(2,0)
+    let x_den = x.square() + K_2_1 * x + K_2_0;
+
+    // y_num = k_(3,3) * x'^3 + k_(3,2) * x'^2 + k_(3,1) * x' + k_(3,0)
+    let y_num = K_3_3 * x.square() * x + K_3_2 * x.square() + K_3_1 * x + K_3_0;
+
+    // y_den = x'^3 + k_(4,2) * x'^2 + k_(4,1) * x' + k_(4,0)
+    let y_den = x.square() * x + K_4_2 * x.square() + K_4_1 * x + K_4_0;
+
+    // x = x_num / x_den
+    x = x_num / x_den;
+
+    // y = y' * y_num / y_den
+    y = y * y_num / y_den;
+
+    (x, y)
 }
 
-impl Z for ark_secp256k1::Config {
-    const Z: Fq = Z;
-}
+impl Config for ark_secp256k1::Config {
+    const ACTUAL_A: Self::BaseField = A_PRIME;
+    const ACTUAL_B: Self::BaseField = B_PRIME;
 
-impl utils::L for ark_secp256k1::Config {
     const L: usize = L;
-}
+    const Z: Self::BaseField = Z;
 
-impl Name for ark_secp256k1::Config {
-    fn name() -> Vec<u8> {
-        NAME.to_vec()
-    }
+    #[cfg(not(test))]
+    const DST: &'static [u8] = DST;
+
+    #[cfg(test)]
+    const DST: &'static [u8] = b"QUUX-V01-CS02-with-secp256k1_XMD:SHA-256_SSWU_RO_";
+
+    type ExpandMessage = expand_message::Xmd<sha2::Sha256>;
 }
