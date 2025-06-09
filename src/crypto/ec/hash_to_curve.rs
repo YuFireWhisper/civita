@@ -24,12 +24,6 @@ pub trait HashToCurve: Config {
 
         Affine::<Self>::from(r)
     }
-
-    fn encode_to_curve(msg: impl AsRef<[u8]>) -> Affine<Self> {
-        let u = hash_to_field::hash_to_field::<Self, 1>(msg);
-        let q = Self::map_to_curve(u[0]);
-        Affine::new(q.0, q.1)
-    }
 }
 
 impl<C: Config> HashToCurve for C {}
