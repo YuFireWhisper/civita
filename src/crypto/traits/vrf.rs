@@ -9,7 +9,7 @@ pub trait Proof: Sized {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-pub trait Prove<P: Proof>: SecretKey {
+pub trait Prover<P: Proof>: SecretKey {
     fn prove(&self, alpha: &[u8]) -> P;
 }
 

@@ -12,7 +12,7 @@ use crate::crypto::{
     traits::{
         self,
         hasher::Hasher,
-        vrf::{Prove, VerifyProof},
+        vrf::{Prover, VerifyProof},
     },
 };
 
@@ -76,7 +76,7 @@ impl<C: Config> traits::vrf::Proof for Proof<C> {
     }
 }
 
-impl<C: Config> Prove<Proof<C>> for SecretKey<C> {
+impl<C: Config> Prover<Proof<C>> for SecretKey<C> {
     fn prove(&self, alpha: &[u8]) -> Proof<C> {
         let y = (C::GENERATOR * self.sk).into_affine();
         let h = C::hash_to_curve(alpha);
@@ -119,7 +119,7 @@ mod tests {
     use ark_ff::MontFp;
     use ark_secp256r1::{Affine, Fq, Fr};
 
-    use crate::crypto::traits::vrf::{Prove, VerifyProof};
+    use crate::crypto::traits::vrf::{Prover, VerifyProof};
 
     const SK: Fr =
         MontFp!("91225253027397101270059260515990221874496108017261222445699397644687913215777");

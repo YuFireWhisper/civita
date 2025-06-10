@@ -72,8 +72,8 @@ impl<C: BaseConfig + SerializeSize> traits::Signer<Signature<C>> for SecretKey<C
     }
 }
 
-impl<C: BaseConfig + SerializeSize> traits::Verifier<Signature<C>> for Affine<C> {
-    fn verify(&self, msg: &[u8], sig: &Signature<C>) -> bool {
+impl<C: BaseConfig + SerializeSize> traits::VerifiySignature<Signature<C>> for Affine<C> {
+    fn verify_signature(&self, msg: &[u8], sig: &Signature<C>) -> bool {
         let e = generate_challenge::<C>(msg, sig.r.into(), self);
 
         let lhs = C::GENERATOR * sig.s;
@@ -101,7 +101,7 @@ fn generate_challenge<C: BaseConfig>(
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::traits::Verifier;
+    use crate::crypto::traits::VerifiySignature;
 
     use super::*;
 
@@ -125,8 +125,8 @@ mod tests {
 
         let sig = sk.sign(msg);
 
-        let should_valid = pk.verify(msg, &sig);
-        let should_invalid = pk.verify(b"wrong message", &sig);
+        let should_valid = pk.verify_signature(msg, &sig);
+        let should_invalid = pk.verify_signature(b"wrong message", &sig);
 
         assert!(should_valid, "Signature should be valid");
         assert!(!should_invalid, "Signature should be invalid");

@@ -12,6 +12,6 @@ pub trait Signer<S: Signature>: SecretKey {
     fn sign(&self, msg: &[u8]) -> S;
 }
 
-pub trait Verifier<S: Signature>: PublicKey {
-    fn verify(&self, msg: &[u8], sig: &S) -> bool;
+pub trait VerifiySignature<S: Signature>: PublicKey {
+    fn verify_signature(&self, msg: &[u8], sig: &S) -> bool;
 }
