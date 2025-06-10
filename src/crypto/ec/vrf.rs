@@ -2,12 +2,18 @@ use ark_ec::{short_weierstrass::Affine, CurveGroup};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
+    self,
     ec::{
         hash_to_curve::{self, HashToCurve},
+        public_key::PublicKey,
         secret_key::SecretKey,
         serialize_affine,
     },
-    traits::{self, hasher::Hasher},
+    traits::{
+        self,
+        hasher::Hasher,
+        vrf::{Prove, VerifyProof},
+    },
 };
 
 mod challenge_generator;
@@ -16,7 +22,7 @@ mod suites;
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
-pub struct Proof<C: hash_to_curve::Config> {
+pub struct Proof<C: Config> {
     #[serde(with = "serialize_affine")]
     pub gamma: Affine<C>,
     pub c: C::ScalarField,
@@ -27,19 +33,32 @@ pub trait Config: hash_to_curve::Config {
     const COFACTOR_SCALAR: Self::ScalarField;
 }
 
-impl<C: Config> traits::Vrf for SecretKey<C> {
-    type Proof = Proof<C>;
+impl<C: Config> traits::vrf::Proof for Proof<C> {
+    fn proof_to_hash(&self) -> Vec<u8> {
+        proof_to_hash::<C>(self)
+    }
 
-    fn prove(&self, alpha: &[u8]) -> Self::Proof {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, crypto::Error> {
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .map(|(proof, _)| proof)
+            .map_err(crypto::Error::from)
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .expect("Serialization should not fail")
+    }
+}
+
+impl<C: Config> Prove<Proof<C>> for SecretKey<C> {
+    fn prove(&self, alpha: &[u8]) -> Proof<C> {
         prove::<C>(self.sk, alpha)
     }
+}
 
-    fn verify(pk: Self::PublicKey, alpha: &[u8], proof: &Self::Proof) -> bool {
-        verify::<C>(pk, alpha, proof)
-    }
-
-    fn proof_to_hash(proof: &Self::Proof) -> Vec<u8> {
-        proof_to_hash::<C>(proof)
+impl<C: Config> VerifyProof<Proof<C>> for PublicKey<C> {
+    fn verify_proof(self, alpha: &[u8], proof: &Proof<C>) -> bool {
+        verify::<C>(self, alpha, proof)
     }
 }
 
