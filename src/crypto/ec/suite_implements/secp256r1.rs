@@ -2,14 +2,17 @@ use ark_ec::models::short_weierstrass::SWCurveConfig;
 use ark_ff::MontFp;
 use ark_secp256r1::Fq;
 
-use crate::crypto::ec::hash_to_curve::{
-    expand_message::Xmd,
-    map_to_curve::{simple_swu, MapToCurve},
-    Config,
+use crate::crypto::ec::{
+    base_config::BaseConfig,
+    hash_to_curve::{
+        expand_message::Xmd,
+        map_to_curve::{simple_swu, MapToCurve},
+        Config,
+    },
 };
 
 #[allow(unused_imports)]
-use crate::crypto::ec::hash_to_curve::suites::concat_str_slices;
+use crate::crypto::ec::suite_implements::concat_str_slices;
 
 const Z: Fq = MontFp!("-10");
 
@@ -28,6 +31,10 @@ impl MapToCurve<Fq> for ark_secp256r1::Config {
     }
 }
 
+impl BaseConfig for ark_secp256r1::Config {
+    type Hasher = sha2::Sha256;
+}
+
 impl Config for ark_secp256r1::Config {
     const ACTUAL_A: Self::BaseField = Self::COEFF_A;
     const ACTUAL_B: Self::BaseField = Self::COEFF_B;
@@ -41,6 +48,5 @@ impl Config for ark_secp256r1::Config {
     #[cfg(test)]
     const DST: &'static [u8] = b"ECVRF_P256_XMD:SHA-256_SSWU_NU_";
 
-    type Hasher = sha2::Sha256;
     type ExpandMessage = Xmd;
 }

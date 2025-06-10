@@ -7,6 +7,7 @@ use crate::crypto::{
     ec::{
         hash_to_curve::{self, HashToCurve},
         secret_key::SecretKey,
+        serialize_size::SerializeSize,
     },
     traits::{
         self,
@@ -26,10 +27,8 @@ pub struct Proof<C: Config> {
     pub s: C::ScalarField,
 }
 
-pub trait Config: hash_to_curve::Config {
+pub trait Config: hash_to_curve::Config + SerializeSize {
     const COFACTOR_SCALAR: Self::ScalarField;
-    const AFFINE_SIZE: usize;
-    const SCALAR_SIZE: usize;
 }
 
 impl<C: Config> traits::vrf::Proof for Proof<C> {

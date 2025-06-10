@@ -1,56 +1,89 @@
 use ark_ec::{
-    short_weierstrass::{Affine, Projective, SWCurveConfig},
+    short_weierstrass::{Affine, Projective},
     CurveGroup,
 };
 use ark_ff::PrimeField;
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
-    ec::{secret_key::SecretKey, serialize_affine},
+    self,
+    ec::{
+        base_config::BaseConfig, secret_key::SecretKey, serialize_affine,
+        serialize_size::SerializeSize,
+    },
     traits::{self, hasher::Hasher},
 };
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
-pub struct Signature<C: SWCurveConfig> {
+pub struct Signature<C: BaseConfig + SerializeSize> {
     #[serde(with = "serialize_affine")]
     pub r: Affine<C>,
     pub s: C::ScalarField,
 }
 
-impl<C: SWCurveConfig> traits::Signature for SecretKey<C> {
-    type Signature = Signature<C>;
-    fn sign(&self, msg: &[u8]) -> Self::Signature {
-        sign::<C, sha2::Sha256>(self.sk, &self.pk, msg)
+impl<C: BaseConfig + SerializeSize> traits::signature::Signature for Signature<C> {
+    fn from_slice(bytes: &[u8]) -> Result<Self, crypto::Error> {
+        let r_size = (C::ScalarField::MODULUS_BIT_SIZE.div_ceil(8) + 1) as usize;
+        let s_size = C::ScalarField::MODULUS_BIT_SIZE.div_ceil(8) as usize;
+
+        if bytes.len() != r_size + s_size {
+            return Err(crate::crypto::Error::Serialization(
+                "Invalid signature size".to_string(),
+            ));
+        }
+
+        let r = Affine::<C>::deserialize_compressed(&bytes[..r_size])?;
+        let s = C::ScalarField::from_be_bytes_mod_order(&bytes[r_size..]);
+
+        Ok(Signature { r, s })
     }
 
-    fn verify(pk: Self::PublicKey, msg: &[u8], sig: &Self::Signature) -> bool {
-        verify::<C, sha2::Sha256>(sig, pk, msg)
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.r.compressed_size() + self.s.compressed_size());
+
+        self.r
+            .serialize_compressed(&mut bytes)
+            .expect("Failed to serialize point");
+        self.s
+            .serialize_compressed(&mut bytes)
+            .expect("Failed to serialize scalar");
+
+        bytes
     }
 }
 
-pub fn sign<C: SWCurveConfig, H: Hasher>(
-    sk: C::ScalarField,
-    pk: &Affine<C>,
-    msg: &[u8],
-) -> Signature<C> {
-    let mut random = [0u8; 32];
-    rand::rng().fill(&mut random);
+impl<C: BaseConfig + SerializeSize> traits::Signer<Signature<C>> for SecretKey<C> {
+    fn sign(&self, msg: &[u8]) -> Signature<C> {
+        let mut random = [0u8; 32];
+        rand::rng().fill(&mut random);
 
-    let k = C::ScalarField::from_be_bytes_mod_order(&random);
-    let r = C::GENERATOR * k;
-    let e = generate_challenge::<C, H>(msg, r, pk);
-    let s = k + e * sk;
+        let k = C::ScalarField::from_be_bytes_mod_order(&random);
+        let r = C::GENERATOR * k;
+        let e = generate_challenge(msg, r, &self.pk);
+        let s = k + e * self.sk;
 
-    Signature {
-        r: r.into_affine(),
-        s,
+        Signature {
+            r: r.into_affine(),
+            s,
+        }
     }
 }
 
-fn generate_challenge<C: SWCurveConfig, H: Hasher>(
+impl<C: BaseConfig + SerializeSize> traits::Verifier<Signature<C>> for Affine<C> {
+    fn verify(&self, msg: &[u8], sig: &Signature<C>) -> bool {
+        let e = generate_challenge::<C>(msg, sig.r.into(), self);
+
+        let lhs = C::GENERATOR * sig.s;
+        let rhs = sig.r + (*self) * e;
+
+        lhs == rhs.into_affine()
+    }
+}
+
+fn generate_challenge<C: BaseConfig>(
     msg: &[u8],
     r: Projective<C>,
     pk: &Affine<C>,
@@ -63,20 +96,13 @@ fn generate_challenge<C: SWCurveConfig, H: Hasher>(
     pk.serialize_compressed(&mut bytes)
         .expect("Failed to serialize point");
 
-    C::ScalarField::from_be_bytes_mod_order(&H::hash(&bytes))
-}
-
-pub fn verify<C: SWCurveConfig, H: Hasher>(sig: &Signature<C>, pk: Affine<C>, msg: &[u8]) -> bool {
-    let e = generate_challenge::<C, H>(msg, sig.r.into(), &pk);
-
-    let lhs = C::GENERATOR * sig.s;
-    let rhs = sig.r + pk * e;
-
-    lhs == rhs.into_affine()
+    C::ScalarField::from_be_bytes_mod_order(&C::Hasher::hash(&bytes))
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::traits::Verifier;
+
     use super::*;
 
     use ark_ff::MontFp;
@@ -92,15 +118,17 @@ mod tests {
     #[case(b"another message")]
     #[case(b"123")]
     fn correct_signature(#[case] msg: &[u8]) {
+        use crate::crypto::traits::Signer;
+
+        let sk = SecretKey::new(SK);
         let pk = Affine::new(PK_X, PK_Y);
 
-        let sig = sign::<ark_secp256r1::Config, sha2::Sha256>(SK, &pk, msg);
+        let sig = sk.sign(msg);
 
-        assert!(verify::<ark_secp256r1::Config, sha2::Sha256>(&sig, pk, msg));
-        assert!(!verify::<ark_secp256r1::Config, sha2::Sha256>(
-            &sig,
-            pk,
-            b"wrong message"
-        ));
+        let should_valid = pk.verify(msg, &sig);
+        let should_invalid = pk.verify(b"wrong message", &sig);
+
+        assert!(should_valid, "Signature should be valid");
+        assert!(!should_invalid, "Signature should be invalid");
     }
 }

@@ -1,11 +1,14 @@
 use ark_ff::{Field, MontFp};
 use ark_secp256k1::Fq;
 
-use crate::crypto::ec::hash_to_curve::{
-    config::Config,
-    expand_message::Xmd,
-    map_to_curve::{simple_swu, MapToCurve},
-    suites::concat_str_slices,
+use crate::crypto::ec::{
+    base_config::BaseConfig,
+    hash_to_curve::{
+        config::Config,
+        expand_message::Xmd,
+        map_to_curve::{simple_swu, MapToCurve},
+    },
+    suite_implements::concat_str_slices,
 };
 
 const K_1_0: Fq = MontFp!("0x8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa8c7");
@@ -45,6 +48,26 @@ impl MapToCurve<Fq> for ark_secp256k1::Config {
     }
 }
 
+impl BaseConfig for ark_secp256k1::Config {
+    type Hasher = sha2::Sha256;
+}
+
+impl Config for ark_secp256k1::Config {
+    const ACTUAL_A: Self::BaseField = A_PRIME;
+    const ACTUAL_B: Self::BaseField = B_PRIME;
+
+    const L: usize = L;
+    const Z: Self::BaseField = Z;
+
+    #[cfg(not(test))]
+    const DST: &'static [u8] = DST;
+
+    #[cfg(test)]
+    const DST: &'static [u8] = b"QUUX-V01-CS02-with-secp256k1_XMD:SHA-256_SSWU_RO_";
+
+    type ExpandMessage = Xmd;
+}
+
 fn iso_map(mut x: Fq, mut y: Fq) -> (Fq, Fq) {
     // x_num = k_(1,3) * x'^3 + k_(1,2) * x'^2 + k_(1,1) * x' + k_(1,0)
     let x_num = K_1_3 * x.square() * x + K_1_2 * x.square() + K_1_1 * x + K_1_0;
@@ -65,38 +88,4 @@ fn iso_map(mut x: Fq, mut y: Fq) -> (Fq, Fq) {
     y = y * y_num / y_den;
 
     (x, y)
-}
-
-impl Config for ark_secp256k1::Config {
-    const ACTUAL_A: Self::BaseField = A_PRIME;
-    const ACTUAL_B: Self::BaseField = B_PRIME;
-
-    const L: usize = L;
-    const Z: Self::BaseField = Z;
-
-    #[cfg(not(test))]
-    const DST: &'static [u8] = DST;
-
-    #[cfg(test)]
-    const DST: &'static [u8] = b"QUUX-V01-CS02-with-secp256k1_XMD:SHA-256_SSWU_RO_";
-
-    type Hasher = sha2::Sha256;
-    type ExpandMessage = Xmd;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn correct_concat_str_slices() {
-        let expected: [u8; 40] = [
-            99, 105, 118, 105, 116, 97, 45, 118, 49, 45, 115, 101, 99, 112, 50, 53, 54, 107, 49,
-            95, 88, 77, 68, 58, 83, 72, 65, 45, 50, 53, 54, 95, 83, 83, 87, 85, 95, 82, 79, 95,
-        ];
-
-        let result = concat_str_slices::<40>("civita-", "v1-", "secp256k1_XMD:SHA-256_SSWU_RO_");
-
-        assert_eq!(result, expected);
-    }
 }

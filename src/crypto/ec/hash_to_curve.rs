@@ -2,10 +2,9 @@ use ark_ec::short_weierstrass::Affine;
 
 pub mod config;
 
-mod expand_message;
-mod hash_to_field;
-mod map_to_curve;
-mod suites;
+pub mod expand_message;
+pub mod hash_to_field;
+pub mod map_to_curve;
 mod utils;
 
 pub use config::Config;
