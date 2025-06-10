@@ -1,15 +1,12 @@
 use ark_ec::{short_weierstrass::Affine, CurveGroup};
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
     self,
     ec::{
         hash_to_curve::{self, HashToCurve},
-        public_key::PublicKey,
         secret_key::SecretKey,
-        serialize_affine,
     },
     traits::{
         self,
@@ -23,9 +20,7 @@ mod nonce_generator;
 mod suites;
 
 #[derive(Debug)]
-#[derive(Serialize, Deserialize)]
 pub struct Proof<C: Config> {
-    #[serde(with = "serialize_affine")]
     pub gamma: Affine<C>,
     pub c: C::ScalarField,
     pub s: C::ScalarField,
@@ -103,13 +98,13 @@ impl<C: Config> Prove<Proof<C>> for SecretKey<C> {
     }
 }
 
-impl<C: Config> VerifyProof<Proof<C>> for PublicKey<C> {
+impl<C: Config> VerifyProof<Proof<C>> for Affine<C> {
     fn verify_proof(&self, alpha: &[u8], proof: &Proof<C>) -> bool {
         let h = C::hash_to_curve(alpha);
-        let u = C::GENERATOR * proof.s - self.0 * proof.c;
+        let u = C::GENERATOR * proof.s - (*self) * proof.c;
         let v = h * proof.s - proof.gamma * proof.c;
         let c_prime = challenge_generator::generate_challenge::<Affine<C>, C::Hasher>([
-            self.0,
+            *self,
             h,
             proof.gamma,
             u.into(),
@@ -125,10 +120,7 @@ mod tests {
     use ark_ff::MontFp;
     use ark_secp256r1::{Affine, Fq, Fr};
 
-    use crate::crypto::{
-        ec::public_key::PublicKey,
-        traits::vrf::{Prove, VerifyProof},
-    };
+    use crate::crypto::traits::vrf::{Prove, VerifyProof};
 
     const SK: Fr =
         MontFp!("91225253027397101270059260515990221874496108017261222445699397644687913215777");
@@ -144,7 +136,6 @@ mod tests {
         use crate::crypto::ec::secret_key::SecretKey;
 
         let pk = Affine::new(PK_X, PK_Y);
-        let pk = PublicKey::from(pk);
 
         let sk = SecretKey::new(SK);
         let proof = sk.prove(alpha.as_bytes());
@@ -153,6 +144,6 @@ mod tests {
         let should_invalid = pk.verify_proof(b"invalid", &proof);
 
         assert!(is_valid);
-        assert!(!should_invalid,);
+        assert!(!should_invalid);
     }
 }
