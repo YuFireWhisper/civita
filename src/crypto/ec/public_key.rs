@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{self, traits};
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[derive(Debug)]
 pub struct PublicKey<C: SWCurveConfig>(pub(crate) Affine<C>);
 
@@ -21,6 +21,12 @@ impl<C: SWCurveConfig> traits::PublicKey for PublicKey<C> {
             .serialize_compressed(&mut bytes)
             .expect("Serialization should not fail");
         bytes
+    }
+}
+
+impl<C: SWCurveConfig> From<Affine<C>> for PublicKey<C> {
+    fn from(affine: Affine<C>) -> Self {
+        PublicKey(affine)
     }
 }
 

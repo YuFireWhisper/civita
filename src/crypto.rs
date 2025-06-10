@@ -11,9 +11,6 @@ pub mod vss;
 
 pub use error::Error;
 
-pub struct SecretKey<S>(pub(crate) S::SecretKey)
-where
-    S: traits::Suite,
-    S::SecretKey: traits::Vrf + traits::Signature;
-
+pub struct Proof<S: traits::Suite>(pub(crate) S::Proof);
+pub struct SecretKey<S: traits::Suite>(pub(crate) S::SecretKey);
 pub struct PublicKey<S: traits::Suite>(pub(crate) S::PublicKey);

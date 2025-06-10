@@ -14,5 +14,5 @@ pub trait Prove<P: Proof>: SecretKey {
 }
 
 pub trait VerifyProof<P: Proof>: PublicKey {
-    fn verify_proof(self, alpha: &[u8], proof: &P) -> bool;
+    fn verify_proof(&self, alpha: &[u8], proof: &P) -> bool;
 }
