@@ -5,6 +5,7 @@ use crate::crypto::ec::hash_to_curve::{
     config::Config,
     expand_message::Xmd,
     map_to_curve::{simple_swu, MapToCurve},
+    suites::concat_str_slices,
 };
 
 const K_1_0: Fq = MontFp!("0x8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa8c7");
@@ -81,34 +82,6 @@ impl Config for ark_secp256k1::Config {
 
     type Hasher = sha2::Sha256;
     type ExpandMessage = Xmd;
-}
-
-const fn concat_str_slices<const N: usize>(a: &str, b: &str, c: &str) -> [u8; N] {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let c_bytes = c.as_bytes();
-
-    let mut result = [0u8; N];
-    let mut i = 0;
-
-    while i < a_bytes.len() {
-        result[i] = a_bytes[i];
-        i += 1;
-    }
-
-    let mut j = 0;
-    while j < b_bytes.len() {
-        result[i + j] = b_bytes[j];
-        j += 1;
-    }
-
-    let mut k = 0;
-    while k < c_bytes.len() {
-        result[i + j + k] = c_bytes[k];
-        k += 1;
-    }
-
-    result
 }
 
 #[cfg(test)]
