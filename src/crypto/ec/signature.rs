@@ -7,7 +7,10 @@ use ark_serialize::CanonicalSerialize;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{ec::serialize_affine, traits::hasher::Hasher};
+use crate::crypto::{
+    ec::{secret_key::SecretKey, serialize_affine},
+    traits::{self, hasher::Hasher},
+};
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
@@ -15,6 +18,17 @@ pub struct Signature<C: SWCurveConfig> {
     #[serde(with = "serialize_affine")]
     pub r: Affine<C>,
     pub s: C::ScalarField,
+}
+
+impl<C: SWCurveConfig> traits::Signature for SecretKey<C> {
+    type Signature = Signature<C>;
+    fn sign(&self, msg: &[u8]) -> Self::Signature {
+        sign::<C, sha2::Sha256>(self.sk, self.pk, msg)
+    }
+
+    fn verify(pk: Self::PublicKey, msg: &[u8], sig: &Self::Signature) -> bool {
+        verify::<C, sha2::Sha256>(sig, pk, msg)
+    }
 }
 
 pub fn sign<C: SWCurveConfig, H: Hasher>(

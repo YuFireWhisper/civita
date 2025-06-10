@@ -11,7 +11,7 @@ use crate::crypto::{self, traits};
 #[derive(Debug)]
 pub struct SecretKey<C: SWCurveConfig> {
     pub(crate) sk: C::ScalarField,
-    pk: Affine<C>,
+    pub(crate) pk: Affine<C>,
 }
 
 impl<C: SWCurveConfig> SecretKey<C> {
