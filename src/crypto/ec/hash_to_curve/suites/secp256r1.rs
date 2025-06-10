@@ -5,14 +5,21 @@ use ark_secp256r1::Fq;
 use crate::crypto::ec::hash_to_curve::{
     expand_message::Xmd,
     map_to_curve::{simple_swu, MapToCurve},
-    suites::concat_str_slices,
     Config,
 };
 
+#[allow(unused_imports)]
+use crate::crypto::ec::hash_to_curve::suites::concat_str_slices;
+
 const Z: Fq = MontFp!("-10");
 
+#[allow(dead_code)]
 const CRATE_NAME: &str = "civita-"; // Len: 7
+
+#[allow(dead_code)]
 const VERSION: &str = "v1-"; // Len: 3
+
+#[allow(dead_code)]
 const SUITE_ID: &str = "secp256r1_XMD:SHA-256_SSWU_RO_"; // Len: 30
 
 impl MapToCurve<Fq> for ark_secp256r1::Config {
@@ -27,7 +34,12 @@ impl Config for ark_secp256r1::Config {
 
     const L: usize = 48;
     const Z: Self::BaseField = Z;
+
+    #[cfg(not(test))]
     const DST: &'static [u8] = &concat_str_slices::<40>(CRATE_NAME, VERSION, SUITE_ID);
+
+    #[cfg(test)]
+    const DST: &'static [u8] = b"ECVRF_P256_XMD:SHA-256_SSWU_NU_";
 
     type Hasher = sha2::Sha256;
     type ExpandMessage = Xmd;
