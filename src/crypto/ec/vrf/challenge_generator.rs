@@ -6,10 +6,12 @@ use crate::crypto::traits::hasher::Hasher;
 pub fn generate_challenge<P: AffineRepr, H: Hasher>(
     suite_string: &[u8],
     points: [P; 5],
-    c_len: usize,
 ) -> P::ScalarField {
     const DOMAIN_SEPARATOR_FRONT: u8 = 0x02;
     const DOMAIN_SEPARATOR_BACK: u8 = 0x00;
+
+    let q_len_in_bytes = P::ScalarField::MODULUS_BIT_SIZE.div_ceil(8);
+    let c_len = q_len_in_bytes.div_ceil(2) as usize;
 
     let mut str =
         Vec::with_capacity(suite_string.len() + 1 + points[0].compressed_size() * points.len() + 1);
