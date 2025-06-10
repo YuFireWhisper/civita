@@ -3,7 +3,7 @@ use ark_secp256k1::Fq;
 
 use crate::crypto::ec::hash_to_curve::{
     config::Config,
-    expand_message,
+    expand_message::Xmd,
     map_to_curve::{simple_swu, MapToCurve},
 };
 
@@ -79,7 +79,8 @@ impl Config for ark_secp256k1::Config {
     #[cfg(test)]
     const DST: &'static [u8] = b"QUUX-V01-CS02-with-secp256k1_XMD:SHA-256_SSWU_RO_";
 
-    type ExpandMessage = expand_message::Xmd<sha2::Sha256>;
+    type Hasher = sha2::Sha256;
+    type ExpandMessage = Xmd;
 }
 
 const fn concat_str_slices<const N: usize>(a: &str, b: &str, c: &str) -> [u8; N] {

@@ -1,13 +1,14 @@
 use ark_ec::short_weierstrass::Affine;
 
-use crate::crypto::ec::hash_to_curve::config::Config;
+pub mod config;
 
-mod config;
 mod expand_message;
 mod hash_to_field;
 mod map_to_curve;
 mod suites;
 mod utils;
+
+pub use config::Config;
 
 #[allow(dead_code)]
 pub trait HashToCurve: Config {

@@ -2,9 +2,9 @@ use crate::crypto::{ec::hash_to_curve::expand_message::ExpandMessage, traits::ha
 
 #[derive(Debug)]
 #[derive(Default)]
-pub struct Xmd<H: Hasher>(std::marker::PhantomData<H>);
+pub struct Xmd;
 
-impl<H: Hasher> Xmd<H> {
+impl<H: Hasher> ExpandMessage<H> for Xmd {
     fn expand_message(msg: &[u8], dst: &[u8], len_in_bytes: usize) -> Vec<u8> {
         const ELL_MAX: usize = 225;
         const MAX_LEN_IN_BYTES: usize = 65535;
@@ -69,12 +69,6 @@ impl<H: Hasher> Xmd<H> {
     }
 }
 
-impl<H: Hasher> ExpandMessage for Xmd<H> {
-    fn expand_message(msg: &[u8], dst: &[u8], len_in_bytes: usize) -> Vec<u8> {
-        Xmd::<H>::expand_message(msg, dst, len_in_bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -84,6 +78,14 @@ mod tests {
     const MSG: &[u8] = b"abc";
     const DST: &[u8] = b"QUUX-V01-CS02-with-expander-SHA256-128";
     const MAX_VALID_OUTPUT_LEN: usize = 65535;
+
+    fn expand_message<E: ExpandMessage<H>, H: Hasher>(
+        msg: &[u8],
+        dst: &[u8],
+        len_in_bytes: usize,
+    ) -> Vec<u8> {
+        E::expand_message(msg, dst, len_in_bytes)
+    }
 
     #[rstest]
     #[case(MSG, DST, sha2::Sha256::OUTPUT_SIZE_IN_BIT * 256)]
@@ -95,7 +97,7 @@ mod tests {
         #[case] dst: &[u8],
         #[case] len_in_bytes: usize,
     ) {
-        Xmd::<sha2::Sha256>::expand_message(msg, dst, len_in_bytes);
+        expand_message::<Xmd, sha2::Sha256>(msg, dst, len_in_bytes);
     }
 
     #[rstest]
@@ -154,7 +156,7 @@ mod tests {
         #[case] len_in_bytes: usize,
         #[case] expected_output: &str,
     ) {
-        let result = Xmd::<sha2::Sha256>::expand_message(msg, DST, len_in_bytes);
+        let result = expand_message::<Xmd, sha2::Sha256>(msg, DST, len_in_bytes);
         let hex_result = hex::encode(result);
 
         assert_eq!(hex_result, expected_output);
