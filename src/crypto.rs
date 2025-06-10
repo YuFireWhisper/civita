@@ -11,6 +11,7 @@ mod ec;
 mod traits;
 
 pub use error::Error;
+use serde::{Deserialize, Serialize};
 
 pub struct SecretKey<S: traits::Suite>(pub(crate) S::SecretKey);
 pub struct PublicKey<S: traits::Suite>(pub(crate) S::PublicKey);
@@ -49,6 +50,27 @@ impl<S: traits::Suite> traits::Signer<S::Signature> for SecretKey<S> {
     }
 }
 
+impl<SU: traits::Suite> Serialize for SecretKey<SU> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use traits::SecretKey;
+        serializer.serialize_bytes(&self.to_bytes())
+    }
+}
+
+impl<'de, S: traits::Suite> Deserialize<'de> for SecretKey<S> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use traits::SecretKey;
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        SecretKey::from_slice(&bytes).map_err(|e| serde::de::Error::custom(e.to_string()))
+    }
+}
+
 impl<S: traits::Suite> traits::PublicKey for PublicKey<S> {
     fn from_slice(slice: &[u8]) -> Result<Self, self::Error> {
         S::PublicKey::from_slice(slice).map(PublicKey)
@@ -71,6 +93,27 @@ impl<S: traits::Suite> traits::VerifiySignature<S::Signature> for PublicKey<S> {
     }
 }
 
+impl<SU: traits::Suite> Serialize for PublicKey<SU> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use traits::PublicKey;
+        serializer.serialize_bytes(&self.to_bytes())
+    }
+}
+
+impl<'de, S: traits::Suite> Deserialize<'de> for PublicKey<S> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use traits::PublicKey;
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        PublicKey::from_slice(&bytes).map_err(|e| serde::de::Error::custom(e.to_string()))
+    }
+}
+
 impl<S: traits::Suite> traits::vrf::Proof for Proof<S> {
     fn proof_to_hash(&self) -> Vec<u8> {
         self.0.proof_to_hash()
@@ -85,6 +128,27 @@ impl<S: traits::Suite> traits::vrf::Proof for Proof<S> {
     }
 }
 
+impl<SU: traits::Suite> Serialize for Proof<SU> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use traits::vrf::Proof;
+        serializer.serialize_bytes(&self.to_bytes())
+    }
+}
+
+impl<'de, S: traits::Suite> Deserialize<'de> for Proof<S> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use traits::vrf::Proof;
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Proof::from_bytes(&bytes).map_err(|e| serde::de::Error::custom(e.to_string()))
+    }
+}
+
 impl<S: traits::Suite> traits::Signature for Signature<S> {
     fn from_slice(bytes: &[u8]) -> Result<Self, self::Error> {
         S::Signature::from_slice(bytes).map(Signature)
@@ -92,5 +156,26 @@ impl<S: traits::Suite> traits::Signature for Signature<S> {
 
     fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes()
+    }
+}
+
+impl<SU: traits::Suite> Serialize for Signature<SU> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use traits::Signature;
+        serializer.serialize_bytes(&self.to_bytes())
+    }
+}
+
+impl<'de, S: traits::Suite> Deserialize<'de> for Signature<S> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use traits::Signature;
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Signature::from_slice(&bytes).map_err(|e| serde::de::Error::custom(e.to_string()))
     }
 }
