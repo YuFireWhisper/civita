@@ -1,12 +1,11 @@
-use ark_ec::{
-    short_weierstrass::{Affine, SWCurveConfig},
-    AffineRepr, CurveGroup,
-};
-use ark_serialize::CanonicalDeserialize;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use ark_ec::{short_weierstrass::Affine, CurveGroup};
+use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
-    ec::hash_to_curve::{self, HashToCurve},
+    ec::{
+        hash_to_curve::{self, HashToCurve},
+        serialize_affine,
+    },
     traits::hasher::Hasher,
 };
 
@@ -17,10 +16,7 @@ mod suites;
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub struct Proof<C: hash_to_curve::Config> {
-    #[serde(
-        serialize_with = "serialize_affine",
-        deserialize_with = "deserialize_affine"
-    )]
+    #[serde(with = "serialize_affine")]
     pub gamma: Affine<C>,
     pub c: C::ScalarField,
     pub s: C::ScalarField,
@@ -74,25 +70,6 @@ pub fn proof_to_hash<C: Config>(proof: &Proof<C>) -> Vec<u8> {
     bytes.push(DOMAIN_SEPARATOR_BACK);
 
     C::Hasher::hash(&bytes)
-}
-
-fn serialize_affine<S: Serializer>(
-    point: &impl AffineRepr,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    let mut bytes = vec![0u8; point.compressed_size()];
-    point
-        .serialize_compressed(&mut bytes)
-        .map_err(serde::ser::Error::custom)?;
-    serializer.serialize_bytes(&bytes)
-}
-
-fn deserialize_affine<'de, D: Deserializer<'de>, C: SWCurveConfig>(
-    deserializer: D,
-) -> Result<Affine<C>, D::Error> {
-    let bytes = Vec::<u8>::deserialize(deserializer)?;
-    Affine::<C>::deserialize_compressed(bytes.as_slice())
-        .map_err(|e| serde::de::Error::custom(e.to_string()))
 }
 
 #[cfg(test)]
