@@ -1,13 +1,14 @@
 pub mod algebra;
 pub mod dkg;
-pub mod ec;
 pub mod error;
 pub mod keypair;
 pub mod threshold;
-pub mod traits;
 pub mod tss;
 pub mod types;
 pub mod vss;
+
+mod ec;
+mod traits;
 
 pub use error::Error;
 
