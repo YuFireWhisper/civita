@@ -23,7 +23,7 @@ pub struct Signature<C: SWCurveConfig> {
 impl<C: SWCurveConfig> traits::Signature for SecretKey<C> {
     type Signature = Signature<C>;
     fn sign(&self, msg: &[u8]) -> Self::Signature {
-        sign::<C, sha2::Sha256>(self.sk, self.pk, msg)
+        sign::<C, sha2::Sha256>(self.sk, &self.pk, msg)
     }
 
     fn verify(pk: Self::PublicKey, msg: &[u8], sig: &Self::Signature) -> bool {
@@ -33,7 +33,7 @@ impl<C: SWCurveConfig> traits::Signature for SecretKey<C> {
 
 pub fn sign<C: SWCurveConfig, H: Hasher>(
     sk: C::ScalarField,
-    pk: Affine<C>,
+    pk: &Affine<C>,
     msg: &[u8],
 ) -> Signature<C> {
     let mut random = [0u8; 32];
@@ -53,7 +53,7 @@ pub fn sign<C: SWCurveConfig, H: Hasher>(
 fn generate_challenge<C: SWCurveConfig, H: Hasher>(
     msg: &[u8],
     r: Projective<C>,
-    pk: Affine<C>,
+    pk: &Affine<C>,
 ) -> C::ScalarField {
     let mut bytes = Vec::with_capacity(msg.len() + r.compressed_size() + pk.compressed_size());
 
@@ -67,7 +67,7 @@ fn generate_challenge<C: SWCurveConfig, H: Hasher>(
 }
 
 pub fn verify<C: SWCurveConfig, H: Hasher>(sig: &Signature<C>, pk: Affine<C>, msg: &[u8]) -> bool {
-    let e = generate_challenge::<C, H>(msg, sig.r.into(), pk);
+    let e = generate_challenge::<C, H>(msg, sig.r.into(), &pk);
 
     let lhs = C::GENERATOR * sig.s;
     let rhs = sig.r + pk * e;
@@ -94,7 +94,7 @@ mod tests {
     fn correct_signature(#[case] msg: &[u8]) {
         let pk = Affine::new(PK_X, PK_Y);
 
-        let sig = sign::<ark_secp256r1::Config, sha2::Sha256>(SK, pk, msg);
+        let sig = sign::<ark_secp256r1::Config, sha2::Sha256>(SK, &pk, msg);
 
         assert!(verify::<ark_secp256r1::Config, sha2::Sha256>(&sig, pk, msg));
         assert!(!verify::<ark_secp256r1::Config, sha2::Sha256>(
