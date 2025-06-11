@@ -4,7 +4,7 @@ use crate::crypto::{
 };
 
 pub trait Proof<H: Hasher>: Sized {
-    fn proof_to_hash(&self) -> Output<H::OutputSizeInBytes>;
+    fn proof_to_hash(&self) -> Output<H>;
     fn from_bytes(bytes: &[u8]) -> Result<Self, crypto::Error>;
     fn to_bytes(&self) -> Vec<u8>;
 }

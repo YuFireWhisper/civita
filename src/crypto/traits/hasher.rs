@@ -1,7 +1,7 @@
 use generic_array::{ArrayLength, GenericArray};
 use sha2::Digest;
 
-pub type Output<N> = GenericArray<u8, N>;
+pub type Output<H: Hasher> = GenericArray<u8, H::OutputSizeInBytes>;
 
 pub trait Hasher {
     const BLOCK_SIZE_IN_BYTES: usize;
@@ -9,7 +9,7 @@ pub trait Hasher {
 
     type OutputSizeInBytes: ArrayLength;
 
-    fn hash(msg: &[u8]) -> Output<Self::OutputSizeInBytes>;
+    fn hash(msg: &[u8]) -> Output<Self>;
 }
 
 impl Hasher for sha2::Sha256 {
@@ -18,7 +18,7 @@ impl Hasher for sha2::Sha256 {
 
     type OutputSizeInBytes = generic_array::typenum::U32;
 
-    fn hash(input: &[u8]) -> Output<Self::OutputSizeInBytes> {
+    fn hash(input: &[u8]) -> Output<Self> {
         GenericArray::from_array(sha2::Sha256::digest(input).into())
     }
 }

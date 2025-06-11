@@ -1,17 +1,19 @@
+use serde::{Deserialize, Serialize};
+
 pub mod algebra;
 pub mod dkg;
+pub mod ec;
 pub mod error;
 pub mod keypair;
 pub mod threshold;
+pub mod traits;
 pub mod tss;
 pub mod types;
 pub mod vss;
 
-mod ec;
-mod traits;
-
 pub use error::Error;
-use serde::{Deserialize, Serialize};
+pub use traits::hasher::Output as HashOutput;
+pub use traits::Hasher;
 
 pub struct SecretKey<S: traits::Suite>(pub(crate) S::SecretKey);
 pub struct PublicKey<S: traits::Suite>(pub(crate) S::PublicKey);
@@ -115,9 +117,7 @@ impl<'de, S: traits::Suite> Deserialize<'de> for PublicKey<S> {
 }
 
 impl<S: traits::Suite> traits::vrf::Proof<S::Hasher> for Proof<S> {
-    fn proof_to_hash(
-        &self,
-    ) -> traits::hasher::Output<<S::Hasher as traits::hasher::Hasher>::OutputSizeInBytes> {
+    fn proof_to_hash(&self) -> traits::hasher::Output<S::Hasher> {
         self.0.proof_to_hash()
     }
 

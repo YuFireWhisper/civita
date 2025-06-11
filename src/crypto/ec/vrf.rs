@@ -32,7 +32,7 @@ pub trait Config: hash_to_curve::Config + SerializeSize {
 }
 
 impl<C: Config> traits::vrf::Proof<C::Hasher> for Proof<C> {
-    fn proof_to_hash(&self) -> Output<<C::Hasher as Hasher>::OutputSizeInBytes> {
+    fn proof_to_hash(&self) -> Output<C::Hasher> {
         const DOMAIN_SEPARATOR_FRONT: u8 = 0x03;
         const DOMAIN_SEPARATOR_BACK: u8 = 0x00;
 
