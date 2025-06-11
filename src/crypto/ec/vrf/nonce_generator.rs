@@ -1,13 +1,12 @@
 use ark_ff::{BigInteger, PrimeField};
 
-use crate::crypto::traits::hasher::Hasher;
+use crate::crypto::traits::hasher::{Hasher, Output};
 
 pub fn generate_nonce<H: Hasher, F: PrimeField>(private_key: F, msg: &[u8]) -> F {
     let h1 = H::hash(msg);
-    let vlen = H::OUTPUT_SIZE_IN_BIT.div_ceil(8);
 
-    let mut v = vec![0x01u8; vlen];
-    let mut k = vec![0x00u8; vlen];
+    let mut v = Output::<H::OutputSizeInBytes>::default();
+    let mut k = Output::<H::OutputSizeInBytes>::default();
 
     let x_bytes = private_key.into_bigint().to_bytes_be();
     let h1_bits = F::from_be_bytes_mod_order(&h1).into_bigint().to_bytes_be();
@@ -50,12 +49,12 @@ pub fn generate_nonce<H: Hasher, F: PrimeField>(private_key: F, msg: &[u8]) -> F
     }
 }
 
-fn hmac<H: Hasher>(key: &[u8], message: &[u8]) -> Vec<u8> {
+fn hmac<H: Hasher>(key: &[u8], message: &[u8]) -> Output<H::OutputSizeInBytes> {
     const IPAD: u8 = 0x36;
     const OPAD: u8 = 0x5C;
 
     let actual_key = if key.len() > H::BLOCK_SIZE_IN_BYTES {
-        H::hash(key)
+        H::hash(key).to_vec()
     } else {
         key.to_vec()
     };

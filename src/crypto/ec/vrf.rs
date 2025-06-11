@@ -11,7 +11,7 @@ use crate::crypto::{
     },
     traits::{
         self,
-        hasher::Hasher,
+        hasher::{Hasher, Output},
         vrf::{Prover, VerifyProof},
     },
 };
@@ -31,8 +31,8 @@ pub trait Config: hash_to_curve::Config + SerializeSize {
     const COFACTOR_SCALAR: Self::ScalarField;
 }
 
-impl<C: Config> traits::vrf::Proof for Proof<C> {
-    fn proof_to_hash(&self) -> Vec<u8> {
+impl<C: Config> traits::vrf::Proof<C::Hasher> for Proof<C> {
+    fn proof_to_hash(&self) -> Output<<C::Hasher as Hasher>::OutputSizeInBytes> {
         const DOMAIN_SEPARATOR_FRONT: u8 = 0x03;
         const DOMAIN_SEPARATOR_BACK: u8 = 0x00;
 
@@ -76,7 +76,7 @@ impl<C: Config> traits::vrf::Proof for Proof<C> {
     }
 }
 
-impl<C: Config> Prover<Proof<C>> for SecretKey<C> {
+impl<C: Config> Prover<Proof<C>, C::Hasher> for SecretKey<C> {
     fn prove(&self, alpha: &[u8]) -> Proof<C> {
         let y = (C::GENERATOR * self.sk).into_affine();
         let h = C::hash_to_curve(alpha);
@@ -97,7 +97,7 @@ impl<C: Config> Prover<Proof<C>> for SecretKey<C> {
     }
 }
 
-impl<C: Config> VerifyProof<Proof<C>> for Affine<C> {
+impl<C: Config> VerifyProof<Proof<C>, C::Hasher> for Affine<C> {
     fn verify_proof(&self, alpha: &[u8], proof: &Proof<C>) -> bool {
         let h = C::hash_to_curve(alpha);
         let u = C::GENERATOR * proof.s - (*self) * proof.c;

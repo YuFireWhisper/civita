@@ -38,7 +38,7 @@ impl<S: traits::Suite> traits::SecretKey for SecretKey<S> {
     }
 }
 
-impl<S: traits::Suite> traits::vrf::Prover<S::Proof> for SecretKey<S> {
+impl<S: traits::Suite> traits::vrf::Prover<S::Proof, S::Hasher> for SecretKey<S> {
     fn prove(&self, msg: &[u8]) -> S::Proof {
         self.0.prove(msg)
     }
@@ -81,7 +81,7 @@ impl<S: traits::Suite> traits::PublicKey for PublicKey<S> {
     }
 }
 
-impl<S: traits::Suite> traits::vrf::VerifyProof<S::Proof> for PublicKey<S> {
+impl<S: traits::Suite> traits::vrf::VerifyProof<S::Proof, S::Hasher> for PublicKey<S> {
     fn verify_proof(&self, msg: &[u8], proof: &S::Proof) -> bool {
         self.0.verify_proof(msg, proof)
     }
@@ -114,8 +114,10 @@ impl<'de, S: traits::Suite> Deserialize<'de> for PublicKey<S> {
     }
 }
 
-impl<S: traits::Suite> traits::vrf::Proof for Proof<S> {
-    fn proof_to_hash(&self) -> Vec<u8> {
+impl<S: traits::Suite> traits::vrf::Proof<S::Hasher> for Proof<S> {
+    fn proof_to_hash(
+        &self,
+    ) -> traits::hasher::Output<<S::Hasher as traits::hasher::Hasher>::OutputSizeInBytes> {
         self.0.proof_to_hash()
     }
 
