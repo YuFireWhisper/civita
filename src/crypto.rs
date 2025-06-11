@@ -12,7 +12,6 @@ pub mod types;
 pub mod vss;
 
 pub use error::Error;
-pub use traits::hasher::Output as HashOutput;
 pub use traits::Hasher;
 
 pub struct SecretKey<S: traits::Suite>(pub(crate) S::SecretKey);
@@ -117,7 +116,7 @@ impl<'de, S: traits::Suite> Deserialize<'de> for PublicKey<S> {
 }
 
 impl<S: traits::Suite> traits::vrf::Proof<S::Hasher> for Proof<S> {
-    fn proof_to_hash(&self) -> traits::hasher::Output<S::Hasher> {
+    fn proof_to_hash(&self) -> traits::hasher::HashArray<S::Hasher> {
         self.0.proof_to_hash()
     }
 

@@ -1,10 +1,12 @@
+use generic_array::GenericArray;
+
 use crate::crypto::{
     self,
-    traits::{hasher::Output, secret_key::SecretKey, Hasher, PublicKey},
+    traits::{secret_key::SecretKey, Hasher, PublicKey},
 };
 
 pub trait Proof<H: Hasher>: Sized {
-    fn proof_to_hash(&self) -> Output<H>;
+    fn proof_to_hash(&self) -> GenericArray<u8, <H as Hasher>::OutputSizeInBytes>;
     fn from_bytes(bytes: &[u8]) -> Result<Self, crypto::Error>;
     fn to_bytes(&self) -> Vec<u8>;
 }

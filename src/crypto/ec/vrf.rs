@@ -1,6 +1,7 @@
 use ark_ec::{short_weierstrass::Affine, CurveGroup};
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use generic_array::GenericArray;
 
 use crate::crypto::{
     self,
@@ -11,7 +12,7 @@ use crate::crypto::{
     },
     traits::{
         self,
-        hasher::{Hasher, Output},
+        hasher::Hasher,
         vrf::{Prover, VerifyProof},
     },
 };
@@ -32,7 +33,7 @@ pub trait Config: hash_to_curve::Config + SerializeSize {
 }
 
 impl<C: Config> traits::vrf::Proof<C::Hasher> for Proof<C> {
-    fn proof_to_hash(&self) -> Output<C::Hasher> {
+    fn proof_to_hash(&self) -> GenericArray<u8, <C::Hasher as Hasher>::OutputSizeInBytes> {
         const DOMAIN_SEPARATOR_FRONT: u8 = 0x03;
         const DOMAIN_SEPARATOR_BACK: u8 = 0x00;
 

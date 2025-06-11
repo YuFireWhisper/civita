@@ -96,7 +96,7 @@ fn generate_challenge<C: BaseConfig>(
     pk.serialize_compressed(&mut bytes)
         .expect("Failed to serialize point");
 
-    C::ScalarField::from_be_bytes_mod_order(C::Hasher::hash(&bytes).as_slice())
+    C::ScalarField::from_be_bytes_mod_order(<C::Hasher as Hasher>::hash(&bytes).as_slice())
 }
 
 #[cfg(test)]
