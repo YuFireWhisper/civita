@@ -1,6 +1,3 @@
-#![feature(associated_type_defaults)]
-#![feature(slice_as_array)]
-
 pub mod consensus;
 pub mod constants;
 pub mod crypto;
