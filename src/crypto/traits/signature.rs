@@ -8,10 +8,14 @@ pub trait Signature: Sized {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-pub trait Signer<S: Signature>: SecretKey {
-    fn sign(&self, msg: &[u8]) -> S;
+pub trait Signer: SecretKey {
+    type Signature: Signature;
+
+    fn sign(&self, msg: &[u8]) -> Self::Signature;
 }
 
-pub trait VerifiySignature<S: Signature>: PublicKey {
-    fn verify_signature(&self, msg: &[u8], sig: &S) -> bool;
+pub trait VerifiySignature: PublicKey {
+    type Signature: Signature;
+
+    fn verify_signature(&self, msg: &[u8], sig: &Self::Signature) -> bool;
 }

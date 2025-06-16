@@ -9,4 +9,3 @@ mod serialize_size;
 mod signature;
 mod suite_implements;
 mod vrf;
-

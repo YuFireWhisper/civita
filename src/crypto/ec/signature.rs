@@ -55,7 +55,9 @@ impl<C: BaseConfig + SerializeSize> traits::signature::Signature for Signature<C
     }
 }
 
-impl<C: BaseConfig + SerializeSize> traits::Signer<Signature<C>> for SecretKey<C> {
+impl<C: BaseConfig + SerializeSize> traits::Signer for SecretKey<C> {
+    type Signature = Signature<C>;
+
     fn sign(&self, msg: &[u8]) -> Signature<C> {
         let mut random = [0u8; 32];
         rand::rng().fill(&mut random);
@@ -72,7 +74,9 @@ impl<C: BaseConfig + SerializeSize> traits::Signer<Signature<C>> for SecretKey<C
     }
 }
 
-impl<C: BaseConfig + SerializeSize> traits::VerifiySignature<Signature<C>> for Affine<C> {
+impl<C: BaseConfig + SerializeSize> traits::VerifiySignature for Affine<C> {
+    type Signature = Signature<C>;
+
     fn verify_signature(&self, msg: &[u8], sig: &Signature<C>) -> bool {
         let e = generate_challenge::<C>(msg, sig.r.into(), self);
 

@@ -16,8 +16,8 @@ pub use traits::Hasher;
 
 pub struct SecretKey<S: traits::Suite>(pub(crate) S::SecretKey);
 pub struct PublicKey<S: traits::Suite>(pub(crate) S::PublicKey);
-pub struct Proof<S: traits::Suite>(pub(crate) S::Proof);
-pub struct Signature<S: traits::Suite>(pub(crate) S::Signature);
+pub struct Proof<S: traits::Suite>(pub(crate) <S::SecretKey as traits::vrf::Prover>::Proof);
+pub struct Signature<S: traits::Suite>(pub(crate) <S::SecretKey as traits::Signer>::Signature);
 
 impl<S: traits::Suite> traits::SecretKey for SecretKey<S> {
     type PublicKey = PublicKey<S>;
@@ -39,14 +39,18 @@ impl<S: traits::Suite> traits::SecretKey for SecretKey<S> {
     }
 }
 
-impl<S: traits::Suite> traits::vrf::Prover<S::Proof, S::Hasher> for SecretKey<S> {
-    fn prove(&self, msg: &[u8]) -> S::Proof {
+impl<S: traits::Suite> traits::vrf::Prover for SecretKey<S> {
+    type Proof = <S::SecretKey as traits::vrf::Prover>::Proof;
+
+    fn prove(&self, msg: &[u8]) -> <S::SecretKey as traits::vrf::Prover>::Proof {
         self.0.prove(msg)
     }
 }
 
-impl<S: traits::Suite> traits::Signer<S::Signature> for SecretKey<S> {
-    fn sign(&self, msg: &[u8]) -> S::Signature {
+impl<S: traits::Suite> traits::Signer for SecretKey<S> {
+    type Signature = <S::SecretKey as traits::Signer>::Signature;
+
+    fn sign(&self, msg: &[u8]) -> <S::SecretKey as traits::Signer>::Signature {
         self.0.sign(msg)
     }
 }
@@ -82,14 +86,26 @@ impl<S: traits::Suite> traits::PublicKey for PublicKey<S> {
     }
 }
 
-impl<S: traits::Suite> traits::vrf::VerifyProof<S::Proof, S::Hasher> for PublicKey<S> {
-    fn verify_proof(&self, msg: &[u8], proof: &S::Proof) -> bool {
+impl<S: traits::Suite> traits::vrf::VerifyProof for PublicKey<S> {
+    type Proof = <S::PublicKey as traits::vrf::VerifyProof>::Proof;
+
+    fn verify_proof(
+        &self,
+        msg: &[u8],
+        proof: &<S::PublicKey as traits::vrf::VerifyProof>::Proof,
+    ) -> bool {
         self.0.verify_proof(msg, proof)
     }
 }
 
-impl<S: traits::Suite> traits::VerifiySignature<S::Signature> for PublicKey<S> {
-    fn verify_signature(&self, msg: &[u8], sig: &S::Signature) -> bool {
+impl<S: traits::Suite> traits::VerifiySignature for PublicKey<S> {
+    type Signature = <S::PublicKey as traits::VerifiySignature>::Signature;
+
+    fn verify_signature(
+        &self,
+        msg: &[u8],
+        sig: &<S::PublicKey as traits::VerifiySignature>::Signature,
+    ) -> bool {
         self.0.verify_signature(msg, sig)
     }
 }
@@ -115,7 +131,9 @@ impl<'de, S: traits::Suite> Deserialize<'de> for PublicKey<S> {
     }
 }
 
-impl<S: traits::Suite> traits::vrf::Proof<S::Hasher> for Proof<S> {
+impl<S: traits::Suite> traits::vrf::Proof for Proof<S> {
+    type Hasher = S::Hasher;
+
     fn proof_to_hash(&self) -> traits::hasher::HashArray<S::Hasher> {
         self.0.proof_to_hash()
     }
@@ -152,7 +170,9 @@ impl<'de, S: traits::Suite> Deserialize<'de> for Proof<S> {
 
 impl<S: traits::Suite> traits::Signature for Signature<S> {
     fn from_slice(bytes: &[u8]) -> Result<Self, self::Error> {
-        S::Signature::from_slice(bytes).map(Signature)
+        Ok(Self(<S::Signature as traits::Signature>::from_slice(
+            bytes,
+        )?))
     }
 
     fn to_bytes(&self) -> Vec<u8> {

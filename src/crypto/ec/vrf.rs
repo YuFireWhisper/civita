@@ -1,7 +1,6 @@
 use ark_ec::{short_weierstrass::Affine, CurveGroup};
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use generic_array::GenericArray;
 
 use crate::crypto::{
     self,
@@ -12,7 +11,7 @@ use crate::crypto::{
     },
     traits::{
         self,
-        hasher::Hasher,
+        hasher::{HashArray, Hasher},
         vrf::{Prover, VerifyProof},
     },
 };
@@ -32,8 +31,10 @@ pub trait Config: hash_to_curve::Config + SerializeSize {
     const COFACTOR_SCALAR: Self::ScalarField;
 }
 
-impl<C: Config> traits::vrf::Proof<C::Hasher> for Proof<C> {
-    fn proof_to_hash(&self) -> GenericArray<u8, <C::Hasher as Hasher>::OutputSizeInBytes> {
+impl<C: Config> traits::vrf::Proof for Proof<C> {
+    type Hasher = C::Hasher;
+
+    fn proof_to_hash(&self) -> HashArray<Self::Hasher> {
         const DOMAIN_SEPARATOR_FRONT: u8 = 0x03;
         const DOMAIN_SEPARATOR_BACK: u8 = 0x00;
 
@@ -77,7 +78,9 @@ impl<C: Config> traits::vrf::Proof<C::Hasher> for Proof<C> {
     }
 }
 
-impl<C: Config> Prover<Proof<C>, C::Hasher> for SecretKey<C> {
+impl<C: Config> Prover for SecretKey<C> {
+    type Proof = Proof<C>;
+
     fn prove(&self, alpha: &[u8]) -> Proof<C> {
         let y = (C::GENERATOR * self.sk).into_affine();
         let h = C::hash_to_curve(alpha);
@@ -98,7 +101,9 @@ impl<C: Config> Prover<Proof<C>, C::Hasher> for SecretKey<C> {
     }
 }
 
-impl<C: Config> VerifyProof<Proof<C>, C::Hasher> for Affine<C> {
+impl<C: Config> VerifyProof for Affine<C> {
+    type Proof = Proof<C>;
+
     fn verify_proof(&self, alpha: &[u8], proof: &Proof<C>) -> bool {
         let h = C::hash_to_curve(alpha);
         let u = C::GENERATOR * proof.s - (*self) * proof.c;
