@@ -4,8 +4,7 @@ use futures::StreamExt;
 use libp2p::PeerId;
 
 use crate::{
-    constants::HashArray,
-    crypto::tss::Signature,
+    crypto::{traits::hasher::HashArray, tss::Signature, Hasher},
     network::transport::{
         behaviour::Behaviour,
         protocols::{
@@ -275,30 +274,25 @@ impl Transport {
         self.request_response.request(peer_id, request).await
     }
 
-    pub async fn put(
+    pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
+        self.kad.put::<H>(record).await.map_err(Error::from)
+    }
+
+    pub async fn get<T: TryFrom<Vec<u8>, Error: Display> + 'static, H: Hasher>(
         &self,
-        key: &HashArray,
-        payload: kad::Payload,
-        signature: Signature,
-    ) -> Result<()> {
+        key: &HashArray<H>,
+    ) -> Result<Option<T>> {
+        self.kad.get::<T, H>(key).await.map_err(Error::from)
+    }
+
+    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display> + 'static, H: Hasher>(
+        &self,
+        key: &HashArray<H>,
+    ) -> Result<T> {
         self.kad
-            .put(key, payload, signature)
+            .get_or_error::<T, H>(key)
             .await
             .map_err(Error::from)
-    }
-
-    pub async fn get<T: TryFrom<Vec<u8>, Error: Display> + 'static>(
-        &self,
-        key: &HashArray,
-    ) -> Result<Option<T>> {
-        self.kad.get::<T>(key).await.map_err(Error::from)
-    }
-
-    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display> + 'static>(
-        &self,
-        key: &HashArray,
-    ) -> Result<T> {
-        self.kad.get_or_error::<T>(key).await.map_err(Error::from)
     }
 
     pub fn self_peer(&self) -> PeerId {

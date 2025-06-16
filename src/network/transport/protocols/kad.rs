@@ -3,10 +3,9 @@ use std::{fmt::Display, sync::Arc};
 use dashmap::DashMap;
 
 use crate::{
-    constants::HashArray,
-    crypto::tss::Signature,
+    crypto::{traits::hasher::HashArray, Hasher},
     network::transport::behaviour::Behaviour,
-    traits::{byteable, Byteable},
+    traits::byteable,
 };
 
 pub mod message;
@@ -161,10 +160,11 @@ impl Kad {
         }
     }
 
-    pub async fn put(&self, key: &HashArray, payload: Payload, signature: Signature) -> Result<()> {
+    pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
+        let key = H::hash(&record);
         let key = libp2p::kad::RecordKey::new(&key);
-        let record_value = Message::new(payload, signature)?.to_vec()?;
-        let record = libp2p::kad::Record::new(key, record_value);
+
+        let record = libp2p::kad::Record::new(key, record);
 
         let mut swarm = self.swarm.lock().await;
         let query_id = swarm
@@ -178,16 +178,16 @@ impl Kad {
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
     }
 
-    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display>>(
+    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display>, H: Hasher>(
         &self,
-        key: &HashArray,
+        key: &HashArray<H>,
     ) -> Result<T> {
-        self.get::<T>(key).await?.ok_or(Error::NotFound)
+        self.get::<T, H>(key).await?.ok_or(Error::NotFound)
     }
 
-    pub async fn get<T: TryFrom<Vec<u8>, Error: Display>>(
+    pub async fn get<T: TryFrom<Vec<u8>, Error: Display>, H: Hasher>(
         &self,
-        key: &HashArray,
+        key: &HashArray<H>,
     ) -> Result<Option<T>> {
         let mut swarm = self.swarm.lock().await;
         let key = libp2p::kad::RecordKey::new(key);
