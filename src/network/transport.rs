@@ -1,7 +1,8 @@
-use std::{collections::HashSet, fmt::Display, io, sync::Arc};
+use std::{collections::HashSet, fmt::Display, sync::Arc};
 
 use futures::StreamExt;
 use libp2p::PeerId;
+use tokio::sync::mpsc::Receiver;
 
 use crate::{
     crypto::{traits::hasher::HashArray, tss::Signature, Hasher},
@@ -16,50 +17,18 @@ use crate::{
     },
 };
 
-pub mod behaviour;
 pub mod config;
+pub mod error;
 pub mod protocols;
 pub mod store;
 
+mod behaviour;
 mod dispatcher;
 
 pub use config::Config;
+pub use error::Error;
 
 type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Behaviour(#[from] behaviour::Error),
-
-    #[error("{0}")]
-    Gossipsub(#[from] gossipsub::Error),
-
-    #[error("{0}")]
-    Kad(#[from] kad::Error),
-
-    #[error("{0}")]
-    RequestResponse(#[from] request_response::Error),
-
-    #[error("Timeout")]
-    Timeout(#[from] tokio::time::error::Elapsed),
-
-    #[error("Lock contention")]
-    LockContention,
-
-    #[error("Listener error: {0}")]
-    Listener(#[from] io::Error),
-
-    #[error("Transport error: {0}")]
-    Transport(#[from] libp2p::TransportError<io::Error>),
-
-    #[error("Dial error: {0}")]
-    Dial(#[from] libp2p::swarm::DialError),
-
-    #[error("")]
-    MockError, // For testing
-}
 
 #[allow(dead_code)]
 enum KadResult {
@@ -164,8 +133,9 @@ impl Transport {
                 }
             }
         })
-        .await??;
-        Ok(())
+        .await
+        .map_err(Error::from)
+        .and_then(|result| result)
     }
 
     async fn receive(&self) {
@@ -233,10 +203,7 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn listen_on_topic(
-        &self,
-        topic: &str,
-    ) -> Result<tokio::sync::mpsc::Receiver<gossipsub::Message>> {
+    pub async fn listen_on_topic(&self, topic: &str) -> Result<Receiver<gossipsub::Message>> {
         self.gossipsub.subscribe(topic).await.map_err(Error::from)
     }
 

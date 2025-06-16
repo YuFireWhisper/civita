@@ -9,10 +9,7 @@ use generic_array::{ArrayLength, GenericArray};
 
 use crate::{
     crypto::{traits::hasher::HashArray, Hasher},
-    network::transport::{
-        self,
-        protocols::kad::{self},
-    },
+    network::transport,
 };
 
 #[cfg(not(test))]
@@ -33,9 +30,6 @@ type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("{0}")]
     Transport(#[from] transport::Error),
-
-    #[error("{0}")]
-    Kad(#[from] kad::Error),
 
     #[error("{0}")]
     Decode(#[from] DecodeError),
