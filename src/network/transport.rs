@@ -182,7 +182,7 @@ impl Transport {
                         match event {
                             behaviour::Event::Gossipsub(event) => {
                                 if let Err(e) = gossipsub.handle_event(*event).await {
-                                    log::error!("Error handling gossipsub event: {:?}", e);
+                                    log::error!("Error handling gossipsub event: {e:?}");
                                 }
                             },
                             behaviour::Event::Kad(event) => {
@@ -190,7 +190,7 @@ impl Transport {
                             },
                             behaviour::Event::RequestResponse(event) => {
                                 if let Err(e) = request_response.handle_event(event) {
-                                    log::error!("Error handling request-response event: {:?}", e);
+                                    log::error!("Error handling request-response event: {e:?}");
                                 }
                             },
                         }
@@ -386,11 +386,7 @@ mod tests {
 
         let result = Transport::new(keypair.clone(), listen_addr, config.clone()).await;
 
-        assert!(
-            result.is_ok(),
-            "Failed to create Libp2pTransport: {:?}",
-            result
-        );
+        assert!(result.is_ok(), "Failed to create Transport: {result:?}");
     }
 
     #[tokio::test]
@@ -410,7 +406,7 @@ mod tests {
 
         let result = ctx.t1.p2p.listen_on_topic(TOPIC).await;
 
-        assert!(result.is_ok(), "Failed to listen on topic: {:?}", result);
+        assert!(result.is_ok(), "Failed to listen on topic: {result:?}");
     }
 
     #[tokio::test]
@@ -424,7 +420,7 @@ mod tests {
 
         let result = ctx.t1.p2p.publish(TOPIC, payload.clone()).await;
 
-        assert!(result.is_ok(), "Failed to publish message: {:?}", result);
+        assert!(result.is_ok(), "Failed to publish message: {result:?}");
     }
 
     #[tokio::test]
@@ -444,7 +440,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result, "Failed to receive message: {:?}", result);
+        assert!(result, "Failed to receive message: {result:?}");
     }
 
     #[tokio::test]
@@ -467,7 +463,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result, "Failed to receive message: {:?}", result);
+        assert!(result, "Failed to receive message: {result:?}");
     }
 }
 
