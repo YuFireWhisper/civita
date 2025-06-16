@@ -1,9 +1,11 @@
+use std::fmt::Debug;
+
 use crate::crypto::{
     self,
     traits::{secret_key::SecretKey, PublicKey},
 };
 
-pub trait Signature: Sized {
+pub trait Signature: Clone + Debug + Eq + Sized + Sync + Send + 'static {
     fn from_slice(bytes: &[u8]) -> Result<Self, crypto::Error>;
     fn to_bytes(&self) -> Vec<u8>;
 }

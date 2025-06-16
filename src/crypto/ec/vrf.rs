@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use ark_ec::{short_weierstrass::Affine, CurveGroup};
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -20,14 +22,14 @@ mod challenge_generator;
 mod nonce_generator;
 mod suites;
 
-#[derive(Debug)]
+#[derive(Eq, PartialEq)]
 pub struct Proof<C: Config> {
     pub gamma: Affine<C>,
     pub c: C::ScalarField,
     pub s: C::ScalarField,
 }
 
-pub trait Config: hash_to_curve::Config + SerializeSize {
+pub trait Config: hash_to_curve::Config + SerializeSize + Eq + PartialEq {
     const COFACTOR_SCALAR: Self::ScalarField;
 }
 
@@ -117,6 +119,26 @@ impl<C: Config> VerifyProof for Affine<C> {
         ]);
 
         proof.c == c_prime
+    }
+}
+
+impl<C: Config> Clone for Proof<C> {
+    fn clone(&self) -> Self {
+        Proof {
+            gamma: self.gamma,
+            c: self.c,
+            s: self.s,
+        }
+    }
+}
+
+impl<C: Config> Debug for Proof<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Proof")
+            .field("gamma", &self.gamma)
+            .field("c", &self.c)
+            .field("s", &self.s)
+            .finish()
     }
 }
 

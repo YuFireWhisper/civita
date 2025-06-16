@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use ark_ec::{
     short_weierstrass::{Affine, Projective},
     CurveGroup,
@@ -16,7 +18,6 @@ use crate::crypto::{
     traits::{self, hasher::Hasher},
 };
 
-#[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub struct Signature<C: BaseConfig + SerializeSize> {
     #[serde(with = "serialize_affine")]
@@ -55,7 +56,7 @@ impl<C: BaseConfig + SerializeSize> traits::signature::Signature for Signature<C
     }
 }
 
-impl<C: BaseConfig + SerializeSize> traits::Signer for SecretKey<C> {
+impl<C: BaseConfig + SerializeSize + Eq> traits::Signer for SecretKey<C> {
     type Signature = Signature<C>;
 
     fn sign(&self, msg: &[u8]) -> Signature<C> {
@@ -74,7 +75,7 @@ impl<C: BaseConfig + SerializeSize> traits::Signer for SecretKey<C> {
     }
 }
 
-impl<C: BaseConfig + SerializeSize> traits::VerifiySignature for Affine<C> {
+impl<C: BaseConfig + SerializeSize + Eq> traits::VerifiySignature for Affine<C> {
     type Signature = Signature<C>;
 
     fn verify_signature(&self, msg: &[u8], sig: &Signature<C>) -> bool {
@@ -102,6 +103,32 @@ fn generate_challenge<C: BaseConfig>(
 
     C::ScalarField::from_be_bytes_mod_order(<C::Hasher as Hasher>::hash(&bytes).as_slice())
 }
+
+impl<C: BaseConfig + SerializeSize> Clone for Signature<C> {
+    fn clone(&self) -> Self {
+        Signature {
+            r: self.r,
+            s: self.s,
+        }
+    }
+}
+
+impl<C: BaseConfig + SerializeSize> Debug for Signature<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Signature")
+            .field("r", &self.r)
+            .field("s", &self.s)
+            .finish()
+    }
+}
+
+impl<C: BaseConfig + SerializeSize> PartialEq for Signature<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.r == other.r && self.s == other.s
+    }
+}
+
+impl<C: BaseConfig + SerializeSize> Eq for Signature<C> {}
 
 #[cfg(test)]
 mod tests {

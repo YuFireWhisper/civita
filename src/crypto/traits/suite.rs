@@ -5,7 +5,7 @@ use crate::crypto::traits::{
     Hasher, Signature, Signer, VerifiySignature,
 };
 
-pub trait Suite {
+pub trait Suite: 'static {
     type SecretKey: SecretKey<PublicKey = Self::PublicKey>
         + vrf::Prover<Proof = Self::Proof>
         + Signer<Signature = Self::Signature>;

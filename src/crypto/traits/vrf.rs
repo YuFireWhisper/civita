@@ -1,9 +1,11 @@
+use std::fmt::Debug;
+
 use crate::crypto::{
     self,
     traits::{hasher::HashArray, secret_key::SecretKey, Hasher, PublicKey},
 };
 
-pub trait Proof: Sized {
+pub trait Proof: Clone + Debug + Eq + Sized + Sync + Send + 'static {
     type Hasher: Hasher;
 
     fn proof_to_hash(&self) -> HashArray<Self::Hasher>;
@@ -11,7 +13,7 @@ pub trait Proof: Sized {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-pub trait Prover: SecretKey {
+pub trait Prover: SecretKey + Eq {
     type Proof: Proof;
 
     fn prove(&self, alpha: &[u8]) -> Self::Proof;

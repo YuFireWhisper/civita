@@ -44,6 +44,23 @@ impl<C: SWCurveConfig> traits::SecretKey for SecretKey<C> {
     }
 }
 
+impl<C: SWCurveConfig> Clone for SecretKey<C> {
+    fn clone(&self) -> Self {
+        SecretKey {
+            sk: self.sk,
+            pk: self.pk,
+        }
+    }
+}
+
+impl<C: SWCurveConfig> PartialEq for SecretKey<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.sk == other.sk && self.pk == other.pk
+    }
+}
+
+impl<C: SWCurveConfig> Eq for SecretKey<C> {}
+
 impl<C: SWCurveConfig> From<SecretKey<C>> for Vec<u8> {
     fn from(value: SecretKey<C>) -> Self {
         (&value).into()

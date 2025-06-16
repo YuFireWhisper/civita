@@ -1,6 +1,6 @@
 use crate::crypto;
 
-pub trait SecretKey: Sized {
+pub trait SecretKey: Clone + Eq + Sized + Sync + Send + 'static {
     type PublicKey;
 
     fn random() -> Self;
