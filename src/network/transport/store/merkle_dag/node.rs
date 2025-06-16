@@ -1,15 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
-use crossbeam::atomic::AtomicCell;
 use crossbeam_skiplist::{map::Entry, SkipMap};
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{
+    stream::{self, FuturesUnordered},
+    StreamExt,
+};
+use generic_array::GenericArray;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::{
-    constants::{HASH_ARRAY_LENGTH, USIZE_LENGTH},
-    network::transport::store::merkle_dag::{
-        BanchingFactor, Error, HashArray, KeyArray, Result, DEPTH,
-    },
+    crypto::{traits::hasher::HashArray, Hasher},
+    network::transport::store::merkle_dag::{Error, HasherConfig, KeyArray, Result},
 };
 
 #[cfg(not(test))]
@@ -18,73 +20,88 @@ use crate::network::transport::Transport;
 #[cfg(test)]
 use crate::network::transport::MockTransport as Transport;
 
-#[derive(Debug)]
-#[derive(Default)]
-pub struct Node {
-    hash: AtomicCell<HashArray>,
-    children: SkipMap<BanchingFactor, Node>,
-    depth: usize,
+type ChildrenMap<H> = SkipMap<<H as HasherConfig>::BanchingFactor, Node<H>>;
+
+pub struct Node<H: HasherConfig> {
+    hash: RwLock<HashArray<H>>,
+    children: ChildrenMap<H>,
 }
 
-impl Node {
-    pub fn with_hash(hash: HashArray, depth: usize) -> Self {
+impl<H: HasherConfig> Node<H> {
+    pub fn with_hash(hash: HashArray<H>) -> Self {
         Node {
-            hash: AtomicCell::new(hash),
-            depth,
+            hash: RwLock::new(hash),
             ..Default::default()
         }
     }
 
-    pub fn with_children(children: SkipMap<BanchingFactor, Node>, depth: usize) -> Self {
+    pub async fn with_children(children: ChildrenMap<H>) -> Self {
         Node {
-            hash: AtomicCell::new(calc_hash(&children)),
+            hash: RwLock::new(calc_hash(&children).await),
             children,
-            depth,
-        }
-    }
-
-    pub fn with_depth(depth: usize) -> Self {
-        Node {
-            depth,
-            ..Default::default()
         }
     }
 
     pub async fn insert(
         &self,
-        key: KeyArray,
-        value: HashArray,
+        key: KeyArray<H>,
+        value: HashArray<H>,
         transport: &Transport,
-    ) -> Result<HashSet<HashArray>> {
-        if self.is_last_stub() {
-            self.insert_child(key[self.depth], value);
-            return Ok(HashSet::from([self.recalc_hash()]));
+    ) -> Result<HashSet<HashArray<H>>> {
+        self.insert_inner(key, value, transport, 0).await
+    }
+
+    async fn insert_inner(
+        &self,
+        key: KeyArray<H>,
+        value: HashArray<H>,
+        transport: &Transport,
+        depth: usize,
+    ) -> Result<HashSet<HashArray<H>>> {
+        if Self::is_last_stub(depth) {
+            self.children.insert(key[depth], Node::with_hash(value));
+            return Ok(HashSet::from([self.recalc_hash().await]));
         }
 
-        let entry = self.get_or_insert(key[self.depth]);
+        let entry = self
+            .child_with_ensure_loaded(&key[depth], depth, transport)
+            .await?;
 
-        entry.value().ensure_loaded(transport).await?;
-        Box::pin(entry.value().insert(key, value, transport)).await
+        let mut changed =
+            Box::pin(entry.value().insert_inner(key, value, transport, depth + 1)).await?;
+
+        changed.insert(self.recalc_hash().await);
+
+        Ok(changed)
     }
 
-    fn is_last_stub(&self) -> bool {
-        self.depth == DEPTH - 1
+    fn is_last_stub(depth: usize) -> bool {
+        depth == H::DEPTH - 1
     }
 
-    fn insert_child(&self, index: BanchingFactor, hash: HashArray) {
-        self.children
-            .insert(index, Node::with_hash(hash, self.depth + 1));
+    async fn child_with_ensure_loaded(
+        &self,
+        index: &H::BanchingFactor,
+        depth: usize,
+        transport: &Transport,
+    ) -> Result<Entry<H::BanchingFactor, Node<H>>> {
+        match self.children.get(index) {
+            Some(entry) => {
+                entry.value().ensure_loaded(depth, transport).await?;
+                Ok(entry)
+            }
+            None => {
+                self.children.insert(*index, Node::default());
+                Ok(self.children.get(index).unwrap())
+            }
+        }
     }
 
-    fn get_or_insert(&self, index: BanchingFactor) -> Entry<BanchingFactor, Node> {
-        self.children
-            .get_or_insert(index, Node::with_depth(self.depth + 1))
-    }
-
-    async fn ensure_loaded(&self, transport: &Transport) -> Result<()> {
-        if self.is_missing() {
-            let fetched = transport.get_or_error::<Node>(&self.hash()).await?;
-
+    async fn ensure_loaded(&self, depth: usize, transport: &Transport) -> Result<()> {
+        if self.is_missing(depth).await {
+            let fetched = transport
+                .get_or_error::<Node<H>, H>(&self.hash().await)
+                .await?;
             self.children.clear();
             fetched.children.into_iter().for_each(|(index, child)| {
                 self.children.insert(index, child);
@@ -94,21 +111,23 @@ impl Node {
         Ok(())
     }
 
-    fn is_missing(&self) -> bool {
-        !self.is_leaf() && self.children.is_empty() && self.hash.load() == HashArray::default()
+    async fn is_missing(&self, depth: usize) -> bool {
+        !self.is_leaf(depth)
+            && self.children.is_empty()
+            && *self.hash.read().await == HashArray::<H>::default()
     }
 
-    fn is_leaf(&self) -> bool {
-        self.depth == DEPTH
+    fn is_leaf(&self, depth: usize) -> bool {
+        depth == H::DEPTH
     }
 
-    fn recalc_hash(&self) -> HashArray {
+    async fn recalc_hash(&self) -> HashArray<H> {
         if self.children.is_empty() {
-            return self.hash.load();
+            return HashArray::<H>::default();
         }
 
-        let new_hash = calc_hash(&self.children);
-        self.hash.store(new_hash);
+        let new_hash = calc_hash(&self.children).await;
+        *self.hash.write().await = new_hash.clone();
         new_hash
     }
 
@@ -116,37 +135,44 @@ impl Node {
         &self,
         iter: I,
         transport: &Transport,
-    ) -> Result<HashSet<HashArray>>
+    ) -> Result<HashSet<HashArray<H>>>
     where
-        I: IntoIterator<Item = (KeyArray, HashArray)>,
+        I: IntoIterator<Item = (KeyArray<H>, HashArray<H>)>,
     {
-        if self.is_last_stub() {
-            iter.into_iter().for_each(|(key, value)| {
-                self.insert_child(key[self.depth], value);
-            });
+        self.batch_insert_inner(iter, transport, 0).await
+    }
 
-            return Ok(HashSet::from([self.recalc_hash()]));
+    async fn batch_insert_inner<I>(
+        &self,
+        iter: I,
+        transport: &Transport,
+        depth: usize,
+    ) -> Result<HashSet<HashArray<H>>>
+    where
+        I: IntoIterator<Item = (KeyArray<H>, HashArray<H>)>,
+    {
+        if Self::is_last_stub(depth) {
+            iter.into_iter().for_each(|(key, value)| {
+                self.children.insert(key[depth], Node::with_hash(value));
+            });
+            return Ok(HashSet::from([self.recalc_hash().await]));
         }
 
         let grouped: HashMap<_, Vec<_>> =
             iter.into_iter()
                 .fold(HashMap::new(), |mut acc, (key, value)| {
-                    acc.entry(key[self.depth]).or_default().push((key, value));
+                    acc.entry(key[depth]).or_default().push((key, value));
                     acc
                 });
 
         let mut futures: FuturesUnordered<_> = grouped
             .into_iter()
-            .map(|(index, group)| {
-                let entry = self.get_or_insert(index);
-
-                async move {
-                    entry.value().ensure_loaded(transport).await?;
-                    entry
-                        .value()
-                        .batch_insert(group.into_iter(), transport)
-                        .await
-                }
+            .map(|(index, group)| async move {
+                self.child_with_ensure_loaded(&index, depth, transport)
+                    .await?
+                    .value()
+                    .batch_insert_inner(group.into_iter(), transport, depth + 1)
+                    .await
             })
             .collect();
 
@@ -156,48 +182,77 @@ impl Node {
             changed.extend(result?);
         }
 
-        changed.insert(self.recalc_hash());
+        changed.insert(self.recalc_hash().await);
 
         Ok(changed)
     }
 
-    pub async fn get(&self, key: KeyArray, transport: &Transport) -> Result<Option<HashArray>> {
-        let entry = match self.children.get(&key[self.depth]) {
+    pub async fn get(
+        &self,
+        key: KeyArray<H>,
+        transport: &Transport,
+    ) -> Result<Option<HashArray<H>>> {
+        self.get_inner(key, transport, 0).await
+    }
+
+    async fn get_inner(
+        &self,
+        key: KeyArray<H>,
+        transport: &Transport,
+        depth: usize,
+    ) -> Result<Option<HashArray<H>>> {
+        let entry = match self.children.get(&key[depth]) {
             Some(entry) => entry,
             None => return Ok(None),
         };
 
-        let child = entry.value();
-
-        if child.is_leaf() {
-            return Ok(Some(child.hash()));
+        if Self::is_last_stub(depth) {
+            return Ok(Some(entry.value().hash().await));
         }
 
-        child.ensure_loaded(transport).await?;
+        let child = entry.value();
+        child.ensure_loaded(depth, transport).await?;
 
-        Box::pin(child.get(key, transport)).await
+        Box::pin(child.get_inner(key, transport, depth + 1)).await
     }
 
     pub async fn batch_get<I>(
         &self,
         iter: I,
         transport: &Transport,
-    ) -> Result<HashMap<KeyArray, HashArray>>
+    ) -> Result<HashMap<KeyArray<H>, HashArray<H>>>
     where
-        I: IntoIterator<Item = KeyArray>,
+        I: IntoIterator<Item = KeyArray<H>>,
     {
-        if self.is_last_stub() {
-            return Ok(iter.into_iter().fold(HashMap::new(), |mut acc, key| {
-                if let Some(entry) = self.children.get(&key[self.depth]) {
-                    acc.insert(key, entry.value().hash());
-                }
-                acc
-            }));
+        self.batch_get_inner(iter, transport, 0).await
+    }
+
+    async fn batch_get_inner<I>(
+        &self,
+        iter: I,
+        transport: &Transport,
+        depth: usize,
+    ) -> Result<HashMap<KeyArray<H>, HashArray<H>>>
+    where
+        I: IntoIterator<Item = KeyArray<H>>,
+    {
+        if Self::is_last_stub(depth) {
+            return Ok(stream::iter(iter)
+                .filter_map(|key| async move {
+                    if let Some(entry) = self.children.get(&key[depth]) {
+                        let hash = entry.value().hash().await;
+                        Some((key, hash))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<HashMap<_, _>>()
+                .await);
         }
 
         let grouped: HashMap<_, Vec<_>> =
             iter.into_iter().fold(HashMap::new(), |mut grouped, key| {
-                let index = key[self.depth];
+                let index = key[depth];
                 if self.child(&index).is_some() {
                     grouped.entry(index).or_default().push(key);
                 }
@@ -211,8 +266,11 @@ impl Node {
                 let entry = self.children.get(&index).unwrap();
 
                 async move {
-                    entry.value().ensure_loaded(transport).await?;
-                    entry.value().batch_get(keys, transport).await
+                    entry.value().ensure_loaded(depth, transport).await?;
+                    entry
+                        .value()
+                        .batch_get_inner(keys, transport, depth + 1)
+                        .await
                 }
             })
             .collect();
@@ -226,11 +284,11 @@ impl Node {
         Ok(collected)
     }
 
-    pub fn hash(&self) -> HashArray {
-        self.hash.load()
+    pub async fn hash(&self) -> HashArray<H> {
+        self.hash.read().await.clone()
     }
 
-    pub fn child(&self, index: &BanchingFactor) -> Option<Entry<BanchingFactor, Node>> {
+    pub fn child(&self, index: &H::BanchingFactor) -> Option<Entry<H::BanchingFactor, Node<H>>> {
         self.children.get(index)
     }
 
@@ -243,34 +301,47 @@ impl Node {
     }
 }
 
-fn calc_hash(children: &SkipMap<BanchingFactor, Node>) -> HashArray {
+pub async fn calc_hash<H: HasherConfig>(
+    children: &ChildrenMap<H>,
+) -> GenericArray<u8, <H as Hasher>::OutputSizeInBytes> {
     if children.is_empty() {
-        return HashArray::default();
+        return GenericArray::default();
     }
 
-    let mut hasher = blake3::Hasher::new();
-    children.iter().for_each(|entry| {
-        hasher.update(&entry.value().hash());
-    });
+    let hash_bytes = stream::iter(children.iter())
+        .then(|entry| async move { entry.value().hash().await })
+        .fold(Vec::new(), |mut acc, hash| async move {
+            acc.extend(hash);
+            acc
+        })
+        .await;
 
-    hasher.finalize().into()
+    <H as Hasher>::hash(&hash_bytes)
 }
 
-impl From<Node> for Vec<u8> {
-    fn from(node: Node) -> Self {
-        bincode::serde::encode_to_vec(&node, bincode::config::standard())
-            .expect("Failed to serialize Node")
+impl<H: HasherConfig> Default for Node<H> {
+    fn default() -> Self {
+        Node {
+            hash: RwLock::new(HashArray::<H>::default()),
+            children: SkipMap::new(),
+        }
     }
 }
 
-impl From<&Node> for Vec<u8> {
-    fn from(node: &Node) -> Self {
+impl<H: HasherConfig> From<Node<H>> for Vec<u8> {
+    fn from(node: Node<H>) -> Self {
+        (&node).into()
+    }
+}
+
+impl<H: HasherConfig> From<&Node<H>> for Vec<u8> {
+    fn from(node: &Node<H>) -> Self {
         bincode::serde::encode_to_vec(node, bincode::config::standard())
             .expect("Failed to serialize Node")
     }
 }
 
-impl TryFrom<Vec<u8>> for Node {
+impl<H: HasherConfig> TryFrom<Vec<u8>> for Node<H> {
     type Error = Error;
 
     fn try_from(vec: Vec<u8>) -> Result<Self> {
@@ -278,7 +349,7 @@ impl TryFrom<Vec<u8>> for Node {
     }
 }
 
-impl TryFrom<&[u8]> for Node {
+impl<H: HasherConfig> TryFrom<&[u8]> for Node<H> {
     type Error = Error;
 
     fn try_from(slice: &[u8]) -> Result<Self> {
@@ -288,74 +359,59 @@ impl TryFrom<&[u8]> for Node {
     }
 }
 
-impl Serialize for Node {
+impl<H: HasherConfig> Serialize for Node<H> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let mut bytes = Vec::new();
-
-        bytes.extend(self.depth.to_be_bytes());
+        let mut bytes = Vec::with_capacity(
+            self.children.len() * (H::BANCHING_FACTOR_SIZE + H::OUTPUT_SIZE_IN_BIT / 8),
+        );
 
         self.children.iter().for_each(|entry| {
-            bytes.extend(entry.key().to_be_bytes());
-            bytes.extend(entry.value().hash());
+            bytes.extend(H::serialize_banching_factor(entry.key()));
+            bytes.extend_from_slice(&entry.value().hash.try_read().expect("Failed to read hash"));
         });
-
-        if self.is_leaf() {
-            bytes.extend(self.hash());
-        }
 
         serializer.serialize_bytes(&bytes)
     }
 }
 
-impl<'de> Deserialize<'de> for Node {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+impl<'de, H: HasherConfig> Deserialize<'de> for Node<H> {
+    fn deserialize<DE>(deserializer: DE) -> std::result::Result<Self, DE::Error>
     where
-        D: serde::Deserializer<'de>,
+        DE: serde::Deserializer<'de>,
     {
-        const INDEX_LENGTH: usize = std::mem::size_of::<BanchingFactor>();
-        const CHILDREN_SIZE: usize = INDEX_LENGTH + HASH_ARRAY_LENGTH;
-
         let bytes = Vec::<u8>::deserialize(deserializer)?;
 
-        if bytes.len() < USIZE_LENGTH {
-            return Err(serde::de::Error::custom("Byte length too short"));
+        let children_len = H::BANCHING_FACTOR_SIZE + H::OUTPUT_SIZE_IN_BIT / 8;
+
+        if bytes.is_empty() || bytes.len() % children_len != 0 {
+            return Err(serde::de::Error::custom("Invalid byte length"));
         }
 
-        let len = bytes.len() - USIZE_LENGTH;
-        match len {
-            HASH_ARRAY_LENGTH => {}
-            _ if len % CHILDREN_SIZE == 0 => {}
-            _ => {
-                return Err(serde::de::Error::custom("Invalid byte length"));
-            }
-        }
+        let children_count = bytes.len() / children_len;
 
-        match usize::from_be_bytes(std::array::from_fn(|i| bytes[i])) {
-            DEPTH => {
-                let hash = std::array::from_fn(|i| bytes[USIZE_LENGTH + i]);
-                Ok(Node::with_hash(hash, DEPTH))
-            }
+        let mut hashes = Vec::with_capacity(H::OUTPUT_SIZE_IN_BIT / 8 * children_count);
 
-            depth if depth < DEPTH => {
-                let children_depth = depth + 1;
-                let children = SkipMap::new();
+        let children =
+            bytes
+                .chunks_exact(children_len)
+                .fold(ChildrenMap::default(), |children, chunk| {
+                    let index = H::deserialize_banching_factor(&chunk[..H::BANCHING_FACTOR_SIZE])
+                        .expect("Failed to deserialize index");
+                    let hash = HashArray::<H>::from_slice(&chunk[H::BANCHING_FACTOR_SIZE..]);
+                    hashes.extend_from_slice(hash);
+                    children.insert(index, Node::with_hash(hash.clone()));
+                    children
+                });
 
-                bytes[USIZE_LENGTH..]
-                    .chunks_exact(CHILDREN_SIZE)
-                    .for_each(|chunk| {
-                        let index =
-                            BanchingFactor::from_be_bytes(std::array::from_fn(|i| chunk[i]));
-                        let hash = std::array::from_fn(|i| chunk[INDEX_LENGTH + i]);
-                        children.insert(index, Node::with_hash(hash, children_depth));
-                    });
+        let hash = <H as Hasher>::hash(&hashes);
 
-                Ok(Node::with_children(children, depth))
-            }
-            _ => Err(serde::de::Error::custom("Invalid depth")),
-        }
+        Ok(Node {
+            hash: RwLock::new(hash),
+            children,
+        })
     }
 }
 
@@ -363,15 +419,31 @@ impl<'de> Deserialize<'de> for Node {
 mod tests {
     use super::*;
 
-    const KEY_1: KeyArray = [1; DEPTH];
-    const KEY_2: KeyArray = [2; DEPTH];
+    const KEY_1: KeyArray<sha2::Sha256> = GenericArray::from_array([
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10,
+    ]);
 
-    const HASH_1: HashArray = [1; HASH_ARRAY_LENGTH];
-    const HASH_2: HashArray = [2; HASH_ARRAY_LENGTH];
+    const KEY_2: KeyArray<sha2::Sha256> = GenericArray::from_array([
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x20,
+    ]);
+
+    const HASH_1: HashArray<sha2::Sha256> = GenericArray::from_array([
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e,
+        0x3f, 0x40,
+    ]);
+
+    const HASH_2: HashArray<sha2::Sha256> = GenericArray::from_array([
+        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e,
+        0x5f, 0x60,
+    ]);
 
     #[tokio::test]
     async fn insert_and_get() {
-        let node = Node::default();
+        let node = Node::<sha2::Sha256>::default();
         let transport = Transport::default();
 
         let changed = node.insert(KEY_1, HASH_1, &transport).await.unwrap();
@@ -381,14 +453,13 @@ mod tests {
 
         assert_eq!(same, Some(HASH_1));
         assert_eq!(different, None);
-        assert_eq!(changed.len(), DEPTH);
-        assert_ne!(node.hash(), HashArray::default());
-        assert!(changed.contains(&node.hash()));
+        assert_eq!(changed.len(), sha2::Sha256::DEPTH);
+        assert!(changed.contains(&node.hash().await));
     }
 
     #[tokio::test]
     async fn batch_insert_and_get() {
-        let node = Node::default();
+        let node = Node::<sha2::Sha256>::default();
         let transport = Transport::default();
 
         let pairs = vec![(KEY_1, HASH_1), (KEY_2, HASH_2)];
@@ -405,16 +476,15 @@ mod tests {
 
     #[tokio::test]
     async fn serialize_and_deserialize() {
-        let node = Node::default();
+        let node = Node::<sha2::Sha256>::default();
         let transport = Transport::default();
 
         node.insert(KEY_1, HASH_1, &transport).await.unwrap();
 
         let serialized = node.to_bytes();
-        let deserialized = Node::from_slice(&serialized).unwrap();
+        let deserialized = Node::<sha2::Sha256>::from_slice(&serialized).unwrap();
 
-        assert_eq!(node.depth, deserialized.depth);
         assert_eq!(node.children.len(), deserialized.children.len());
-        assert_eq!(node.hash(), deserialized.hash());
+        assert_eq!(node.hash().await, deserialized.hash().await);
     }
 }
