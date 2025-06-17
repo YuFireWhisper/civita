@@ -9,7 +9,7 @@ pub trait Proof: Clone + Debug + Eq + Sized + Sync + Send + 'static {
     type Hasher: Hasher;
 
     fn proof_to_hash(&self) -> HashArray<Self::Hasher>;
-    fn from_bytes(bytes: &[u8]) -> Result<Self, crypto::Error>;
+    fn from_slice(slice: &[u8]) -> Result<Self, crypto::Error>;
     fn to_bytes(&self) -> Vec<u8>;
 }
 

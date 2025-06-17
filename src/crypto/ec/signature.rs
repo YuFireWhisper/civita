@@ -1,62 +1,42 @@
-use std::fmt::Debug;
-
 use ark_ec::{
     short_weierstrass::{Affine, Projective},
     CurveGroup,
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use derivative::Derivative;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 
+use crate::crypto::traits::{self, hasher::Hasher, SecretKey as _};
 use crate::crypto::{
     self,
-    ec::{
-        base_config::BaseConfig, secret_key::SecretKey, serialize_affine,
-        serialize_size::SerializeSize,
-    },
-    traits::{self, hasher::Hasher},
+    ec::{base_config::BaseConfig, secret_key::SecretKey},
 };
 
-#[derive(Serialize, Deserialize)]
-pub struct Signature<C: BaseConfig + SerializeSize> {
-    #[serde(with = "serialize_affine")]
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
+#[derivative(Debug(bound = ""))]
+#[derivative(Eq(bound = ""), PartialEq(bound = ""))]
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
+pub struct Signature<C: BaseConfig> {
     pub r: Affine<C>,
     pub s: C::ScalarField,
 }
 
-impl<C: BaseConfig + SerializeSize> traits::signature::Signature for Signature<C> {
+impl<C: BaseConfig> traits::signature::Signature for Signature<C> {
     fn from_slice(bytes: &[u8]) -> Result<Self, crypto::Error> {
-        let r_size = (C::ScalarField::MODULUS_BIT_SIZE.div_ceil(8) + 1) as usize;
-        let s_size = C::ScalarField::MODULUS_BIT_SIZE.div_ceil(8) as usize;
-
-        if bytes.len() != r_size + s_size {
-            return Err(crate::crypto::Error::Serialization(
-                "Invalid signature size".to_string(),
-            ));
-        }
-
-        let r = Affine::<C>::deserialize_compressed(&bytes[..r_size])?;
-        let s = C::ScalarField::from_be_bytes_mod_order(&bytes[r_size..]);
-
-        Ok(Signature { r, s })
+        Self::deserialize_compressed(bytes).map_err(crypto::Error::from)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.r.compressed_size() + self.s.compressed_size());
-
-        self.r
-            .serialize_compressed(&mut bytes)
-            .expect("Failed to serialize point");
-        self.s
-            .serialize_compressed(&mut bytes)
-            .expect("Failed to serialize scalar");
-
+        let mut bytes = Vec::with_capacity(self.compressed_size());
+        self.serialize_compressed(&mut bytes)
+            .expect("Failed to serialize signature");
         bytes
     }
 }
 
-impl<C: BaseConfig + SerializeSize + Eq> traits::Signer for SecretKey<C> {
+impl<C: BaseConfig> traits::Signer for SecretKey<C> {
     type Signature = Signature<C>;
 
     fn sign(&self, msg: &[u8]) -> Signature<C> {
@@ -65,7 +45,7 @@ impl<C: BaseConfig + SerializeSize + Eq> traits::Signer for SecretKey<C> {
 
         let k = C::ScalarField::from_be_bytes_mod_order(&random);
         let r = C::GENERATOR * k;
-        let e = generate_challenge(msg, r, &self.pk);
+        let e = generate_challenge(msg, r, &self.public_key());
         let s = k + e * self.sk;
 
         Signature {
@@ -75,14 +55,14 @@ impl<C: BaseConfig + SerializeSize + Eq> traits::Signer for SecretKey<C> {
     }
 }
 
-impl<C: BaseConfig + SerializeSize + Eq> traits::VerifiySignature for Affine<C> {
+impl<C: BaseConfig> traits::VerifiySignature for Affine<C> {
     type Signature = Signature<C>;
 
     fn verify_signature(&self, msg: &[u8], sig: &Signature<C>) -> bool {
         let e = generate_challenge::<C>(msg, sig.r.into(), self);
 
         let lhs = C::GENERATOR * sig.s;
-        let rhs = sig.r + (*self) * e;
+        let rhs = sig.r + *self * e;
 
         lhs == rhs.into_affine()
     }
@@ -103,32 +83,6 @@ fn generate_challenge<C: BaseConfig>(
 
     C::ScalarField::from_be_bytes_mod_order(<C::Hasher as Hasher>::hash(&bytes).as_slice())
 }
-
-impl<C: BaseConfig + SerializeSize> Clone for Signature<C> {
-    fn clone(&self) -> Self {
-        Signature {
-            r: self.r,
-            s: self.s,
-        }
-    }
-}
-
-impl<C: BaseConfig + SerializeSize> Debug for Signature<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Signature")
-            .field("r", &self.r)
-            .field("s", &self.s)
-            .finish()
-    }
-}
-
-impl<C: BaseConfig + SerializeSize> PartialEq for Signature<C> {
-    fn eq(&self, other: &Self) -> bool {
-        self.r == other.r && self.s == other.s
-    }
-}
-
-impl<C: BaseConfig + SerializeSize> Eq for Signature<C> {}
 
 #[cfg(test)]
 mod tests {

@@ -3,21 +3,25 @@ use ark_ec::{
     CurveGroup,
 };
 use ark_ff::PrimeField;
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use derivative::Derivative;
 use rand::Rng;
 
 use crate::crypto::{self, traits};
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""), Copy(bound = ""))]
+#[derivative(Debug(bound = ""))]
+#[derivative(Eq(bound = ""), PartialEq(bound = ""))]
 pub struct SecretKey<C: SWCurveConfig> {
     pub(crate) sk: C::ScalarField,
     pub(crate) pk: Affine<C>,
 }
 
 impl<C: SWCurveConfig> SecretKey<C> {
-    pub fn new(sk: C::ScalarField) -> Self {
-        let pk = (C::GENERATOR * sk).into_affine();
-        SecretKey { sk, pk }
+    pub fn new(scalar: C::ScalarField) -> Self {
+        let pk = (C::GENERATOR * scalar).into_affine();
+        Self { sk: scalar, pk }
     }
 }
 
@@ -27,59 +31,23 @@ impl<C: SWCurveConfig> traits::SecretKey for SecretKey<C> {
     fn random() -> Self {
         let mut bytes = [0u8; 32];
         rand::rng().fill(&mut bytes);
-        let sk = C::ScalarField::from_be_bytes_mod_order(&bytes);
-        SecretKey::new(sk)
+        Self::new(C::ScalarField::from_be_bytes_mod_order(&bytes))
     }
 
     fn from_slice(slice: &[u8]) -> Result<Self, crypto::Error> {
-        Ok(Self::from(slice))
+        let scalar = C::ScalarField::deserialize_compressed(slice)?;
+        Ok(Self::new(scalar))
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.into()
-    }
-
-    fn to_public_key(&self) -> Self::PublicKey {
-        self.pk
-    }
-}
-
-impl<C: SWCurveConfig> Clone for SecretKey<C> {
-    fn clone(&self) -> Self {
-        SecretKey {
-            sk: self.sk,
-            pk: self.pk,
-        }
-    }
-}
-
-impl<C: SWCurveConfig> PartialEq for SecretKey<C> {
-    fn eq(&self, other: &Self) -> bool {
-        self.sk == other.sk && self.pk == other.pk
-    }
-}
-
-impl<C: SWCurveConfig> Eq for SecretKey<C> {}
-
-impl<C: SWCurveConfig> From<SecretKey<C>> for Vec<u8> {
-    fn from(value: SecretKey<C>) -> Self {
-        (&value).into()
-    }
-}
-
-impl<C: SWCurveConfig> From<&SecretKey<C>> for Vec<u8> {
-    fn from(sk: &SecretKey<C>) -> Self {
-        let mut bytes = Vec::with_capacity(sk.sk.compressed_size());
-        sk.sk
+        let mut bytes = Vec::with_capacity(self.sk.compressed_size());
+        self.sk
             .serialize_compressed(&mut bytes)
             .expect("Failed to serialize secret key");
         bytes
     }
-}
 
-impl<C: SWCurveConfig> From<&[u8]> for SecretKey<C> {
-    fn from(slice: &[u8]) -> Self {
-        let sk = C::ScalarField::from_be_bytes_mod_order(slice);
-        SecretKey::new(sk)
+    fn public_key(&self) -> Self::PublicKey {
+        self.pk
     }
 }

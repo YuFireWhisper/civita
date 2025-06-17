@@ -1,205 +1,291 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeSet, HashMap},
+    io::{Cursor, Read},
+};
 
-use serde::{Deserialize, Serialize};
-use tokio::time::Duration;
+use derivative::Derivative;
 
-use crate::{consensus::randomizer::DrawResult, constants::HashArray, crypto::keypair::PublicKey};
+use crate::{
+    consensus::randomizer::{self, DrawResult},
+    crypto::{
+        self,
+        traits::{hasher::HashArray, PublicKey, Suite},
+        Hasher,
+    },
+};
 
 type Result<T> = std::result::Result<T, Error>;
+type LeaderAndSizeInfo<S> = (
+    u32,
+    u32,
+    (<S as Suite>::PublicKey, DrawResult<<S as Suite>::Proof>),
+);
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("Failed to deserialize View: {0}")]
-    Deserialize(#[from] bincode::error::DecodeError),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("{0}")]
+    Randomizer(#[from] randomizer::Error),
+
+    #[error("{0}")]
+    Crypto(#[from] crypto::Error),
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
-#[derive(Serialize, Deserialize)]
-pub enum State {
-    Prepare,
-    PreCommit,
-    Commit,
-}
-
-#[derive(Clone)]
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
-#[derive(Serialize, Deserialize)]
-pub struct QuorumCertificate {
-    pub view_number: u64,
-    pub root_hash: HashArray,
-    pub state: State,
-    pub height: u64,
-
-    pub leader_pk: PublicKey,
-    pub leader_result: DrawResult,
-
-    pub validators: HashMap<PublicKey, DrawResult>,
-}
-
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
-#[derive(Serialize, Deserialize)]
-pub struct View {
-    pub number: u64,
-    pub timeout: Duration,
-
-    pub leader_pk: PublicKey,
-    pub leader_result: DrawResult,
-
-    pub root_hash: HashArray,
+#[derive(Derivative)]
+#[derivative(Debug(bound = ""))]
+#[derivative(Clone(bound = ""))]
+#[derivative(Eq(bound = ""), PartialEq(bound = ""))]
+pub struct Block<H: Hasher> {
+    pub root_hash: HashArray<H>,
     pub total_stakes: u32,
-    pub proposals: HashSet<Vec<u8>>,
-
-    pub parent_hash: HashArray,
-    pub parent_qcs: QuorumCertificate,
-
-    pub state: State,
-    pub height: u64,
+    pub proposals: BTreeSet<Vec<u8>>,
+    pub records: BTreeSet<HashArray<H>>,
 }
 
-impl State {
-    pub fn to_u8(&self) -> u8 {
-        self.into()
-    }
+#[derive(Derivative)]
+#[derivative(Debug)]
+#[derivative(Clone)]
+#[derivative(Eq, PartialEq)]
+pub struct QuorumCertificate<S: Suite> {
+    pub view_number: u64,
+    pub block_hash: HashArray<S::Hasher>,
+    pub leader: (S::PublicKey, DrawResult<S::Proof>),
+    pub validators: HashMap<S::PublicKey, DrawResult<S::Proof>>,
 }
 
-impl View {
-    pub fn generate_draw_seed(&self) -> HashArray {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&self.number.to_le_bytes());
-        hasher.update(&self.root_hash);
-        hasher.update(&[self.state.to_u8()]);
-        hasher.update(&self.height.to_le_bytes());
-        hasher.update(self.leader_pk.as_bytes());
-        hasher.finalize().into()
-    }
+#[derive(Derivative)]
+#[derivative(Debug)]
+#[derivative(Clone)]
+#[derivative(Eq, PartialEq)]
+pub struct View<S: Suite> {
+    pub number: u64,
+    pub block: Block<S::Hasher>,
+    pub leader: (S::PublicKey, DrawResult<S::Proof>),
+    pub parent: QuorumCertificate<S>,
+}
 
-    pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        Self::try_from(slice)
+impl<H: Hasher> Block<H> {
+    pub fn hash(&self) -> HashArray<H> {
+        H::hash(self.to_bytes().as_slice())
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard())
-            .expect("Failed to serialize View")
-    }
-}
+        let mut bytes = Vec::new();
 
-impl From<&State> for u8 {
-    fn from(state: &State) -> Self {
-        match state {
-            State::Prepare => 0,
-            State::PreCommit => 1,
-            State::Commit => 2,
+        bytes.extend_from_slice(self.root_hash.as_slice());
+        bytes.extend(self.total_stakes.to_le_bytes());
+
+        self.serialize_proposals(&mut bytes);
+        self.serialize_records(&mut bytes);
+
+        bytes
+    }
+
+    fn serialize_proposals(&self, bytes: &mut Vec<u8>) {
+        bytes.extend((self.proposals.len() as u32).to_le_bytes());
+
+        self.proposals.iter().for_each(|proposal| {
+            bytes.extend((proposal.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(proposal);
+        });
+    }
+
+    fn serialize_records(&self, bytes: &mut Vec<u8>) {
+        bytes.extend((self.records.len() as u32).to_le_bytes());
+
+        self.records.iter().for_each(|record| {
+            bytes.extend_from_slice(record.as_slice());
+        });
+    }
+
+    pub fn from_slice(slice: &[u8]) -> Result<Self> {
+        Self::from_cursor(&mut Cursor::new(slice))
+    }
+
+    pub fn from_cursor(cursor: &mut Cursor<&[u8]>) -> Result<Self> {
+        Ok(Block {
+            root_hash: read_hash_array::<H>(cursor)?,
+            total_stakes: read_u32(cursor)?,
+            proposals: Self::deserialize_proposals(cursor)?,
+            records: Self::deserialize_records(cursor)?,
+        })
+    }
+
+    fn deserialize_proposals(cursor: &mut Cursor<&[u8]>) -> Result<BTreeSet<Vec<u8>>> {
+        let count = read_u32(cursor)?;
+
+        let mut proposals = BTreeSet::new();
+
+        for _ in 0..count {
+            let length = read_u32(cursor)? as usize;
+            let mut proposal = vec![0u8; length];
+            cursor.read_exact(&mut proposal)?;
+            proposals.insert(proposal);
         }
+
+        Ok(proposals)
     }
-}
 
-impl From<View> for Vec<u8> {
-    fn from(view: View) -> Self {
-        (&view).into()
-    }
-}
+    fn deserialize_records(cursor: &mut Cursor<&[u8]>) -> Result<BTreeSet<HashArray<H>>> {
+        let count = read_u32(cursor)?;
 
-impl From<&View> for Vec<u8> {
-    fn from(view: &View) -> Self {
-        bincode::serde::encode_to_vec(view, bincode::config::standard())
-            .expect("Failed to serialize View")
-    }
-}
+        let mut records = BTreeSet::new();
 
-impl TryFrom<Vec<u8>> for View {
-    type Error = Error;
-
-    fn try_from(value: Vec<u8>) -> Result<Self> {
-        value.as_slice().try_into()
-    }
-}
-
-impl TryFrom<&[u8]> for View {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> Result<Self> {
-        bincode::serde::decode_from_slice(value, bincode::config::standard())
-            .map(|(d, _)| d)
-            .map_err(Error::from)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        constants::HASH_ARRAY_LENGTH,
-        crypto::keypair::{self, KeyType, SecretKey},
-    };
-
-    use super::*;
-
-    const VIEW_NUMBER: u64 = 1;
-    const ROOT_HASH: HashArray = [1; HASH_ARRAY_LENGTH];
-    const STATE: State = State::Prepare;
-    const HEIGHT: u64 = 1;
-
-    fn generate_qc(pk: PublicKey, leader_result: DrawResult) -> QuorumCertificate {
-        QuorumCertificate {
-            view_number: VIEW_NUMBER,
-            root_hash: ROOT_HASH,
-            state: STATE,
-            height: HEIGHT,
-
-            leader_pk: pk,
-            leader_result,
-
-            validators: HashMap::new(),
+        for _ in 0..count {
+            let record = read_hash_array::<H>(cursor)?;
+            records.insert(record);
         }
+
+        Ok(records)
+    }
+}
+
+impl<S: Suite> QuorumCertificate<S> {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        bytes.extend(self.view_number.to_le_bytes());
+        bytes.extend_from_slice(self.block_hash.as_slice());
+
+        write_leader_and_size_info::<S>(&mut bytes, &self.leader);
+        self.serialize_validators(&mut bytes);
+
+        bytes
     }
 
-    fn generate_draw_result(sk: &SecretKey, msg: &[u8], weight: u32) -> DrawResult {
-        let proof = sk.prove(msg).expect("Failed to generate proof");
-        DrawResult { proof, weight }
+    fn serialize_validators(&self, bytes: &mut Vec<u8>) {
+        bytes.extend((self.validators.len() as u32).to_le_bytes());
+
+        self.validators.iter().for_each(|(pk, proof)| {
+            bytes.extend(pk.to_bytes());
+            bytes.extend(proof.to_bytes());
+        })
     }
 
-    fn generate_random_view() -> View {
-        const TIMEOUT: Duration = Duration::from_secs(5);
-        const MSG: &[u8] = b"test message";
-        const WEIGHT: u32 = 1000;
-        const TOTAL_STAKES: u32 = 1000;
-        const PROPOSAL: [u8; 3] = [1, 2, 3];
-        const PARENT_HASH: HashArray = [2; HASH_ARRAY_LENGTH];
+    pub fn from_slice(slice: &[u8]) -> Result<Self> {
+        Self::from_cursor(&mut Cursor::new(slice))
+    }
 
-        let (sk, pk) = keypair::generate_keypair(KeyType::Secp256k1);
+    fn from_cursor(cursor: &mut Cursor<&[u8]>) -> Result<Self> {
+        let view_number = read_u64(cursor)?;
+        let block_hash = read_hash_array::<S::Hasher>(cursor)?;
 
-        let parent_qc = generate_qc(pk.clone(), generate_draw_result(&sk, MSG, WEIGHT));
+        let (pk_size, result_size, leader) = read_leader_and_size_info::<S>(cursor)?;
+        let validators = Self::deserialize_validators(pk_size, result_size, cursor)?;
 
-        View {
-            number: VIEW_NUMBER,
-            timeout: TIMEOUT,
+        Ok(QuorumCertificate {
+            view_number,
+            block_hash,
+            leader,
+            validators,
+        })
+    }
 
-            leader_pk: pk,
-            leader_result: generate_draw_result(&sk, MSG, WEIGHT),
+    fn deserialize_validators(
+        pk_size: u32,
+        result_size: u32,
+        cursor: &mut Cursor<&[u8]>,
+    ) -> Result<HashMap<S::PublicKey, DrawResult<S::Proof>>> {
+        let count = read_u32(cursor)?;
+        let mut validators = HashMap::new();
 
-            root_hash: ROOT_HASH,
-            total_stakes: TOTAL_STAKES,
-            proposals: HashSet::from([PROPOSAL.to_vec()]),
-
-            parent_hash: PARENT_HASH,
-            parent_qcs: parent_qc,
-
-            state: STATE,
-            height: HEIGHT,
+        for _ in 0..count {
+            let public_key = read_public_key::<S>(pk_size, cursor)?;
+            let result = read_result::<S>(result_size, cursor)?;
+            validators.insert(public_key, result);
         }
+
+        Ok(validators)
+    }
+}
+
+impl<S: Suite> View<S> {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        bytes.extend(self.number.to_le_bytes());
+        bytes.extend(self.block.to_bytes());
+
+        write_leader_and_size_info::<S>(&mut bytes, &self.leader);
+        bytes.extend(self.parent.to_bytes());
+
+        bytes
     }
 
-    #[test]
-    fn correct_serialization() {
-        let view = generate_random_view();
+    pub fn from_slice(slice: &[u8]) -> Result<Self> {
+        let mut cursor = Cursor::new(slice);
 
-        let serialized = view.to_bytes();
-        let deserialized: View = serialized.try_into().expect("Failed to deserialize View");
+        let number = read_u64(&mut cursor)?;
+        let block = Block::<S::Hasher>::from_cursor(&mut cursor)?;
 
-        assert_eq!(view, deserialized);
+        let (_, _, leader) = read_leader_and_size_info::<S>(&mut cursor)?;
+        let parent = QuorumCertificate::<S>::from_cursor(&mut cursor)?;
+
+        Ok(View {
+            number,
+            block,
+            leader,
+            parent,
+        })
     }
+}
+
+fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {
+    let mut buf = [0u8; 4];
+    cursor.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+fn read_hash_array<H: Hasher>(cursor: &mut Cursor<&[u8]>) -> Result<HashArray<H>> {
+    let mut hash_array = HashArray::<H>::default();
+    cursor.read_exact(hash_array.as_mut_slice())?;
+    Ok(hash_array)
+}
+
+fn read_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64> {
+    let mut buf = [0u8; 8];
+    cursor.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+fn read_public_key<S: Suite>(pk_size: u32, cursor: &mut Cursor<&[u8]>) -> Result<S::PublicKey> {
+    let mut pk_bytes = vec![0u8; pk_size as usize];
+    cursor.read_exact(&mut pk_bytes)?;
+    S::PublicKey::from_slice(&pk_bytes).map_err(Error::from)
+}
+
+fn read_result<S: Suite>(
+    result_size: u32,
+    cursor: &mut Cursor<&[u8]>,
+) -> Result<DrawResult<S::Proof>> {
+    let mut proof_bytes = vec![0u8; result_size as usize];
+    cursor.read_exact(&mut proof_bytes)?;
+    DrawResult::<S::Proof>::from_slice(&proof_bytes).map_err(Error::from)
+}
+
+fn read_leader_and_size_info<S: Suite>(cursor: &mut Cursor<&[u8]>) -> Result<LeaderAndSizeInfo<S>> {
+    let pk_size = read_u32(cursor)?;
+    let result_size = read_u32(cursor)?;
+
+    let pk = read_public_key::<S>(pk_size, cursor)?;
+    let result = read_result::<S>(result_size, cursor)?;
+
+    Ok((pk_size, result_size, (pk, result)))
+}
+
+fn write_leader_and_size_info<S: Suite>(
+    bytes: &mut Vec<u8>,
+    leader: &(S::PublicKey, DrawResult<S::Proof>),
+) {
+    let pk_bytes = leader.0.to_bytes();
+    let result_bytes = leader.1.to_bytes();
+
+    bytes.extend((pk_bytes.len() as u32).to_le_bytes());
+    bytes.extend((result_bytes.len() as u32).to_le_bytes());
+
+    bytes.extend(pk_bytes);
+    bytes.extend(result_bytes);
 }

@@ -6,7 +6,7 @@ use crate::crypto::{
 };
 
 pub trait Signature: Clone + Debug + Eq + Sized + Sync + Send + 'static {
-    fn from_slice(bytes: &[u8]) -> Result<Self, crypto::Error>;
+    fn from_slice(slice: &[u8]) -> Result<Self, crypto::Error>;
     fn to_bytes(&self) -> Vec<u8>;
 }
 

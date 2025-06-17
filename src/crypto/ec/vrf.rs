@@ -1,20 +1,18 @@
-use std::fmt::Debug;
-
 use ark_ec::{short_weierstrass::Affine, CurveGroup};
-use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use derivative::Derivative;
 
 use crate::crypto::{
     self,
     ec::{
         hash_to_curve::{self, HashToCurve},
         secret_key::SecretKey,
-        serialize_size::SerializeSize,
     },
     traits::{
         self,
         hasher::{HashArray, Hasher},
         vrf::{Prover, VerifyProof},
+        SecretKey as _,
     },
 };
 
@@ -22,14 +20,18 @@ mod challenge_generator;
 mod nonce_generator;
 mod suites;
 
-#[derive(Eq, PartialEq)]
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
+#[derivative(Debug(bound = ""))]
+#[derivative(Eq(bound = ""), PartialEq(bound = ""))]
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct Proof<C: Config> {
     pub gamma: Affine<C>,
     pub c: C::ScalarField,
     pub s: C::ScalarField,
 }
 
-pub trait Config: hash_to_curve::Config + SerializeSize + Eq + PartialEq {
+pub trait Config: hash_to_curve::Config {
     const COFACTOR_SCALAR: Self::ScalarField;
 }
 
@@ -48,34 +50,14 @@ impl<C: Config> traits::vrf::Proof for Proof<C> {
         C::Hasher::hash(&bytes)
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self, crypto::Error> {
-        if bytes.len() != C::AFFINE_SIZE + C::SCALAR_SIZE * 2 {
-            return Err(crypto::Error::Serialization(
-                "Invalid proof size".to_string(),
-            ));
-        }
-
-        let gamma = Affine::<C>::deserialize_compressed(&bytes[..C::AFFINE_SIZE])
-            .map_err(crypto::Error::from)?;
-        let c = C::ScalarField::from_be_bytes_mod_order(
-            &bytes[C::AFFINE_SIZE..C::AFFINE_SIZE + C::SCALAR_SIZE],
-        );
-        let s = C::ScalarField::from_be_bytes_mod_order(&bytes[C::AFFINE_SIZE + C::SCALAR_SIZE..]);
-
-        Ok(Proof { gamma, c, s })
+    fn from_slice(bytes: &[u8]) -> Result<Self, crypto::Error> {
+        Self::deserialize_compressed(bytes).map_err(crypto::Error::from)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(C::AFFINE_SIZE + C::SCALAR_SIZE * 2);
-        self.gamma
-            .serialize_compressed(&mut bytes)
-            .expect("Failed to serialize gamma");
-        self.c
-            .serialize_compressed(&mut bytes)
-            .expect("Failed to serialize challenge");
-        self.s
-            .serialize_compressed(&mut bytes)
-            .expect("Failed to serialize response");
+        let mut bytes = Vec::with_capacity(self.compressed_size());
+        self.serialize_compressed(&mut bytes)
+            .expect("Failed to serialize VRF proof");
         bytes
     }
 }
@@ -84,7 +66,7 @@ impl<C: Config> Prover for SecretKey<C> {
     type Proof = Proof<C>;
 
     fn prove(&self, alpha: &[u8]) -> Proof<C> {
-        let y = (C::GENERATOR * self.sk).into_affine();
+        let y = self.public_key();
         let h = C::hash_to_curve(alpha);
         let gamma = (h * self.sk).into_affine();
         let k = nonce_generator::generate_nonce::<C::Hasher, C::ScalarField>(self.sk, alpha);
@@ -106,9 +88,9 @@ impl<C: Config> Prover for SecretKey<C> {
 impl<C: Config> VerifyProof for Affine<C> {
     type Proof = Proof<C>;
 
-    fn verify_proof(&self, alpha: &[u8], proof: &Proof<C>) -> bool {
+    fn verify_proof(&self, alpha: &[u8], proof: &Self::Proof) -> bool {
         let h = C::hash_to_curve(alpha);
-        let u = C::GENERATOR * proof.s - (*self) * proof.c;
+        let u = C::GENERATOR * proof.s - *self * proof.c;
         let v = h * proof.s - proof.gamma * proof.c;
         let c_prime = challenge_generator::generate_challenge::<Affine<C>, C::Hasher>([
             *self,
@@ -122,32 +104,12 @@ impl<C: Config> VerifyProof for Affine<C> {
     }
 }
 
-impl<C: Config> Clone for Proof<C> {
-    fn clone(&self) -> Self {
-        Proof {
-            gamma: self.gamma,
-            c: self.c,
-            s: self.s,
-        }
-    }
-}
-
-impl<C: Config> Debug for Proof<C> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Proof")
-            .field("gamma", &self.gamma)
-            .field("c", &self.c)
-            .field("s", &self.s)
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ark_ff::MontFp;
     use ark_secp256r1::{Affine, Fq, Fr};
 
-    use crate::crypto::traits::vrf::{Prover, VerifyProof};
+    use crate::crypto::traits::vrf::{Proof, Prover, VerifyProof};
 
     const SK: Fr =
         MontFp!("91225253027397101270059260515990221874496108017261222445699397644687913215777");
@@ -170,7 +132,10 @@ mod tests {
         let is_valid = pk.verify_proof(alpha.as_bytes(), &proof);
         let should_invalid = pk.verify_proof(b"invalid", &proof);
 
+        let deserialized = super::Proof::<ark_secp256r1::Config>::from_slice(&proof.to_bytes());
+
         assert!(is_valid);
         assert!(!should_invalid);
+        assert_eq!(proof, deserialized.unwrap());
     }
 }

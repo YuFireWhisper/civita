@@ -37,7 +37,7 @@ k256 = { version = "0.13", features = ["arithmetic"] }
 libecvrf-k256 = "1.1"
 blake3 = "1.8"
 trait-variant = "0.1.2"
-generic-array = "1.2"
+generic-array = { version = "1.2", features = ["serde"] }
 ark-ff = "0.5"
 ark-ec = "0.5"
 ark-secp256k1 = "0.5"
@@ -46,6 +46,7 @@ ark-serialize = "0.5"
 statrs = "0.18"
 crossbeam = "0.8"
 crossbeam-skiplist = "0.1"
+derivative = "2.2"
 
 [dev-dependencies]
 tempfile = "3.17"
