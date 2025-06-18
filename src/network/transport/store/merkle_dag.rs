@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    mem,
-    sync::Arc,
-};
+use std::mem;
 
 use bincode::error::DecodeError;
 use generic_array::{ArrayLength, GenericArray};
@@ -11,12 +7,6 @@ use crate::{
     crypto::{traits::hasher::HashArray, Hasher},
     network::transport,
 };
-
-#[cfg(not(test))]
-use crate::network::transport::Transport;
-
-#[cfg(test)]
-use crate::network::transport::MockTransport as Transport;
 
 pub mod node;
 
@@ -51,62 +41,6 @@ pub trait HasherConfig: Hasher + Send + Sync + 'static {
     fn deserialize_banching_factor(bytes: &[u8]) -> Option<Self::BanchingFactor>;
 }
 
-pub struct MerkleDag<H: HasherConfig> {
-    transport: Arc<Transport>,
-    root: Node<H>,
-}
-
-impl<H: HasherConfig> MerkleDag<H> {
-    pub fn new(transport: Arc<Transport>) -> Self {
-        let root = Node::default();
-        MerkleDag { transport, root }
-    }
-
-    pub fn new_with_root(transport: Arc<Transport>, root: Node<H>) -> Self {
-        MerkleDag { transport, root }
-    }
-
-    pub async fn insert(
-        &self,
-        key: HashArray<H>,
-        value: HashArray<H>,
-    ) -> Result<HashSet<HashArray<H>>> {
-        self.root
-            .insert(H::convert_to_key(key), value, &self.transport)
-            .await
-    }
-
-    pub async fn batch_insert<I>(&self, iter: I) -> Result<HashSet<HashArray<H>>>
-    where
-        I: IntoIterator<Item = (HashArray<H>, HashArray<H>)>,
-    {
-        self.root
-            .batch_insert(
-                iter.into_iter().map(|(k, v)| (H::convert_to_key(k), v)),
-                &self.transport,
-            )
-            .await
-    }
-
-    pub async fn get(&self, key: HashArray<H>) -> Result<Option<HashArray<H>>> {
-        self.root.get(H::convert_to_key(key), &self.transport).await
-    }
-
-    pub async fn batch_get<I>(&self, iter: I) -> Result<HashMap<HashArray<H>, HashArray<H>>>
-    where
-        I: IntoIterator<Item = HashArray<H>>,
-    {
-        self.root
-            .batch_get(iter.into_iter().map(H::convert_to_key), &self.transport)
-            .await
-            .map(|map| {
-                map.into_iter()
-                    .map(|(k, v)| (H::convert_to_hash(k), v))
-                    .collect()
-            })
-    }
-}
-
 impl HasherConfig for sha2::Sha256 {
     const DEPTH: usize = 16;
     const BANCHING_FACTOR_SIZE: usize = 2;
@@ -136,6 +70,3 @@ impl HasherConfig for sha2::Sha256 {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {}
