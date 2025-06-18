@@ -6,7 +6,7 @@ use std::{
 use derivative::Derivative;
 
 use crate::{
-    consensus::randomizer::{self, DrawResult},
+    consensus::randomizer::{self, DrawProof},
     crypto::{
         self,
         traits::{hasher::HashArray, PublicKey, Suite},
@@ -15,11 +15,6 @@ use crate::{
 };
 
 type Result<T> = std::result::Result<T, Error>;
-type LeaderAndSizeInfo<S> = (
-    u32,
-    u32,
-    (<S as Suite>::PublicKey, DrawResult<<S as Suite>::Proof>),
-);
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -52,8 +47,8 @@ pub struct Block<H: Hasher> {
 pub struct QuorumCertificate<S: Suite> {
     pub view_number: u64,
     pub block_hash: HashArray<S::Hasher>,
-    pub leader: (S::PublicKey, DrawResult<S::Proof>),
-    pub validators: HashMap<S::PublicKey, DrawResult<S::Proof>>,
+    pub leader: (S::PublicKey, DrawProof<S::Proof>),
+    pub validators: HashMap<S::PublicKey, DrawProof<S::Proof>>,
 }
 
 #[derive(Derivative)]
@@ -63,7 +58,7 @@ pub struct QuorumCertificate<S: Suite> {
 pub struct View<S: Suite> {
     pub number: u64,
     pub block: Block<S::Hasher>,
-    pub leader: (S::PublicKey, DrawResult<S::Proof>),
+    pub leader: (S::PublicKey, DrawProof<S::Proof>),
     pub parent: QuorumCertificate<S>,
 }
 
@@ -173,8 +168,10 @@ impl<S: Suite> QuorumCertificate<S> {
         let view_number = read_u64(cursor)?;
         let block_hash = read_hash_array::<S::Hasher>(cursor)?;
 
-        let (pk_size, result_size, leader) = read_leader_and_size_info::<S>(cursor)?;
-        let validators = Self::deserialize_validators(pk_size, result_size, cursor)?;
+        let (pk_size, proof_size) = read_size_info::<S>(cursor)?;
+        let leader = read_public_key_and_proof::<S>(pk_size, proof_size, cursor)?;
+
+        let validators = Self::deserialize_validators(pk_size, proof_size, cursor)?;
 
         Ok(QuorumCertificate {
             view_number,
@@ -188,14 +185,13 @@ impl<S: Suite> QuorumCertificate<S> {
         pk_size: u32,
         result_size: u32,
         cursor: &mut Cursor<&[u8]>,
-    ) -> Result<HashMap<S::PublicKey, DrawResult<S::Proof>>> {
+    ) -> Result<HashMap<S::PublicKey, DrawProof<S::Proof>>> {
         let count = read_u32(cursor)?;
         let mut validators = HashMap::new();
 
         for _ in 0..count {
-            let public_key = read_public_key::<S>(pk_size, cursor)?;
-            let result = read_result::<S>(result_size, cursor)?;
-            validators.insert(public_key, result);
+            let (pk, proof) = read_public_key_and_proof::<S>(pk_size, result_size, cursor)?;
+            validators.insert(pk, proof);
         }
 
         Ok(validators)
@@ -221,7 +217,8 @@ impl<S: Suite> View<S> {
         let number = read_u64(&mut cursor)?;
         let block = Block::<S::Hasher>::from_cursor(&mut cursor)?;
 
-        let (_, _, leader) = read_leader_and_size_info::<S>(&mut cursor)?;
+        let (pk_size, proof_size) = read_size_info::<S>(&mut cursor)?;
+        let leader = read_public_key_and_proof::<S>(pk_size, proof_size, &mut cursor)?;
         let parent = QuorumCertificate::<S>::from_cursor(&mut cursor)?;
 
         Ok(View {
@@ -257,35 +254,41 @@ fn read_public_key<S: Suite>(pk_size: u32, cursor: &mut Cursor<&[u8]>) -> Result
     S::PublicKey::from_slice(&pk_bytes).map_err(Error::from)
 }
 
-fn read_result<S: Suite>(
-    result_size: u32,
+fn read_draw_proof<S: Suite>(
+    proof_size: u32,
     cursor: &mut Cursor<&[u8]>,
-) -> Result<DrawResult<S::Proof>> {
-    let mut proof_bytes = vec![0u8; result_size as usize];
+) -> Result<DrawProof<S::Proof>> {
+    let mut proof_bytes = vec![0u8; proof_size as usize];
     cursor.read_exact(&mut proof_bytes)?;
-    DrawResult::<S::Proof>::from_slice(&proof_bytes).map_err(Error::from)
+    DrawProof::from_slice(&proof_bytes).map_err(Error::from)
 }
 
-fn read_leader_and_size_info<S: Suite>(cursor: &mut Cursor<&[u8]>) -> Result<LeaderAndSizeInfo<S>> {
+fn read_size_info<S: Suite>(cursor: &mut Cursor<&[u8]>) -> Result<(u32, u32)> {
     let pk_size = read_u32(cursor)?;
     let result_size = read_u32(cursor)?;
+    Ok((pk_size, result_size))
+}
 
+fn read_public_key_and_proof<S: Suite>(
+    pk_size: u32,
+    proof_size: u32,
+    cursor: &mut Cursor<&[u8]>,
+) -> Result<(S::PublicKey, DrawProof<S::Proof>)> {
     let pk = read_public_key::<S>(pk_size, cursor)?;
-    let result = read_result::<S>(result_size, cursor)?;
-
-    Ok((pk_size, result_size, (pk, result)))
+    let proof = read_draw_proof::<S>(proof_size, cursor)?;
+    Ok((pk, proof))
 }
 
 fn write_leader_and_size_info<S: Suite>(
     bytes: &mut Vec<u8>,
-    leader: &(S::PublicKey, DrawResult<S::Proof>),
+    leader: &(S::PublicKey, DrawProof<S::Proof>),
 ) {
     let pk_bytes = leader.0.to_bytes();
-    let result_bytes = leader.1.to_bytes();
+    let proof_bytes = leader.1.to_bytes();
 
     bytes.extend((pk_bytes.len() as u32).to_le_bytes());
-    bytes.extend((result_bytes.len() as u32).to_le_bytes());
+    bytes.extend((proof_bytes.len() as u32).to_le_bytes());
 
     bytes.extend(pk_bytes);
-    bytes.extend(result_bytes);
+    bytes.extend(proof_bytes);
 }
