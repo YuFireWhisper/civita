@@ -5,7 +5,7 @@ use libp2p::PeerId;
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
-    crypto::{traits::hasher::HashArray, tss::Signature, Hasher},
+    crypto::{traits::hasher::HashArray, Hasher},
     network::transport::{
         behaviour::Behaviour,
         protocols::{
@@ -256,6 +256,16 @@ impl Transport {
 
     pub fn keypair(&self) -> &libp2p::identity::Keypair {
         self.keypair.as_ref()
+    }
+
+    pub async fn self_address(&self) -> libp2p::Multiaddr {
+        self.swarm
+            .lock()
+            .await
+            .listeners()
+            .next()
+            .cloned()
+            .expect("No listen address available")
     }
 }
 

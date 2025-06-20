@@ -1,3 +1,4 @@
+use libp2p::Multiaddr;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{
@@ -47,6 +48,13 @@ pub enum Payload {
     },
 
     Proposal(Vec<u8>),
+
+    ConsensusCandidate {
+        seed: Vec<u8>,
+        proof: Vec<u8>,
+        pk: Vec<u8>,
+        addr: Multiaddr,
+    },
 
     // For testing
     Raw(Vec<u8>),
