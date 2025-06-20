@@ -225,18 +225,6 @@ impl Transport {
             .map_err(Error::from)
     }
 
-    pub async fn publish_signed(
-        &self,
-        topic: &str,
-        payload: gossipsub::Payload,
-        committee_signature: Signature,
-    ) -> Result<libp2p::gossipsub::MessageId> {
-        self.gossipsub
-            .publish_signed(topic, payload, committee_signature)
-            .await
-            .map_err(Error::from)
-    }
-
     pub async fn request(&self, peer_id: &PeerId, request: Request) {
         self.request_response.request(peer_id, request).await
     }

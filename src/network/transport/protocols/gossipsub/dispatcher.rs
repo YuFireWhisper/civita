@@ -86,7 +86,6 @@ mod tests {
             source: source_peer_id,
             topic: topic.to_string(),
             payload: Payload::Raw(PAYLOAD.to_vec()),
-            committee_signature: None,
         }
     }
 

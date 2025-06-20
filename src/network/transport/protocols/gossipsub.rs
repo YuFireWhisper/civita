@@ -6,18 +6,13 @@ use libp2p::{
     Swarm,
 };
 
-use crate::{
-    crypto::tss::Signature,
-    network::transport::{
-        behaviour::Behaviour,
-        protocols::gossipsub::{dispatcher::Dispatcher, signed_payload::SignedPayload},
-    },
+use crate::network::transport::{
+    behaviour::Behaviour, protocols::gossipsub::dispatcher::Dispatcher,
 };
 
 mod dispatcher;
 pub mod message;
 pub mod payload;
-mod signed_payload;
 
 pub use message::Message;
 pub use payload::Payload;
@@ -44,9 +39,6 @@ pub enum Error {
 
     #[error("Oneshot error: {0}")]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
-
-    #[error("{0}")]
-    SignedPayload(#[from] signed_payload::Error),
 }
 
 #[derive(Debug)]
@@ -159,15 +151,6 @@ impl Gossipsub {
         topic: impl Into<String>,
         payload: impl Into<Payload>,
     ) -> Result<libp2p::gossipsub::MessageId> {
-        self.publish_signed_payload(topic, payload, None).await
-    }
-
-    async fn publish_signed_payload(
-        &self,
-        topic: impl Into<String>,
-        payload: impl Into<Payload>,
-        committee_signature: Option<Signature>,
-    ) -> Result<libp2p::gossipsub::MessageId> {
         let topic = IdentTopic::new(topic);
 
         if !self.subscribed_topics.read().await.contains(&topic.hash()) {
@@ -179,24 +162,14 @@ impl Gossipsub {
                 .map_err(|_| Error::NoPeerSubscribed(topic.to_string()))??;
         }
 
-        let signed_payload = SignedPayload::new(payload.into(), committee_signature)?;
+        let payload = payload.into();
 
         self.swarm
             .lock()
             .await
             .behaviour_mut()
             .gossipsub_mut()
-            .publish(topic, signed_payload.to_vec()?)
+            .publish(topic, payload.to_vec()?)
             .map_err(Error::from)
-    }
-
-    pub async fn publish_signed(
-        &self,
-        topic: impl Into<String>,
-        payload: impl Into<Payload>,
-        signature: impl Into<Signature>,
-    ) -> Result<libp2p::gossipsub::MessageId> {
-        self.publish_signed_payload(topic, payload, Some(signature.into()))
-            .await
     }
 }

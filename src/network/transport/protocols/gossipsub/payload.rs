@@ -1,18 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-    time::SystemTime,
-};
-
-use libp2p::gossipsub::MessageId;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    constants::HashArray,
-    crypto::{
-        algebra::{Point, Scalar},
-        keypair::{PublicKey, ResidentSignature, VrfProof},
-        vss::{encrypted_share::EncryptedShares, DecryptedShares},
-    },
+use crate::crypto::{
+    algebra::{Point, Scalar},
+    vss::{encrypted_share::EncryptedShares, DecryptedShares},
 };
 
 #[derive(Debug)]
@@ -56,63 +46,15 @@ pub enum Payload {
         share: Scalar,
     },
 
-    ElectionEligibilityProof {
-        proof: VrfProof,
-        public_key: PublicKey,
-        payload_hash: [u8; 32],
-    },
-
-    ElectionFailure {
-        invalid_peers: HashSet<libp2p::PeerId>,
-    },
-
-    ConsensusTime {
-        end_time: SystemTime,
-    },
-
-    ConsensusTimeResponse {
-        end_time: SystemTime,
-        is_accepted: bool,
-    },
-
-    QueryCommitteeState,
-
-    QueryCommitteeStateResponse {
-        message_id: MessageId,
-        state: Vec<u8>,
-    },
-
     Proposal(Vec<u8>),
-
-    ProposalProcessingComplete {
-        final_node: Vec<u8>,
-        total_stakes_impact: i32,
-        processed: HashSet<HashArray>,
-        proofs: HashMap<PublicKey, (VrfProof, ResidentSignature)>,
-    },
-
-    ConsensusCandidate {
-        public_key: PublicKey,
-        proof: VrfProof,
-        signature: ResidentSignature,
-    },
 
     // For testing
     Raw(Vec<u8>),
-
-    // For testing
-    RawWithSignature {
-        raw: Vec<u8>,
-    },
 }
 
 impl Payload {
     pub fn to_vec(&self) -> Result<Vec<u8>, Error> {
         self.try_into()
-    }
-
-    pub fn require_signature(&self) -> bool {
-        matches!(self, Payload::RawWithSignature { .. })
     }
 }
 

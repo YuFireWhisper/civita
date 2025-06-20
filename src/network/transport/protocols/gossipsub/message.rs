@@ -6,25 +6,15 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    crypto::tss::Signature,
-    network::transport::{
-        dispatcher::Keyed,
-        protocols::gossipsub::{
-            payload,
-            signed_payload::{self, SignedPayload},
-            Payload,
-        },
-    },
+use crate::network::transport::{
+    dispatcher::Keyed,
+    protocols::gossipsub::{payload, Payload},
 };
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
     Payload(#[from] payload::Error),
-
-    #[error("{0}")]
-    SignedPayload(#[from] signed_payload::Error),
 
     #[error("Source field is none")]
     MissingSource,
@@ -50,7 +40,6 @@ pub struct Message {
     pub source: PeerId,
     pub topic: String,
     pub payload: Payload,
-    pub committee_signature: Option<Signature>,
 }
 
 impl Message {
@@ -77,15 +66,13 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
         {
             let source = message.source.ok_or(Error::MissingSource)?;
             let topic = message.topic.into_string();
-            let signed_payload = SignedPayload::from_bytes(&message.data)?;
-            let (payload, committee_signature) = signed_payload.take_payload_and_signature();
+            let payload = Payload::try_from(message.data)?;
 
             Ok(Self {
                 message_id,
                 source,
                 topic,
                 payload,
-                committee_signature,
             })
         } else {
             Err(Error::NotMessageEvent)
@@ -152,7 +139,6 @@ mod tests {
             source: PeerId::random(),
             topic: TOPIC.to_string(),
             payload: Payload::Raw(PAYLOAD.to_vec()),
-            committee_signature: None,
         };
 
         let message_vec: Vec<u8> = Message::try_into(message.clone()).unwrap();
