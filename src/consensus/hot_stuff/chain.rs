@@ -1,8 +1,44 @@
 use std::hash::Hash;
 
+use serde::{Deserialize, Serialize};
+
 use crate::consensus::hot_stuff::utils::QuorumCertificate;
 
 type Qc<H, T, P, S> = QuorumCertificate<Box<Node<H, T, P, S>>, P, S>;
+type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Decode(#[from] bincode::error::DecodeError),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum SerailizedNode<H, T, P, S>
+where
+    P: Eq + Hash,
+{
+    Genesis {
+        hash: H,
+        cmd: T,
+        view_number: u64,
+    },
+
+    Normal {
+        hash: H,
+        parent: H,
+        cmd: T,
+        justify: QuorumCertificate<H, P, S>,
+        view_number: u64,
+    },
+
+    Dummy {
+        hash: H,
+        parent: H,
+        view_number: u64,
+    },
+}
 
 #[derive(Clone)]
 #[derive(Eq, PartialEq)]
@@ -42,6 +78,22 @@ where
     v_height: u64,
 }
 
+impl<H, T, P, S> SerailizedNode<H, T, P, S>
+where
+    H: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    T: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+    P: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    S: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+{
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.into()
+    }
+
+    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        Self::try_from(bytes)
+    }
+}
+
 impl<H, T, P, S> Node<H, T, P, S>
 where
     H: Clone + Eq + Hash,
@@ -72,6 +124,22 @@ where
         }
     }
 
+    pub fn hash(&self) -> &H {
+        match self {
+            Node::Genesis { hash, .. } => hash,
+            Node::Normal { hash, .. } => hash,
+            Node::Dummy { hash, .. } => hash,
+        }
+    }
+
+    pub fn hash_take(self) -> H {
+        match self {
+            Node::Genesis { hash, .. } => hash,
+            Node::Normal { hash, .. } => hash,
+            Node::Dummy { hash, .. } => hash,
+        }
+    }
+
     pub fn is_parent_eq_justify(&self) -> bool {
         match self {
             Node::Normal {
@@ -80,6 +148,23 @@ where
             Node::Dummy { .. } => false,
             Node::Genesis { .. } => false,
         }
+    }
+
+    pub fn extends_from(&self, other: &Node<H, T, P, S>) -> bool {
+        let mut cur = self;
+
+        loop {
+            if cur == other {
+                return true;
+            }
+
+            match cur.parent() {
+                Some(parent) => cur = parent,
+                None => return false,
+            }
+        }
+
+        false
     }
 }
 
@@ -134,5 +219,194 @@ where
                 }
             }
         }
+    }
+
+    pub fn is_valid_node(&self, node: &Node<H, T, P, S>) -> bool {
+        if node.view_number() <= self.v_height {
+            return false;
+        }
+
+        let locked = match &self.locked {
+            Some(locked) => locked,
+            None => return true,
+        };
+
+        node.extends_from(locked)
+            || node
+                .justify()
+                .is_some_and(|qc| qc.node.view_number() > locked.view_number())
+    }
+}
+
+impl<H, T, P, S> From<Node<H, T, P, S>> for SerailizedNode<H, T, P, S>
+where
+    H: Clone + Eq + Hash,
+    P: Clone + Eq + Hash,
+    T: Clone + Eq,
+    S: Clone + Eq,
+{
+    fn from(node: Node<H, T, P, S>) -> Self {
+        match node {
+            Node::Genesis {
+                hash,
+                cmd,
+                view_number,
+            } => SerailizedNode::Genesis {
+                hash,
+                cmd,
+                view_number,
+            },
+            Node::Normal {
+                hash,
+                parent,
+                cmd,
+                justify,
+                view_number,
+            } => {
+                let justify = QuorumCertificate {
+                    node: justify.node.hash_take(),
+                    view_number,
+                    sig: justify.sig,
+                };
+
+                SerailizedNode::Normal {
+                    hash,
+                    parent: parent.hash_take(),
+                    cmd,
+                    justify,
+                    view_number,
+                }
+            }
+            Node::Dummy {
+                hash,
+                parent,
+                view_number,
+            } => SerailizedNode::Dummy {
+                hash,
+                parent: parent.hash().clone(),
+                view_number,
+            },
+        }
+    }
+}
+
+impl<H, T, P, S> From<&Node<H, T, P, S>> for SerailizedNode<H, T, P, S>
+where
+    H: Clone + Eq + Hash,
+    P: Clone + Eq + Hash,
+    T: Clone + Eq,
+    S: Clone + Eq,
+{
+    fn from(node: &Node<H, T, P, S>) -> Self {
+        match node {
+            Node::Genesis {
+                hash,
+                cmd,
+                view_number,
+            } => SerailizedNode::Genesis {
+                hash: hash.clone(),
+                cmd: cmd.clone(),
+                view_number: *view_number,
+            },
+            Node::Normal {
+                hash,
+                parent,
+                cmd,
+                justify,
+                view_number,
+            } => {
+                let justify = QuorumCertificate {
+                    node: justify.node.hash().clone(),
+                    view_number: *view_number,
+                    sig: justify.sig.clone(),
+                };
+
+                SerailizedNode::Normal {
+                    hash: hash.clone(),
+                    parent: parent.hash().clone(),
+                    cmd: cmd.clone(),
+                    justify: justify.clone(),
+                    view_number: *view_number,
+                }
+            }
+            Node::Dummy {
+                hash,
+                parent,
+                view_number,
+            } => SerailizedNode::Dummy {
+                hash: hash.clone(),
+                parent: parent.hash().clone(),
+                view_number: *view_number,
+            },
+        }
+    }
+}
+
+impl<H, T, P, S> From<SerailizedNode<H, T, P, S>> for Vec<u8>
+where
+    H: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    T: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+    P: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    S: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+{
+    fn from(node: SerailizedNode<H, T, P, S>) -> Self {
+        (&node).into()
+    }
+}
+
+impl<H, T, P, S> From<&SerailizedNode<H, T, P, S>> for Vec<u8>
+where
+    H: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    T: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+    P: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    S: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+{
+    fn from(node: &SerailizedNode<H, T, P, S>) -> Self {
+        bincode::serde::encode_to_vec(node, bincode::config::standard())
+            .expect("Failed to serialize node")
+    }
+}
+
+impl<H, T, P, S> TryFrom<Vec<u8>> for SerailizedNode<H, T, P, S>
+where
+    H: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    T: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+    P: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    S: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+{
+    type Error = Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self> {
+        bytes.as_slice().try_into()
+    }
+}
+
+impl<H, T, P, S> TryFrom<&Vec<u8>> for SerailizedNode<H, T, P, S>
+where
+    H: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    T: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+    P: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    S: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+{
+    type Error = Error;
+
+    fn try_from(bytes: &Vec<u8>) -> Result<Self> {
+        bytes.as_slice().try_into()
+    }
+}
+
+impl<H, T, P, S> TryFrom<&[u8]> for SerailizedNode<H, T, P, S>
+where
+    H: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    T: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+    P: Serialize + for<'a> Deserialize<'a> + Clone + Eq + Hash,
+    S: Serialize + for<'a> Deserialize<'a> + Clone + Eq,
+{
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .map(|(d, _)| d)
+            .map_err(Error::from)
     }
 }
