@@ -1,17 +1,23 @@
 use ark_ec::short_weierstrass::{Affine, SWCurveConfig};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-use crate::crypto::{self, traits};
+use crate::{
+    crypto::traits::PublicKey,
+    traits::serializable::{Error, Serializable},
+};
 
-impl<C: SWCurveConfig> traits::PublicKey for Affine<C> {
-    fn from_slice(slice: &[u8]) -> Result<Self, crypto::Error> {
-        Self::deserialize_compressed(slice).map_err(crypto::Error::from)
+impl<C: SWCurveConfig> Serializable for Affine<C> {
+    fn serialized_size(&self) -> usize {
+        self.compressed_size()
     }
 
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.compressed_size());
-        self.serialize_compressed(&mut bytes)
-            .expect("Failed to serialize public key");
-        bytes
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, Error> {
+        Self::deserialize_compressed(reader).map_err(Error::from)
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), Error> {
+        self.serialize_compressed(writer).map_err(Error::from)
     }
 }
+
+impl<C: SWCurveConfig> PublicKey for Affine<C> {}

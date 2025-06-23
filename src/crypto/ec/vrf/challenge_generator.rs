@@ -1,9 +1,9 @@
 use ark_ec::AffineRepr;
 use ark_ff::PrimeField;
 
-use crate::crypto::traits::hasher::Hasher;
+use crate::crypto::{error::*, traits::hasher::Hasher};
 
-pub fn generate_challenge<P: AffineRepr, H: Hasher>(points: [P; 5]) -> P::ScalarField {
+pub fn generate_challenge<P: AffineRepr, H: Hasher>(points: [P; 5]) -> Result<P::ScalarField> {
     const DOMAIN_SEPARATOR_FRONT: u8 = 0x02;
     const DOMAIN_SEPARATOR_BACK: u8 = 0x00;
 
@@ -15,13 +15,14 @@ pub fn generate_challenge<P: AffineRepr, H: Hasher>(points: [P; 5]) -> P::Scalar
     str.push(DOMAIN_SEPARATOR_FRONT);
 
     for p in points.iter() {
-        p.serialize_compressed(&mut str)
-            .expect("Failed to serialize point");
+        p.serialize_compressed(&mut str)?;
     }
 
     str.push(DOMAIN_SEPARATOR_BACK);
 
     let c_str = H::hash(&str);
 
-    P::ScalarField::from_be_bytes_mod_order(&c_str[..c_len.min(c_str.len())])
+    Ok(P::ScalarField::from_be_bytes_mod_order(
+        &c_str[..c_len.min(c_str.len())],
+    ))
 }

@@ -1,14 +1,16 @@
 use ark_ff::{Field, MontFp};
 use ark_secp256k1::Fq;
 
-use crate::crypto::ec::{
-    base_config::BaseConfig,
-    hash_to_curve::{
-        config::Config,
-        expand_message::Xmd,
-        map_to_curve::{simple_swu, MapToCurve},
+use crate::crypto::{
+    ec::{
+        hash_to_curve::{
+            config::Config,
+            expand_message::Xmd,
+            map_to_curve::{simple_swu, MapToCurve},
+        },
+        suite_implements::concat_str_slices,
     },
-    suite_implements::concat_str_slices,
+    traits::suite::HasherConfig,
 };
 
 const K_1_0: Fq = MontFp!("0x8e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38e38daaaaa8c7");
@@ -48,7 +50,7 @@ impl MapToCurve<Fq> for ark_secp256k1::Config {
     }
 }
 
-impl BaseConfig for ark_secp256k1::Config {
+impl HasherConfig for ark_secp256k1::Config {
     type Hasher = sha2::Sha256;
 }
 

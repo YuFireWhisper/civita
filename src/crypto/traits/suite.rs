@@ -1,18 +1,26 @@
 use crate::crypto::traits::{
-    public_key::PublicKey,
+    self,
     secret_key::SecretKey,
     vrf::{self},
-    Hasher, Signature, Signer, VerifiySignature,
+    Signer, VerifiySignature,
 };
 
-pub trait Suite: 'static {
+pub type Hasher<S> = <S as HasherConfig>::Hasher;
+pub type PublicKey<S> = <S as Suite>::PublicKey;
+pub type Proof<S> = <S as Suite>::Proof;
+pub type Signature<S> = <S as Suite>::Signature;
+
+pub trait HasherConfig {
+    type Hasher: traits::Hasher;
+}
+
+pub trait Suite: HasherConfig + 'static {
     type SecretKey: SecretKey<PublicKey = Self::PublicKey>
         + vrf::Prover<Proof = Self::Proof>
         + Signer<Signature = Self::Signature>;
-    type PublicKey: PublicKey
+    type PublicKey: traits::PublicKey
         + vrf::VerifyProof<Proof = Self::Proof>
         + VerifiySignature<Signature = Self::Signature>;
     type Proof: vrf::Proof<Hasher = Self::Hasher>;
-    type Signature: Signature;
-    type Hasher: Hasher;
+    type Signature: traits::Signature;
 }

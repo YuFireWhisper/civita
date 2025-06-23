@@ -2,13 +2,13 @@ use ark_ec::models::short_weierstrass::SWCurveConfig;
 use ark_ff::MontFp;
 use ark_secp256r1::Fq;
 
-use crate::crypto::ec::{
-    base_config::BaseConfig,
-    hash_to_curve::{
+use crate::crypto::{
+    ec::hash_to_curve::{
         expand_message::Xmd,
         map_to_curve::{simple_swu, MapToCurve},
         Config,
     },
+    traits::suite::HasherConfig,
 };
 
 #[allow(unused_imports)]
@@ -31,7 +31,7 @@ impl MapToCurve<Fq> for ark_secp256r1::Config {
     }
 }
 
-impl BaseConfig for ark_secp256r1::Config {
+impl HasherConfig for ark_secp256r1::Config {
     type Hasher = sha2::Sha256;
 }
 

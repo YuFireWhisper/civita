@@ -1,87 +1,108 @@
+use std::fmt::Debug;
+
 use ark_ec::{
-    short_weierstrass::{Affine, Projective},
+    short_weierstrass::{Affine, SWCurveConfig},
     CurveGroup,
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use derivative::Derivative;
 use rand::Rng;
 
-use crate::crypto::traits::{self, hasher::Hasher, SecretKey as _};
-use crate::crypto::{
-    self,
-    ec::{base_config::BaseConfig, secret_key::SecretKey},
+use crate::{
+    crypto::{
+        ec::secret_key::SecretKey,
+        traits::{self, suite::HasherConfig, SecretKey as _},
+        Error as CryptoError, Hasher,
+    },
+    traits::serializable::{Error as SerializableError, Serializable},
 };
 
-#[derive(Derivative)]
-#[derivative(Clone(bound = ""))]
-#[derivative(Debug(bound = ""))]
-#[derivative(Eq(bound = ""), PartialEq(bound = ""))]
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
-pub struct Signature<C: BaseConfig> {
-    pub r: Affine<C>,
-    pub s: C::ScalarField,
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+pub struct Signature<P, S> {
+    pub r: P,
+    pub s: S,
 }
 
-impl<C: BaseConfig> traits::signature::Signature for Signature<C> {
-    fn from_slice(bytes: &[u8]) -> Result<Self, crypto::Error> {
-        Self::deserialize_compressed(bytes).map_err(crypto::Error::from)
+impl<P, S> Serializable for Signature<P, S>
+where
+    P: CanonicalSerialize + CanonicalDeserialize,
+    S: CanonicalSerialize + CanonicalDeserialize,
+{
+    fn serialized_size(&self) -> usize {
+        self.r.compressed_size() + self.s.compressed_size()
     }
 
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.compressed_size());
-        self.serialize_compressed(&mut bytes)
-            .expect("Failed to serialize signature");
-        bytes
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, SerializableError> {
+        let r = P::deserialize_compressed(reader.by_ref())?;
+        let s = S::deserialize_compressed(reader.by_ref())?;
+
+        Ok(Self { r, s })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), SerializableError> {
+        self.r.serialize_compressed(writer.by_ref())?;
+        self.s.serialize_compressed(writer.by_ref())?;
+
+        Ok(())
     }
 }
 
-impl<C: BaseConfig> traits::Signer for SecretKey<C> {
-    type Signature = Signature<C>;
+impl<C: SWCurveConfig + HasherConfig> traits::Signature for Signature<Affine<C>, C::ScalarField> {}
 
-    fn sign(&self, msg: &[u8]) -> Signature<C> {
+impl<C: SWCurveConfig + HasherConfig> traits::Signer for SecretKey<C> {
+    type Signature = Signature<Affine<C>, C::ScalarField>;
+
+    fn sign(&self, msg: &[u8]) -> Result<Signature<Affine<C>, C::ScalarField>, CryptoError> {
         let mut random = [0u8; 32];
         rand::rng().fill(&mut random);
 
         let k = C::ScalarField::from_be_bytes_mod_order(&random);
         let r = C::GENERATOR * k;
-        let e = generate_challenge(msg, r, &self.public_key());
+        let e = generate_challenge::<_, _, C::ScalarField, C::Hasher>(msg, r, &self.public_key())?;
         let s = k + e * self.sk;
 
-        Signature {
+        Ok(Signature {
             r: r.into_affine(),
             s,
-        }
+        })
     }
 }
 
-impl<C: BaseConfig> traits::VerifiySignature for Affine<C> {
-    type Signature = Signature<C>;
+impl<C: SWCurveConfig + HasherConfig> traits::VerifiySignature for Affine<C> {
+    type Signature = Signature<Affine<C>, C::ScalarField>;
 
-    fn verify_signature(&self, msg: &[u8], sig: &Signature<C>) -> bool {
-        let e = generate_challenge::<C>(msg, sig.r.into(), self);
+    fn verify_signature(
+        &self,
+        msg: &[u8],
+        sig: &Signature<Affine<C>, C::ScalarField>,
+    ) -> Result<(), CryptoError> {
+        let e = generate_challenge::<_, _, C::ScalarField, C::Hasher>(msg, sig.r, self)?;
 
         let lhs = C::GENERATOR * sig.s;
         let rhs = sig.r + *self * e;
 
-        lhs == rhs.into_affine()
+        if lhs != rhs.into_affine() {
+            Err(CryptoError::SignatureVerificationFailed)
+        } else {
+            Ok(())
+        }
     }
 }
 
-fn generate_challenge<C: BaseConfig>(
+fn generate_challenge<P1: CanonicalSerialize, P2: CanonicalSerialize, S: PrimeField, H: Hasher>(
     msg: &[u8],
-    r: Projective<C>,
-    pk: &Affine<C>,
-) -> C::ScalarField {
+    r: P1,
+    pk: &P2,
+) -> Result<S, CryptoError> {
     let mut bytes = Vec::with_capacity(msg.len() + r.compressed_size() + pk.compressed_size());
 
     bytes.extend_from_slice(msg);
-    r.serialize_compressed(&mut bytes)
-        .expect("Failed to serialize point");
-    pk.serialize_compressed(&mut bytes)
-        .expect("Failed to serialize point");
+    r.serialize_compressed(&mut bytes)?;
+    pk.serialize_compressed(&mut bytes)?;
 
-    C::ScalarField::from_be_bytes_mod_order(<C::Hasher as Hasher>::hash(&bytes).as_slice())
+    Ok(S::from_be_bytes_mod_order(H::hash(&bytes).as_slice()))
 }
 
 #[cfg(test)]
@@ -108,12 +129,12 @@ mod tests {
         let sk = SecretKey::new(SK);
         let pk = Affine::new(PK_X, PK_Y);
 
-        let sig = sk.sign(msg);
+        let sig = sk.sign(msg).unwrap();
 
         let should_valid = pk.verify_signature(msg, &sig);
         let should_invalid = pk.verify_signature(b"wrong message", &sig);
 
-        assert!(should_valid, "Signature should be valid");
-        assert!(!should_invalid, "Signature should be invalid");
+        assert!(should_valid.is_ok(), "Signature should be valid");
+        assert!(should_invalid.is_err(), "Signature should be invalid");
     }
 }

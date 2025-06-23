@@ -1,8 +1,5 @@
 use std::{fmt::Debug, hash::Hash};
 
-use crate::crypto;
+use crate::traits::serializable::Serializable;
 
-pub trait PublicKey: Clone + Debug + Eq + Hash + Sized + Sync + Send + 'static {
-    fn from_slice(slice: &[u8]) -> Result<Self, crypto::Error>;
-    fn to_bytes(&self) -> Vec<u8>;
-}
+pub trait PublicKey: Clone + Debug + Eq + Hash + Serializable + Sync + Send + 'static {}

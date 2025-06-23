@@ -7,7 +7,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
 use rand::Rng;
 
-use crate::crypto::{self, traits};
+use crate::{
+    crypto::traits,
+    traits::serializable::{Error, Serializable},
+};
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Copy(bound = ""))]
@@ -19,9 +22,27 @@ pub struct SecretKey<C: SWCurveConfig> {
 }
 
 impl<C: SWCurveConfig> SecretKey<C> {
-    pub fn new(scalar: C::ScalarField) -> Self {
-        let pk = (C::GENERATOR * scalar).into_affine();
-        Self { sk: scalar, pk }
+    pub fn new(sk: C::ScalarField) -> Self {
+        let pk = (C::GENERATOR * sk).into_affine();
+        Self { sk, pk }
+    }
+}
+
+impl<C: SWCurveConfig> Serializable for SecretKey<C> {
+    fn serialized_size(&self) -> usize {
+        self.sk.compressed_size()
+    }
+
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, Error> {
+        let sk =
+            C::ScalarField::deserialize_compressed(reader).map_err(|e| Error(e.to_string()))?;
+        Ok(Self::new(sk))
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), Error> {
+        self.sk
+            .serialize_compressed(writer)
+            .map_err(|e| Error(e.to_string()))
     }
 }
 
@@ -32,19 +53,6 @@ impl<C: SWCurveConfig> traits::SecretKey for SecretKey<C> {
         let mut bytes = [0u8; 32];
         rand::rng().fill(&mut bytes);
         Self::new(C::ScalarField::from_be_bytes_mod_order(&bytes))
-    }
-
-    fn from_slice(slice: &[u8]) -> Result<Self, crypto::Error> {
-        let scalar = C::ScalarField::deserialize_compressed(slice)?;
-        Ok(Self::new(scalar))
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.sk.compressed_size());
-        self.sk
-            .serialize_compressed(&mut bytes)
-            .expect("Failed to serialize secret key");
-        bytes
     }
 
     fn public_key(&self) -> Self::PublicKey {
