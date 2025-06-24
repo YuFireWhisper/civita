@@ -181,7 +181,9 @@ impl<H: Hasher> KadEngine<H> for Kad<H> {
 
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
             .await
-            .map_err(Error::from)?;
+            .map_err(Error::from)?
+            .map_err(Error::from)?
+            .map_err(transport::Error::from)?;
 
         Ok(())
     }
