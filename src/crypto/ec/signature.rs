@@ -14,7 +14,7 @@ use crate::{
         traits::{self, suite::HasherConfig, SecretKey as _},
         Error as CryptoError, Hasher,
     },
-    traits::serializable::{Error as SerializableError, Serializable},
+    traits::serializable::{ConstantSize, Error as SerializableError, Serializable},
 };
 
 #[derive(Clone)]
@@ -47,6 +47,10 @@ where
 
         Ok(())
     }
+}
+
+impl<C: SWCurveConfig + HasherConfig> ConstantSize for Signature<Affine<C>, C::ScalarField> {
+    const SIZE: usize = Affine::<C>::SIZE + C::ScalarField::MODULUS_BIT_SIZE as usize / 8usize;
 }
 
 impl<C: SWCurveConfig + HasherConfig> traits::Signature for Signature<Affine<C>, C::ScalarField> {}

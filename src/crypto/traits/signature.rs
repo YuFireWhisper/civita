@@ -5,10 +5,13 @@ use crate::{
         error::*,
         traits::{secret_key::SecretKey, PublicKey},
     },
-    traits::serializable::Serializable,
+    traits::serializable::{ConstantSize, Serializable},
 };
 
-pub trait Signature: Clone + Debug + Eq + Serializable + Sync + Send + 'static {}
+pub trait Signature:
+    Clone + Debug + Eq + Serializable + ConstantSize + Sync + Send + 'static
+{
+}
 
 pub trait Signer: SecretKey {
     type Signature: Signature;

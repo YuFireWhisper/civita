@@ -9,7 +9,7 @@ use rand::Rng;
 
 use crate::{
     crypto::traits,
-    traits::serializable::{Error, Serializable},
+    traits::serializable::{ConstantSize, Error, Serializable},
 };
 
 #[derive(Derivative)]
@@ -44,6 +44,10 @@ impl<C: SWCurveConfig> Serializable for SecretKey<C> {
             .serialize_compressed(writer)
             .map_err(|e| Error(e.to_string()))
     }
+}
+
+impl<C: SWCurveConfig> ConstantSize for SecretKey<C> {
+    const SIZE: usize = C::ScalarField::MODULUS_BIT_SIZE as usize / 8usize;
 }
 
 impl<C: SWCurveConfig> traits::SecretKey for SecretKey<C> {

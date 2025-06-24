@@ -5,10 +5,10 @@ use crate::{
         error::*,
         traits::{hasher::HashArray, secret_key::SecretKey, Hasher, PublicKey},
     },
-    traits::serializable::Serializable,
+    traits::serializable::{ConstantSize, Serializable},
 };
 
-pub trait Proof: Clone + Debug + Eq + Serializable + Sync + Send + 'static {
+pub trait Proof: Clone + Debug + Eq + Serializable + ConstantSize + Sync + Send + 'static {
     type Hasher: Hasher;
 
     fn proof_to_hash(&self) -> HashArray<Self::Hasher>;

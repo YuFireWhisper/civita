@@ -18,7 +18,7 @@ use crate::{
         },
         Error as CryptoError,
     },
-    traits::serializable::{Error as SerializableError, Serializable},
+    traits::serializable::{ConstantSize, Error as SerializableError, Serializable},
 };
 
 mod challenge_generator;
@@ -86,6 +86,15 @@ where
 
         Ok(())
     }
+}
+
+impl<C> ConstantSize for Proof<Affine<C>, C::ScalarField>
+where
+    C: hash_to_curve::Config,
+    C::ScalarField: Cofactor,
+{
+    const SIZE: usize =
+        Affine::<C>::SIZE + 2 * (C::ScalarField::MODULUS_BIT_SIZE as usize / 8usize);
 }
 
 impl<C> Prover for SecretKey<C>

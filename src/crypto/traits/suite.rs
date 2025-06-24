@@ -5,11 +5,6 @@ use crate::crypto::traits::{
     Signer, VerifiySignature,
 };
 
-pub type Hasher<S> = <S as HasherConfig>::Hasher;
-pub type PublicKey<S> = <S as Suite>::PublicKey;
-pub type Proof<S> = <S as Suite>::Proof;
-pub type Signature<S> = <S as Suite>::Signature;
-
 pub trait HasherConfig {
     type Hasher: traits::Hasher;
 }
