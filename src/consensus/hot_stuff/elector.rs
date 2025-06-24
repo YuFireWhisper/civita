@@ -5,14 +5,14 @@ use tokio::time;
 
 use crate::{
     consensus::randomizer::{self, DrawProof, Drawer, VerifyDrawProof},
-    constants::{U16_LENGTH, U64_LENGTH},
-    crypto::traits::{hasher::HashArray, vrf::Proof, Hasher, PublicKey, SecretKey, Suite},
+    crypto::traits::{hasher::HashArray, vrf::Proof, Hasher, SecretKey, Suite},
     network::transport::{
         self,
         protocols::gossipsub,
         store::merkle_dag::{self, Node},
     },
     resident,
+    traits::serializable::{self, Serializable},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -34,6 +34,9 @@ pub enum Error {
 
     #[error("{0}")]
     Randomizer(#[from] randomizer::Error),
+
+    #[error("{0}")]
+    Serializable(#[from] serializable::Error),
 }
 
 pub struct Config {
@@ -56,64 +59,51 @@ where
     S::PublicKey: VerifyDrawProof<S::Hasher>,
     S::Hasher: merkle_dag::HasherConfig,
 {
-    pub async fn elect(
-        &self,
-        number: u64,
-        total_stakes: u32,
-        root_hash: HashArray<S::Hasher>,
-    ) -> Result<(PeerId, Multiaddr)> {
-        let mut counter = 0u16;
-
-        let mut base_seed = Vec::with_capacity(U64_LENGTH + root_hash.len() + U16_LENGTH);
-        base_seed.extend(number.to_be_bytes());
-        base_seed.extend_from_slice(&root_hash);
-
-        loop {
-            let seed = self.generate_seed(&mut base_seed, counter);
-
-            let ctx = randomizer::Context::<S::Hasher>::new(
-                seed.clone(),
-                total_stakes,
-                self.config.expected_leaders,
-                self.config.expected_members,
-            );
-
-            let own_stake = self.get_stakes(&self.sk.public_key(), &root_hash).await?;
-            let proof = self.sk.draw(&ctx, own_stake, true)?;
-
-            if let Some(proof) = &proof {
-                let payload = gossipsub::Payload::ConsensusCandidate {
-                    seed: seed.to_vec(),
-                    proof: proof.to_bytes(),
-                    pk: self.sk.public_key().to_bytes(),
-                    addr: self.transport.self_address().await,
-                };
-                self.transport.publish(&self.config.topic, payload).await?;
-            }
-
-            if let Some(leader) = self.wait_for_leader(&ctx, seed, proof).await? {
-                return Ok(leader);
-            }
-
-            counter += 1;
+    pub fn new(transport: Arc<Transport>, sk: S::SecretKey, config: Config) -> Self {
+        Self {
+            transport,
+            sk,
+            config,
         }
     }
 
-    fn generate_seed(&self, base_seed: &mut Vec<u8>, counter: u16) -> HashArray<S::Hasher> {
-        base_seed.extend(counter.to_be_bytes());
-        let seed = S::Hasher::hash(base_seed);
-        base_seed.truncate(base_seed.len() - U16_LENGTH);
-        seed
+    pub async fn elect(
+        &self,
+        seed: HashArray<S::Hasher>,
+        total_stakes: u32,
+        root_hash: HashArray<S::Hasher>,
+    ) -> Result<Option<(PeerId, Multiaddr)>> {
+        let ctx = randomizer::Context::<S::Hasher>::new(
+            seed.clone(),
+            total_stakes,
+            self.config.expected_leaders,
+            self.config.expected_members,
+        );
+
+        let own_stake = self.get_stakes(&self.sk.public_key(), &root_hash).await?;
+        let proof = self.sk.draw(&ctx, own_stake, true)?;
+
+        if let Some(proof) = &proof {
+            let payload = gossipsub::Payload::ConsensusCandidate {
+                seed: seed.to_vec()?,
+                proof: proof.to_vec()?,
+                pk: self.sk.public_key().to_vec()?,
+                addr: self.transport.self_address().await,
+            };
+            self.transport.publish(&self.config.topic, payload).await?;
+        }
+
+        self.wait_for_leader(&ctx, seed, proof).await
     }
 
     async fn get_stakes(&self, pk: &S::PublicKey, root_hash: &HashArray<S::Hasher>) -> Result<u32> {
-        let peer_hash = S::Hasher::hash(&pk.to_bytes());
-
         let root = self
             .transport
             .get::<Node<S::Hasher>, S::Hasher>(root_hash)
             .await?
             .expect("Root node should always exist");
+
+        let peer_hash = S::Hasher::hash(&pk.to_vec()?);
 
         match root.get(peer_hash, &self.transport).await? {
             Some(hash) => Ok(self

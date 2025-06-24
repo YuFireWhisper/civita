@@ -1,14 +1,15 @@
-use std::io::{Cursor, Read};
-
 use statrs::distribution::{Binomial, DiscreteCDF};
 
-use crate::crypto::{
-    self,
-    traits::{
-        hasher::HashArray,
-        vrf::{Proof, Prover, VerifyProof},
+use crate::{
+    crypto::{
+        self,
+        traits::{
+            hasher::HashArray,
+            vrf::{Proof, Prover, VerifyProof},
+        },
+        Hasher,
     },
-    Hasher,
+    traits::serializable::{self, Serializable},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -27,6 +28,9 @@ pub enum Error {
 
     #[error("{0}")]
     Crypto(#[from] crypto::Error),
+
+    #[error("{0}")]
+    Serializable(#[from] serializable::Error),
 }
 
 #[derive(Clone)]
@@ -40,14 +44,14 @@ pub struct Context<H: Hasher> {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 pub struct DrawProof<P: Proof> {
-    proof: P,
-    weight: u32,
+    pub proof: P,
+    pub weight: u32,
 }
 
 pub trait Drawer<H: Hasher>: Prover {
     fn draw(
         &self,
-        ctx: Context<H>,
+        ctx: &Context<H>,
         stakes: u32,
         is_leader: bool,
     ) -> Result<Option<DrawProof<Self::Proof>>>;
@@ -56,9 +60,9 @@ pub trait Drawer<H: Hasher>: Prover {
 pub trait VerifyDrawProof<H: Hasher>: VerifyProof {
     fn verify_draw_proof(
         &self,
-        ctx: Context<H>,
+        ctx: &Context<H>,
         stakes: u32,
-        proof: DrawProof<Self::Proof>,
+        proof: &DrawProof<Self::Proof>,
         is_leader: bool,
     ) -> Result<bool>;
 }
@@ -118,7 +122,7 @@ impl<H: Hasher> Context<H> {
             (&self.validator.0, self.validator.1)
         };
 
-        let proof = sk.prove(input.as_slice());
+        let proof = sk.prove(input.as_slice())?;
         let output = proof.proof_to_hash();
 
         let hash_as_float = self.hash_to_float(&output);
@@ -171,7 +175,7 @@ impl<H: Hasher> Context<H> {
             (&self.validator.0, self.validator.1)
         };
 
-        if !pk.verify_proof(input.as_slice(), &proof.proof) {
+        if pk.verify_proof(input.as_slice(), &proof.proof).is_err() {
             return Ok(false);
         }
 
@@ -187,43 +191,35 @@ impl<H: Hasher> Context<H> {
     }
 }
 
-impl<P: Proof> DrawProof<P> {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        bytes.extend(self.weight.to_le_bytes());
-        bytes.extend(self.proof.to_bytes());
-
-        bytes
+impl<P: Proof> Serializable for DrawProof<P> {
+    fn serialized_size(&self) -> usize {
+        self.proof.serialized_size() + self.weight.serialized_size()
     }
 
-    pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        let mut cursor = Cursor::new(slice);
-
-        let mut weight_bytes = [0u8; 4];
-        cursor.read_exact(&mut weight_bytes)?;
-        let weight = u32::from_le_bytes(weight_bytes);
-
-        let proof = P::from_slice(&cursor.get_ref()[cursor.position() as usize..])?;
-
-        Ok(DrawProof { proof, weight })
+    fn from_reader<R: std::io::Read>(
+        reader: &mut R,
+    ) -> std::result::Result<Self, serializable::Error> {
+        Ok(Self {
+            proof: P::from_reader(reader)?,
+            weight: u32::from_reader(reader)?,
+        })
     }
 
-    pub fn from_cursor(cursor: &mut Cursor<&[u8]>) -> Result<Self> {
-        let mut weight_bytes = [0u8; 4];
-        cursor.read_exact(&mut weight_bytes)?;
-        let weight = u32::from_le_bytes(weight_bytes);
+    fn to_writer<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+    ) -> std::result::Result<(), serializable::Error> {
+        self.proof.to_writer(writer)?;
+        self.weight.to_writer(writer)?;
 
-        let proof = P::from_slice(&cursor.get_ref()[cursor.position() as usize..])?;
-
-        Ok(DrawProof { proof, weight })
+        Ok(())
     }
 }
 
 impl<H: Hasher, S: Prover> Drawer<H> for S {
     fn draw(
         &self,
-        ctx: Context<H>,
+        ctx: &Context<H>,
         stakes: u32,
         is_leader: bool,
     ) -> Result<Option<DrawProof<Self::Proof>>> {
@@ -234,11 +230,11 @@ impl<H: Hasher, S: Prover> Drawer<H> for S {
 impl<H: Hasher, S: VerifyProof> VerifyDrawProof<H> for S {
     fn verify_draw_proof(
         &self,
-        ctx: Context<H>,
+        ctx: &Context<H>,
         stakes: u32,
-        proof: DrawProof<Self::Proof>,
+        proof: &DrawProof<Self::Proof>,
         is_leader: bool,
     ) -> Result<bool> {
-        ctx.verify(self, stakes, &proof, is_leader)
+        ctx.verify(self, stakes, proof, is_leader)
     }
 }

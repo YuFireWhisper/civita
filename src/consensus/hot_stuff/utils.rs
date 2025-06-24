@@ -1,15 +1,9 @@
-use std::{collections::HashMap, hash::Hash};
+pub mod block;
+pub mod quorum_certificate;
+pub mod view;
 
-use serde::{Deserialize, Serialize};
+pub use block::Block;
+pub use quorum_certificate::QuorumCertificate;
+pub use view::View;
 
-#[derive(Clone)]
-#[derive(Eq, PartialEq)]
-#[derive(Serialize, Deserialize)]
-pub struct QuorumCertificate<T, P, S>
-where
-    P: Eq + Hash,
-{
-    pub view_number: u64,
-    pub node: T,
-    pub sig: HashMap<P, S>,
-}
+pub type ViewNumber = u64;
