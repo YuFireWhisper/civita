@@ -1,6 +1,7 @@
 use std::{fmt::Display, sync::Arc};
 
 use dashmap::DashMap;
+use tokio::sync::oneshot;
 
 use crate::{
     crypto::{traits::hasher::HashArray, Hasher},
@@ -25,14 +26,8 @@ pub enum Error {
     #[error("Get error: {0}")]
     Get(#[from] libp2p::kad::GetRecordError),
 
-    #[error("Invalid payload type for Kademlia key generation")]
-    InvalidPayloadType,
-
     #[error("Waiting for Kademlia operation timed out after {0:?}")]
     Timeout(#[from] tokio::time::error::Elapsed),
-
-    #[error("{0}")]
-    Message(#[from] message::Error),
 
     #[error("Oneshot error: {0}")]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
@@ -61,6 +56,11 @@ pub struct Config {
 pub struct ConfigBuilder {
     wait_for_kad_result_timeout: Option<tokio::time::Duration>,
     quorum: Option<libp2p::kad::Quorum>,
+}
+
+enum WaitingQuery {
+    Put(oneshot::Sender<Result<()>>),
+    Get(oneshot::Sender<Result<Option<libp2p::kad::PeerRecord>>>),
 }
 
 impl ConfigBuilder {
@@ -93,11 +93,7 @@ impl ConfigBuilder {
 
 pub struct Kad {
     swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
-    waiting_put_queries: DashMap<libp2p::kad::QueryId, tokio::sync::oneshot::Sender<Result<()>>>,
-    waiting_get_queries: DashMap<
-        libp2p::kad::QueryId,
-        tokio::sync::oneshot::Sender<Result<Option<libp2p::kad::PeerRecord>>>,
-    >,
+    waiting_queries: DashMap<libp2p::kad::QueryId, WaitingQuery>,
     config: Config,
 }
 
@@ -108,8 +104,7 @@ impl Kad {
     ) -> Self {
         Self {
             swarm,
-            waiting_put_queries: DashMap::new(),
-            waiting_get_queries: DashMap::new(),
+            waiting_queries: DashMap::new(),
             config,
         }
     }
@@ -128,28 +123,40 @@ impl Kad {
 
         match result {
             QueryResult::PutRecord(result) => {
-                if let Some((_, sender)) = self.waiting_put_queries.remove(&id) {
-                    let send_result = match result {
-                        Ok(_) => sender.send(Ok(())),
-                        Err(err) => sender.send(Err(Error::Put(err))),
-                    };
+                let Some((_, sender)) = self.waiting_queries.remove(&id) else {
+                    return;
+                };
 
-                    if send_result.is_err() {
-                        log::warn!("Failed to send put record result, receiver dropped");
-                    }
+                let result = match result {
+                    Ok(_) => Ok(()),
+                    Err(err) => Err(Error::Put(err)),
+                };
+
+                let WaitingQuery::Put(sender) = sender else {
+                    panic!("Expected a Put query result, but got a different type");
+                };
+
+                if let Err(err) = sender.send(result) {
+                    log::warn!("Failed to send put record result, receiver dropped: {err:?}");
                 }
             }
             QueryResult::GetRecord(result) => {
-                if let Some((_, sender)) = self.waiting_get_queries.remove(&id) {
-                    let response = match result {
-                        Ok(GetRecordOk::FoundRecord(record)) => Ok(Some(record)),
-                        Ok(GetRecordOk::FinishedWithNoAdditionalRecord { .. }) => Ok(None),
-                        Err(err) => Err(Error::Get(err)),
-                    };
+                let Some((_, sender)) = self.waiting_queries.remove(&id) else {
+                    return;
+                };
 
-                    if sender.send(response).is_err() {
-                        log::warn!("Failed to send get record result, receiver dropped");
-                    }
+                let result = match result {
+                    Ok(GetRecordOk::FoundRecord(record)) => Ok(Some(record)),
+                    Ok(GetRecordOk::FinishedWithNoAdditionalRecord { .. }) => Ok(None),
+                    Err(err) => Err(Error::Get(err)),
+                };
+
+                let WaitingQuery::Get(sender) = sender else {
+                    panic!("Expected a Get query result, but got a different type");
+                };
+
+                if let Err(err) = sender.send(result) {
+                    log::warn!("Failed to send get record result, receiver dropped: {err:?}");
                 }
             }
             _ => log::debug!("Received unhandled query result: {result:?}"),
@@ -169,7 +176,7 @@ impl Kad {
             .put_record(record, self.config.quorum)?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.waiting_put_queries.insert(query_id, tx);
+        self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
 
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
     }
@@ -187,10 +194,11 @@ impl Kad {
     ) -> Result<Option<T>> {
         let mut swarm = self.swarm.lock().await;
         let key = libp2p::kad::RecordKey::new(key);
+
         let query_id = swarm.behaviour_mut().kad_mut().get_record(key);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.waiting_get_queries.insert(query_id, tx);
+        self.waiting_queries.insert(query_id, WaitingQuery::Get(tx));
 
         let peer_record_opt =
             tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
