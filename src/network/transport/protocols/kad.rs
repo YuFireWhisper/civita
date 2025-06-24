@@ -1,11 +1,12 @@
-use std::{fmt::Display, sync::Arc};
+use std::{marker::PhantomData, sync::Arc};
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
 use crate::{
     crypto::{traits::hasher::HashArray, Hasher},
-    network::transport::behaviour::Behaviour,
+    network::transport::{self, behaviour::Behaviour, KadEngine},
+    traits::{serializable, Serializable},
 };
 
 pub mod message;
@@ -15,7 +16,7 @@ pub mod validated_store;
 pub use message::Message;
 pub use payload::Payload;
 
-type Result<T> = std::result::Result<T, Error>;
+type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -36,13 +37,7 @@ pub enum Error {
     Store(#[from] libp2p::kad::store::Error),
 
     #[error("{0}")]
-    ConvertFromPayload(String),
-
-    #[error("No found payload for the given key")]
-    NotFound,
-
-    #[error("{0}")]
-    ConvertFromVec(String),
+    Serializable(#[from] serializable::Error),
 }
 
 #[derive(Debug)]
@@ -91,13 +86,14 @@ impl ConfigBuilder {
     }
 }
 
-pub struct Kad {
+pub struct Kad<H> {
     swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
     waiting_queries: DashMap<libp2p::kad::QueryId, WaitingQuery>,
     config: Config,
+    _marker: PhantomData<H>,
 }
 
-impl Kad {
+impl<H: Hasher> Kad<H> {
     pub fn new(
         swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
         config: Config,
@@ -106,6 +102,7 @@ impl Kad {
             swarm,
             waiting_queries: DashMap::new(),
             config,
+            _marker: PhantomData,
         }
     }
 
@@ -162,8 +159,11 @@ impl Kad {
             _ => log::debug!("Received unhandled query result: {result:?}"),
         }
     }
+}
 
-    pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
+#[async_trait::async_trait]
+impl<H: Hasher> KadEngine<H> for Kad<H> {
+    async fn put(&self, record: Vec<u8>) -> Result<(), transport::Error> {
         let key = H::hash(&record);
         let key = libp2p::kad::RecordKey::new(&key);
 
@@ -173,25 +173,23 @@ impl Kad {
         let query_id = swarm
             .behaviour_mut()
             .kad_mut()
-            .put_record(record, self.config.quorum)?;
+            .put_record(record, self.config.quorum)
+            .map_err(Error::from)?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
 
-        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await??
+        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
+            .await
+            .map_err(Error::from)?;
+
+        Ok(())
     }
 
-    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display>, H: Hasher>(
+    async fn get<T: Serializable + 'static>(
         &self,
         key: &HashArray<H>,
-    ) -> Result<T> {
-        self.get::<T, H>(key).await?.ok_or(Error::NotFound)
-    }
-
-    pub async fn get<T: TryFrom<Vec<u8>, Error: Display>, H: Hasher>(
-        &self,
-        key: &HashArray<H>,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<T>, transport::Error> {
         let mut swarm = self.swarm.lock().await;
         let key = libp2p::kad::RecordKey::new(key);
 
@@ -200,15 +198,16 @@ impl Kad {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_queries.insert(query_id, WaitingQuery::Get(tx));
 
-        let peer_record_opt =
-            tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
+        let peer_record_opt = tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
+            .await
+            .map_err(Error::from)
+            .and_then(|result| result.map_err(Error::from))?
+            .map_err(transport::Error::from)?;
 
         match peer_record_opt {
-            Some(peer_record) => {
-                let t = T::try_from(peer_record.record.value)
-                    .map_err(|e| Error::ConvertFromVec(e.to_string()))?;
-                Ok(Some(t))
-            }
+            Some(peer_record) => Ok(Some(
+                T::from_slice(&peer_record.record.value).map_err(Error::from)?,
+            )),
             None => Ok(None),
         }
     }

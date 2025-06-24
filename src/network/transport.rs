@@ -1,8 +1,8 @@
-use std::{collections::HashSet, fmt::Display, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use futures::StreamExt;
 use libp2p::PeerId;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc::Receiver, Mutex};
 
 use crate::{
     crypto::{traits::hasher::HashArray, Hasher},
@@ -14,7 +14,9 @@ use crate::{
             request_response::{self, payload::Request},
             Gossipsub, Kad, RequestResponse,
         },
+        store::merkle_dag,
     },
+    traits::Serializable,
 };
 
 pub mod config;
@@ -30,31 +32,31 @@ pub use error::Error;
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[allow(dead_code)]
-enum KadResult {
-    PutSuccess,
-    PutFailure(Vec<u8>),
-    GetSuccess(Vec<u8>),
-    GetFailure(Vec<u8>),
-    GetNotFound,
+#[mockall::automock]
+#[async_trait::async_trait]
+pub trait KadEngine<H: Hasher>: Send + Sync + 'static {
+    async fn put(&self, record: Vec<u8>) -> Result<()>;
+    async fn get<T: Serializable + 'static>(&self, key: &HashArray<H>) -> Result<Option<T>>;
 }
 
-pub struct Transport {
+pub struct Transport<H: merkle_dag::Config> {
     swarm: Arc<tokio::sync::Mutex<libp2p::Swarm<Behaviour>>>,
     gossipsub: Arc<Gossipsub>,
-    kad: Arc<Kad>,
+    kad: Arc<Kad<H>>,
     request_response: Arc<RequestResponse>,
     keypair: Arc<libp2p::identity::Keypair>,
     config: Config,
     self_peer: PeerId,
+    kad_root: Mutex<merkle_dag::Node<H, Kad<H>>>,
 }
 
 #[mockall::automock]
-impl Transport {
+impl<H: merkle_dag::Config> Transport<H> {
     pub async fn new<T: Into<libp2p::identity::Keypair> + 'static>(
         secret_key: T,
         listen_addr: libp2p::Multiaddr,
         config: Config,
+        root: merkle_dag::Node<H, Kad<H>>,
     ) -> Result<Self> {
         let keypair: libp2p::identity::Keypair = secret_key.into();
 
@@ -94,6 +96,7 @@ impl Transport {
             keypair,
             config,
             self_peer,
+            kad_root: Mutex::new(root),
         };
 
         transport.receive().await;
@@ -229,25 +232,29 @@ impl Transport {
         self.request_response.request(peer_id, request).await
     }
 
-    pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
-        self.kad.put::<H>(record).await.map_err(Error::from)
+    pub async fn put(&self, record: Vec<u8>) -> Result<()> {
+        self.kad.put(record).await
     }
 
-    pub async fn get<T: TryFrom<Vec<u8>, Error: Display> + 'static, H: Hasher>(
-        &self,
-        key: &HashArray<H>,
-    ) -> Result<Option<T>> {
-        self.kad.get::<T, H>(key).await.map_err(Error::from)
-    }
-
-    pub async fn get_or_error<T: TryFrom<Vec<u8>, Error: Display> + 'static, H: Hasher>(
-        &self,
-        key: &HashArray<H>,
-    ) -> Result<T> {
-        self.kad
-            .get_or_error::<T, H>(key)
+    pub async fn get<T: Serializable + 'static>(&self, key: HashArray<H>) -> Result<Option<T>> {
+        let hash = match self
+            .kad_root
+            .lock()
             .await
-            .map_err(Error::from)
+            .get(key, &self.kad)
+            .await
+            .map_err(|e| Error::MerkleDag(e.to_string()))?
+        {
+            Some(hash) => hash,
+            None => return Ok(None),
+        };
+
+        self.kad.get::<T>(&hash).await
+    }
+
+    pub async fn set_kad_root(&self, root: merkle_dag::Node<H, Kad<H>>) {
+        let mut kad_root = self.kad_root.lock().await;
+        *kad_root = root;
     }
 
     pub fn self_peer(&self) -> PeerId {
@@ -269,23 +276,17 @@ impl Transport {
     }
 }
 
-impl std::fmt::Debug for Transport {
+impl<H: merkle_dag::Config> std::fmt::Debug for Transport<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("P2PCommunication")
+        f.debug_struct("Transport")
             .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>")
             .finish()
     }
 }
 
-impl PartialEq for Transport {
+impl<H: merkle_dag::Config> PartialEq for Transport<H> {
     fn eq(&self, other: &Self) -> bool {
         self.keypair.public() == other.keypair.public()
-    }
-}
-
-impl MockTransport {
-    pub fn new_empty() -> Self {
-        Self::default()
     }
 }
 
@@ -298,7 +299,8 @@ mod tests {
 
     use crate::network::transport::{
         config::Config,
-        protocols::{gossipsub, request_response},
+        protocols::{gossipsub, request_response, Kad},
+        store::merkle_dag,
         test_transport::TestTransport,
         Transport,
     };
@@ -307,6 +309,8 @@ mod tests {
     const TOPIC: &str = "TOPIC";
     const PAYLOAD: &[u8] = b"PAYLOAD";
     const WAIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+    type Hasher = sha2::Sha256;
 
     struct TestContext {
         t1: TestTransport,
@@ -348,8 +352,9 @@ mod tests {
         let keypair = Keypair::generate_ed25519();
         let listen_addr = LISTEN_ADDR.parse().unwrap();
         let config = Config::default();
+        let root = merkle_dag::Node::<Hasher, Kad<Hasher>>::default();
 
-        let result = Transport::new(keypair.clone(), listen_addr, config.clone()).await;
+        let result = Transport::new(keypair.clone(), listen_addr, config.clone(), root).await;
 
         assert!(result.is_ok(), "Failed to create Transport: {result:?}");
     }
@@ -437,13 +442,17 @@ pub mod test_transport {
     use libp2p::{identity::Keypair, Multiaddr, PeerId, Swarm};
     use tokio::sync::MutexGuard;
 
-    use crate::network::transport::{behaviour::Behaviour, config::Config, Transport};
+    use crate::network::transport::{
+        behaviour::Behaviour, config::Config, protocols::Kad, store::merkle_dag, Transport,
+    };
+
+    type Hasher = sha2::Sha256;
 
     pub struct TestTransport {
         pub keypair: Keypair,
         pub peer_id: PeerId,
         pub config: Config,
-        pub p2p: Transport,
+        pub p2p: Transport<Hasher>,
     }
 
     impl TestTransport {
@@ -451,8 +460,9 @@ pub mod test_transport {
             let keypair = Keypair::generate_ed25519();
             let peer_id = PeerId::from_public_key(&keypair.public());
             let config = Config::default();
+            let root = merkle_dag::Node::<Hasher, Kad<Hasher>>::default();
 
-            let p2p = Transport::new(keypair.clone(), listen_addr, config.clone())
+            let p2p = Transport::new(keypair.clone(), listen_addr, config.clone(), root)
                 .await
                 .unwrap();
 

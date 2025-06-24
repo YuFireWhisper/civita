@@ -35,6 +35,9 @@ pub enum Error {
     #[error("{0}")]
     Behaviour(#[from] behaviour::Error),
 
+    #[error("{0}")]
+    MerkleDag(String),
+
     #[error("")]
     MockError, // For testing
 }
