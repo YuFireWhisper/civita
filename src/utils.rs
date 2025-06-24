@@ -1,4 +1,3 @@
-pub mod consensus_collector;
 pub mod indexed_map;
 pub mod timer;
 

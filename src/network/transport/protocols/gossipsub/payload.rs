@@ -1,11 +1,6 @@
 use libp2p::Multiaddr;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{
-    algebra::{Point, Scalar},
-    vss::{encrypted_share::EncryptedShares, DecryptedShares},
-};
-
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -21,32 +16,31 @@ pub enum Error {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub enum Payload {
-    VSSComponent {
-        id: Vec<u8>,
-        encrypted_shares: EncryptedShares,
-        commitments: Vec<Point>,
-    },
-
-    VSSReport {
-        id: Vec<u8>,
-        decrypted_shares: DecryptedShares,
-    },
-
-    VSSReportResponse {
-        id: Vec<u8>,
-        decrypted_shares: DecryptedShares,
-    },
-
-    TssNonceShare {
-        id: Vec<u8>,
-        share: Scalar,
-    },
-
-    TssSignatureShare {
-        id: Vec<u8>,
-        share: Scalar,
-    },
-
+    // VSSComponent {
+    //     id: Vec<u8>,
+    //     encrypted_shares: EncryptedShares,
+    //     commitments: Vec<Point>,
+    // },
+    //
+    // VSSReport {
+    //     id: Vec<u8>,
+    //     decrypted_shares: DecryptedShares,
+    // },
+    //
+    // VSSReportResponse {
+    //     id: Vec<u8>,
+    //     decrypted_shares: DecryptedShares,
+    // },
+    //
+    // TssNonceShare {
+    //     id: Vec<u8>,
+    //     share: Scalar,
+    // },
+    //
+    // TssSignatureShare {
+    //     id: Vec<u8>,
+    //     share: Scalar,
+    // },
     Proposal(Vec<u8>),
 
     ConsensusCandidate {
@@ -54,6 +48,10 @@ pub enum Payload {
         proof: Vec<u8>,
         pk: Vec<u8>,
         addr: Multiaddr,
+    },
+
+    View {
+        node: Vec<u8>,
     },
 
     // For testing

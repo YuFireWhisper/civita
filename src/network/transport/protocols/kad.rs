@@ -5,7 +5,6 @@ use dashmap::DashMap;
 use crate::{
     crypto::{traits::hasher::HashArray, Hasher},
     network::transport::behaviour::Behaviour,
-    traits::byteable,
 };
 
 pub mod message;
@@ -40,9 +39,6 @@ pub enum Error {
 
     #[error("Store error: {0}")]
     Store(#[from] libp2p::kad::store::Error),
-
-    #[error("{0}")]
-    Byteable(#[from] byteable::Error),
 
     #[error("{0}")]
     ConvertFromPayload(String),
