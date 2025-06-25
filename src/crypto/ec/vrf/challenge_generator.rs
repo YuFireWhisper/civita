@@ -23,6 +23,6 @@ pub fn generate_challenge<P: AffineRepr, H: Hasher>(points: [P; 5]) -> Result<P:
     let c_str = H::hash(&str);
 
     Ok(P::ScalarField::from_be_bytes_mod_order(
-        &c_str[..c_len.min(c_str.len())],
+        &c_str.digest()[..c_len.min(c_str.size() as usize)],
     ))
 }

@@ -10,7 +10,7 @@ impl<H: Hasher> ExpandMessage<H> for Xmd {
         const MAX_LEN_IN_BYTES: usize = 65535;
         const MAX_DST_LEN: usize = 255;
 
-        let ell = len_in_bytes.div_ceil(H::OUTPUT_SIZE_IN_BIT / 8);
+        let ell = len_in_bytes.div_ceil(H::OUTPUT_SIZE_IN_BYTES);
 
         if ell > ELL_MAX || len_in_bytes > MAX_LEN_IN_BYTES || dst.len() > MAX_DST_LEN {
             panic!("Invalid parameters for XMD expansion");
@@ -36,22 +36,22 @@ impl<H: Hasher> ExpandMessage<H> for Xmd {
 
         let b_0 = H::hash(&msg_prime);
 
-        let mut b_i_input = Vec::with_capacity(b_0.len() + 1 + dst_prime.len());
-        b_i_input.extend_from_slice(&b_0);
+        let mut b_i_input = Vec::with_capacity(b_0.size() as usize + 1 + dst_prime.len());
+        b_i_input.extend_from_slice(&b_0.digest());
         b_i_input.push(1);
         b_i_input.extend_from_slice(&dst_prime);
 
         let b_1 = H::hash(&b_i_input);
 
         let mut uniform_bytes = Vec::with_capacity(ell * H::BLOCK_SIZE_IN_BYTES);
-        uniform_bytes.extend_from_slice(&b_1);
+        uniform_bytes.extend_from_slice(&b_1.digest());
 
         let mut b_prev = b_1;
 
         for i in 2..=ell {
             b_i_input.clear();
 
-            for (a, b) in b_0.iter().zip(b_prev.iter()) {
+            for (a, b) in b_0.digest().iter().zip(b_prev.digest().iter()) {
                 b_i_input.push(a ^ b);
             }
 
@@ -59,7 +59,8 @@ impl<H: Hasher> ExpandMessage<H> for Xmd {
             b_i_input.extend_from_slice(&dst_prime);
 
             let b_i = H::hash(&b_i_input);
-            uniform_bytes.extend_from_slice(&b_i);
+
+            uniform_bytes.extend_from_slice(b_i.digest());
             b_prev = b_i;
         }
 
@@ -88,7 +89,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case(MSG, DST, sha2::Sha256::OUTPUT_SIZE_IN_BIT * 256)]
+    #[case(MSG, DST, sha2::Sha256::OUTPUT_SIZE_IN_BYTES * 256)]
     #[case(MSG, DST, MAX_VALID_OUTPUT_LEN + 1)]
     #[case(MSG, &[0; 256], 1)]
     #[should_panic(expected = "Invalid parameters for XMD expansion")]

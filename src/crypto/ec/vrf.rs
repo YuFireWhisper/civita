@@ -12,7 +12,7 @@ use crate::{
         },
         traits::{
             self,
-            hasher::{HashArray, Hasher},
+            hasher::{Hasher, Multihash},
             vrf::{Prover, VerifyProof},
             SecretKey as _,
         },
@@ -43,9 +43,7 @@ where
     C: hash_to_curve::Config,
     C::ScalarField: Cofactor,
 {
-    type Hasher = C::Hasher;
-
-    fn proof_to_hash(&self) -> HashArray<Self::Hasher> {
+    fn proof_to_hash(&self) -> Multihash {
         const DOMAIN_SEPARATOR_FRONT: u8 = 0x03;
         const DOMAIN_SEPARATOR_BACK: u8 = 0x00;
 

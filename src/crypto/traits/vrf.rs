@@ -3,15 +3,13 @@ use std::fmt::Debug;
 use crate::{
     crypto::{
         error::*,
-        traits::{hasher::HashArray, secret_key::SecretKey, Hasher, PublicKey},
+        traits::{hasher::Multihash, secret_key::SecretKey, PublicKey},
     },
     traits::serializable::{ConstantSize, Serializable},
 };
 
 pub trait Proof: Clone + Debug + Eq + Serializable + ConstantSize + Sync + Send + 'static {
-    type Hasher: Hasher;
-
-    fn proof_to_hash(&self) -> HashArray<Self::Hasher>;
+    fn proof_to_hash(&self) -> Multihash;
 }
 
 pub trait Prover: SecretKey + Eq {

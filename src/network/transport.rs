@@ -5,7 +5,7 @@ use libp2p::PeerId;
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
-    crypto::{traits::hasher::HashArray, Hasher},
+    crypto::{traits::hasher::Multihash, Hasher},
     network::transport::{
         behaviour::Behaviour,
         protocols::{
@@ -225,18 +225,15 @@ impl Transport {
         self.kad.put::<H>(record).await.map_err(Error::from)
     }
 
-    pub async fn put_with_key<H: Hasher>(&self, key: &HashArray<H>, record: Vec<u8>) -> Result<()> {
+    pub async fn put_with_key<H: Hasher>(&self, key: &Multihash, record: Vec<u8>) -> Result<()> {
         self.kad
             .put_with_key::<H>(key, record)
             .await
             .map_err(Error::from)
     }
 
-    pub async fn get<H: Hasher, T: Serializable + 'static>(
-        &self,
-        key: &HashArray<H>,
-    ) -> Result<Option<T>> {
-        self.kad.get::<H, T>(key).await.map_err(Error::from)
+    pub async fn get<T: Serializable + 'static>(&self, key: &Multihash) -> Result<Option<T>> {
+        self.kad.get(key).await.map_err(Error::from)
     }
 
     pub fn self_peer(&self) -> PeerId {

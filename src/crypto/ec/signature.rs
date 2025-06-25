@@ -106,7 +106,7 @@ fn generate_challenge<P1: CanonicalSerialize, P2: CanonicalSerialize, S: PrimeFi
     r.serialize_compressed(&mut bytes)?;
     pk.serialize_compressed(&mut bytes)?;
 
-    Ok(S::from_be_bytes_mod_order(H::hash(&bytes).as_slice()))
+    Ok(S::from_be_bytes_mod_order(H::hash(&bytes).digest()))
 }
 
 #[cfg(test)]

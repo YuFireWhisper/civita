@@ -5,6 +5,7 @@ pub mod generic_array;
 pub mod hash_map;
 pub mod numeric;
 pub mod option;
+pub mod peer_id;
 pub mod tuple;
 
 #[derive(Debug)]

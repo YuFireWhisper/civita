@@ -1,3 +1,4 @@
+pub mod behaviour;
 pub mod consensus;
 pub mod constants;
 pub mod crypto;

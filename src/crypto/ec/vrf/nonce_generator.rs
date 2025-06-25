@@ -1,16 +1,17 @@
 use ark_ff::{BigInteger, PrimeField};
-use generic_array::sequence::GenericSequence;
 
-use crate::crypto::traits::hasher::{HashArray, Hasher};
+use crate::crypto::traits::hasher::Hasher;
 
 pub fn generate_nonce<H: Hasher, F: PrimeField>(private_key: F, msg: &[u8]) -> F {
     let h1 = H::hash(msg);
 
-    let mut v = HashArray::<H>::generate(|_| 0x01u8);
-    let mut k = HashArray::<H>::default();
+    let mut v = vec![0x01u8; H::BLOCK_SIZE_IN_BYTES];
+    let mut k = vec![0u8; H::BLOCK_SIZE_IN_BYTES];
 
     let x_bytes = private_key.into_bigint().to_bytes_be();
-    let h1_bits = F::from_be_bytes_mod_order(&h1).into_bigint().to_bytes_be();
+    let h1_bits = F::from_be_bytes_mod_order(&h1.digest())
+        .into_bigint()
+        .to_bytes_be();
 
     let build_data = |v: &[u8], separator: u8, x: &[u8], h: &[u8]| -> Vec<u8> {
         let mut data = Vec::with_capacity(v.len() + 1 + x.len() + h.len());
@@ -50,18 +51,18 @@ pub fn generate_nonce<H: Hasher, F: PrimeField>(private_key: F, msg: &[u8]) -> F
     }
 }
 
-fn hmac<H: Hasher>(key: &[u8], message: &[u8]) -> HashArray<H> {
+fn hmac<H: Hasher>(key: &[u8], message: &[u8]) -> Vec<u8> {
     const IPAD: u8 = 0x36;
     const OPAD: u8 = 0x5C;
 
-    let actual_key = if key.len() > H::BLOCK_SIZE_IN_BYTES {
-        H::hash(key).to_vec()
-    } else {
-        key.to_vec()
-    };
+    let mut padded_key = vec![0u8; H::BLOCK_SIZE_IN_BYTES];
 
-    let mut padded_key = actual_key;
-    padded_key.resize(H::BLOCK_SIZE_IN_BYTES, 0);
+    if key.len() > H::BLOCK_SIZE_IN_BYTES {
+        let hash = H::hash(key).to_bytes();
+        padded_key[..hash.len()].copy_from_slice(&hash);
+    } else {
+        padded_key[..key.len()].copy_from_slice(key);
+    }
 
     let inner_key: Vec<u8> = padded_key.iter().map(|&b| b ^ IPAD).collect();
     let outer_key: Vec<u8> = padded_key.iter().map(|&b| b ^ OPAD).collect();
@@ -71,8 +72,8 @@ fn hmac<H: Hasher>(key: &[u8], message: &[u8]) -> HashArray<H> {
     let inner_hash = H::hash(&inner_input);
 
     let mut outer_input = outer_key;
-    outer_input.extend_from_slice(&inner_hash);
-    H::hash(&outer_input)
+    outer_input.extend_from_slice(&inner_hash.digest());
+    H::hash(&outer_input).to_bytes()
 }
 
 #[cfg(test)]

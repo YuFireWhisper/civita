@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use crossbeam_skiplist::{map::Entry, SkipMap};
 use dashmap::DashMap;
@@ -6,13 +6,13 @@ use futures::{
     stream::{self, FuturesUnordered},
     StreamExt, TryStreamExt,
 };
-use generic_array::{typenum::Unsigned, GenericArray};
+use libp2p::multihash;
 use tokio::sync::RwLock;
 
 use crate::{
-    crypto::traits::hasher::HashArray,
-    network::dhash_map::{Config, Error},
-    traits::{serializable, ConstantSize, Serializable},
+    crypto::{traits::hasher::Multihash, Hasher},
+    network::dhash_map::{Error, KeyArray, KEY_LENGTH},
+    traits::{serializable, Serializable},
 };
 
 #[cfg(not(test))]
@@ -21,47 +21,59 @@ use crate::network::transport::Transport;
 #[cfg(test)]
 use crate::network::transport::MockTransport as Transport;
 
-type KeyArray<H> = GenericArray<<H as Config>::Key, <H as Config>::KeyLength>;
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-pub struct Node<V, H: Config> {
-    hash: RwLock<HashArray<H>>,
+pub struct Node<V, H> {
+    hash: RwLock<Multihash>,
     value: Option<V>,
-    children: SkipMap<H::Key, Node<V, H>>,
+    children: SkipMap<u16, Node<V, H>>,
+    _marker: PhantomData<H>,
 }
 
-impl<V, H: Config> Node<V, H>
+impl<V, H> Node<V, H>
 where
     V: Clone + Serializable + Send + Sync + 'static,
+    H: Hasher,
 {
-    pub fn new_leaf(value: V) -> Result<Self> {
+    pub fn with_value(value: V) -> Result<Self> {
         let hash = H::hash(&value.to_vec()?);
 
         Ok(Node {
             hash: RwLock::new(hash),
             value: Some(value),
             children: SkipMap::new(),
+            _marker: PhantomData,
         })
     }
 
-    pub async fn insert(&self, key: KeyArray<H>, value: V, transport: &Transport) -> Result<()> {
+    pub fn with_hash(hash: Multihash) -> Self {
+        Node {
+            hash: RwLock::new(hash),
+            value: None,
+            children: SkipMap::new(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub async fn insert(&self, key: KeyArray, value: V, transport: &Transport) -> Result<()> {
         self.insert_inner(key, value, transport, 0).await
     }
 
     async fn insert_inner(
         &self,
-        key: KeyArray<H>,
+        key: KeyArray,
         value: V,
         transport: &Transport,
         depth: usize,
     ) -> Result<()> {
-        if depth == H::KeyLength::USIZE - 1 {
-            self.children.insert(key[depth], Node::new_leaf(value)?);
+        if depth == KEY_LENGTH - 1 {
+            self.children.insert(key[depth], Node::with_value(value)?);
             self.update_hash(transport).await?;
             return Ok(());
         }
 
         let entry = self.ensure_loaded(key[depth], transport).await?;
+
         Box::pin(entry.value().insert_inner(key, value, transport, depth + 1)).await
     }
 
@@ -74,9 +86,9 @@ where
 
     async fn ensure_loaded(
         &self,
-        key: H::Key,
+        key: u16,
         transport: &Transport,
-    ) -> Result<Entry<H::Key, Node<V, H>>> {
+    ) -> Result<Entry<u16, Node<V, H>>> {
         match self.children.get(&key) {
             Some(entry) => {
                 let node = entry.value();
@@ -86,7 +98,7 @@ where
                 }
 
                 let fetched = transport
-                    .get::<H, Node<V, H>>(&node.hash().await)
+                    .get::<Node<V, H>>(&*node.hash.read().await)
                     .await?
                     .ok_or(Error::NodeNotFound)?;
 
@@ -103,13 +115,13 @@ where
         }
     }
 
-    pub async fn hash(&self) -> HashArray<H> {
+    pub async fn hash(&self) -> Multihash {
         self.hash.read().await.clone()
     }
 
     pub async fn batch_insert<I>(&self, iter: I, transport: &Transport) -> Result<()>
     where
-        I: IntoIterator<Item = (KeyArray<H>, V)>,
+        I: IntoIterator<Item = (KeyArray, V)>,
     {
         self.batch_insert_inner(iter, transport, 0).await
     }
@@ -121,11 +133,11 @@ where
         depth: usize,
     ) -> Result<()>
     where
-        I: IntoIterator<Item = (KeyArray<H>, V)>,
+        I: IntoIterator<Item = (KeyArray, V)>,
     {
-        if depth == H::KeyLength::USIZE - 1 {
+        if depth == KEY_LENGTH - 1 {
             for (key, value) in iter {
-                self.children.insert(key[depth], Node::new_leaf(value)?);
+                self.children.insert(key[depth], Node::with_value(value)?);
             }
             self.update_hash(transport).await?;
             return Ok(());
@@ -156,19 +168,19 @@ where
         Ok(())
     }
 
-    pub async fn get(&self, key: KeyArray<H>, transport: &Transport) -> Result<Option<V>> {
+    pub async fn get(&self, key: KeyArray, transport: &Transport) -> Result<Option<V>> {
         self.get_inner(key, transport, 0).await
     }
 
     async fn get_inner(
         &self,
-        key: KeyArray<H>,
+        key: KeyArray,
         transport: &Transport,
         depth: usize,
     ) -> Result<Option<V>> {
         let entry = self.ensure_loaded(key[depth], transport).await?;
 
-        if depth == H::KeyLength::USIZE - 1 {
+        if depth == KEY_LENGTH - 1 {
             return Ok(entry.value().value.clone());
         }
 
@@ -179,9 +191,9 @@ where
         &self,
         iter: I,
         transport: &Transport,
-    ) -> Result<impl IntoIterator<Item = (KeyArray<H>, Option<V>)>>
+    ) -> Result<impl IntoIterator<Item = (KeyArray, Option<V>)>>
     where
-        I: IntoIterator<Item = KeyArray<H>>,
+        I: IntoIterator<Item = KeyArray>,
     {
         let results = Arc::new(DashMap::new());
         self.batch_get_inner(iter, transport, 0, Arc::clone(&results))
@@ -200,12 +212,12 @@ where
         iter: I,
         transport: &Transport,
         depth: usize,
-        results: Arc<DashMap<KeyArray<H>, Option<V>>>,
+        results: Arc<DashMap<KeyArray, Option<V>>>,
     ) -> Result<()>
     where
-        I: IntoIterator<Item = KeyArray<H>>,
+        I: IntoIterator<Item = KeyArray>,
     {
-        if depth == H::KeyLength::USIZE - 1 {
+        if depth == KEY_LENGTH - 1 {
             for key in iter {
                 let node_key = key[depth];
                 if let Some(entry) = self.children.get(&node_key) {
@@ -217,11 +229,10 @@ where
             return Ok(());
         }
 
-        let grouped: HashMap<H::Key, Vec<KeyArray<H>>> =
-            iter.into_iter().fold(HashMap::new(), |mut acc, key| {
-                acc.entry(key[depth]).or_default().push(key);
-                acc
-            });
+        let grouped: HashMap<_, Vec<_>> = iter.into_iter().fold(HashMap::new(), |mut acc, key| {
+            acc.entry(key[depth]).or_default().push(key);
+            acc
+        });
 
         grouped
             .into_iter()
@@ -252,21 +263,19 @@ where
     }
 }
 
-async fn calc_hash<V, H>(children: &SkipMap<H::Key, Node<V, H>>) -> HashArray<H>
+async fn calc_hash<V, H>(children: &SkipMap<u16, Node<V, H>>) -> Multihash
 where
     V: Clone + Serializable + Send + Sync + 'static,
-    H: Config,
+    H: Hasher,
 {
     if children.is_empty() {
-        return HashArray::<H>::default();
+        return Multihash::default();
     }
-
-    let capacity = children.len() * H::KeyLength::USIZE;
 
     let bytes = stream::iter(children.iter())
         .then(|entry| async move { entry.value().hash().await })
-        .fold(Vec::with_capacity(capacity), |mut acc, hash| async move {
-            acc.extend(hash);
+        .fold(Vec::<u8>::new(), |mut acc, hash| async move {
+            acc.extend(hash.to_bytes());
             acc
         })
         .await;
@@ -274,16 +283,13 @@ where
     H::hash(&bytes)
 }
 
-impl<V, H> Default for Node<V, H>
-where
-    V: Clone + Serializable + Send + Sync + 'static,
-    H: Config,
-{
+impl<V, H> Default for Node<V, H> {
     fn default() -> Self {
         Node {
-            hash: RwLock::new(HashArray::<H>::default()),
+            hash: RwLock::new(Multihash::default()),
             value: None,
             children: SkipMap::new(),
+            _marker: PhantomData,
         }
     }
 }
@@ -291,25 +297,23 @@ where
 impl<V, H> Serializable for Node<V, H>
 where
     V: Clone + Serializable + Send + Sync + 'static,
-    H: Config,
+    H: Hasher,
 {
     fn serialized_size(&self) -> usize {
-        self.value.serialized_size()
-            + usize::SIZE
-            + (HashArray::<H>::SIZE + H::Key::SIZE) * self.children.len()
+        unimplemented!()
     }
 
     fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
         self.value.to_writer(writer)?;
+
         self.children.len().to_writer(writer)?;
         self.children.iter().try_for_each(|entry| {
             entry.key().to_writer(writer)?;
-            entry
-                .value()
-                .hash
-                .try_read()
-                .map_err(|e| serializable::Error(e.to_string()))?
-                .to_writer(writer)?;
+
+            let child = entry.value().hash.try_read().expect("Failed to read hash");
+            child.code().to_writer(writer)?;
+            child.size().to_writer(writer)?;
+            writer.write_all(child.digest())?;
 
             Ok(())
         })
@@ -317,20 +321,28 @@ where
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let value = Option::<V>::from_reader(reader)?;
-        let children_len = usize::from_reader(reader)?;
 
+        let children_len = usize::from_reader(reader)?;
         let children = SkipMap::new();
-        let mut hash_bytes = Vec::with_capacity(children_len * HashArray::<H>::SIZE);
+
+        let mut hash_bytes = Vec::new();
         for _ in 0..children_len {
-            let key = H::Key::from_reader(reader)?;
-            let hash = HashArray::<H>::from_reader(reader)?;
-            let node = Node {
-                hash: RwLock::new(hash.clone()),
-                value: None,
-                children: SkipMap::new(),
-            };
+            let key = u16::from_reader(reader)?;
+
+            let code = u64::from_reader(reader)?;
+            hash_bytes.extend_from_slice(&code.to_be_bytes());
+
+            let size = u8::from_reader(reader)?;
+            hash_bytes.push(size);
+
+            let mut digest = vec![0u8; size as usize];
+            reader.read_exact(&mut digest)?;
+            hash_bytes.extend_from_slice(&digest);
+
+            let hash = Multihash::wrap(code, &digest)?;
+            let node = Node::<V, H>::with_hash(hash);
+
             children.insert(key, node);
-            hash_bytes.extend(hash);
         }
 
         let hash = H::hash(&hash_bytes);
@@ -339,6 +351,13 @@ where
             hash: RwLock::new(hash),
             value,
             children,
+            _marker: PhantomData,
         })
+    }
+}
+
+impl From<multihash::Error> for serializable::Error {
+    fn from(err: multihash::Error) -> Self {
+        serializable::Error(err.to_string())
     }
 }

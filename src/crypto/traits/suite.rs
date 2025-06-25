@@ -16,6 +16,6 @@ pub trait Suite: HasherConfig + 'static {
     type PublicKey: traits::PublicKey
         + vrf::VerifyProof<Proof = Self::Proof>
         + VerifiySignature<Signature = Self::Signature>;
-    type Proof: vrf::Proof<Hasher = Self::Hasher>;
+    type Proof: vrf::Proof;
     type Signature: traits::Signature;
 }
