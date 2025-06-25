@@ -1,11 +1,11 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
 use crate::{
     crypto::{traits::hasher::HashArray, Hasher},
-    network::transport::{self, behaviour::Behaviour, KadEngine},
+    network::transport::behaviour::Behaviour,
     traits::{serializable, Serializable},
 };
 
@@ -86,14 +86,13 @@ impl ConfigBuilder {
     }
 }
 
-pub struct Kad<H> {
+pub struct Kad {
     swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
     waiting_queries: DashMap<libp2p::kad::QueryId, WaitingQuery>,
     config: Config,
-    _marker: PhantomData<H>,
 }
 
-impl<H: Hasher> Kad<H> {
+impl Kad {
     pub fn new(
         swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
         config: Config,
@@ -102,7 +101,6 @@ impl<H: Hasher> Kad<H> {
             swarm,
             waiting_queries: DashMap::new(),
             config,
-            _marker: PhantomData,
         }
     }
 
@@ -159,11 +157,8 @@ impl<H: Hasher> Kad<H> {
             _ => log::debug!("Received unhandled query result: {result:?}"),
         }
     }
-}
 
-#[async_trait::async_trait]
-impl<H: Hasher> KadEngine<H> for Kad<H> {
-    async fn put(&self, record: Vec<u8>) -> Result<(), transport::Error> {
+    pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
         let key = H::hash(&record);
         let key = libp2p::kad::RecordKey::new(&key);
 
@@ -179,19 +174,15 @@ impl<H: Hasher> KadEngine<H> for Kad<H> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
 
-        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
-            .await
-            .map_err(Error::from)?
-            .map_err(Error::from)?
-            .map_err(transport::Error::from)?;
+        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
 
         Ok(())
     }
 
-    async fn get<T: Serializable + 'static>(
+    pub async fn get<H: Hasher, T: Serializable + 'static>(
         &self,
         key: &HashArray<H>,
-    ) -> Result<Option<T>, transport::Error> {
+    ) -> Result<Option<T>> {
         let mut swarm = self.swarm.lock().await;
         let key = libp2p::kad::RecordKey::new(key);
 
@@ -200,11 +191,8 @@ impl<H: Hasher> KadEngine<H> for Kad<H> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_queries.insert(query_id, WaitingQuery::Get(tx));
 
-        let peer_record_opt = tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
-            .await
-            .map_err(Error::from)
-            .and_then(|result| result.map_err(Error::from))?
-            .map_err(transport::Error::from)?;
+        let peer_record_opt =
+            tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
 
         match peer_record_opt {
             Some(peer_record) => Ok(Some(
