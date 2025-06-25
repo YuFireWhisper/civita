@@ -179,6 +179,26 @@ impl Kad {
         Ok(())
     }
 
+    pub async fn put_with_key<H: Hasher>(&self, key: &HashArray<H>, record: Vec<u8>) -> Result<()> {
+        let key = libp2p::kad::RecordKey::new(key);
+
+        let record = libp2p::kad::Record::new(key, record);
+
+        let mut swarm = self.swarm.lock().await;
+        let query_id = swarm
+            .behaviour_mut()
+            .kad_mut()
+            .put_record(record, self.config.quorum)
+            .map_err(Error::from)?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
+
+        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
+
+        Ok(())
+    }
+
     pub async fn get<H: Hasher, T: Serializable + 'static>(
         &self,
         key: &HashArray<H>,

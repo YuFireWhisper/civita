@@ -21,7 +21,7 @@ use crate::{
 pub mod config;
 pub mod error;
 pub mod protocols;
-pub mod store;
+// pub mod store;
 
 mod behaviour;
 mod dispatcher;
@@ -223,6 +223,13 @@ impl Transport {
 
     pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
         self.kad.put::<H>(record).await.map_err(Error::from)
+    }
+
+    pub async fn put_with_key<H: Hasher>(&self, key: &HashArray<H>, record: Vec<u8>) -> Result<()> {
+        self.kad
+            .put_with_key::<H>(key, record)
+            .await
+            .map_err(Error::from)
     }
 
     pub async fn get<H: Hasher, T: Serializable + 'static>(

@@ -67,8 +67,8 @@ where
 
     async fn update_hash(&self, transport: &Transport) -> Result<()> {
         let hash = calc_hash(&self.children).await;
-        *self.hash.write().await = hash.clone();
-        transport.put_with_hash::<H>(hash, self.to_vec()?).await?;
+        transport.put_with_key::<H>(&hash, self.to_vec()?).await?;
+        *self.hash.write().await = hash;
         Ok(())
     }
 
@@ -86,7 +86,7 @@ where
                 }
 
                 let fetched = transport
-                    .get::<Node<V, H>, H>(&node.hash().await)
+                    .get::<H, Node<V, H>>(&node.hash().await)
                     .await?
                     .ok_or(Error::NodeNotFound)?;
 
