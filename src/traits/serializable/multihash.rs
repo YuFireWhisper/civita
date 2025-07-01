@@ -1,3 +1,5 @@
+use libp2p::multihash;
+
 use crate::{
     crypto::traits::hasher::Multihash,
     traits::{serializable, ConstantSize, Serializable},
@@ -23,5 +25,11 @@ impl Serializable for Multihash {
         self.size().to_writer(writer)?;
         writer.write_all(self.digest())?;
         Ok(())
+    }
+}
+
+impl From<multihash::Error> for serializable::Error {
+    fn from(e: multihash::Error) -> Self {
+        serializable::Error(e.to_string())
     }
 }

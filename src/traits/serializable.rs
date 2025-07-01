@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 
+pub mod b_tree_map;
 pub mod b_tree_set;
 pub mod generic_array;
 pub mod hash_map;
