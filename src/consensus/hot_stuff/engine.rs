@@ -82,6 +82,13 @@ pub struct Config {
     pub wait_leader_timeout: tokio::time::Duration,
 }
 
+#[derive(Debug)]
+enum ViewWaitResult {
+    ConsecutiveView(Multihash),
+    NonConsecutiveView(Multihash),
+    Timeout,
+}
+
 pub struct Engine<P, S, H>
 where
     P: Proposal,
@@ -153,161 +160,114 @@ where
         let mut validator_proof = None;
 
         loop {
+            if let Err(e) = self
+                .consensus_round(
+                    &mut view_rx,
+                    &mut vote_rx,
+                    &mut leader_proof,
+                    &mut validator_proof,
+                )
+                .await
+            {
+                log::error!("Consensus round error: {e}");
+                continue;
+            }
+
+            self.update_roles(&mut leader_proof, &mut validator_proof)
+                .await?;
+        }
+    }
+
+    async fn consensus_round(
+        &mut self,
+        view_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
+        vote_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
+        leader_proof: &mut Option<DrawProof<S>>,
+        validator_proof: &mut Option<DrawProof<S>>,
+    ) -> Result<()> {
+        let expected_view_number = self.chain.leaf_view_number().await + 1;
+
+        let view_result = self
+            .wait_for_next_view(view_rx, vote_rx, expected_view_number)
+            .await?;
+
+        match view_result {
+            ViewWaitResult::ConsecutiveView(view_hash) => {
+                self.handle_consecutive_view(view_hash, leader_proof, validator_proof)
+                    .await?;
+            }
+            ViewWaitResult::NonConsecutiveView(view_hash) => {
+                self.handle_non_consecutive_view(view_hash).await?;
+            }
+            ViewWaitResult::Timeout => {
+                log::debug!("View wait timeout, proceeding to election");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn wait_for_next_view(
+        &mut self,
+        view_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
+        vote_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
+        expected_view_number: ViewNumber,
+    ) -> Result<ViewWaitResult> {
+        let timeout = tokio::time::sleep(self.config.wait_leader_timeout);
+        tokio::pin!(timeout);
+
+        log::debug!(
+            "Waiting for view {}, timeout: {:?}",
+            expected_view_number,
+            self.config.wait_leader_timeout
+        );
+
+        loop {
             tokio::select! {
+                _ = &mut timeout => {
+                    log::debug!("View wait timeout for view {expected_view_number}");
+                    return Ok(ViewWaitResult::Timeout);
+                }
+
                 Some(msg) = view_rx.recv() => {
                     let gossipsub::Payload::View(hash) = msg.payload else {
                         continue;
                     };
 
-                    self.handle_view(hash, &mut leader_proof, &mut validator_proof).await?;
-                }
-
-                Some(msg) = vote_rx.recv() => {
-                    let gossipsub::Payload::Vote { hash, pk, proof, sig } = msg.payload else {
+                    let Some(view_number) = self.get_view_number(&hash).await? else {
+                        log::warn!("Could not determine view number for hash: {hash:?}");
                         continue;
                     };
 
-                    let pk = PublicKey::<S>::from_slice(&pk)?;
-                    let proof = DrawProof::<S>::from_slice(&proof)?;
-                    let sig = Signature::<S>::from_slice(&sig)?;
+                    log::debug!("Received view {view_number} (expecting {expected_view_number})");
 
-                    self.chain
-                        .on_receive_vote(hash, pk, (proof, sig))
-                        .await?;
+                    if view_number == expected_view_number {
+                        log::info!("Received consecutive view {view_number}");
+                        return Ok(ViewWaitResult::ConsecutiveView(hash));
+                    }
+
+                    if view_number > expected_view_number {
+                        log::info!("Received non-consecutive view {view_number} > {expected_view_number}");
+
+                        if self.is_valid_future_view(&hash).await? {
+                            return Ok(ViewWaitResult::NonConsecutiveView(hash));
+                        }
+
+                        log::warn!("Invalid future view {view_number}");
+
+                        continue;
+                    }
+
+                    log::debug!("Ignoring old view {view_number} < {expected_view_number}");
+                }
+
+                Some(msg) = vote_rx.recv() => {
+                    if let Err(e) = self.handle_vote_message(msg).await {
+                        log::error!("Error handling vote message: {e}");
+                    }
                 }
             }
         }
-    }
-
-    async fn handle_view(
-        &mut self,
-        view_hash: Multihash,
-        leader_proof: &mut Option<DrawProof<S>>,
-        validator_proof: &mut Option<DrawProof<S>>,
-    ) -> Result<()> {
-        if !self.chain.is_safe_view(&view_hash).await? {
-            return Ok(());
-        }
-
-        let Some(cur_view) = self.chain.get_view(&view_hash).await? else {
-            return Ok(());
-        };
-
-        if !self.is_leader_valid(cur_view.value()).await? {
-            return Ok(());
-        }
-
-        let Some(justify) = cur_view.justify.as_ref() else {
-            return Ok(());
-        };
-
-        if !self.is_justify_valid(justify).await? {
-            return Ok(());
-        }
-
-        let cur_view_clone = cur_view.value().clone();
-
-        drop(cur_view);
-
-        let _ = self.chain.update(&view_hash).await?;
-
-        if let Some(proof) = validator_proof.take() {
-            let cur_cmd = cur_view_clone.cmd.as_ref().expect("Command should exist");
-
-            if let Some((exec_hash, total_stakes)) = self.apply_proposal(&cur_cmd.proposals).await?
-            {
-                if exec_hash != cur_cmd.executed_root_hash
-                    || total_stakes != cur_cmd.executed_total_stakes
-                {
-                    return Ok(());
-                }
-
-                let pk = self.sk.public_key();
-                let pk_bytes = pk.to_vec()?;
-                let proof_bytes = proof.to_vec()?;
-                let sig = self.sk.sign(&cur_view_clone.hash.to_bytes())?;
-                let sig_bytes = sig.to_vec()?;
-
-                let vote = gossipsub::Payload::Vote {
-                    hash: cur_view_clone.hash,
-                    pk: pk_bytes,
-                    proof: proof_bytes,
-                    sig: sig_bytes,
-                };
-
-                self.transport
-                    .publish(&self.config.vote_topic, vote)
-                    .await?;
-
-                self.chain
-                    .on_receive_vote(cur_view_clone.hash, pk, (proof, sig))
-                    .await?;
-            }
-        }
-
-        if let Some(proof) = leader_proof.take() {
-            let proposals = self.proposal_pool.get().await?;
-            let (proposals, exec_hash, total_stakes) =
-                self.apply_proposal_or_reduce(proposals).await?;
-
-            let pk = self.sk.public_key().clone();
-            let sig = self.sk.sign(&view_hash.to_bytes())?;
-
-            let block = Block::<S, P> {
-                leader: (pk, (proof, sig)),
-                proposals,
-                executed_root_hash: exec_hash,
-                executed_total_stakes: total_stakes,
-            };
-
-            let view = self.chain.on_propose::<H>(block).await?;
-            let view_bytes = view.to_vec()?;
-
-            self.transport.kad().put(view.hash, view_bytes).await?;
-
-            let payload = gossipsub::Payload::View(view.hash);
-
-            self.transport
-                .publish(&self.config.view_topic, payload)
-                .await?;
-        }
-
-        let Some(exec_view) = self.chain.executed_view().await? else {
-            return Ok(());
-        };
-
-        let Some(exec_cmd) = exec_view.cmd.as_ref() else {
-            return Ok(());
-        };
-
-        let pk_hash = H::hash(&self.sk.public_key().to_vec()?);
-
-        let stakes = self
-            .records
-            .get(&pk_hash.to_bytes())
-            .await?
-            .map(|r| r.stakes)
-            .unwrap_or(0);
-
-        let seed = Self::generate_seed(&exec_view.hash, self.chain.leaf_view_number().await + 1);
-
-        *leader_proof = self.randomizer.draw::<H, _>(
-            seed.digest(),
-            exec_cmd.executed_total_stakes,
-            &self.sk,
-            stakes,
-            true,
-        )?;
-
-        *validator_proof = self.randomizer.draw::<H, _>(
-            seed.digest(),
-            exec_cmd.executed_total_stakes,
-            &self.sk,
-            stakes,
-            false,
-        )?;
-
-        Ok(())
     }
 
     async fn is_leader_valid(&self, cur_view: &View<S, P>) -> Result<bool> {
@@ -526,5 +486,202 @@ where
         self.records.rollback();
 
         Ok((finals, hash, total_stakes))
+    }
+
+    async fn handle_vote_message(&mut self, msg: gossipsub::Message) -> Result<()> {
+        let gossipsub::Payload::Vote {
+            hash,
+            pk,
+            proof,
+            sig,
+        } = msg.payload
+        else {
+            return Ok(());
+        };
+
+        let pk = PublicKey::<S>::from_slice(&pk)?;
+        let proof = DrawProof::<S>::from_slice(&proof)?;
+        let sig = Signature::<S>::from_slice(&sig)?;
+
+        if let Some(_qc) = self.chain.on_receive_vote(hash, pk, (proof, sig)).await? {
+            log::debug!("Generated new QuorumCertificate for view: {hash:?}");
+        }
+
+        Ok(())
+    }
+
+    async fn get_view_number(&self, view_hash: &Multihash) -> Result<Option<ViewNumber>> {
+        let Some(view) = self.chain.get_view(view_hash).await? else {
+            return Ok(None);
+        };
+        Ok(Some(view.number))
+    }
+
+    async fn is_valid_future_view(&self, view_hash: &Multihash) -> Result<bool> {
+        if !self.chain.is_safe_view(view_hash).await? {
+            return Ok(false);
+        }
+
+        let Some(view) = self.chain.get_view(view_hash).await? else {
+            return Ok(false);
+        };
+
+        if !self.is_leader_valid(view.value()).await? {
+            return Ok(false);
+        }
+
+        if let Some(justify) = &view.justify {
+            if !self.is_justify_valid(justify).await? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn handle_consecutive_view(
+        &mut self,
+        view_hash: Multihash,
+        leader_proof: &mut Option<DrawProof<S>>,
+        validator_proof: &mut Option<DrawProof<S>>,
+    ) -> Result<()> {
+        let Some(cur_view) = self.chain.get_view(&view_hash).await? else {
+            return Ok(());
+        };
+
+        let cur_view_clone = cur_view.value().clone();
+        drop(cur_view);
+
+        let _ = self.chain.update(&view_hash).await?;
+
+        if let Some(proof) = validator_proof.take() {
+            self.cast_vote(&cur_view_clone, proof).await?;
+        }
+
+        if let Some(proof) = leader_proof.take() {
+            self.propose_new_view(&view_hash, proof).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_non_consecutive_view(&mut self, view_hash: Multihash) -> Result<()> {
+        let _ = self.chain.update(&view_hash).await?;
+        log::info!("Updated chain with non-consecutive view: {view_hash:?}");
+        Ok(())
+    }
+
+    async fn cast_vote(&mut self, view: &View<S, P>, proof: DrawProof<S>) -> Result<()> {
+        let Some(cmd) = view.cmd.as_ref() else {
+            return Ok(());
+        };
+
+        if let Some((exec_hash, total_stakes)) = self.apply_proposal(&cmd.proposals).await? {
+            if exec_hash != cmd.executed_root_hash || total_stakes != cmd.executed_total_stakes {
+                return Ok(());
+            }
+
+            let pk = self.sk.public_key();
+            let pk_bytes = pk.to_vec()?;
+            let proof_bytes = proof.to_vec()?;
+            let sig = self.sk.sign(&view.hash.to_bytes())?;
+            let sig_bytes = sig.to_vec()?;
+
+            let vote = gossipsub::Payload::Vote {
+                hash: view.hash,
+                pk: pk_bytes,
+                proof: proof_bytes,
+                sig: sig_bytes,
+            };
+
+            self.transport
+                .publish(&self.config.vote_topic, vote)
+                .await?;
+
+            if let Some(_qc) = self
+                .chain
+                .on_receive_vote(view.hash, pk, (proof, sig))
+                .await?
+            {
+                log::debug!("Generated new QuorumCertificate for our own vote");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn propose_new_view(
+        &mut self,
+        parent_hash: &Multihash,
+        proof: DrawProof<S>,
+    ) -> Result<()> {
+        let proposals = self.proposal_pool.get().await?;
+        let (proposals, exec_hash, total_stakes) = self.apply_proposal_or_reduce(proposals).await?;
+
+        let pk = self.sk.public_key().clone();
+        let sig = self.sk.sign(&parent_hash.to_bytes())?;
+
+        let block = Block::<S, P> {
+            leader: (pk, (proof, sig)),
+            proposals,
+            executed_root_hash: exec_hash,
+            executed_total_stakes: total_stakes,
+        };
+
+        let view = self.chain.on_propose::<H>(block).await?;
+        let view_bytes = view.to_vec()?;
+
+        self.transport.kad().put(view.hash, view_bytes).await?;
+
+        let payload = gossipsub::Payload::View(view.hash);
+
+        self.transport
+            .publish(&self.config.view_topic, payload)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn update_roles(
+        &mut self,
+        leader_proof: &mut Option<DrawProof<S>>,
+        validator_proof: &mut Option<DrawProof<S>>,
+    ) -> Result<()> {
+        let Some(exec_view) = self.chain.executed_view().await? else {
+            return Ok(());
+        };
+
+        let Some(exec_cmd) = exec_view.cmd.as_ref() else {
+            return Ok(());
+        };
+
+        let pk_hash = H::hash(&self.sk.public_key().to_vec()?);
+        let stakes = self
+            .records
+            .get(&pk_hash.to_bytes())
+            .await?
+            .map(|r| r.stakes)
+            .unwrap_or(0);
+
+        let next_view_number = self.chain.leaf_view_number().await + 1;
+        let seed = Self::generate_seed(&exec_view.hash, next_view_number);
+
+        *leader_proof = self.randomizer.draw::<H, _>(
+            seed.digest(),
+            exec_cmd.executed_total_stakes,
+            &self.sk,
+            stakes,
+            true,
+        )?;
+
+        *validator_proof = self.randomizer.draw::<H, _>(
+            seed.digest(),
+            exec_cmd.executed_total_stakes,
+            &self.sk,
+            stakes,
+            false,
+        )?;
+
+        Ok(())
     }
 }
