@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use dashmap::{mapref::one::Ref, DashMap};
 
 use crate::{crypto::traits::hasher::Multihash, traits::Serializable};
 
@@ -20,31 +22,31 @@ pub trait Storage {
 
 pub struct CacheStorage<T, S> {
     storage: S,
-    cache: HashMap<Multihash, T>,
+    cache: DashMap<Multihash, T>,
     changes: HashSet<Multihash>,
 }
 
 impl<T, S> CacheStorage<T, S>
 where
-    T: Clone + Serializable + Sync + Send + 'static,
+    T: Serializable + Sync + Send + 'static,
     S: Storage,
 {
     pub fn new(storage: S) -> Self {
         Self {
             storage,
-            cache: HashMap::new(),
+            cache: DashMap::new(),
             changes: HashSet::new(),
         }
     }
 
-    pub async fn insert(&mut self, key: Multihash, value: T) {
+    pub fn insert(&mut self, key: Multihash, value: T) {
         self.cache.insert(key, value);
         self.changes.insert(key);
     }
 
-    pub async fn get(&mut self, key: &Multihash) -> Result<Option<&T>, S::Error> {
-        if self.cache.contains_key(key) {
-            return Ok(self.cache.get(key));
+    pub async fn get(&self, key: &Multihash) -> Result<Option<Ref<Multihash, T>>, S::Error> {
+        if let Some(value) = self.cache.get(key) {
+            return Ok(Some(value));
         }
 
         let Some(value) = self.storage.get::<T>(key).await? else {

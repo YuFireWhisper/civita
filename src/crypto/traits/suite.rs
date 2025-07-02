@@ -9,7 +9,7 @@ pub trait HasherConfig {
     type Hasher: traits::Hasher;
 }
 
-pub trait Suite: HasherConfig + 'static {
+pub trait Suite: 'static {
     type SecretKey: SecretKey<PublicKey = Self::PublicKey>
         + vrf::Prover<Proof = Self::Proof>
         + Signer<Signature = Self::Signature>;

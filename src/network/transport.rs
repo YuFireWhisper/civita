@@ -4,24 +4,20 @@ use futures::StreamExt;
 use libp2p::PeerId;
 use tokio::sync::mpsc::Receiver;
 
-use crate::{
-    crypto::{traits::hasher::Multihash, Hasher},
-    network::transport::{
-        behaviour::Behaviour,
-        protocols::{
-            gossipsub,
-            kad::{self},
-            request_response::{self, payload::Request},
-            Gossipsub, Kad, RequestResponse,
-        },
+use crate::network::transport::{
+    behaviour::Behaviour,
+    protocols::{
+        gossipsub,
+        kad::{self},
+        request_response::{self, payload::Request},
     },
-    traits::Serializable,
 };
 
 pub mod config;
 pub mod error;
 pub mod protocols;
-// pub mod store;
+
+pub use protocols::{Gossipsub, Kad, RequestResponse};
 
 mod behaviour;
 mod dispatcher;
@@ -221,21 +217,6 @@ impl Transport {
         self.request_response.request(peer_id, request).await
     }
 
-    pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
-        self.kad.put::<H>(record).await.map_err(Error::from)
-    }
-
-    pub async fn put_with_key<H: Hasher>(&self, key: &Multihash, record: Vec<u8>) -> Result<()> {
-        self.kad
-            .put_with_key::<H>(key, record)
-            .await
-            .map_err(Error::from)
-    }
-
-    pub async fn get<T: Serializable + 'static>(&self, key: &Multihash) -> Result<Option<T>> {
-        self.kad.get(key).await.map_err(Error::from)
-    }
-
     pub fn self_peer(&self) -> PeerId {
         self.self_peer
     }
@@ -252,6 +233,10 @@ impl Transport {
             .next()
             .cloned()
             .expect("No listen address available")
+    }
+
+    pub fn kad(&self) -> Arc<Kad> {
+        self.kad.clone()
     }
 }
 

@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
 use crate::{
-    crypto::{traits::hasher::Multihash, Hasher},
-    network::transport::behaviour::Behaviour,
+    crypto::traits::hasher::Multihash,
+    network::{storage::Storage, transport::behaviour::Behaviour},
     traits::{serializable, Serializable},
 };
 
@@ -157,69 +157,126 @@ impl Kad {
             _ => log::debug!("Received unhandled query result: {result:?}"),
         }
     }
+}
 
-    pub async fn put<H: Hasher>(&self, record: Vec<u8>) -> Result<()> {
-        let key = H::hash(&record);
-        let key = libp2p::kad::RecordKey::new(&key.digest());
+#[async_trait::async_trait]
+impl Storage for Kad {
+    type Error = Error;
 
-        let record = libp2p::kad::Record::new(key, record);
-
-        let mut swarm = self.swarm.lock().await;
-        let query_id = swarm
-            .behaviour_mut()
-            .kad_mut()
-            .put_record(record, self.config.quorum)
-            .map_err(Error::from)?;
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
-
-        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
-
-        Ok(())
-    }
-
-    pub async fn put_with_key<H: Hasher>(&self, key: &Multihash, record: Vec<u8>) -> Result<()> {
-        let key = libp2p::kad::RecordKey::new(&key.digest());
-
-        let record = libp2p::kad::Record::new(key, record);
+    async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
+    where
+        T: Serializable + Sync + Send + 'static,
+    {
+        let key = libp2p::kad::RecordKey::new(&key.to_bytes());
 
         let mut swarm = self.swarm.lock().await;
-        let query_id = swarm
-            .behaviour_mut()
-            .kad_mut()
-            .put_record(record, self.config.quorum)
-            .map_err(Error::from)?;
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
-
-        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
-
-        Ok(())
-    }
-
-    pub async fn get<T: Serializable + 'static>(&self, key: &Multihash) -> Result<Option<T>> {
-        self.get_with_slice::<T>(key.digest()).await
-    }
-
-    pub async fn get_with_slice<T: Serializable + 'static>(&self, key: &[u8]) -> Result<Option<T>> {
-        let mut swarm = self.swarm.lock().await;
-        let key = libp2p::kad::RecordKey::new(&key);
-
         let query_id = swarm.behaviour_mut().kad_mut().get_record(key);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.waiting_queries.insert(query_id, WaitingQuery::Get(tx));
 
-        let peer_record_opt =
-            tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
+        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx)
+            .await???
+            .map(|peer_record| T::from_slice(&peer_record.record.value).map_err(Error::from))
+            .transpose()
+    }
 
-        match peer_record_opt {
-            Some(peer_record) => Ok(Some(
-                T::from_slice(&peer_record.record.value).map_err(Error::from)?,
-            )),
-            None => Ok(None),
+    async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
+    where
+        T: Serializable + Sync + Send + 'static,
+    {
+        let key = libp2p::kad::RecordKey::new(&key.to_bytes());
+        let record = libp2p::kad::Record::new(key, value.to_vec()?);
+
+        let mut swarm = self.swarm.lock().await;
+        let query_id = swarm
+            .behaviour_mut()
+            .kad_mut()
+            .put_record(record, self.config.quorum)
+            .map_err(Error::from)?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
+
+        tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
+
+        Ok(())
+    }
+
+    async fn put_batch<T, I>(&mut self, items: I) -> Result<(), Self::Error>
+    where
+        T: Serializable + Sync + Send + 'static,
+        I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
+    {
+        let items: Vec<_> = items.into_iter().collect();
+
+        if items.is_empty() {
+            return Ok(());
         }
+
+        let mut records = Vec::new();
+        let mut query_senders = HashMap::new();
+
+        for (hash, value) in items {
+            let key = libp2p::kad::RecordKey::new(&hash.to_bytes());
+            let record = libp2p::kad::Record::new(key, value.to_vec()?);
+            records.push(record);
+        }
+
+        let mut swarm = self.swarm.lock().await;
+
+        for record in records {
+            let query_id = swarm
+                .behaviour_mut()
+                .kad_mut()
+                .put_record(record, self.config.quorum)
+                .map_err(Error::from)?;
+
+            let (tx, rx) = oneshot::channel();
+            query_senders.insert(query_id, rx);
+            self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
+        }
+
+        drop(swarm);
+
+        let futures: Vec<_> = query_senders
+            .into_values()
+            .map(|rx| tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx))
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        for result in results {
+            result???;
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Storage for Arc<Kad> {
+    type Error = Error;
+
+    async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
+    where
+        T: Serializable + Sync + Send + 'static,
+    {
+        self.as_ref().get(key).await
+    }
+
+    async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
+    where
+        T: Serializable + Sync + Send + 'static,
+    {
+        self.put(key, value).await
+    }
+
+    async fn put_batch<T, I>(&mut self, items: I) -> Result<(), Self::Error>
+    where
+        T: Serializable + Sync + Send + 'static,
+        I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
+    {
+        self.put_batch(items).await
     }
 }

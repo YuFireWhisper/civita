@@ -1,38 +1,45 @@
 use std::collections::BTreeSet;
 
-use crate::traits::{serializable, ConstantSize, Serializable};
+use crate::{
+    crypto::traits::hasher::Multihash,
+    traits::{serializable, Serializable},
+};
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
-pub struct Block<H, P> {
-    pub root_hash: H,
-    pub total_stakes: u32,
+pub struct Block<P, PK, S> {
+    pub leader: (PK, S),
     pub proposals: BTreeSet<P>,
+    pub executed_root_hash: Multihash,
+    pub executed_total_stakes: u32,
 }
 
-impl<H, P> Serializable for Block<H, P>
+impl<P, PK, S> Serializable for Block<P, PK, S>
 where
-    H: Serializable + ConstantSize,
     P: Serializable + Ord,
+    PK: Serializable,
+    S: Serializable,
 {
     fn serialized_size(&self) -> usize {
         unimplemented!()
     }
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        Ok(Block {
-            root_hash: H::from_reader(reader)?,
-            total_stakes: u32::from_reader(reader)?,
+        Ok(Self {
+            leader: (PK::from_reader(reader)?, S::from_reader(reader)?),
             proposals: BTreeSet::from_reader(reader)?,
+            executed_root_hash: Multihash::from_reader(reader)?,
+            executed_total_stakes: u32::from_reader(reader)?,
         })
     }
 
     fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.root_hash.to_writer(writer)?;
-        self.total_stakes.to_writer(writer)?;
+        self.leader.0.to_writer(writer)?;
+        self.leader.1.to_writer(writer)?;
+        self.executed_root_hash.to_writer(writer)?;
+        self.executed_total_stakes.to_writer(writer)?;
         self.proposals.to_writer(writer)?;
-
         Ok(())
     }
 }

@@ -3,19 +3,15 @@ use libp2p::{
     PeerId,
 };
 use log::error;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::network::transport::{
-    dispatcher::Keyed,
-    protocols::gossipsub::{payload, Payload},
+use crate::{
+    network::transport::{dispatcher::Keyed, protocols::gossipsub::Payload},
+    traits::{serializable, Serializable},
 };
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("{0}")]
-    Payload(#[from] payload::Error),
-
     #[error("Source field is none")]
     MissingSource,
 
@@ -23,18 +19,14 @@ pub enum Error {
     NotMessageEvent,
 
     #[error("{0}")]
-    Encode(#[from] bincode::error::EncodeError),
-
-    #[error("{0}")]
-    Decode(#[from] bincode::error::DecodeError),
+    Serializable(#[from] serializable::Error),
 }
 
-type Result<T> = std::result::Result<T, Error>;
+type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
-#[derive(Serialize, Deserialize)]
 pub struct Message {
     pub message_id: MessageId,
     pub source: PeerId,
@@ -66,7 +58,7 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
         {
             let source = message.source.ok_or(Error::MissingSource)?;
             let topic = message.topic.into_string();
-            let payload = Payload::try_from(message.data)?;
+            let payload = Payload::from_slice(message.data.as_slice())?;
 
             Ok(Self {
                 message_id,
@@ -80,45 +72,30 @@ impl TryFrom<libp2p::gossipsub::Event> for Message {
     }
 }
 
-impl TryFrom<&Message> for Vec<u8> {
-    type Error = Error;
-
-    fn try_from(message: &Message) -> Result<Vec<u8>> {
-        bincode::serde::encode_to_vec(message, bincode::config::standard()).map_err(Error::from)
+impl Serializable for Message {
+    fn serialized_size(&self) -> usize {
+        self.message_id.serialized_size()
+            + self.source.serialized_size()
+            + self.topic.serialized_size()
+            + self.payload.serialized_size()
     }
-}
 
-impl TryFrom<Message> for Vec<u8> {
-    type Error = Error;
-
-    fn try_from(message: Message) -> Result<Vec<u8>> {
-        (&message).try_into()
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        Ok(Self {
+            message_id: MessageId::from_reader(reader)?,
+            source: PeerId::from_reader(reader)?,
+            topic: String::from_reader(reader)?,
+            payload: Payload::from_reader(reader)?,
+        })
     }
-}
 
-impl TryFrom<&[u8]> for Message {
-    type Error = Error;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.message_id.to_writer(writer)?;
+        self.source.to_writer(writer)?;
+        self.topic.to_writer(writer)?;
+        self.payload.to_writer(writer)?;
 
-    fn try_from(value: &[u8]) -> Result<Self> {
-        bincode::serde::decode_from_slice(value, bincode::config::standard())
-            .map(|(m, _)| m)
-            .map_err(Error::from)
-    }
-}
-
-impl TryFrom<&Vec<u8>> for Message {
-    type Error = Error;
-
-    fn try_from(value: &Vec<u8>) -> Result<Self> {
-        Message::try_from(value.as_slice())
-    }
-}
-
-impl TryFrom<Vec<u8>> for Message {
-    type Error = Error;
-
-    fn try_from(value: Vec<u8>) -> Result<Self> {
-        Message::try_from(value.as_slice())
+        Ok(())
     }
 }
 
@@ -126,7 +103,10 @@ impl TryFrom<Vec<u8>> for Message {
 mod tests {
     use libp2p::{gossipsub::MessageId, PeerId};
 
-    use crate::network::transport::protocols::gossipsub::{Message, Payload};
+    use crate::{
+        network::transport::protocols::gossipsub::{Message, Payload},
+        traits::Serializable,
+    };
 
     #[test]
     fn success_convert_with_vec() {
@@ -134,21 +114,16 @@ mod tests {
         const TOPIC: &str = "test-topic";
         const PAYLOAD: &[u8] = &[1, 2, 3, 4, 5];
 
-        let message = Message {
+        let msg = Message {
             message_id: MessageId::from(MESSAGE_ID),
             source: PeerId::random(),
             topic: TOPIC.to_string(),
             payload: Payload::Raw(PAYLOAD.to_vec()),
         };
 
-        let message_vec: Vec<u8> = Message::try_into(message.clone()).unwrap();
+        let msg_vec = msg.to_vec().unwrap();
+        let msg_from_vec = Message::from_slice(&msg_vec).unwrap();
 
-        let message_from_vec = Message::try_from(message_vec.clone()).unwrap();
-        let message_from_ref_vec = Message::try_from(&message_vec.clone()).unwrap();
-        let message_from_bytes = Message::try_from(message_vec.as_slice()).unwrap();
-
-        assert_eq!(message, message_from_vec);
-        assert_eq!(message, message_from_ref_vec);
-        assert_eq!(message, message_from_bytes);
+        assert_eq!(msg, msg_from_vec);
     }
 }

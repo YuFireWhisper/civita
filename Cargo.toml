@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libp2p = { version = "0.55", features = [
+libp2p = { version = "0.56", features = [
   "identify",
   "macros",
   "kad",
@@ -20,23 +20,23 @@ libp2p = { version = "0.55", features = [
 ] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
-sha2 = "0.9" # Required by curv-kzen, can't upgrade
+sha2 = "0.10" # Required by curv-kzen, can't upgrade
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures = "0.3"
 dashmap = "6.1"
 log = "0.4"
 rand = "0.9"
-curv-kzen = "0.10"
+# curv-kzen = "0.10"
 bincode = { version = "2.0", features = ["serde"] }
 mockall = { version = "0.13", features = ["nightly"] }
 async-trait = "0.1"
-ecies = "0.2"
-libsecp256k1 = "0.7"
-k256 = { version = "0.13", features = ["arithmetic"] }
-libecvrf-k256 = "1.1"
+# ecies = "0.2"
+# libsecp256k1 = "0.7"
+# k256 = { version = "0.13", features = ["arithmetic"] }
+# libecvrf-k256 = "1.1"
 blake3 = "1.8"
-trait-variant = "0.1.2"
+# trait-variant = "0.1.2"
 generic-array = { version = "1.2", features = ["serde"] }
 ark-ff = "0.5"
 ark-ec = "0.5"
@@ -45,9 +45,10 @@ ark-secp256r1 = "0.5"
 ark-serialize = "0.5"
 ark-std = "0.5"
 statrs = "0.18"
-crossbeam = "0.8"
-crossbeam-skiplist = "0.1"
+# crossbeam = "0.8"
+# crossbeam-skiplist = "0.1"
 derivative = "2.2"
+bytemuck = "1.23"
 
 [dev-dependencies]
 tempfile = "3.17"

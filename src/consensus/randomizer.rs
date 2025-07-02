@@ -4,12 +4,15 @@ use crate::{
     crypto::{
         self,
         traits::{
-            hasher::HashArray,
+            hasher::Multihash,
             vrf::{Proof, Prover, VerifyProof},
         },
         Hasher,
     },
-    traits::serializable::{self, Serializable},
+    traits::{
+        serializable::{self, Serializable},
+        ConstantSize,
+    },
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -33,11 +36,9 @@ pub enum Error {
     Serializable(#[from] serializable::Error),
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
-pub struct Context<H: Hasher> {
-    leader: (HashArray<H>, f64),
-    validator: (HashArray<H>, f64),
+pub struct Randomizer {
+    expected_leaders: u16,
+    expected_validators: u16,
 }
 
 #[derive(Clone)]
@@ -48,84 +49,37 @@ pub struct DrawProof<P: Proof> {
     pub weight: u32,
 }
 
-pub trait Drawer<H: Hasher>: Prover {
-    fn draw(
-        &self,
-        ctx: &Context<H>,
-        stakes: u32,
-        is_leader: bool,
-    ) -> Result<Option<DrawProof<Self::Proof>>>;
-}
-
-pub trait VerifyDrawProof<H: Hasher>: VerifyProof {
-    fn verify_draw_proof(
-        &self,
-        ctx: &Context<H>,
-        stakes: u32,
-        proof: &DrawProof<Self::Proof>,
-        is_leader: bool,
-    ) -> Result<bool>;
-}
-
-impl<H: Hasher> Context<H> {
-    pub fn new(
-        seed: HashArray<H>,
-        total_stakes: u32,
-        expected_leaders: u16,
-        expected_validators: u16,
-    ) -> Self {
-        let leader_input = Self::generate_input(seed.clone(), true);
-        let leader_p = Self::calc_p(expected_leaders, total_stakes);
-
-        let validator_input = Self::generate_input(seed, false);
-        let validator_p = Self::calc_p(expected_validators, total_stakes);
-
+impl Randomizer {
+    pub fn new(expected_leaders: u16, expected_validators: u16) -> Self {
         Self {
-            leader: (leader_input, leader_p),
-            validator: (validator_input, validator_p),
+            expected_leaders,
+            expected_validators,
         }
     }
 
-    fn generate_input(seed: HashArray<H>, is_leader: bool) -> HashArray<H> {
-        let mut bytes = Vec::with_capacity(seed.len() + 1);
-
-        bytes.extend(seed);
-        bytes.push(is_leader as u8);
-
-        H::hash(&bytes)
-    }
-
-    fn calc_p(tau: u16, total_stakes: u32) -> f64 {
-        (tau as f64) / (total_stakes as f64)
-    }
-
-    fn check_status(&self) -> bool {
-        self.leader.1 > 0.0
-            && self.leader.1 < 1.0
-            && self.validator.1 > 0.0
-            && self.validator.1 < 1.0
-    }
-
-    fn draw<S: Prover>(
+    pub fn draw<H: Hasher, S: Prover>(
         &self,
+        seed: &[u8],
+        total_stakes: u32,
         sk: &S,
         stakes: u32,
         is_leader: bool,
     ) -> Result<Option<DrawProof<S::Proof>>> {
-        if !self.check_status() {
+        if total_stakes == 0 || stakes == 0 {
             return Ok(None);
         }
 
-        let (input, p) = if is_leader {
-            (&self.leader.0, self.leader.1)
-        } else {
-            (&self.validator.0, self.validator.1)
-        };
+        let input = Self::generate_input::<H>(seed, is_leader);
+        let p = self.calc_p(total_stakes, is_leader);
 
-        let proof = sk.prove(input.as_slice())?;
+        if !self.is_status_valid(p) {
+            return Ok(None);
+        }
+
+        let proof = sk.prove(input.digest())?;
         let output = proof.proof_to_hash();
 
-        let hash_as_float = self.hash_to_float(&output);
+        let hash_as_float = self.hash_to_float(output.digest());
 
         let mut j = 0u32;
 
@@ -146,6 +100,26 @@ impl<H: Hasher> Context<H> {
         Ok(None)
     }
 
+    fn generate_input<H: Hasher>(seed: &[u8], is_leader: bool) -> Multihash {
+        let mut bytes = Vec::with_capacity(seed.len() + 1);
+        bytes.extend(seed);
+        bytes.push(is_leader as u8);
+        H::hash(&bytes)
+    }
+
+    fn calc_p(&self, total_stakes: u32, is_leader: bool) -> f64 {
+        let tau = if is_leader {
+            self.expected_leaders
+        } else {
+            self.expected_validators
+        };
+        (tau as f64) / (total_stakes as f64)
+    }
+
+    fn is_status_valid(&self, p: f64) -> bool {
+        p > 0.0 && p < 1.0
+    }
+
     fn hash_to_float(&self, hash: &[u8]) -> f64 {
         u64::from_be_bytes(std::array::from_fn(|i| hash[i])) as f64
     }
@@ -158,36 +132,40 @@ impl<H: Hasher> Context<H> {
         }
     }
 
-    fn verify<PK: VerifyProof>(
+    pub fn verify<H: Hasher, P: VerifyProof>(
         &self,
-        pk: &PK,
+        seed: &[u8],
+        total_stakes: u32,
+        pk: &P,
         stakes: u32,
-        proof: &DrawProof<PK::Proof>,
+        proof: &DrawProof<P::Proof>,
         is_leader: bool,
-    ) -> Result<bool> {
-        if !self.check_status() {
-            return Ok(false);
+    ) -> bool {
+        if total_stakes == 0 {
+            return false;
         }
 
-        let (input, p) = if is_leader {
-            (&self.leader.0, self.leader.1)
-        } else {
-            (&self.validator.0, self.validator.1)
-        };
+        let input = Self::generate_input::<H>(seed, is_leader);
+        let p = self.calc_p(total_stakes, is_leader);
 
-        if pk.verify_proof(input.as_slice(), &proof.proof).is_err() {
-            return Ok(false);
+        if !self.is_status_valid(p) {
+            return false;
+        }
+
+        if pk.verify_proof(input.digest(), &proof.proof).is_err() {
+            return false;
         }
 
         let output = proof.proof.proof_to_hash();
-        let hash_as_float = self.hash_to_float(&output);
+        let hash_as_float = self.hash_to_float(output.digest());
         let normalized_hash = hash_as_float / 2f64.powi(TRUNCATED_HASH_SIZE_IN_BITS as i32);
 
-        let dist = Binomial::new(p, stakes as u64)?;
+        let dist =
+            Binomial::new(p, stakes as u64).expect("Invalid binomial distribution parameters");
         let lower_bound = self.binomial_cdf_sum(proof.weight, dist);
         let upper_bound = self.binomial_cdf_sum(proof.weight + 1, dist);
 
-        Ok(normalized_hash >= lower_bound && normalized_hash < upper_bound)
+        normalized_hash >= lower_bound && normalized_hash < upper_bound
     }
 }
 
@@ -216,25 +194,6 @@ impl<P: Proof> Serializable for DrawProof<P> {
     }
 }
 
-impl<H: Hasher, S: Prover> Drawer<H> for S {
-    fn draw(
-        &self,
-        ctx: &Context<H>,
-        stakes: u32,
-        is_leader: bool,
-    ) -> Result<Option<DrawProof<Self::Proof>>> {
-        ctx.draw(self, stakes, is_leader)
-    }
-}
-
-impl<H: Hasher, S: VerifyProof> VerifyDrawProof<H> for S {
-    fn verify_draw_proof(
-        &self,
-        ctx: &Context<H>,
-        stakes: u32,
-        proof: &DrawProof<Self::Proof>,
-        is_leader: bool,
-    ) -> Result<bool> {
-        ctx.verify(self, stakes, proof, is_leader)
-    }
+impl<P: Proof> ConstantSize for DrawProof<P> {
+    const SIZE: usize = P::SIZE + u32::SIZE;
 }

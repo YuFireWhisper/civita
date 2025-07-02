@@ -6,8 +6,9 @@ use libp2p::{
     Swarm,
 };
 
-use crate::network::transport::{
-    behaviour::Behaviour, protocols::gossipsub::dispatcher::Dispatcher,
+use crate::{
+    network::transport::{behaviour::Behaviour, protocols::gossipsub::dispatcher::Dispatcher},
+    traits::serializable::{self, Serializable},
 };
 
 mod dispatcher;
@@ -34,11 +35,11 @@ pub enum Error {
     #[error("Publish error: {0}")]
     Publish(#[from] libp2p::gossipsub::PublishError),
 
-    #[error("{0}")]
-    Payload(#[from] payload::Error),
-
     #[error("Oneshot error: {0}")]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
+
+    #[error("{0}")]
+    Serializable(#[from] serializable::Error),
 }
 
 #[derive(Debug)]

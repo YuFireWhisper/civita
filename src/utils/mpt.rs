@@ -44,15 +44,14 @@ where
     }
 
     pub async fn insert<H: Hasher>(&mut self, path: &[u8], value: T) -> Result<(), S::Error> {
-        let key = cast_slice(path);
+        let path = cast_slice(path);
 
         let root = self.get_root_node().await?;
-        let new_root = self.insert_rec::<H>(root, key, value).await?;
+        let root = self.insert_rec::<H>(root, path, value).await?;
 
-        let new_root_hash = new_root.hash::<H>();
-        self.storage.insert(new_root_hash, new_root);
+        let hash = self.hash_and_insert::<H>(root)?;
 
-        self.root_hash = Some(new_root_hash);
+        self.root_hash = Some(hash);
 
         Ok(())
     }
@@ -64,7 +63,7 @@ where
         }
     }
 
-    async fn get_node(&mut self, hash: &Multihash) -> Result<Node<T>, S::Error> {
+    async fn get_node(&self, hash: &Multihash) -> Result<Node<T>, S::Error> {
         self.storage
             .get(hash)
             .await?
@@ -149,13 +148,13 @@ where
         let mut children = BTreeMap::new();
 
         {
-            let child = Self::new_leaf_child(&leaf_path, leaf.value);
+            let child = Self::new_leaf_child(leaf_path, leaf.value);
             let hash = self.hash_and_insert::<H>(child)?;
             children.insert(leaf_path[0], hash);
         }
 
         {
-            let child = Self::new_leaf_child(&new_path, value);
+            let child = Self::new_leaf_child(new_path, value);
             let hash = self.hash_and_insert::<H>(child)?;
             children.insert(new_path[0], hash);
         }
@@ -245,18 +244,18 @@ where
     async fn insert_branch<H: Hasher>(
         &mut self,
         mut branch: Branch<T>,
-        key: &[Nibble],
+        path: &[Nibble],
         value: T,
     ) -> Result<Node<T>, S::Error> {
-        if key.is_empty() {
+        if path.is_empty() {
             branch.value = Some(value);
         } else {
-            let idx = key[0];
+            let idx = path[0];
             let child = match branch.children.get(&idx) {
                 Some(hash) => self.get_node(hash).await?,
                 None => Node::Empty,
             };
-            let child = self.insert_rec::<H>(child, &key[1..], value).await?;
+            let child = self.insert_rec::<H>(child, &path[1..], value).await?;
             let hash = self.hash_and_insert::<H>(child)?;
             branch.children.insert(idx, hash);
         }
@@ -264,8 +263,8 @@ where
         Ok(Node::Branch(branch))
     }
 
-    pub async fn get(&mut self, key: &[u8]) -> Result<Option<T>, S::Error> {
-        let key = cast_slice(key);
+    pub async fn get(&self, path: &[u8]) -> Result<Option<T>, S::Error> {
+        let key = cast_slice(path);
 
         let Some(hash) = self.root_hash else {
             return Ok(None);
@@ -275,7 +274,7 @@ where
         self.get_rec(&root, key).await
     }
 
-    async fn get_rec(&mut self, node: &Node<T>, path: &[Nibble]) -> Result<Option<T>, S::Error> {
+    async fn get_rec(&self, node: &Node<T>, path: &[Nibble]) -> Result<Option<T>, S::Error> {
         match node {
             Node::Empty => Ok(None),
             Node::Leaf(leaf) => {

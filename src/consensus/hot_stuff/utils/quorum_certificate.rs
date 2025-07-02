@@ -2,6 +2,8 @@ use std::{collections::HashMap, hash::Hash};
 
 use crate::traits::{serializable, ConstantSize, Serializable};
 
+#[derive(Clone)]
+#[derive(Debug, Default)]
 pub struct QuorumCertificate<N, P, S> {
     pub view: N,
     pub sigs: HashMap<P, S>,
