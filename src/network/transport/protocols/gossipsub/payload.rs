@@ -51,16 +51,13 @@ pub enum Payload {
         addr: Multiaddr,
     },
 
-    View {
-        data: Vec<u8>,
-        proof: Vec<u8>,
-        pk: Vec<u8>,
-    },
+    View(Multihash),
 
     Vote {
+        hash: Multihash,
         pk: Vec<u8>,
         proof: Vec<u8>,
-        sign: Vec<u8>,
+        sig: Vec<u8>,
     },
 
     // For testing
@@ -131,11 +128,17 @@ impl Serializable for Payload {
                         + pk.serialized_size()
                         + addr.serialized_size()
                 }
-                Payload::View { data, proof, pk } => {
-                    data.serialized_size() + proof.serialized_size() + pk.serialized_size()
-                }
-                Payload::Vote { pk, proof, sign } => {
-                    pk.serialized_size() + proof.serialized_size() + sign.serialized_size()
+                Payload::View(data) => data.serialized_size(),
+                Payload::Vote {
+                    hash,
+                    pk,
+                    proof,
+                    sig: sign,
+                } => {
+                    hash.serialized_size()
+                        + pk.serialized_size()
+                        + proof.serialized_size()
+                        + sign.serialized_size()
                 }
                 Payload::Raw(data) => data.serialized_size(),
             }
@@ -152,15 +155,12 @@ impl Serializable for Payload {
                 pk: Vec::<u8>::from_reader(reader)?,
                 addr: Multiaddr::from_reader(reader)?,
             },
-            PayloadType::View => Payload::View {
-                data: Vec::<u8>::from_reader(reader)?,
-                proof: Vec::<u8>::from_reader(reader)?,
-                pk: Vec::<u8>::from_reader(reader)?,
-            },
+            PayloadType::View => Payload::View(Multihash::from_reader(reader)?),
             PayloadType::Vote => Payload::Vote {
+                hash: Multihash::from_reader(reader)?,
                 pk: Vec::<u8>::from_reader(reader)?,
                 proof: Vec::<u8>::from_reader(reader)?,
-                sign: Vec::<u8>::from_reader(reader)?,
+                sig: Vec::<u8>::from_reader(reader)?,
             },
             PayloadType::Raw => Payload::Raw(Vec::<u8>::from_reader(reader)?),
         };
@@ -185,12 +185,16 @@ impl Serializable for Payload {
                 pk.to_writer(writer)?;
                 addr.to_writer(writer)?;
             }
-            Payload::View { data, proof, pk } => {
-                data.to_writer(writer)?;
-                proof.to_writer(writer)?;
-                pk.to_writer(writer)?;
+            Payload::View(hash) => {
+                hash.to_writer(writer)?;
             }
-            Payload::Vote { pk, proof, sign } => {
+            Payload::Vote {
+                hash,
+                pk,
+                proof,
+                sig: sign,
+            } => {
+                hash.to_writer(writer)?;
                 pk.to_writer(writer)?;
                 proof.to_writer(writer)?;
                 sign.to_writer(writer)?;

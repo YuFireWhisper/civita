@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
 
 use dashmap::mapref::one::Ref;
 
@@ -16,10 +16,13 @@ use crate::{
         traits::{
             hasher::{Hasher, Multihash},
             suite::Suite,
-            VerifiySignature,
+            SecretKey, Signer, VerifiySignature,
         },
     },
-    network::transport::{self, Kad},
+    network::{
+        storage::Storage,
+        transport::{self, protocols::gossipsub, Kad},
+    },
     proposal::Proposal,
     resident,
     traits::serializable::{self, ConstantSize, Serializable},
@@ -124,6 +127,12 @@ where
                 config,
                 _marker: PhantomData,
             };
+
+            if let Err(e) = engine.run().await {
+                log::error!("Engine error: {e}");
+            }
+
+            log::info!("Engine stopped");
         });
 
         Ok(())
@@ -135,40 +144,170 @@ where
             .listen_on_topic(&self.config.view_topic)
             .await?;
 
-        let mut votes: HashMap<Multihash, ProofPair<S>> = HashMap::new();
+        let mut vote_rx = self
+            .transport
+            .listen_on_topic(&self.config.vote_topic)
+            .await?;
+
+        let mut leader_proof = None;
+        let mut validator_proof = None;
 
         loop {
             tokio::select! {
-                Some(view) = view_rx.recv() => {
+                Some(msg) = view_rx.recv() => {
+                    let gossipsub::Payload::View(hash) = msg.payload else {
+                        continue;
+                    };
+
+                    self.handle_view(hash, &mut leader_proof, &mut validator_proof).await?;
+                }
+
+                Some(msg) = vote_rx.recv() => {
+                    let gossipsub::Payload::Vote { hash, pk, proof, sig } = msg.payload else {
+                        continue;
+                    };
+
+                    let pk = PublicKey::<S>::from_slice(&pk)?;
+                    let proof = DrawProof::<S>::from_slice(&proof)?;
+                    let sig = Signature::<S>::from_slice(&sig)?;
+
+                    self.chain
+                        .on_receive_vote(hash, pk, (proof, sig))
+                        .await?;
                 }
             }
         }
     }
 
-    async fn handle_view(&mut self, view_hash: Multihash) -> Result<Option<Vec<Block<S, P>>>> {
+    async fn handle_view(
+        &mut self,
+        view_hash: Multihash,
+        leader_proof: &mut Option<DrawProof<S>>,
+        validator_proof: &mut Option<DrawProof<S>>,
+    ) -> Result<()> {
         if !self.chain.is_safe_view(&view_hash).await? {
-            return Ok(None);
+            return Ok(());
         }
 
         let Some(cur_view) = self.chain.get_view(&view_hash).await? else {
-            return Ok(None);
+            return Ok(());
         };
 
         if !self.is_leader_valid(cur_view.value()).await? {
-            return Ok(None);
+            return Ok(());
         }
 
         let Some(justify) = cur_view.justify.as_ref() else {
-            return Ok(None);
+            return Ok(());
         };
 
         if !self.is_justify_valid(justify).await? {
-            return Ok(None);
+            return Ok(());
         }
+
+        let cur_view_clone = cur_view.value().clone();
 
         drop(cur_view);
 
-        self.chain.update(&view_hash).await.map_err(Error::from)
+        let _ = self.chain.update(&view_hash).await?;
+
+        if let Some(proof) = validator_proof.take() {
+            let cur_cmd = cur_view_clone.cmd.as_ref().expect("Command should exist");
+
+            if let Some((exec_hash, total_stakes)) = self.apply_proposal(&cur_cmd.proposals).await?
+            {
+                if exec_hash != cur_cmd.executed_root_hash
+                    || total_stakes != cur_cmd.executed_total_stakes
+                {
+                    return Ok(());
+                }
+
+                let pk = self.sk.public_key();
+                let pk_bytes = pk.to_vec()?;
+                let proof_bytes = proof.to_vec()?;
+                let sig = self.sk.sign(&cur_view_clone.hash.to_bytes())?;
+                let sig_bytes = sig.to_vec()?;
+
+                let vote = gossipsub::Payload::Vote {
+                    hash: cur_view_clone.hash,
+                    pk: pk_bytes,
+                    proof: proof_bytes,
+                    sig: sig_bytes,
+                };
+
+                self.transport
+                    .publish(&self.config.vote_topic, vote)
+                    .await?;
+
+                self.chain
+                    .on_receive_vote(cur_view_clone.hash, pk, (proof, sig))
+                    .await?;
+            }
+        }
+
+        if let Some(proof) = leader_proof.take() {
+            let proposals = self.proposal_pool.get().await?;
+            let (proposals, exec_hash, total_stakes) =
+                self.apply_proposal_or_reduce(proposals).await?;
+
+            let pk = self.sk.public_key().clone();
+            let sig = self.sk.sign(&view_hash.to_bytes())?;
+
+            let block = Block::<S, P> {
+                leader: (pk, (proof, sig)),
+                proposals,
+                executed_root_hash: exec_hash,
+                executed_total_stakes: total_stakes,
+            };
+
+            let view = self.chain.on_propose::<H>(block).await?;
+            let view_bytes = view.to_vec()?;
+
+            self.transport.kad().put(view.hash, view_bytes).await?;
+
+            let payload = gossipsub::Payload::View(view.hash);
+
+            self.transport
+                .publish(&self.config.view_topic, payload)
+                .await?;
+        }
+
+        let Some(exec_view) = self.chain.executed_view().await? else {
+            return Ok(());
+        };
+
+        let Some(exec_cmd) = exec_view.cmd.as_ref() else {
+            return Ok(());
+        };
+
+        let pk_hash = H::hash(&self.sk.public_key().to_vec()?);
+
+        let stakes = self
+            .records
+            .get(&pk_hash.to_bytes())
+            .await?
+            .map(|r| r.stakes)
+            .unwrap_or(0);
+
+        let seed = Self::generate_seed(&exec_view.hash, self.chain.leaf_view_number().await + 1);
+
+        *leader_proof = self.randomizer.draw::<H, _>(
+            seed.digest(),
+            exec_cmd.executed_total_stakes,
+            &self.sk,
+            stakes,
+            true,
+        )?;
+
+        *validator_proof = self.randomizer.draw::<H, _>(
+            seed.digest(),
+            exec_cmd.executed_total_stakes,
+            &self.sk,
+            stakes,
+            false,
+        )?;
+
+        Ok(())
     }
 
     async fn is_leader_valid(&self, cur_view: &View<S, P>) -> Result<bool> {
@@ -312,5 +451,80 @@ where
         }
 
         Ok(true)
+    }
+
+    async fn apply_proposal(&mut self, proposal: &BTreeSet<P>) -> Result<Option<(Multihash, u32)>> {
+        self.records.rollback();
+
+        let mut total_stakes = 0u32;
+
+        for prop in proposal {
+            if !prop
+                .verify::<H>(&self.records)
+                .await
+                .map_err(|e| Error::Proposal(e.to_string()))?
+            {
+                return Ok(None);
+            }
+
+            prop.apply::<H>(&mut self.records)
+                .await
+                .map_err(|e| Error::Proposal(e.to_string()))?;
+
+            let stakes = prop
+                .impact_stakes()
+                .map_err(|e| Error::Proposal(e.to_string()))?;
+
+            total_stakes = total_stakes.wrapping_add_signed(stakes);
+        }
+
+        let Some(hash) = self.records.root_hash() else {
+            return Ok(None);
+        };
+
+        self.records.rollback();
+
+        Ok(Some((hash, total_stakes)))
+    }
+
+    async fn apply_proposal_or_reduce(
+        &mut self,
+        proposal: BTreeSet<P>,
+    ) -> Result<(BTreeSet<P>, Multihash, u32)> {
+        self.records.rollback();
+
+        let mut total_stakes = 0u32;
+
+        let mut finals = BTreeSet::new();
+
+        for prop in proposal.into_iter() {
+            if !prop
+                .verify::<H>(&self.records)
+                .await
+                .map_err(|e| Error::Proposal(e.to_string()))?
+            {
+                continue;
+            }
+
+            if (prop.apply::<H>(&mut self.records).await).is_err() {
+                continue;
+            }
+
+            let stakes = prop
+                .impact_stakes()
+                .map_err(|e| Error::Proposal(e.to_string()))?;
+
+            total_stakes = total_stakes.wrapping_add_signed(stakes);
+
+            finals.insert(prop);
+        }
+
+        let Some(hash) = self.records.root_hash() else {
+            panic!("Root hash should exist after applying proposals");
+        };
+
+        self.records.rollback();
+
+        Ok((finals, hash, total_stakes))
     }
 }

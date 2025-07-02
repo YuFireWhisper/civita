@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::Hash};
 
-use dashmap::mapref::one::Ref;
+use dashmap::{mapref::one::Ref, DashMap};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -22,7 +22,7 @@ pub struct Chain<T, P, S, ST: Storage> {
     highest_qc_view: RwLock<Option<QuorumCertificatePair<P, S>>>,
 
     v_height: ViewNumber,
-    votes: HashMap<Multihash, HashMap<P, S>>,
+    votes: DashMap<Multihash, HashMap<P, S>>,
 
     total_nodes: usize,
     max_faulty: usize,
@@ -50,7 +50,7 @@ where
             highest_qc_view: RwLock::new(Some((0, qc))),
 
             v_height: 0,
-            votes: HashMap::new(),
+            votes: DashMap::new(),
 
             total_nodes,
             max_faulty,
@@ -377,12 +377,12 @@ where
     }
 
     pub async fn on_receive_vote(
-        &mut self,
+        &self,
         hash: Multihash,
         peer: P,
         sign: S,
     ) -> Result<(), ST::Error> {
-        let signs = self.votes.entry(hash).or_default();
+        let mut signs = self.votes.entry(hash).or_default();
 
         if signs.contains_key(&peer) {
             return Ok(()); // duplicate vote
@@ -398,7 +398,7 @@ where
 
             let qc = Some(QuorumCertificate {
                 view: hash,
-                sigs: votes_for_view,
+                sigs: votes_for_view.1,
             });
 
             let _ = self.update_highest_qc(&qc).await?;
@@ -444,7 +444,7 @@ where
         self.get_justified_view(&b1).await
     }
 
-    pub async fn on_propose<H: Hasher>(&mut self, cmd: T) -> Result<View<T, P, S>, ST::Error> {
+    pub async fn on_propose<H: Hasher>(&self, cmd: T) -> Result<View<T, P, S>, ST::Error> {
         let leaf_view = self.leaf_view.read().await;
         let Some(leaf_view) = *leaf_view else {
             return Ok(View::new::<H>(
