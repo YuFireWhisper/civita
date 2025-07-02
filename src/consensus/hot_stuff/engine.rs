@@ -585,6 +585,12 @@ where
         let cur_view_clone = cur_view.value().clone();
         drop(cur_view);
 
+        if let Some(cmd) = &cur_view_clone.cmd {
+            if let Err(e) = self.proposal_pool.remove(cmd.proposals.clone()).await {
+                log::warn!("Failed to remove proposals from pool: {e}");
+            }
+        }
+
         let _ = self.chain.update(&view_hash).await?;
 
         if let Some(proof) = validator_proof.take() {
@@ -599,8 +605,22 @@ where
     }
 
     async fn handle_non_consecutive_view(&mut self, view_hash: Multihash) -> Result<()> {
+        let Some(view) = self.chain.get_view(&view_hash).await? else {
+            return Ok(());
+        };
+
+        if let Some(cmd) = &view.cmd {
+            if let Err(e) = self.proposal_pool.remove(cmd.proposals.clone()).await {
+                log::warn!("Failed to remove proposals from pool: {e}");
+            }
+        }
+
+        drop(view);
+
         let _ = self.chain.update(&view_hash).await?;
+
         log::info!("Updated chain with non-consecutive view: {view_hash:?}");
+
         Ok(())
     }
 
