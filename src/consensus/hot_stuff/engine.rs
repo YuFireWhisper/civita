@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
 
 use dashmap::mapref::one::Ref;
+use tokio::sync::mpsc;
 
 use crate::{
     consensus::{
@@ -16,6 +17,7 @@ use crate::{
         traits::{
             hasher::{Hasher, Multihash},
             suite::Suite,
+            vrf::Proof,
             SecretKey, Signer, VerifiySignature,
         },
     },
@@ -209,8 +211,8 @@ where
 
     async fn wait_for_next_view(
         &mut self,
-        view_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
-        vote_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
+        view_rx: &mut mpsc::Receiver<gossipsub::Message>,
+        vote_rx: &mut mpsc::Receiver<gossipsub::Message>,
         expected_view_number: ViewNumber,
     ) -> Result<ViewWaitResult> {
         let timeout = tokio::time::sleep(self.config.wait_leader_timeout);
@@ -222,10 +224,20 @@ where
             self.config.wait_leader_timeout
         );
 
+        let mut consecutive_candidates: Vec<(Multihash, Multihash)> = Vec::new();
+
         loop {
             tokio::select! {
                 _ = &mut timeout => {
                     log::debug!("View wait timeout for view {expected_view_number}");
+
+                    if !consecutive_candidates.is_empty() {
+                        consecutive_candidates.sort_by(|a, b| a.1.cmp(&b.1));
+                        let best_view_hash = consecutive_candidates[0].0;
+                        log::info!("Selected consecutive view with smallest proof hash: {best_view_hash:?}");
+                        return Ok(ViewWaitResult::ConsecutiveView(best_view_hash));
+                    }
+
                     return Ok(ViewWaitResult::Timeout);
                 }
 
@@ -242,19 +254,27 @@ where
                     log::debug!("Received view {view_number} (expecting {expected_view_number})");
 
                     if view_number == expected_view_number {
-                        log::info!("Received consecutive view {view_number}");
-                        return Ok(ViewWaitResult::ConsecutiveView(hash));
+                        log::debug!("Received consecutive view {view_number}, adding to candidates");
+
+                        if let Some(proof_hash) = self.get_view_proof_hash(&hash).await? {
+                            consecutive_candidates.push((hash, proof_hash));
+                            log::debug!("Added consecutive view candidate with proof hash: {proof_hash:?}");
+                        } else {
+                            log::warn!("Could not get proof hash for consecutive view: {hash:?}");
+                        }
+
+                        continue;
                     }
 
                     if view_number > expected_view_number {
                         log::info!("Received non-consecutive view {view_number} > {expected_view_number}");
 
                         if self.is_valid_future_view(&hash).await? {
+                            log::info!("Non-consecutive view {view_number} is valid, using immediately");
                             return Ok(ViewWaitResult::NonConsecutiveView(hash));
                         }
 
                         log::warn!("Invalid future view {view_number}");
-
                         continue;
                     }
 
@@ -268,6 +288,19 @@ where
                 }
             }
         }
+    }
+
+    async fn get_view_proof_hash(&self, view_hash: &Multihash) -> Result<Option<Multihash>> {
+        let Some(view) = self.chain.get_view(view_hash).await? else {
+            return Ok(None);
+        };
+
+        let Some(cmd) = view.cmd.as_ref() else {
+            return Ok(None);
+        };
+
+        let proof_hash = cmd.leader.1 .0.proof.proof_to_hash();
+        Ok(Some(proof_hash))
     }
 
     async fn is_leader_valid(&self, cur_view: &View<S, P>) -> Result<bool> {
