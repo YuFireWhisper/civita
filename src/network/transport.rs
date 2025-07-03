@@ -189,6 +189,10 @@ impl Transport {
         &self.sk
     }
 
+    pub fn gossipsub(&self) -> Arc<Gossipsub> {
+        self.gossipsub.clone()
+    }
+
     pub fn kad(&self) -> Arc<Kad> {
         self.kad.clone()
     }

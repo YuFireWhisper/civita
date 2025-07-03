@@ -139,7 +139,7 @@ impl Kad {
             .transpose()
     }
 
-    pub async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
+    pub async fn put<T>(&self, key: Multihash, value: T) -> Result<()>
     where
         T: Serializable + Sync + Send + 'static,
     {
@@ -161,7 +161,7 @@ impl Kad {
         Ok(())
     }
 
-    pub async fn put_batch<T, I>(&mut self, items: I) -> Result<()>
+    pub async fn put_batch<T, I>(&self, items: I) -> Result<()>
     where
         T: Serializable + Sync + Send + 'static,
         I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
