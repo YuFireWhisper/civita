@@ -1,25 +1,24 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{mapref::one::Ref, DashMap};
 
 use crate::{
     crypto::Multihash,
-    network::traits::storage::{self, Storage},
+    network::kad::{self, Kad},
     traits::Serializable,
 };
 
-pub struct CacheStorage<T, S> {
-    storage: S,
+pub struct CacheStorage<T> {
+    storage: Arc<Kad>,
     cache: DashMap<Multihash, T>,
     changes: HashSet<Multihash>,
 }
 
-impl<T, S> CacheStorage<T, S>
+impl<T> CacheStorage<T>
 where
     T: Serializable + Sync + Send + 'static,
-    S: Storage,
 {
-    pub fn new(storage: S) -> Self {
+    pub fn new(storage: Arc<Kad>) -> Self {
         Self {
             storage,
             cache: DashMap::new(),
@@ -32,7 +31,7 @@ where
         self.changes.insert(key);
     }
 
-    pub async fn get(&self, key: &Multihash) -> Result<Option<Ref<Multihash, T>>, storage::Error> {
+    pub async fn get(&self, key: &Multihash) -> Result<Option<Ref<Multihash, T>>, kad::Error> {
         if let Some(value) = self.cache.get(key) {
             return Ok(Some(value));
         }
@@ -46,7 +45,7 @@ where
         Ok(Some(self.cache.get(key).unwrap()))
     }
 
-    pub async fn commit(&mut self) -> Result<(), storage::Error> {
+    pub async fn commit(&mut self) -> Result<(), kad::Error> {
         let mut items = Vec::new();
 
         for key in self.changes.drain() {

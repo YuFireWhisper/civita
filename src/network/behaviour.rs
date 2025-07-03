@@ -1,12 +1,10 @@
 use libp2p::{
     gossipsub::{self, MessageAuthenticity},
     identity::Keypair,
-    kad,
+    kad::{self, store::MemoryStore},
     swarm::NetworkBehaviour,
     PeerId,
 };
-
-use crate::network::transport::protocols::kad::validated_store::ValidatedStore;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -30,7 +28,7 @@ pub enum Event {
 #[behaviour(to_swarm = "Event")]
 pub struct Behaviour {
     gossipsub: gossipsub::Behaviour,
-    kad: kad::Behaviour<ValidatedStore>,
+    kad: kad::Behaviour<MemoryStore>,
 }
 
 impl Behaviour {
@@ -53,15 +51,15 @@ impl Behaviour {
             .map_err(Error::from)
     }
 
-    fn create_kad(peer_id: PeerId) -> kad::Behaviour<ValidatedStore> {
-        kad::Behaviour::new(peer_id, ValidatedStore::default())
+    fn create_kad(peer_id: PeerId) -> kad::Behaviour<MemoryStore> {
+        kad::Behaviour::new(peer_id, MemoryStore::new(peer_id))
     }
 
     pub fn gossipsub(&self) -> &gossipsub::Behaviour {
         &self.gossipsub
     }
 
-    pub fn kad(&self) -> &kad::Behaviour<ValidatedStore> {
+    pub fn kad(&self) -> &kad::Behaviour<MemoryStore> {
         &self.kad
     }
 
@@ -69,7 +67,7 @@ impl Behaviour {
         &mut self.gossipsub
     }
 
-    pub fn kad_mut(&mut self) -> &mut kad::Behaviour<ValidatedStore> {
+    pub fn kad_mut(&mut self) -> &mut kad::Behaviour<MemoryStore> {
         &mut self.kad
     }
 }

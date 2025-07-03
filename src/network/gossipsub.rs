@@ -2,32 +2,29 @@ use std::{collections::HashSet, sync::Arc};
 
 use dashmap::DashMap;
 use libp2p::{
-    gossipsub::{Event, IdentTopic, TopicHash},
+    gossipsub::{Event, IdentTopic, PublishError, SubscriptionError, TopicHash},
     PeerId, Swarm,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::{
-    crypto::Multihash,
-    network::{
-        traits::{self, gossipsub::Error},
-        transport::behaviour::Behaviour,
-    },
-};
+use crate::{crypto::Multihash, network::behaviour::Behaviour};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Subscribe(#[from] SubscriptionError),
+
+    #[error("{0}")]
+    Publish(#[from] PublishError),
+}
 
 #[derive(Debug)]
 pub struct Config {
     pub timeout: tokio::time::Duration,
     pub channel_size: usize,
-}
-
-#[derive(Debug)]
-#[derive(Default)]
-pub struct ConfigBuilder {
-    timeout: Option<tokio::time::Duration>,
-    channel_size: Option<usize>,
 }
 
 pub struct Gossipsub {
@@ -37,35 +34,6 @@ pub struct Gossipsub {
     subscribed_peer: DashMap<TopicHash, HashSet<Multihash>>,
     waiting_subscription: DashMap<TopicHash, oneshot::Sender<()>>,
     config: Config,
-}
-
-impl ConfigBuilder {
-    const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
-    const DEFAULT_CHANNEL_SIZE: usize = 1000;
-
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_timeout(mut self, timeout: tokio::time::Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
-    pub fn with_channel_size(mut self, size: usize) -> Self {
-        self.channel_size = Some(size);
-        self
-    }
-
-    pub fn build(self) -> Config {
-        let waiting_subscription_timeout = self.timeout.unwrap_or(Self::DEFAULT_TIMEOUT);
-        let channel_size = self.channel_size.unwrap_or(Self::DEFAULT_CHANNEL_SIZE);
-
-        Config {
-            timeout: waiting_subscription_timeout,
-            channel_size,
-        }
-    }
 }
 
 impl Gossipsub {
@@ -196,17 +164,3 @@ impl Gossipsub {
     }
 }
 
-#[async_trait::async_trait]
-impl traits::Gossipsub for Arc<Gossipsub> {
-    async fn subscribe(&self, topic: u8) -> Result<mpsc::Receiver<Vec<u8>>> {
-        self.subscribe(topic).await
-    }
-
-    async fn unsubscribe(&self, topic: u8) -> Result<()> {
-        self.unsubscribe(topic).await
-    }
-
-    async fn publish(&self, topic: u8, data: Vec<u8>) -> Result<()> {
-        self.publish(topic, data).await
-    }
-}

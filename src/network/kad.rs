@@ -1,25 +1,49 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dashmap::DashMap;
-use tokio::{sync::oneshot, time::Duration};
+use libp2p::{
+    kad::{QueryId, QueryResult, Quorum, Record, RecordKey},
+    Swarm,
+};
+use tokio::{
+    sync::{oneshot, Mutex},
+    time::Duration,
+};
 
 use crate::{
     crypto::Multihash,
-    network::{
-        traits::{storage::Error, Storage},
-        transport::behaviour::Behaviour,
-    },
-    traits::Serializable,
+    network::behaviour::Behaviour,
+    traits::{serializable, Serializable},
 };
-
-pub mod validated_store;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Put(#[from] libp2p::kad::PutRecordError),
+
+    #[error("{0}")]
+    Get(#[from] libp2p::kad::GetRecordError),
+
+    #[error("Waiting for Kademlia operation timed out after {0:?}")]
+    Timeout(#[from] tokio::time::error::Elapsed),
+
+    #[error("{0}")]
+    Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
+
+    #[error("{0}")]
+    Store(#[from] libp2p::kad::store::Error),
+
+    #[error("{0}")]
+    Serializable(#[from] serializable::Error),
+}
+
+#[derive(Debug)]
 pub struct Config {
-    pub wait_for_kad_result_timeout: tokio::time::Duration,
-    pub quorum: libp2p::kad::Quorum,
+    pub wait_for_kad_result_timeout: Duration,
+    pub quorum: Quorum,
 }
 
 enum WaitingQuery {
@@ -27,17 +51,15 @@ enum WaitingQuery {
     Get(oneshot::Sender<Result<Option<libp2p::kad::PeerRecord>>>),
 }
 
+#[derive()]
 pub struct Kad {
-    swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
-    waiting_queries: DashMap<libp2p::kad::QueryId, WaitingQuery>,
+    swarm: Arc<Mutex<Swarm<Behaviour>>>,
+    waiting_queries: DashMap<QueryId, WaitingQuery>,
     config: Config,
 }
 
 impl Kad {
-    pub fn new(
-        swarm: Arc<tokio::sync::Mutex<libp2p::swarm::Swarm<Behaviour>>>,
-        config: Config,
-    ) -> Self {
+    pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>, config: Config) -> Self {
         Self {
             swarm,
             waiting_queries: DashMap::new(),
@@ -54,7 +76,7 @@ impl Kad {
         }
     }
 
-    fn handle_outbound(&self, id: libp2p::kad::QueryId, result: libp2p::kad::QueryResult) {
+    fn handle_outbound(&self, id: QueryId, result: QueryResult) {
         use libp2p::kad::{GetRecordOk, QueryResult};
 
         match result {
@@ -98,24 +120,12 @@ impl Kad {
             _ => log::debug!("Received unhandled query result: {result:?}"),
         }
     }
-}
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            wait_for_kad_result_timeout: Duration::from_secs(10),
-            quorum: libp2p::kad::Quorum::Majority,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Storage for Arc<Kad> {
-    async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
+    pub async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
     where
         T: Serializable + Sync + Send + 'static,
     {
-        let key = libp2p::kad::RecordKey::new(&key.to_bytes());
+        let key = RecordKey::new(&key.to_bytes());
 
         let mut swarm = self.swarm.lock().await;
         let query_id = swarm.behaviour_mut().kad_mut().get_record(key);
@@ -129,12 +139,12 @@ impl Storage for Arc<Kad> {
             .transpose()
     }
 
-    async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
+    pub async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
     where
         T: Serializable + Sync + Send + 'static,
     {
-        let key = libp2p::kad::RecordKey::new(&key.to_bytes());
-        let record = libp2p::kad::Record::new(key, value.to_vec()?);
+        let key = RecordKey::new(&key.to_bytes());
+        let record = Record::new(key, value.to_vec()?);
 
         let mut swarm = self.swarm.lock().await;
         let query_id = swarm
@@ -143,7 +153,7 @@ impl Storage for Arc<Kad> {
             .put_record(record, self.config.quorum)
             .map_err(Error::from)?;
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         self.waiting_queries.insert(query_id, WaitingQuery::Put(tx));
 
         tokio::time::timeout(self.config.wait_for_kad_result_timeout, rx).await???;
@@ -151,7 +161,7 @@ impl Storage for Arc<Kad> {
         Ok(())
     }
 
-    async fn put_batch<T, I>(&mut self, items: I) -> Result<()>
+    pub async fn put_batch<T, I>(&mut self, items: I) -> Result<()>
     where
         T: Serializable + Sync + Send + 'static,
         I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
@@ -201,28 +211,12 @@ impl Storage for Arc<Kad> {
         Ok(())
     }
 }
-//
-// #[async_trait::async_trait]
-// impl Storage for Arc<Kad> {
-//     async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
-//     where
-//         T: Serializable + Sync + Send + 'static,
-//     {
-//         self.get(key).await
-//     }
-//
-//     async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
-//     where
-//         T: Serializable + Sync + Send + 'static,
-//     {
-//         self.put(key, value).await
-//     }
-//
-//     async fn put_batch<T, I>(&mut self, items: I) -> Result<()>
-//     where
-//         T: Serializable + Sync + Send + 'static,
-//         I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
-//     {
-//         self.put_batch(items).await
-//     }
-// }
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            wait_for_kad_result_timeout: Duration::from_secs(10),
+            quorum: libp2p::kad::Quorum::Majority,
+        }
+    }
+}

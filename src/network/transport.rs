@@ -15,24 +15,14 @@ use tokio::{
 use crate::{
     crypto::{Hasher, SecretKey},
     network::{
-        traits,
-        transport::{
-            behaviour::Behaviour,
-            protocols::{
-                gossipsub,
-                kad::{self},
-            },
-        },
+        behaviour::{self, Behaviour},
+        gossipsub::{self, Gossipsub},
+        kad::{self, Kad},
     },
 };
 
 pub mod config;
 pub mod error;
-pub mod protocols;
-
-pub use protocols::{Gossipsub, Kad};
-
-mod behaviour;
 
 pub use config::Config;
 pub use error::Error;
@@ -40,7 +30,7 @@ pub use error::Error;
 type Result<T> = std::result::Result<T, Error>;
 
 pub struct Transport {
-    swarm: Arc<Mutex<libp2p::Swarm<Behaviour>>>,
+    swarm: Arc<Mutex<Swarm<Behaviour>>>,
     gossipsub: Arc<Gossipsub>,
     kad: Arc<Kad>,
     local_peer_id: PeerId,
@@ -54,14 +44,23 @@ impl Transport {
         sk: SecretKey,
         listen_addr: Multiaddr,
         config: Config,
+        is_test: bool,
     ) -> Result<Self> {
         let keypair = sk.to_libp2p_key();
 
-        let transport = libp2p::tcp::tokio::Transport::default()
-            .upgrade(upgrade::Version::V1)
-            .authenticate(noise::Config::new(&keypair).expect("Failed to create Noise config"))
-            .multiplex(libp2p::yamux::Config::default())
-            .boxed();
+        let transport = if is_test {
+            libp2p::core::transport::MemoryTransport::default()
+                .upgrade(upgrade::Version::V1)
+                .authenticate(noise::Config::new(&keypair).expect("Failed to create Noise config"))
+                .multiplex(libp2p::yamux::Config::default())
+                .boxed()
+        } else {
+            libp2p::tcp::tokio::Transport::default()
+                .upgrade(upgrade::Version::V1)
+                .authenticate(noise::Config::new(&keypair).expect("Failed to create Noise config"))
+                .multiplex(libp2p::yamux::Config::default())
+                .boxed()
+        };
 
         let peer_id = keypair.public().to_peer_id();
         let behaviour = Behaviour::new(keypair, peer_id)?;
@@ -81,10 +80,10 @@ impl Transport {
         let kad = Kad::new(swarm.clone(), kad_config);
         let kad = Arc::new(kad);
 
-        let gossipsub_config = gossipsub::ConfigBuilder::new()
-            .with_timeout(config.wait_for_gossipsub_peer_timeout)
-            .with_channel_size(config.channel_capacity)
-            .build();
+        let gossipsub_config = gossipsub::Config {
+            timeout: config.wait_for_gossipsub_peer_timeout,
+            channel_size: config.channel_capacity,
+        };
         let gossipsub = Gossipsub::new(swarm.clone(), peer_id, gossipsub_config).await;
 
         let transport = Self {
@@ -200,27 +199,6 @@ impl std::fmt::Debug for Transport {
         f.debug_struct("Transport")
             .field("swarm", &"Arc<Mutex<Swarm<P2PBehaviour>>>")
             .finish()
-    }
-}
-
-impl traits::Transport for Transport {
-    type Storage = Arc<Kad>;
-    type Gossipsub = Arc<Gossipsub>;
-
-    fn storage(&self) -> Self::Storage {
-        self.kad.clone()
-    }
-
-    fn gossipsub(&self) -> Self::Gossipsub {
-        self.gossipsub.clone()
-    }
-
-    fn local_peer_id(&self) -> PeerId {
-        self.local_peer_id
-    }
-
-    fn secret_key(&self) -> &SecretKey {
-        &self.sk
     }
 }
 
