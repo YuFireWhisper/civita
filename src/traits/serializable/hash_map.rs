@@ -8,11 +8,15 @@ use crate::traits::serializable::{ConstantSize, Error, Serializable};
 
 impl<K, V> Serializable for HashMap<K, V>
 where
-    K: Serializable + ConstantSize + Eq + Hash,
-    V: Serializable + ConstantSize,
+    K: Serializable + Eq + Hash,
+    V: Serializable,
 {
     fn serialized_size(&self) -> usize {
-        usize::SIZE + (K::SIZE + V::SIZE) * self.len()
+        usize::SIZE
+            + self
+                .iter()
+                .map(|(k, v)| k.serialized_size() + v.serialized_size())
+                .sum::<usize>()
     }
 
     fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error> {
