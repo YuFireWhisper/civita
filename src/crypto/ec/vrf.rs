@@ -26,6 +26,7 @@ mod nonce_generator;
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
+#[derive(Hash)]
 pub struct Proof<P, S> {
     pub gamma: P,
     pub c: S,

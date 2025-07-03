@@ -20,6 +20,7 @@ use crate::{
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
+#[derive(Hash)]
 pub struct Signature<P, S> {
     pub r: P,
     pub s: S,
@@ -101,38 +102,4 @@ fn generate_challenge<P1: CanonicalSerialize, P2: CanonicalSerialize, S: PrimeFi
         .expect("Failed to serialize public key");
 
     S::from_be_bytes_mod_order(H::hash(&bytes).digest())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::crypto::traits::VerifiySignature;
-
-    use super::*;
-
-    use ark_ff::MontFp;
-    use ark_secp256r1::{Affine, Fq, Fr};
-
-    const SK: Fr =
-        MontFp!("91225253027397101270059260515990221874496108017261222445699397644687913215777");
-    const PK_X: Fq = MontFp!("0x60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6");
-    const PK_Y: Fq = MontFp!("0x7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299");
-
-    #[rstest::rstest]
-    #[case(b"sample")]
-    #[case(b"another message")]
-    #[case(b"123")]
-    fn correct_signature(#[case] msg: &[u8]) {
-        use crate::crypto::traits::Signer;
-
-        let sk = SecretKey::new(SK);
-        let pk = Affine::new(PK_X, PK_Y);
-
-        let sig = sk.sign(msg);
-
-        let should_valid = pk.verify_signature(msg, &sig);
-        let should_invalid = pk.verify_signature(b"wrong message", &sig);
-
-        assert!(should_valid, "Signature should be valid");
-        assert!(!should_invalid, "Signature should be invalid");
-    }
 }

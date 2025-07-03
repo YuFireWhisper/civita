@@ -16,6 +16,7 @@ use crate::{
 #[derivative(Clone(bound = ""), Copy(bound = ""))]
 #[derivative(Debug(bound = ""))]
 #[derivative(Eq(bound = ""), PartialEq(bound = ""))]
+#[derivative(Hash(bound = ""))]
 pub struct SecretKey<C: SWCurveConfig> {
     pub(crate) sk: C::ScalarField,
     pub(crate) pk: Affine<C>,

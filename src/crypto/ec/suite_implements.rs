@@ -1,5 +1,4 @@
 pub mod secp256k1;
-pub mod secp256r1;
 
 #[allow(dead_code)]
 const fn concat_str_slices<const N: usize>(a: &str, b: &str, c: &str) -> [u8; N] {
