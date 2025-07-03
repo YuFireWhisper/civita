@@ -10,20 +10,12 @@ use crate::{
             proposal_pool::{self, ProposalPool},
             utils::{self, QuorumCertificate, ViewNumber},
         },
-        randomizer::{self, Randomizer},
+        randomizer::{self, DrawProof, Randomizer},
     },
-    crypto::{
-        self,
-        traits::{
-            hasher::{Hasher, Multihash},
-            suite::Suite,
-            vrf::Proof,
-            SecretKey, Signer, VerifiySignature,
-        },
-    },
+    crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     network::{
-        storage::Storage,
-        transport::{self, protocols::gossipsub, Kad},
+        traits::{gossipsub, storage, Gossipsub, Storage, Transport},
+        transport::Kad,
     },
     proposal::Proposal,
     resident,
@@ -31,31 +23,21 @@ use crate::{
     utils::mpt::Mpt,
 };
 
-#[cfg(not(test))]
-use crate::network::transport::Transport;
+type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[cfg(test)]
-use crate::network::transport::MockTransport as Transport;
-
-type Result<T> = std::result::Result<T, Error>;
-
-type PublicKey<S> = <S as Suite>::PublicKey;
-type Signature<S> = <S as Suite>::Signature;
-type DrawProof<S> = randomizer::DrawProof<<S as Suite>::Proof>;
-type ProofPair<S> = (DrawProof<S>, Signature<S>);
-
-type Block<S, P> = utils::Block<P, PublicKey<S>, ProofPair<S>>;
-type View<S, P> = utils::View<Block<S, P>, PublicKey<S>, ProofPair<S>>;
-type Chain<S, P, ST = Arc<Kad>> = chain::Chain<Block<S, P>, PublicKey<S>, ProofPair<S>, ST>;
+type ProofPair = (DrawProof, Signature);
+type Block<P> = utils::Block<P, PublicKey, ProofPair>;
+type View<P> = utils::View<Block<P>, PublicKey, ProofPair>;
+type Chain<P, S = Arc<Kad>> = chain::Chain<Block<P>, PublicKey, ProofPair, S>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
-    Transport(#[from] transport::Error),
+    Storage(#[from] storage::Error),
 
     #[error("{0}")]
-    Kad(#[from] transport::protocols::kad::Error),
+    Gossipsub(#[from] gossipsub::Error),
 
     #[error("{0}")]
     Randomizer(#[from] randomizer::Error),
@@ -68,15 +50,12 @@ pub enum Error {
 
     #[error("{0}")]
     Proposal(String),
-
-    #[error("{0}")]
-    Crypto(#[from] crypto::Error),
 }
 
 pub struct Config {
-    pub proposal_topic: String,
-    pub view_topic: String,
-    pub vote_topic: String,
+    pub proposal_topic: u8,
+    pub view_topic: u8,
+    pub vote_topic: u8,
 
     pub proposal_pool_capacity: usize,
     pub expected_leaders: u16,
@@ -91,43 +70,55 @@ enum ViewWaitResult {
     Timeout,
 }
 
-pub struct Engine<P, S, H>
+struct Vote {
+    hash: Multihash,
+    pk: PublicKey,
+    proof: DrawProof,
+    sig: Signature,
+}
+
+pub struct Engine<T, P, H>
 where
+    T: Transport,
     P: Proposal,
-    S: Suite,
     H: Hasher,
 {
-    transport: Arc<Transport>,
-    sk: S::SecretKey,
+    gossipsub: T::Gossipsub,
+    storage: T::Storage,
     proposal_pool: ProposalPool<P>,
-    chain: Chain<S, P>,
-    records: Mpt<resident::Record>,
+    sk: SecretKey,
+    chain: Chain<P>,
+    records: Mpt<resident::Record, T::Storage>,
     randomizer: Randomizer,
     config: Config,
     _marker: PhantomData<H>,
 }
 
-impl<P, S, H> Engine<P, S, H>
+impl<T, P, H> Engine<T, P, H>
 where
+    T: Transport,
     P: Proposal,
-    S: Suite,
     H: Hasher,
 {
     pub async fn spawn(
-        transport: Arc<Transport>,
-        sk: S::SecretKey,
-        chain: Chain<S, P>,
+        transport: Arc<T>,
+        chain: Chain<P>,
         root_hash: Multihash,
         config: Config,
     ) -> Result<()> {
-        let rx = transport.listen_on_topic(&config.proposal_topic).await?;
+        let gossipsub = transport.gossipsub();
+        let storage = transport.storage();
+        let sk = transport.secret_key().clone();
+
+        let rx = gossipsub.subscribe(config.proposal_topic).await?;
         let proposal_pool = ProposalPool::<P>::new(rx, config.proposal_pool_capacity);
-        let records = Mpt::with_root(transport.kad(), root_hash);
         let randomizer = Randomizer::new(config.expected_leaders, config.expected_members);
+        let records = Mpt::with_root(storage.clone(), root_hash);
 
         tokio::spawn(async move {
             let mut engine = Self {
-                transport,
+                gossipsub,
+                storage,
                 sk,
                 proposal_pool,
                 chain,
@@ -148,15 +139,8 @@ where
     }
 
     async fn run(&mut self) -> Result<()> {
-        let mut view_rx = self
-            .transport
-            .listen_on_topic(&self.config.view_topic)
-            .await?;
-
-        let mut vote_rx = self
-            .transport
-            .listen_on_topic(&self.config.vote_topic)
-            .await?;
+        let mut view_rx = self.gossipsub.subscribe(self.config.view_topic).await?;
+        let mut vote_rx = self.gossipsub.subscribe(self.config.vote_topic).await?;
 
         let mut leader_proof = None;
         let mut validator_proof = None;
@@ -182,10 +166,10 @@ where
 
     async fn consensus_round(
         &mut self,
-        view_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
-        vote_rx: &mut tokio::sync::mpsc::Receiver<gossipsub::Message>,
-        leader_proof: &mut Option<DrawProof<S>>,
-        validator_proof: &mut Option<DrawProof<S>>,
+        view_rx: &mut mpsc::Receiver<Vec<u8>>,
+        vote_rx: &mut mpsc::Receiver<Vec<u8>>,
+        leader_proof: &mut Option<DrawProof>,
+        validator_proof: &mut Option<DrawProof>,
     ) -> Result<()> {
         let expected_view_number = self.chain.leaf_view_number().await + 1;
 
@@ -211,8 +195,8 @@ where
 
     async fn wait_for_next_view(
         &mut self,
-        view_rx: &mut mpsc::Receiver<gossipsub::Message>,
-        vote_rx: &mut mpsc::Receiver<gossipsub::Message>,
+        view_rx: &mut mpsc::Receiver<Vec<u8>>,
+        vote_rx: &mut mpsc::Receiver<Vec<u8>>,
         expected_view_number: ViewNumber,
     ) -> Result<ViewWaitResult> {
         let timeout = tokio::time::sleep(self.config.wait_leader_timeout);
@@ -242,9 +226,7 @@ where
                 }
 
                 Some(msg) = view_rx.recv() => {
-                    let gossipsub::Payload::View(hash) = msg.payload else {
-                        continue;
-                    };
+                    let hash = Multihash::from_slice(&msg)?;
 
                     let Some(view_number) = self.get_view_number(&hash).await? else {
                         log::warn!("Could not determine view number for hash: {hash:?}");
@@ -299,11 +281,12 @@ where
             return Ok(None);
         };
 
-        let proof_hash = cmd.leader.1 .0.proof.proof_to_hash();
+        let proof_hash = cmd.leader.1 .0.proof.to_hash();
+
         Ok(Some(proof_hash))
     }
 
-    async fn is_leader_valid(&self, cur_view: &View<S, P>) -> Result<bool> {
+    async fn is_leader_valid(&self, cur_view: &View<P>) -> Result<bool> {
         let Some((pk, (proof, sig))) = cur_view.cmd.as_ref().map(|cmd| &cmd.leader) else {
             return Ok(false);
         };
@@ -332,7 +315,7 @@ where
     async fn get_exec_view_at(
         &self,
         view_hash: &Multihash,
-    ) -> Result<Option<Ref<Multihash, View<S, P>>>> {
+    ) -> Result<Option<Ref<Multihash, View<P>>>> {
         let Some(exec_hash) = self.chain.exec_hash_at(view_hash).await? else {
             return Ok(None);
         };
@@ -362,12 +345,12 @@ where
         view_hash: &[u8],
         seed: &[u8],
         total_stakes: u32,
-        info: (&PublicKey<S>, (&DrawProof<S>, &Signature<S>)),
+        info: (&PublicKey, (&DrawProof, &Signature)),
         is_leader: bool,
     ) -> Result<Option<u32>> {
         let (pk, (proof, sig)) = info;
 
-        if pk.verify_signature(view_hash, sig).is_err() {
+        if !pk.verify_signature(view_hash, sig) {
             return Ok(None);
         }
 
@@ -386,14 +369,10 @@ where
             return Ok(None);
         }
 
-        if !self.randomizer.verify::<H, S::PublicKey>(
-            seed,
-            total_stakes,
-            pk,
-            stakes,
-            proof,
-            is_leader,
-        ) {
+        if !self
+            .randomizer
+            .verify::<H>(seed, total_stakes, pk, stakes, proof, is_leader)
+        {
             return Ok(None);
         }
 
@@ -402,7 +381,7 @@ where
 
     async fn is_justify_valid(
         &self,
-        justify: &QuorumCertificate<Multihash, PublicKey<S>, ProofPair<S>>,
+        justify: &QuorumCertificate<Multihash, PublicKey, ProofPair>,
     ) -> Result<bool> {
         let Some(jus_view) = self.chain.get_view(&justify.view).await? else {
             return Ok(false);
@@ -453,14 +432,14 @@ where
 
         for prop in proposal {
             if !prop
-                .verify::<H>(&self.records)
+                .verify::<H, _>(&self.records)
                 .await
                 .map_err(|e| Error::Proposal(e.to_string()))?
             {
                 return Ok(None);
             }
 
-            prop.apply::<H>(&mut self.records)
+            prop.apply::<H, _>(&mut self.records)
                 .await
                 .map_err(|e| Error::Proposal(e.to_string()))?;
 
@@ -492,14 +471,14 @@ where
 
         for prop in proposal.into_iter() {
             if !prop
-                .verify::<H>(&self.records)
+                .verify::<H, _>(&self.records)
                 .await
                 .map_err(|e| Error::Proposal(e.to_string()))?
             {
                 continue;
             }
 
-            if (prop.apply::<H>(&mut self.records).await).is_err() {
+            if (prop.apply::<H, _>(&mut self.records).await).is_err() {
                 continue;
             }
 
@@ -521,24 +500,13 @@ where
         Ok((finals, hash, total_stakes))
     }
 
-    async fn handle_vote_message(&mut self, msg: gossipsub::Message) -> Result<()> {
-        let gossipsub::Payload::Vote {
-            hash,
-            pk,
-            proof,
-            sig,
-        } = msg.payload
-        else {
-            return Ok(());
-        };
+    async fn handle_vote_message(&mut self, msg: Vec<u8>) -> Result<()> {
+        let vote = Vote::from_slice(&msg)?;
 
-        let pk = PublicKey::<S>::from_slice(&pk)?;
-        let proof = DrawProof::<S>::from_slice(&proof)?;
-        let sig = Signature::<S>::from_slice(&sig)?;
-
-        if let Some(_qc) = self.chain.on_receive_vote(hash, pk, (proof, sig)).await? {
-            log::debug!("Generated new QuorumCertificate for view: {hash:?}");
-        }
+        let _ = self
+            .chain
+            .on_receive_vote(vote.hash, vote.pk, (vote.proof, vote.sig))
+            .await?;
 
         Ok(())
     }
@@ -547,6 +515,7 @@ where
         let Some(view) = self.chain.get_view(view_hash).await? else {
             return Ok(None);
         };
+
         Ok(Some(view.number))
     }
 
@@ -575,8 +544,8 @@ where
     async fn handle_consecutive_view(
         &mut self,
         view_hash: Multihash,
-        leader_proof: &mut Option<DrawProof<S>>,
-        validator_proof: &mut Option<DrawProof<S>>,
+        leader_proof: &mut Option<DrawProof>,
+        validator_proof: &mut Option<DrawProof>,
     ) -> Result<()> {
         let Some(cur_view) = self.chain.get_view(&view_hash).await? else {
             return Ok(());
@@ -624,7 +593,7 @@ where
         Ok(())
     }
 
-    async fn cast_vote(&mut self, view: &View<S, P>, proof: DrawProof<S>) -> Result<()> {
+    async fn cast_vote(&mut self, view: &View<P>, proof: DrawProof) -> Result<()> {
         let Some(cmd) = view.cmd.as_ref() else {
             return Ok(());
         };
@@ -635,46 +604,36 @@ where
             }
 
             let pk = self.sk.public_key();
-            let pk_bytes = pk.to_vec()?;
-            let proof_bytes = proof.to_vec()?;
-            let sig = self.sk.sign(&view.hash.to_bytes())?;
-            let sig_bytes = sig.to_vec()?;
+            let sig = self.sk.sign(&view.hash.to_bytes());
 
-            let vote = gossipsub::Payload::Vote {
+            let vote = Vote {
                 hash: view.hash,
-                pk: pk_bytes,
-                proof: proof_bytes,
-                sig: sig_bytes,
+                pk: pk.clone(),
+                proof: proof.clone(),
+                sig: sig.clone(),
             };
 
-            self.transport
-                .publish(&self.config.vote_topic, vote)
+            self.gossipsub
+                .publish(self.config.vote_topic, vote.to_vec()?)
                 .await?;
 
-            if let Some(_qc) = self
+            let _ = self
                 .chain
                 .on_receive_vote(view.hash, pk, (proof, sig))
-                .await?
-            {
-                log::debug!("Generated new QuorumCertificate for our own vote");
-            }
+                .await?;
         }
 
         Ok(())
     }
 
-    async fn propose_new_view(
-        &mut self,
-        parent_hash: &Multihash,
-        proof: DrawProof<S>,
-    ) -> Result<()> {
+    async fn propose_new_view(&mut self, parent_hash: &Multihash, proof: DrawProof) -> Result<()> {
         let proposals = self.proposal_pool.get().await?;
         let (proposals, exec_hash, total_stakes) = self.apply_proposal_or_reduce(proposals).await?;
 
-        let pk = self.sk.public_key().clone();
-        let sig = self.sk.sign(&parent_hash.to_bytes())?;
+        let pk = self.sk.public_key();
+        let sig = self.sk.sign(&parent_hash.to_bytes());
 
-        let block = Block::<S, P> {
+        let block = Block::<P> {
             leader: (pk, (proof, sig)),
             proposals,
             executed_root_hash: exec_hash,
@@ -684,12 +643,10 @@ where
         let view = self.chain.on_propose::<H>(block).await?;
         let view_bytes = view.to_vec()?;
 
-        self.transport.kad().put(view.hash, view_bytes).await?;
+        self.storage.put(view.hash, view_bytes).await?;
 
-        let payload = gossipsub::Payload::View(view.hash);
-
-        self.transport
-            .publish(&self.config.view_topic, payload)
+        self.gossipsub
+            .publish(self.config.view_topic, view.hash.to_bytes())
             .await?;
 
         Ok(())
@@ -697,8 +654,8 @@ where
 
     async fn update_roles(
         &mut self,
-        leader_proof: &mut Option<DrawProof<S>>,
-        validator_proof: &mut Option<DrawProof<S>>,
+        leader_proof: &mut Option<DrawProof>,
+        validator_proof: &mut Option<DrawProof>,
     ) -> Result<()> {
         let Some(exec_view) = self.chain.executed_view().await? else {
             return Ok(());
@@ -719,7 +676,7 @@ where
         let next_view_number = self.chain.leaf_view_number().await + 1;
         let seed = Self::generate_seed(&exec_view.hash, next_view_number);
 
-        *leader_proof = self.randomizer.draw::<H, _>(
+        *leader_proof = self.randomizer.draw::<H>(
             seed.digest(),
             exec_cmd.executed_total_stakes,
             &self.sk,
@@ -727,13 +684,40 @@ where
             true,
         )?;
 
-        *validator_proof = self.randomizer.draw::<H, _>(
+        *validator_proof = self.randomizer.draw::<H>(
             seed.digest(),
             exec_cmd.executed_total_stakes,
             &self.sk,
             stakes,
             false,
         )?;
+
+        Ok(())
+    }
+}
+
+impl Serializable for Vote {
+    fn serialized_size(&self) -> usize {
+        self.hash.serialized_size()
+            + self.pk.serialized_size()
+            + self.proof.serialized_size()
+            + self.sig.serialized_size()
+    }
+
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        Ok(Self {
+            hash: Multihash::from_reader(reader)?,
+            pk: PublicKey::from_reader(reader)?,
+            proof: DrawProof::from_reader(reader)?,
+            sig: Signature::from_reader(reader)?,
+        })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.hash.to_writer(writer)?;
+        self.pk.to_writer(writer)?;
+        self.proof.to_writer(writer)?;
+        self.sig.to_writer(writer)?;
 
         Ok(())
     }

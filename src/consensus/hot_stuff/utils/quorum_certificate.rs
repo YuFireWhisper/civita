@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::Hash};
 
-use crate::traits::{serializable, ConstantSize, Serializable};
+use crate::traits::{serializable, Serializable};
 
 #[derive(Clone)]
 #[derive(Debug, Default)]
@@ -12,8 +12,8 @@ pub struct QuorumCertificate<N, P, S> {
 impl<N, P, S> Serializable for QuorumCertificate<N, P, S>
 where
     N: Serializable,
-    P: Serializable + ConstantSize + Eq + Hash,
-    S: Serializable + ConstantSize,
+    P: Serializable + Eq + Hash,
+    S: Serializable,
 {
     fn serialized_size(&self) -> usize {
         self.view.serialized_size() + self.sigs.serialized_size()

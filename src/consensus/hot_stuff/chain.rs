@@ -5,13 +5,18 @@ use tokio::sync::RwLock;
 
 use crate::{
     consensus::hot_stuff::utils::{QuorumCertificate, View, ViewNumber},
-    crypto::{traits::hasher::Multihash, Hasher},
-    network::storage::{CacheStorage, Storage},
-    traits::{ConstantSize, Serializable},
+    crypto::{Hasher, Multihash},
+    network::{
+        traits::{storage, Storage},
+        CacheStorage,
+    },
+    traits::Serializable,
 };
 
 type ViewPair = (ViewNumber, Multihash);
 type QuorumCertificatePair<P, S> = (ViewNumber, QuorumCertificate<Multihash, P, S>);
+
+type Result<T, E = storage::Error> = std::result::Result<T, E>;
 
 pub struct Chain<T, P, S, ST: Storage> {
     views: CacheStorage<View<T, P, S>, ST>,
@@ -31,8 +36,8 @@ pub struct Chain<T, P, S, ST: Storage> {
 impl<T, P, S, ST> Chain<T, P, S, ST>
 where
     T: Clone + Serializable + Send + Sync + 'static,
-    P: Clone + Serializable + ConstantSize + Eq + Hash + Send + Sync + 'static,
-    S: Clone + Serializable + ConstantSize + Send + Sync + 'static,
+    P: Clone + Serializable + Eq + Hash + Send + Sync + 'static,
+    S: Clone + Serializable + Send + Sync + 'static,
     ST: Storage,
 {
     pub fn new(stroage: ST, total_nodes: usize, max_faulty: usize) -> Self {
@@ -61,7 +66,7 @@ where
         self.views.insert(hash, view);
     }
 
-    pub async fn update(&mut self, b3_hash: &Multihash) -> Result<Option<Vec<T>>, ST::Error> {
+    pub async fn update(&mut self, b3_hash: &Multihash) -> Result<Option<Vec<T>>> {
         let (b3_number, b3_hash_copy, justify) = {
             let b3 = self.get_view_or_unwrap(b3_hash).await?;
             (b3.number, b3.hash, b3.justify.clone())
@@ -127,7 +132,7 @@ where
     async fn try_update_highest_qc(
         &mut self,
         qc: &Option<QuorumCertificate<Multihash, P, S>>,
-    ) -> Result<Option<Multihash>, ST::Error> {
+    ) -> Result<Option<Multihash>> {
         let Some(qc) = qc else {
             return Ok(None);
         };
@@ -153,10 +158,7 @@ where
         }
     }
 
-    async fn try_update_locked_view(
-        &mut self,
-        b2_hash: &Multihash,
-    ) -> Result<Option<Multihash>, ST::Error> {
+    async fn try_update_locked_view(&mut self, b2_hash: &Multihash) -> Result<Option<Multihash>> {
         let b1_hash = {
             let b2 = self.get_view_or_unwrap(b2_hash).await?;
             self.get_justified_view_hash(&b2).await?
@@ -188,7 +190,7 @@ where
         &mut self,
         b2_hash: &Multihash,
         b1_hash: &Multihash,
-    ) -> Result<Option<Vec<T>>, ST::Error> {
+    ) -> Result<Option<Vec<T>>> {
         let (b2_parent_hash, b1_parent_hash, b1_justify_view) = {
             let b2 = self.get_view_or_unwrap(b2_hash).await?;
             let b1 = self.get_view_or_unwrap(b1_hash).await?;
@@ -218,20 +220,14 @@ where
         Ok(Some(cmds))
     }
 
-    async fn get_justified_view_hash(
-        &self,
-        view: &View<T, P, S>,
-    ) -> Result<Option<Multihash>, ST::Error> {
+    async fn get_justified_view_hash(&self, view: &View<T, P, S>) -> Result<Option<Multihash>> {
         match &view.justify {
             Some(qc) => Ok(Some(qc.view)),
             None => Ok(None),
         }
     }
 
-    async fn get_view_or_unwrap(
-        &self,
-        hash: &Multihash,
-    ) -> Result<Ref<Multihash, View<T, P, S>>, ST::Error> {
+    async fn get_view_or_unwrap(&self, hash: &Multihash) -> Result<Ref<Multihash, View<T, P, S>>> {
         Ok(self
             .views
             .get(hash)
@@ -250,7 +246,7 @@ where
     async fn get_justified_view(
         &self,
         view: &View<T, P, S>,
-    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>, ST::Error> {
+    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
         match &view.justify {
             Some(qc) => Ok(Some(self.get_view_or_unwrap(&qc.view).await?)),
             None => Ok(None),
@@ -268,7 +264,7 @@ where
     async fn collect_commands<'a>(
         &self,
         view: Ref<'a, Multihash, View<T, P, S>>,
-    ) -> Result<Vec<T>, ST::Error> {
+    ) -> Result<Vec<T>> {
         let exec_height = self
             .executed_view
             .read()
@@ -341,7 +337,7 @@ where
             .map(|qc| qc.1.view)
     }
 
-    pub async fn locked_view(&self) -> Result<Option<Ref<Multihash, View<T, P, S>>>, ST::Error> {
+    pub async fn locked_view(&self) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
         let Some(hash) = self.locked_view_hash().await else {
             return Ok(None);
         };
@@ -349,7 +345,7 @@ where
         Ok(Some(self.get_view_or_unwrap(&hash).await?))
     }
 
-    pub async fn executed_view(&self) -> Result<Option<Ref<Multihash, View<T, P, S>>>, ST::Error> {
+    pub async fn executed_view(&self) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
         let Some(hash) = self.executed_view_hash().await else {
             return Ok(None);
         };
@@ -357,7 +353,7 @@ where
         Ok(Some(self.get_view_or_unwrap(&hash).await?))
     }
 
-    pub async fn leaf_view(&self) -> Result<Option<Ref<Multihash, View<T, P, S>>>, ST::Error> {
+    pub async fn leaf_view(&self) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
         let Some(hash) = self.leaf_view_hash().await else {
             return Ok(None);
         };
@@ -365,9 +361,7 @@ where
         Ok(Some(self.get_view_or_unwrap(&hash).await?))
     }
 
-    pub async fn highest_qc_view(
-        &self,
-    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>, ST::Error> {
+    pub async fn highest_qc_view(&self) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
         let Some(hash) = self.highest_qc_view_hash().await else {
             return Ok(None);
         };
@@ -375,7 +369,7 @@ where
         Ok(Some(self.get_view_or_unwrap(&hash).await?))
     }
 
-    pub async fn is_safe_view(&self, view_hash: &Multihash) -> Result<bool, ST::Error> {
+    pub async fn is_safe_view(&self, view_hash: &Multihash) -> Result<bool> {
         let view = match self.get_view(view_hash).await? {
             Some(v) => v,
             None => return Ok(false),
@@ -414,7 +408,7 @@ where
         view: Ref<'a, Multihash, View<T, P, S>>,
         locked_height: ViewNumber,
         locked_hash: Multihash,
-    ) -> Result<bool, ST::Error> {
+    ) -> Result<bool> {
         if view.number == locked_height {
             return Ok(view.hash == locked_hash);
         }
@@ -447,7 +441,7 @@ where
     pub async fn get_view(
         &self,
         hash: &Multihash,
-    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>, ST::Error> {
+    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
         self.views.get(hash).await
     }
 
@@ -456,7 +450,7 @@ where
         hash: Multihash,
         peer: P,
         sign: S,
-    ) -> Result<Option<QuorumCertificate<Multihash, P, S>>, ST::Error> {
+    ) -> Result<Option<QuorumCertificate<Multihash, P, S>>> {
         let mut signs = self.votes.entry(hash).or_default();
 
         if signs.contains_key(&peer) {
@@ -506,7 +500,7 @@ where
         Ok(None)
     }
 
-    pub async fn exec_hash_at(&self, b4_hash: &Multihash) -> Result<Option<Multihash>, ST::Error> {
+    pub async fn exec_hash_at(&self, b4_hash: &Multihash) -> Result<Option<Multihash>> {
         let Some(mut b4) = self.get_view(b4_hash).await? else {
             return Ok(None);
         };
@@ -527,7 +521,7 @@ where
     async fn check_three_chain_from<'a>(
         &'a self,
         view: &Ref<'a, Multihash, View<T, P, S>>,
-    ) -> Result<Option<Ref<'a, Multihash, View<T, P, S>>>, ST::Error> {
+    ) -> Result<Option<Ref<'a, Multihash, View<T, P, S>>>> {
         let Some(b2) = self.get_justified_view(view.value()).await? else {
             return Ok(None);
         };
@@ -543,7 +537,7 @@ where
         self.get_justified_view(&b1).await
     }
 
-    pub async fn on_propose<H: Hasher>(&self, cmd: T) -> Result<View<T, P, S>, ST::Error> {
+    pub async fn on_propose<H: Hasher>(&self, cmd: T) -> Result<View<T, P, S>> {
         let leaf_view = self.leaf_view.read().await;
         let Some(leaf_view) = *leaf_view else {
             return Ok(View::new::<H>(

@@ -1,18 +1,8 @@
 use statrs::distribution::{Binomial, DiscreteCDF};
 
 use crate::{
-    crypto::{
-        self,
-        traits::{
-            hasher::Multihash,
-            vrf::{Proof, Prover, VerifyProof},
-        },
-        Hasher,
-    },
-    traits::{
-        serializable::{self, Serializable},
-        ConstantSize,
-    },
+    crypto::{self, Hasher, Multihash},
+    traits::serializable::{self, Serializable},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -30,9 +20,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error("{0}")]
-    Crypto(#[from] crypto::Error),
-
-    #[error("{0}")]
     Serializable(#[from] serializable::Error),
 }
 
@@ -44,8 +31,8 @@ pub struct Randomizer {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
-pub struct DrawProof<P: Proof> {
-    pub proof: P,
+pub struct DrawProof {
+    pub proof: crypto::Proof,
     pub weight: u32,
 }
 
@@ -57,14 +44,14 @@ impl Randomizer {
         }
     }
 
-    pub fn draw<H: Hasher, S: Prover>(
+    pub fn draw<H: Hasher>(
         &self,
         seed: &[u8],
         total_stakes: u32,
-        sk: &S,
+        sk: &crypto::SecretKey,
         stakes: u32,
         is_leader: bool,
-    ) -> Result<Option<DrawProof<S::Proof>>> {
+    ) -> Result<Option<DrawProof>> {
         if total_stakes == 0 || stakes == 0 {
             return Ok(None);
         }
@@ -76,8 +63,8 @@ impl Randomizer {
             return Ok(None);
         }
 
-        let proof = sk.prove(input.digest())?;
-        let output = proof.proof_to_hash();
+        let proof = sk.prove(input.digest());
+        let output = proof.to_hash();
 
         let hash_as_float = self.hash_to_float(output.digest());
 
@@ -132,13 +119,13 @@ impl Randomizer {
         }
     }
 
-    pub fn verify<H: Hasher, P: VerifyProof>(
+    pub fn verify<H: Hasher>(
         &self,
         seed: &[u8],
         total_stakes: u32,
-        pk: &P,
+        pk: &crypto::PublicKey,
         stakes: u32,
-        proof: &DrawProof<P::Proof>,
+        proof: &DrawProof,
         is_leader: bool,
     ) -> bool {
         if total_stakes == 0 {
@@ -152,11 +139,11 @@ impl Randomizer {
             return false;
         }
 
-        if pk.verify_proof(input.digest(), &proof.proof).is_err() {
+        if !pk.verify_proof(input.digest(), &proof.proof) {
             return false;
         }
 
-        let output = proof.proof.proof_to_hash();
+        let output = proof.proof.to_hash();
         let hash_as_float = self.hash_to_float(output.digest());
         let normalized_hash = hash_as_float / 2f64.powi(TRUNCATED_HASH_SIZE_IN_BITS as i32);
 
@@ -169,7 +156,7 @@ impl Randomizer {
     }
 }
 
-impl<P: Proof> Serializable for DrawProof<P> {
+impl Serializable for DrawProof {
     fn serialized_size(&self) -> usize {
         self.proof.serialized_size() + self.weight.serialized_size()
     }
@@ -178,7 +165,7 @@ impl<P: Proof> Serializable for DrawProof<P> {
         reader: &mut R,
     ) -> std::result::Result<Self, serializable::Error> {
         Ok(Self {
-            proof: P::from_reader(reader)?,
+            proof: crypto::Proof::from_reader(reader)?,
             weight: u32::from_reader(reader)?,
         })
     }
@@ -192,8 +179,4 @@ impl<P: Proof> Serializable for DrawProof<P> {
 
         Ok(())
     }
-}
-
-impl<P: Proof> ConstantSize for DrawProof<P> {
-    const SIZE: usize = P::SIZE + u32::SIZE;
 }

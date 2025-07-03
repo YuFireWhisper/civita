@@ -5,10 +5,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{
-    network::transport::protocols::gossipsub::{self, Payload},
-    proposal::Proposal,
-};
+use crate::{proposal::Proposal, traits::serializable};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -21,8 +18,8 @@ pub enum Error {
     #[error("Channel closed")]
     ChannelClosed,
 
-    #[error("Failed to deserialize proposal: {0}")]
-    Deserialize(String),
+    #[error("{0}")]
+    Serializable(#[from] serializable::Error),
 }
 
 enum Action<P: Proposal> {
@@ -37,7 +34,7 @@ pub struct ProposalPool<P: Proposal> {
 }
 
 impl<P: Proposal> ProposalPool<P> {
-    pub fn new(mut rx: Receiver<gossipsub::Message>, capacity: usize) -> Self {
+    pub fn new(mut rx: Receiver<Vec<u8>>, capacity: usize) -> Self {
         const CHANNEL_CAPACITY: usize = 100;
 
         let (action_tx, mut action_rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -75,20 +72,13 @@ impl<P: Proposal> ProposalPool<P> {
         }
     }
 
-    fn handle_message(
-        msg: gossipsub::Message,
-        proposals: &mut BTreeSet<P>,
-        capacity: usize,
-    ) -> Result<()> {
-        if let Payload::Proposal(proposal) = msg.payload {
-            let proposal =
-                P::from_slice(&proposal).map_err(|e| Error::Deserialize(e.to_string()))?;
+    fn handle_message(msg: Vec<u8>, proposals: &mut BTreeSet<P>, capacity: usize) -> Result<()> {
+        let proposal = P::from_slice(&msg)?;
 
-            proposals.insert(proposal);
+        proposals.insert(proposal);
 
-            if proposals.len() > capacity {
-                proposals.pop_first();
-            }
+        if proposals.len() > capacity {
+            proposals.pop_first();
         }
 
         Ok(())

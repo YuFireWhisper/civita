@@ -2,8 +2,8 @@ use std::hash::Hash;
 
 use crate::{
     consensus::hot_stuff::utils::{QuorumCertificate, ViewNumber},
-    crypto::{traits::hasher::Multihash, Hasher},
-    traits::{serializable, ConstantSize, Serializable},
+    crypto::{Hasher, Multihash},
+    traits::{serializable, Serializable},
 };
 
 #[derive(Clone)]
@@ -19,8 +19,8 @@ pub struct View<T, P, S> {
 impl<T, P, S> View<T, P, S>
 where
     T: Serializable,
-    P: Serializable + ConstantSize + Eq + Hash,
-    S: Serializable + ConstantSize,
+    P: Serializable + Eq + Hash,
+    S: Serializable,
 {
     pub fn new<H: Hasher>(
         number: ViewNumber,
@@ -49,8 +49,8 @@ where
 impl<T, P, S> Serializable for View<T, P, S>
 where
     T: Serializable,
-    P: Serializable + ConstantSize + Eq + Hash,
-    S: Serializable + ConstantSize,
+    P: Serializable + Eq + Hash,
+    S: Serializable,
 {
     fn serialized_size(&self) -> usize {
         self.number.serialized_size()
