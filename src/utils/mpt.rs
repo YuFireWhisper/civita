@@ -5,8 +5,9 @@ use bytemuck::cast_slice;
 use crate::{
     crypto::{Hasher, Multihash},
     network::{
-        storage::{CacheStorage, Storage},
+        traits::{storage, Storage},
         transport::Kad,
+        CacheStorage,
     },
     traits::Serializable,
     utils::mpt::node::{Branch, Extension, Leaf, Node},
@@ -15,6 +16,7 @@ use crate::{
 mod node;
 
 type Nibble = u16;
+type Result<T, E = storage::Error> = std::result::Result<T, E>;
 
 pub struct Mpt<T, S: Storage = Arc<Kad>> {
     root_hash: Option<Multihash>,
@@ -43,7 +45,7 @@ where
         }
     }
 
-    pub async fn insert<H: Hasher>(&mut self, path: &[u8], value: T) -> Result<(), S::Error> {
+    pub async fn insert<H: Hasher>(&mut self, path: &[u8], value: T) -> Result<()> {
         let path = cast_slice(path);
 
         let root = self.get_root_node().await?;
@@ -56,14 +58,14 @@ where
         Ok(())
     }
 
-    async fn get_root_node(&mut self) -> Result<Node<T>, S::Error> {
+    async fn get_root_node(&mut self) -> Result<Node<T>> {
         match self.root_hash {
             Some(hash) => self.get_node(&hash).await,
             None => Ok(Node::Empty),
         }
     }
 
-    async fn get_node(&self, hash: &Multihash) -> Result<Node<T>, S::Error> {
+    async fn get_node(&self, hash: &Multihash) -> Result<Node<T>> {
         self.storage
             .get(hash)
             .await?
@@ -75,7 +77,7 @@ where
         node: Node<T>,
         path: &[Nibble],
         value: T,
-    ) -> Result<Node<T>, S::Error> {
+    ) -> Result<Node<T>> {
         match node {
             Node::Empty => Ok(self.create_leaf(path, value)),
             Node::Leaf(leaf) => Box::pin(self.insert_leaf::<H>(leaf, path, value)).await,
@@ -96,7 +98,7 @@ where
         leaf: Leaf<T>,
         path: &[Nibble],
         value: T,
-    ) -> Result<Node<T>, S::Error> {
+    ) -> Result<Node<T>> {
         let common = Self::common_prefix(&leaf.path, path);
 
         if common.len() == leaf.path.len() && common.len() == path.len() {
@@ -117,7 +119,7 @@ where
         self.split_leaf::<H>(leaf, path, value, common.len()).await
     }
 
-    fn hash_and_insert<H: Hasher>(&mut self, node: Node<T>) -> Result<Multihash, S::Error> {
+    fn hash_and_insert<H: Hasher>(&mut self, node: Node<T>) -> Result<Multihash> {
         let hash = node.hash::<H>();
         self.storage.insert(hash, node);
         Ok(hash)
@@ -141,7 +143,7 @@ where
         path: &[Nibble],
         value: T,
         common_len: usize,
-    ) -> Result<Node<T>, S::Error> {
+    ) -> Result<Node<T>> {
         let leaf_path = &leaf.path[common_len..];
         let new_path = &path[common_len..];
 
@@ -183,7 +185,7 @@ where
         ext: Extension,
         path: &[Nibble],
         value: T,
-    ) -> Result<Node<T>, S::Error> {
+    ) -> Result<Node<T>> {
         let common = Self::common_prefix(&ext.path, path);
 
         if common.len() == ext.path.len() {
@@ -205,7 +207,7 @@ where
         path: &[Nibble],
         value: T,
         common_len: usize,
-    ) -> Result<Node<T>, S::Error> {
+    ) -> Result<Node<T>> {
         let ext_path = &ext.path[common_len..];
         let new_path = &path[common_len..];
 
@@ -246,7 +248,7 @@ where
         mut branch: Branch<T>,
         path: &[Nibble],
         value: T,
-    ) -> Result<Node<T>, S::Error> {
+    ) -> Result<Node<T>> {
         if path.is_empty() {
             branch.value = Some(value);
         } else {
@@ -263,7 +265,7 @@ where
         Ok(Node::Branch(branch))
     }
 
-    pub async fn get(&self, path: &[u8]) -> Result<Option<T>, S::Error> {
+    pub async fn get(&self, path: &[u8]) -> Result<Option<T>> {
         let key = cast_slice(path);
 
         let Some(hash) = self.root_hash else {
@@ -274,7 +276,7 @@ where
         self.get_rec(&root, key).await
     }
 
-    async fn get_rec(&self, node: &Node<T>, path: &[Nibble]) -> Result<Option<T>, S::Error> {
+    async fn get_rec(&self, node: &Node<T>, path: &[Nibble]) -> Result<Option<T>> {
         match node {
             Node::Empty => Ok(None),
             Node::Leaf(leaf) => {
@@ -312,7 +314,7 @@ where
         }
     }
 
-    pub async fn commit(&mut self) -> Result<(), S::Error> {
+    pub async fn commit(&mut self) -> Result<()> {
         self.storage.commit().await?;
         self.original_root = self.root_hash;
 
