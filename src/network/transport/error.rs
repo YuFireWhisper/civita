@@ -1,9 +1,6 @@
 use std::io;
 
-use crate::network::transport::{
-    behaviour, dispatcher,
-    protocols::{gossipsub, kad},
-};
+use crate::network::transport::behaviour;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -24,20 +21,5 @@ pub enum Error {
     LockContention,
 
     #[error("{0}")]
-    Dispatcher(#[from] dispatcher::Error),
-
-    #[error("{0}")]
-    Gossipsub(#[from] gossipsub::Error),
-
-    #[error("{0}")]
-    Kad(#[from] kad::Error),
-
-    #[error("{0}")]
     Behaviour(#[from] behaviour::Error),
-
-    #[error("{0}")]
-    MerkleDag(String),
-
-    #[error("")]
-    MockError, // For testing
 }

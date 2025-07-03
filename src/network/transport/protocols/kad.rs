@@ -1,44 +1,20 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dashmap::DashMap;
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, time::Duration};
 
 use crate::{
-    crypto::traits::hasher::Multihash,
-    network::{storage::Storage, transport::behaviour::Behaviour},
-    traits::{serializable, Serializable},
+    crypto::Multihash,
+    network::{
+        traits::{storage::Error, Storage},
+        transport::behaviour::Behaviour,
+    },
+    traits::Serializable,
 };
 
-pub mod message;
-pub mod payload;
 pub mod validated_store;
 
-pub use message::Message;
-pub use payload::Payload;
-
 type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error("Put error: {0}")]
-    Put(#[from] libp2p::kad::PutRecordError),
-
-    #[error("Get error: {0}")]
-    Get(#[from] libp2p::kad::GetRecordError),
-
-    #[error("Waiting for Kademlia operation timed out after {0:?}")]
-    Timeout(#[from] tokio::time::error::Elapsed),
-
-    #[error("Oneshot error: {0}")]
-    Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
-
-    #[error("Store error: {0}")]
-    Store(#[from] libp2p::kad::store::Error),
-
-    #[error("{0}")]
-    Serializable(#[from] serializable::Error),
-}
 
 #[derive(Debug)]
 pub struct Config {
@@ -46,44 +22,9 @@ pub struct Config {
     pub quorum: libp2p::kad::Quorum,
 }
 
-#[derive(Debug)]
-#[derive(Default)]
-pub struct ConfigBuilder {
-    wait_for_kad_result_timeout: Option<tokio::time::Duration>,
-    quorum: Option<libp2p::kad::Quorum>,
-}
-
 enum WaitingQuery {
     Put(oneshot::Sender<Result<()>>),
     Get(oneshot::Sender<Result<Option<libp2p::kad::PeerRecord>>>),
-}
-
-impl ConfigBuilder {
-    const DEFAULT_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(5);
-    const DEFAULT_QUORUM: libp2p::kad::Quorum = libp2p::kad::Quorum::All;
-
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn wait_for_kad_result_timeout(mut self, timeout: tokio::time::Duration) -> Self {
-        self.wait_for_kad_result_timeout = Some(timeout);
-        self
-    }
-
-    pub fn with_quorum(mut self, quorum: libp2p::kad::Quorum) -> Self {
-        self.quorum = Some(quorum);
-        self
-    }
-
-    pub fn build(self) -> Config {
-        Config {
-            wait_for_kad_result_timeout: self
-                .wait_for_kad_result_timeout
-                .unwrap_or(Self::DEFAULT_TIMEOUT),
-            quorum: self.quorum.unwrap_or(Self::DEFAULT_QUORUM),
-        }
-    }
 }
 
 pub struct Kad {
@@ -159,10 +100,17 @@ impl Kad {
     }
 }
 
-#[async_trait::async_trait]
-impl Storage for Kad {
-    type Error = Error;
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            wait_for_kad_result_timeout: Duration::from_secs(10),
+            quorum: libp2p::kad::Quorum::Majority,
+        }
+    }
+}
 
+#[async_trait::async_trait]
+impl Storage for Arc<Kad> {
     async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
     where
         T: Serializable + Sync + Send + 'static,
@@ -203,7 +151,7 @@ impl Storage for Kad {
         Ok(())
     }
 
-    async fn put_batch<T, I>(&mut self, items: I) -> Result<(), Self::Error>
+    async fn put_batch<T, I>(&mut self, items: I) -> Result<()>
     where
         T: Serializable + Sync + Send + 'static,
         I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
@@ -253,30 +201,28 @@ impl Storage for Kad {
         Ok(())
     }
 }
-
-#[async_trait::async_trait]
-impl Storage for Arc<Kad> {
-    type Error = Error;
-
-    async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
-    where
-        T: Serializable + Sync + Send + 'static,
-    {
-        self.as_ref().get(key).await
-    }
-
-    async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
-    where
-        T: Serializable + Sync + Send + 'static,
-    {
-        self.put(key, value).await
-    }
-
-    async fn put_batch<T, I>(&mut self, items: I) -> Result<(), Self::Error>
-    where
-        T: Serializable + Sync + Send + 'static,
-        I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
-    {
-        self.put_batch(items).await
-    }
-}
+//
+// #[async_trait::async_trait]
+// impl Storage for Arc<Kad> {
+//     async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
+//     where
+//         T: Serializable + Sync + Send + 'static,
+//     {
+//         self.get(key).await
+//     }
+//
+//     async fn put<T>(&mut self, key: Multihash, value: T) -> Result<()>
+//     where
+//         T: Serializable + Sync + Send + 'static,
+//     {
+//         self.put(key, value).await
+//     }
+//
+//     async fn put_batch<T, I>(&mut self, items: I) -> Result<()>
+//     where
+//         T: Serializable + Sync + Send + 'static,
+//         I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
+//     {
+//         self.put_batch(items).await
+//     }
+// }
