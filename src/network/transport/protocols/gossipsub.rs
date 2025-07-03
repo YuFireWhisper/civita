@@ -181,7 +181,8 @@ impl Gossipsub {
 
             tokio::time::timeout(self.config.timeout, rx)
                 .await
-                .expect("Timeout waiting for subscription");
+                .expect("Timeout waiting for subscription")
+                .expect("Failed to receive subscription confirmation");
         }
 
         self.swarm
