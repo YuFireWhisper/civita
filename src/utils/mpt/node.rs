@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    crypto::{traits::hasher::Multihash, Hasher},
+    crypto::{Hasher, Multihash},
     traits::{serializable, ConstantSize, Serializable},
     utils::mpt::Nibble,
 };

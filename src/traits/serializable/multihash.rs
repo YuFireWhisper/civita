@@ -1,7 +1,7 @@
 use libp2p::multihash;
 
 use crate::{
-    crypto::traits::hasher::Multihash,
+    crypto::Multihash,
     traits::{serializable, ConstantSize, Serializable},
 };
 

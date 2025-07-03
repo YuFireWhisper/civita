@@ -1,10 +1,7 @@
 use std::fmt::Debug;
 
 use crate::{
-    crypto::{
-        error::*,
-        traits::{hasher::Multihash, secret_key::SecretKey, PublicKey},
-    },
+    crypto::traits::{hasher::Multihash, secret_key::SecretKey, PublicKey},
     traits::serializable::{ConstantSize, Serializable},
 };
 
@@ -15,11 +12,11 @@ pub trait Proof: Clone + Debug + Eq + Serializable + ConstantSize + Sync + Send 
 pub trait Prover: SecretKey + Eq {
     type Proof: Proof;
 
-    fn prove(&self, alpha: &[u8]) -> Result<Self::Proof>;
+    fn prove(&self, alpha: &[u8]) -> Self::Proof;
 }
 
 pub trait VerifyProof: PublicKey {
     type Proof: Proof;
 
-    fn verify_proof(&self, alpha: &[u8], proof: &Self::Proof) -> Result<()>;
+    fn verify_proof(&self, alpha: &[u8], proof: &Self::Proof) -> bool;
 }

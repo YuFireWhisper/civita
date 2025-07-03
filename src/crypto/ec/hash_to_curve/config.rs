@@ -1,8 +1,8 @@
 use ark_ec::short_weierstrass::SWCurveConfig;
 
-use crate::crypto::{
-    ec::hash_to_curve::{expand_message::ExpandMessage, map_to_curve::MapToCurve},
-    traits::suite::HasherConfig,
+use crate::crypto::ec::{
+    hash_to_curve::{expand_message::ExpandMessage, map_to_curve::MapToCurve},
+    HasherConfig,
 };
 
 pub trait Config: SWCurveConfig + HasherConfig + MapToCurve<Self::BaseField> {

@@ -1,10 +1,7 @@
 use std::fmt::Debug;
 
 use crate::{
-    crypto::{
-        error::*,
-        traits::{secret_key::SecretKey, PublicKey},
-    },
+    crypto::traits::{secret_key::SecretKey, PublicKey},
     traits::serializable::{ConstantSize, Serializable},
 };
 
@@ -16,11 +13,11 @@ pub trait Signature:
 pub trait Signer: SecretKey {
     type Signature: Signature;
 
-    fn sign(&self, msg: &[u8]) -> Result<Self::Signature>;
+    fn sign(&self, msg: &[u8]) -> Self::Signature;
 }
 
 pub trait VerifiySignature: PublicKey {
     type Signature: Signature;
 
-    fn verify_signature(&self, msg: &[u8], sig: &Self::Signature) -> Result<()>;
+    fn verify_signature(&self, msg: &[u8], sig: &Self::Signature) -> bool;
 }

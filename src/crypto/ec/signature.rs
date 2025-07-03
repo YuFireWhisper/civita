@@ -10,9 +10,9 @@ use rand::Rng;
 
 use crate::{
     crypto::{
-        ec::secret_key::SecretKey,
-        traits::{self, suite::HasherConfig, SecretKey as _},
-        Error as CryptoError, Hasher,
+        ec::{secret_key::SecretKey, HasherConfig},
+        traits::{self, SecretKey as _},
+        Hasher,
     },
     traits::serializable::{ConstantSize, Error as SerializableError, Serializable},
 };
@@ -58,40 +58,32 @@ impl<C: SWCurveConfig + HasherConfig> traits::Signature for Signature<Affine<C>,
 impl<C: SWCurveConfig + HasherConfig> traits::Signer for SecretKey<C> {
     type Signature = Signature<Affine<C>, C::ScalarField>;
 
-    fn sign(&self, msg: &[u8]) -> Result<Signature<Affine<C>, C::ScalarField>, CryptoError> {
+    fn sign(&self, msg: &[u8]) -> Signature<Affine<C>, C::ScalarField> {
         let mut random = [0u8; 32];
         rand::rng().fill(&mut random);
 
         let k = C::ScalarField::from_be_bytes_mod_order(&random);
         let r = C::GENERATOR * k;
-        let e = generate_challenge::<_, _, C::ScalarField, C::Hasher>(msg, r, &self.public_key())?;
+        let e = generate_challenge::<_, _, C::ScalarField, C::Hasher>(msg, r, &self.public_key());
         let s = k + e * self.sk;
 
-        Ok(Signature {
+        Signature {
             r: r.into_affine(),
             s,
-        })
+        }
     }
 }
 
 impl<C: SWCurveConfig + HasherConfig> traits::VerifiySignature for Affine<C> {
     type Signature = Signature<Affine<C>, C::ScalarField>;
 
-    fn verify_signature(
-        &self,
-        msg: &[u8],
-        sig: &Signature<Affine<C>, C::ScalarField>,
-    ) -> Result<(), CryptoError> {
-        let e = generate_challenge::<_, _, C::ScalarField, C::Hasher>(msg, sig.r, self)?;
+    fn verify_signature(&self, msg: &[u8], sig: &Signature<Affine<C>, C::ScalarField>) -> bool {
+        let e = generate_challenge::<_, _, C::ScalarField, C::Hasher>(msg, sig.r, self);
 
         let lhs = C::GENERATOR * sig.s;
         let rhs = sig.r + *self * e;
 
-        if lhs != rhs.into_affine() {
-            Err(CryptoError::SignatureVerificationFailed)
-        } else {
-            Ok(())
-        }
+        lhs == rhs.into_affine()
     }
 }
 
@@ -99,14 +91,16 @@ fn generate_challenge<P1: CanonicalSerialize, P2: CanonicalSerialize, S: PrimeFi
     msg: &[u8],
     r: P1,
     pk: &P2,
-) -> Result<S, CryptoError> {
+) -> S {
     let mut bytes = Vec::with_capacity(msg.len() + r.compressed_size() + pk.compressed_size());
 
     bytes.extend_from_slice(msg);
-    r.serialize_compressed(&mut bytes)?;
-    pk.serialize_compressed(&mut bytes)?;
+    r.serialize_compressed(&mut bytes)
+        .expect("Failed to serialize r");
+    pk.serialize_compressed(&mut bytes)
+        .expect("Failed to serialize public key");
 
-    Ok(S::from_be_bytes_mod_order(H::hash(&bytes).digest()))
+    S::from_be_bytes_mod_order(H::hash(&bytes).digest())
 }
 
 #[cfg(test)]
@@ -133,12 +127,12 @@ mod tests {
         let sk = SecretKey::new(SK);
         let pk = Affine::new(PK_X, PK_Y);
 
-        let sig = sk.sign(msg).unwrap();
+        let sig = sk.sign(msg);
 
         let should_valid = pk.verify_signature(msg, &sig);
         let should_invalid = pk.verify_signature(b"wrong message", &sig);
 
-        assert!(should_valid.is_ok(), "Signature should be valid");
-        assert!(should_invalid.is_err(), "Signature should be invalid");
+        assert!(should_valid, "Signature should be valid");
+        assert!(!should_invalid, "Signature should be invalid");
     }
 }

@@ -1,14 +1,14 @@
 use ark_ec::models::short_weierstrass::SWCurveConfig;
 use ark_ff::MontFp;
-use ark_secp256r1::Fq;
+use ark_secp256r1::{Fq, Fr};
 
-use crate::crypto::{
-    ec::hash_to_curve::{
+use crate::crypto::ec::{
+    hash_to_curve::{
         expand_message::Xmd,
         map_to_curve::{simple_swu, MapToCurve},
         Config,
     },
-    traits::suite::HasherConfig,
+    HasherConfig,
 };
 
 #[allow(unused_imports)]
@@ -24,6 +24,8 @@ const VERSION: &str = "v1-"; // Len: 3
 
 #[allow(dead_code)]
 const SUITE_ID: &str = "secp256r1_XMD:SHA-256_SSWU_RO_"; // Len: 30
+
+const COFACTOR: Fr = MontFp!("1");
 
 impl MapToCurve<Fq> for ark_secp256r1::Config {
     fn map_to_curve(u: Fq) -> (Fq, Fq) {

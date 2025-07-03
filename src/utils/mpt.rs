@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use bytemuck::cast_slice;
 
 use crate::{
-    crypto::{traits::hasher::Multihash, Hasher},
+    crypto::{Hasher, Multihash},
     network::{
         storage::{CacheStorage, Storage},
         transport::Kad,

@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use ark_ec::{short_weierstrass::Affine, CurveGroup};
+use ark_ec::{short_weierstrass::Affine, AffineRepr, CurveGroup};
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
@@ -16,14 +16,12 @@ use crate::{
             vrf::{Prover, VerifyProof},
             SecretKey as _,
         },
-        Error as CryptoError,
     },
     traits::serializable::{ConstantSize, Error as SerializableError, Serializable},
 };
 
 mod challenge_generator;
 mod nonce_generator;
-mod suites;
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -34,14 +32,9 @@ pub struct Proof<P, S> {
     pub s: S,
 }
 
-pub trait Cofactor: PrimeField {
-    const COFACTOR_SCALAR: Self;
-}
-
 impl<C> traits::vrf::Proof for Proof<Affine<C>, C::ScalarField>
 where
     C: hash_to_curve::Config,
-    C::ScalarField: Cofactor,
 {
     fn proof_to_hash(&self) -> Multihash {
         const DOMAIN_SEPARATOR_FRONT: u8 = 0x03;
@@ -49,11 +42,7 @@ where
 
         let mut bytes = Vec::new();
         bytes.push(DOMAIN_SEPARATOR_FRONT);
-        bytes.extend_from_slice(
-            (self.gamma * C::ScalarField::COFACTOR_SCALAR)
-                .to_string()
-                .as_bytes(),
-        );
+        bytes.extend_from_slice((self.gamma.mul_by_cofactor()).to_string().as_bytes());
         bytes.push(DOMAIN_SEPARATOR_BACK);
 
         C::Hasher::hash(&bytes)
@@ -89,7 +78,6 @@ where
 impl<C> ConstantSize for Proof<Affine<C>, C::ScalarField>
 where
     C: hash_to_curve::Config,
-    C::ScalarField: Cofactor,
 {
     const SIZE: usize =
         Affine::<C>::SIZE + 2 * (C::ScalarField::MODULUS_BIT_SIZE as usize / 8usize);
@@ -98,11 +86,10 @@ where
 impl<C> Prover for SecretKey<C>
 where
     C: hash_to_curve::Config,
-    C::ScalarField: Cofactor,
 {
     type Proof = Proof<Affine<C>, C::ScalarField>;
 
-    fn prove(&self, alpha: &[u8]) -> Result<Proof<Affine<C>, C::ScalarField>, CryptoError> {
+    fn prove(&self, alpha: &[u8]) -> Proof<Affine<C>, C::ScalarField> {
         let y = self.public_key();
         let h = C::hash_to_curve(alpha);
         let gamma = (h * self.sk).into_affine();
@@ -113,22 +100,21 @@ where
             gamma,
             (C::GENERATOR * k).into(),
             (h * k).into(),
-        ])?;
+        ]);
 
         let s = k + c * self.sk;
 
-        Ok(Proof { gamma, c, s })
+        Proof { gamma, c, s }
     }
 }
 
 impl<C> VerifyProof for Affine<C>
 where
     C: hash_to_curve::Config,
-    C::ScalarField: Cofactor,
 {
     type Proof = Proof<Affine<C>, C::ScalarField>;
 
-    fn verify_proof(&self, alpha: &[u8], proof: &Self::Proof) -> Result<(), CryptoError> {
+    fn verify_proof(&self, alpha: &[u8], proof: &Self::Proof) -> bool {
         let h = C::hash_to_curve(alpha);
         let u = C::GENERATOR * proof.s - *self * proof.c;
         let v = h * proof.s - proof.gamma * proof.c;
@@ -138,13 +124,9 @@ where
             proof.gamma,
             u.into(),
             v.into(),
-        ])?;
+        ]);
 
-        if proof.c != c_prime {
-            Err(CryptoError::VrfVerificationFailed)
-        } else {
-            Ok(())
-        }
+        proof.c != c_prime
     }
 }
 
