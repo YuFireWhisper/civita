@@ -4,10 +4,7 @@ use bytemuck::cast_slice;
 
 use crate::{
     crypto::{Hasher, Multihash},
-    network::{
-        kad::{self, Kad},
-        CacheStorage,
-    },
+    network::{storage, CacheStorage, Storage},
     traits::Serializable,
     utils::mpt::node::{Branch, Extension, Leaf, Node},
 };
@@ -15,7 +12,7 @@ use crate::{
 mod node;
 
 type Nibble = u16;
-type Result<T, E = kad::Error> = std::result::Result<T, E>;
+type Result<T, E = storage::Error> = std::result::Result<T, E>;
 
 pub struct Mpt<T> {
     root_hash: Option<Multihash>,
@@ -27,7 +24,7 @@ impl<T> Mpt<T>
 where
     T: Clone + Serializable + Send + Sync + 'static,
 {
-    pub fn new(storage: Arc<Kad>) -> Self {
+    pub fn new(storage: Arc<Storage>) -> Self {
         Self {
             root_hash: None,
             original_root: None,
@@ -35,7 +32,7 @@ where
         }
     }
 
-    pub fn with_root(storage: Arc<Kad>, root_hash: Multihash) -> Self {
+    pub fn with_root(storage: Arc<Storage>, root_hash: Multihash) -> Self {
         Self {
             root_hash: Some(root_hash),
             original_root: Some(root_hash),

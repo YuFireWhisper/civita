@@ -52,13 +52,13 @@ enum WaitingQuery {
 }
 
 #[derive()]
-pub struct Kad {
+pub struct Storage {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     waiting_queries: DashMap<QueryId, WaitingQuery>,
     config: Config,
 }
 
-impl Kad {
+impl Storage {
     pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>, config: Config) -> Self {
         Self {
             swarm,
@@ -164,7 +164,7 @@ impl Kad {
     pub async fn put_batch<T, I>(&self, items: I) -> Result<()>
     where
         T: Serializable + Sync + Send + 'static,
-        I: IntoIterator<Item = (Multihash, T)> + Send + Sync,
+        I: IntoIterator<Item = (Multihash, T)>,
     {
         let items: Vec<_> = items.into_iter().collect();
 
@@ -216,7 +216,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             wait_for_kad_result_timeout: Duration::from_secs(10),
-            quorum: libp2p::kad::Quorum::Majority,
+            quorum: libp2p::kad::Quorum::One,
         }
     }
 }

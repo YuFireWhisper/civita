@@ -4,12 +4,12 @@ use dashmap::{mapref::one::Ref, DashMap};
 
 use crate::{
     crypto::Multihash,
-    network::kad::{self, Kad},
+    network::{storage, Storage},
     traits::Serializable,
 };
 
 pub struct CacheStorage<T> {
-    storage: Arc<Kad>,
+    storage: Arc<Storage>,
     cache: DashMap<Multihash, T>,
     changes: HashSet<Multihash>,
 }
@@ -18,7 +18,7 @@ impl<T> CacheStorage<T>
 where
     T: Serializable + Sync + Send + 'static,
 {
-    pub fn new(storage: Arc<Kad>) -> Self {
+    pub fn new(storage: Arc<Storage>) -> Self {
         Self {
             storage,
             cache: DashMap::new(),
@@ -31,7 +31,7 @@ where
         self.changes.insert(key);
     }
 
-    pub async fn get(&self, key: &Multihash) -> Result<Option<Ref<Multihash, T>>, kad::Error> {
+    pub async fn get(&self, key: &Multihash) -> Result<Option<Ref<Multihash, T>>, storage::Error> {
         if let Some(value) = self.cache.get(key) {
             return Ok(Some(value));
         }
@@ -45,7 +45,7 @@ where
         Ok(Some(self.cache.get(key).unwrap()))
     }
 
-    pub async fn commit(&mut self) -> Result<(), kad::Error> {
+    pub async fn commit(&mut self) -> Result<(), storage::Error> {
         let mut items = Vec::new();
 
         for key in self.changes.drain() {

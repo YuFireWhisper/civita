@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::network::transport::behaviour;
+use crate::network::behaviour;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
