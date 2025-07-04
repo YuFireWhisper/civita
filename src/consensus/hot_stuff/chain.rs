@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash};
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use dashmap::{mapref::one::Ref, DashMap};
 use tokio::sync::RwLock;
@@ -6,10 +6,7 @@ use tokio::sync::RwLock;
 use crate::{
     consensus::hot_stuff::utils::{QuorumCertificate, View, ViewNumber},
     crypto::{Hasher, Multihash},
-    network::{
-        traits::{storage, Storage},
-        CacheStorage,
-    },
+    network::{storage, CacheStorage, Storage},
     traits::Serializable,
 };
 
@@ -18,8 +15,8 @@ type QuorumCertificatePair<P, S> = (ViewNumber, QuorumCertificate<Multihash, P, 
 
 type Result<T, E = storage::Error> = std::result::Result<T, E>;
 
-pub struct Chain<T, P, S, ST: Storage> {
-    views: CacheStorage<View<T, P, S>, ST>,
+pub struct Chain<T, P, S> {
+    views: CacheStorage<View<T, P, S>>,
 
     locked_view: RwLock<Option<ViewPair>>,
     executed_view: RwLock<Option<ViewPair>>,
@@ -29,18 +26,17 @@ pub struct Chain<T, P, S, ST: Storage> {
     v_height: ViewNumber,
     votes: DashMap<Multihash, HashMap<P, S>>,
 
-    total_nodes: usize,
-    max_faulty: usize,
+    total_nodes: u64,
+    max_faulty: u64,
 }
 
-impl<T, P, S, ST> Chain<T, P, S, ST>
+impl<T, P, S> Chain<T, P, S>
 where
     T: Clone + Serializable + Send + Sync + 'static,
     P: Clone + Serializable + Eq + Hash + Send + Sync + 'static,
     S: Clone + Serializable + Send + Sync + 'static,
-    ST: Storage,
 {
-    pub fn new(stroage: ST, total_nodes: usize, max_faulty: usize) -> Self {
+    pub fn new(stroage: Arc<Storage>, total_nodes: u64, max_faulty: u64) -> Self {
         let qc = QuorumCertificate {
             view: Multihash::default(),
             sigs: HashMap::new(),
@@ -62,33 +58,19 @@ where
         }
     }
 
-    pub fn add_view(&mut self, hash: Multihash, view: View<T, P, S>) {
-        self.views.insert(hash, view);
+    pub async fn add_view(&mut self, view: View<T, P, S>) {
+        self.views.insert(view.hash, view);
     }
 
     pub async fn update(&mut self, b3_hash: &Multihash) -> Result<Option<Vec<T>>> {
-        let (b3_number, b3_hash_copy, justify) = {
-            let b3 = self.get_view_or_unwrap(b3_hash).await?;
-            (b3.number, b3.hash, b3.justify.clone())
+        let Some(b3) = self.get_view(b3_hash).await? else {
+            return Ok(None);
         };
 
-        let max_view_jump = 10;
-        if b3_number > self.v_height + max_view_jump {
-            log::warn!(
-                "View jump too large: {} > {} + {}",
-                b3_number,
-                self.v_height,
-                max_view_jump
-            );
-            // Still allow but log for monitoring
-        }
-
-        log::debug!("Processing view update: {} -> {}", self.v_height, b3_number);
-
-        let b2_view_hash = match self.try_update_highest_qc(&justify).await? {
-            Some(hash) => {
+        let b2 = match self.try_update_highest_qc(&b3.justify).await? {
+            Some(b2) => {
                 log::debug!("Updated highest QC");
-                hash
+                b2
             }
             None => {
                 log::debug!("Could not update highest QC");
@@ -96,7 +78,7 @@ where
             }
         };
 
-        let b1_view_hash = match self.try_update_locked_view(&b2_view_hash).await? {
+        let b1 = match self.try_update_locked_view(&b2).await? {
             Some(hash) => {
                 log::debug!("Updated locked view");
                 hash
@@ -107,20 +89,7 @@ where
             }
         };
 
-        let executed_commands = self
-            .try_update_executed_view(&b2_view_hash, &b1_view_hash)
-            .await?;
-
-        self.leaf_view
-            .write()
-            .await
-            .replace((b3_number, b3_hash_copy));
-
-        let old_height = self.v_height;
-        if b3_number > self.v_height {
-            self.v_height = b3_number;
-            log::info!("Updated chain height: {} -> {}", old_height, self.v_height);
-        }
+        let executed_commands = self.try_update_executed_view(&b2, &b1).await?;
 
         if let Some(ref cmds) = executed_commands {
             log::info!("Executed {} commands", cmds.len());
@@ -129,19 +98,24 @@ where
         Ok(executed_commands)
     }
 
+    pub async fn get_view(
+        &self,
+        hash: &Multihash,
+    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
+        self.views.get(hash).await
+    }
+
     async fn try_update_highest_qc(
-        &mut self,
+        &self,
         qc: &Option<QuorumCertificate<Multihash, P, S>>,
-    ) -> Result<Option<Multihash>> {
+    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
         let Some(qc) = qc else {
             return Ok(None);
         };
 
         let b2 = self.get_view_or_unwrap(&qc.view).await?;
-        let b2_number = b2.number;
-        let b2_hash = b2.hash;
 
-        if !self.is_higher_than_highest_qc(b2_number).await {
+        if !self.is_higher_than_highest_qc(b2.number).await {
             return Ok(None);
         }
 
@@ -149,82 +123,65 @@ where
             .highest_qc_view
             .write()
             .await
-            .replace((b2_number, qc.clone()));
+            .replace((b2.number, qc.clone()));
+
+        self.leaf_view.write().await.replace((b2.number, b2.hash));
 
         if origin.is_none() {
             Ok(None)
         } else {
-            Ok(Some(b2_hash))
+            Ok(Some(b2))
         }
     }
 
-    async fn try_update_locked_view(&mut self, b2_hash: &Multihash) -> Result<Option<Multihash>> {
-        let b1_hash = {
-            let b2 = self.get_view_or_unwrap(b2_hash).await?;
-            self.get_justified_view_hash(&b2).await?
-        };
-
-        let Some(b1_hash) = b1_hash else {
+    async fn try_update_locked_view<'a>(
+        &'a self,
+        b2: &Ref<'a, Multihash, View<T, P, S>>,
+    ) -> Result<Option<Ref<'a, Multihash, View<T, P, S>>>> {
+        let Some(b1) = self.get_justified_view(b2.value()).await? else {
             return Ok(None);
         };
 
-        let b1_number = {
-            let b1 = self.get_view_or_unwrap(&b1_hash).await?;
-            b1.number
-        };
-
-        if !self.is_higher_than_locked_view(b1_number).await {
+        if !self.is_higher_than_locked_view(b1.number).await {
             return Ok(None);
         }
 
-        let origin = self.locked_view.write().await.replace((b1_number, b1_hash));
+        let origin = self.locked_view.write().await.replace((b1.number, b1.hash));
 
         if origin.is_none() {
             Ok(None)
         } else {
-            Ok(Some(b1_hash))
+            Ok(Some(b1))
         }
     }
 
-    async fn try_update_executed_view(
-        &mut self,
-        b2_hash: &Multihash,
-        b1_hash: &Multihash,
+    async fn try_update_executed_view<'a>(
+        &'a self,
+        b2: &Ref<'a, Multihash, View<T, P, S>>,
+        b1: &Ref<'a, Multihash, View<T, P, S>>,
     ) -> Result<Option<Vec<T>>> {
-        let (b2_parent_hash, b1_parent_hash, b1_justify_view) = {
-            let b2 = self.get_view_or_unwrap(b2_hash).await?;
-            let b1 = self.get_view_or_unwrap(b1_hash).await?;
-            let justify_view = b1.justify.as_ref().map(|qc| qc.view);
-            (b2.parent_hash, b1.parent_hash, justify_view)
+        if b2.parent_hash != b1.hash {
+            return Ok(None);
+        }
+
+        let Some(b0) = self.get_justified_view(b1.value()).await? else {
+            return Ok(None);
         };
 
-        if b2_parent_hash != *b1_hash {
+        if b1.parent_hash != b0.hash {
             return Ok(None);
         }
 
-        if Some(b1_parent_hash) != b1_justify_view {
-            return Ok(None);
-        }
-
-        let b0 = self.get_view_or_unwrap(&b1_parent_hash).await?;
         let b0_number = b0.number;
         let b0_hash = b0.hash;
+        let cmds = self.collect_commands(b0).await?;
 
         self.executed_view
             .write()
             .await
             .replace((b0_number, b0_hash));
 
-        let cmds = self.collect_commands(b0).await?;
-
         Ok(Some(cmds))
-    }
-
-    async fn get_justified_view_hash(&self, view: &View<T, P, S>) -> Result<Option<Multihash>> {
-        match &view.justify {
-            Some(qc) => Ok(Some(qc.view)),
-            None => Ok(None),
-        }
     }
 
     async fn get_view_or_unwrap(&self, hash: &Multihash) -> Result<Ref<Multihash, View<T, P, S>>> {
@@ -232,7 +189,7 @@ where
             .views
             .get(hash)
             .await?
-            .expect("View must exist in the cache"))
+            .unwrap_or_else(|| panic!("View with hash {hash:?} not found in the chain")))
     }
 
     async fn is_higher_than_highest_qc(&self, number: ViewNumber) -> bool {
@@ -258,23 +215,19 @@ where
             .read()
             .await
             .as_ref()
-            .is_some_and(|lv| lv.0 < number)
+            .is_none_or(|lv| lv.0 <= number)
     }
 
-    async fn collect_commands<'a>(
-        &self,
-        view: Ref<'a, Multihash, View<T, P, S>>,
-    ) -> Result<Vec<T>> {
+    async fn collect_commands<'a>(&self, b0: Ref<'a, Multihash, View<T, P, S>>) -> Result<Vec<T>> {
         let exec_height = self
             .executed_view
             .read()
             .await
             .as_ref()
-            .expect("Executed view should exist")
-            .0;
+            .map_or(0, |ev| ev.0);
 
         let mut cmds = Vec::new();
-        let mut cur = view;
+        let mut cur = b0;
 
         while exec_height < cur.number {
             if let Some(cmd) = &cur.cmd {
@@ -438,13 +391,6 @@ where
         Ok(cur.number == locked_height && cur.hash == locked_hash)
     }
 
-    pub async fn get_view(
-        &self,
-        hash: &Multihash,
-    ) -> Result<Option<Ref<Multihash, View<T, P, S>>>> {
-        self.views.get(hash).await
-    }
-
     pub async fn on_receive_vote(
         &mut self,
         hash: Multihash,
@@ -459,7 +405,9 @@ where
 
         signs.insert(peer, sign);
 
-        if signs.len() >= self.total_nodes - self.max_faulty {
+        if signs.len() as u64 >= self.total_nodes - self.max_faulty {
+            drop(signs); // drop the lock on votes
+
             let votes_for_view = self
                 .votes
                 .remove(&hash)
@@ -470,29 +418,7 @@ where
                 sigs: votes_for_view.1,
             };
 
-            // Update highest QC if this is higher
-            let should_update = {
-                let current_qc = self.highest_qc_view.read().await;
-                match current_qc.as_ref() {
-                    Some((current_height, _)) => {
-                        if let Some(view) = self.get_view(&hash).await? {
-                            view.number > *current_height
-                        } else {
-                            false
-                        }
-                    }
-                    None => true,
-                }
-            };
-
-            if should_update {
-                if let Some(view) = self.get_view(&hash).await? {
-                    self.highest_qc_view
-                        .write()
-                        .await
-                        .replace((view.number, qc.clone()));
-                }
-            }
+            self.try_update_highest_qc(&Some(qc.clone())).await?;
 
             return Ok(Some(qc));
         }
@@ -538,29 +464,228 @@ where
     }
 
     pub async fn on_propose<H: Hasher>(&self, cmd: T) -> Result<View<T, P, S>> {
-        let leaf_view = self.leaf_view.read().await;
-        let Some(leaf_view) = *leaf_view else {
+        let highest_qc = self.highest_qc_view.read().await;
+        let Some((_, qc)) = highest_qc.as_ref() else {
             return Ok(View::new::<H>(
-                self.v_height + 1,
+                self.leaf_view_number().await + 1,
                 Multihash::default(),
                 Some(cmd),
                 None,
             ));
         };
 
-        let justify = self
-            .get_view_or_unwrap(&leaf_view.1)
-            .await?
-            .justify
-            .as_ref()
-            .expect("Leaf view should always have a justify")
-            .clone();
-
         Ok(View::new::<H>(
-            self.v_height + 1,
-            leaf_view.1,
+            self.leaf_view_number().await + 1,
+            qc.view,
             Some(cmd),
-            Some(justify),
+            Some(qc.clone()),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consensus::hot_stuff::utils::{QuorumCertificate, View};
+    use std::{collections::HashMap, sync::Arc};
+
+    type Hasher = sha2::Sha256;
+
+    const TOTAL_NODES: u64 = 4;
+    const MAX_FAULTY: u64 = 1;
+    const QUORUM_SIZE: u64 = TOTAL_NODES - MAX_FAULTY;
+
+    type TestCommand = u64;
+    type TestPeer = u64;
+    type TestSignature = u64;
+
+    type TestChain = Chain<TestCommand, TestPeer, TestSignature>;
+    type TestQuorumCertificate = QuorumCertificate<Multihash, TestPeer, TestSignature>;
+    type TestView = View<TestCommand, TestPeer, TestSignature>;
+
+    fn genesis_hash() -> Multihash {
+        let view = TestView::new::<Hasher>(0, Multihash::default(), None, None);
+        view.hash
+    }
+
+    async fn create_test_chain() -> TestChain {
+        let storage = Arc::new(Storage::new_local_one());
+
+        let genesis_view = TestView::new::<Hasher>(0, Multihash::default(), None, None);
+        let genesis_hash = genesis_view.hash;
+
+        storage
+            .put(genesis_hash, genesis_view)
+            .await
+            .expect("Failed to store genesis view");
+
+        TestChain::new(storage, TOTAL_NODES, MAX_FAULTY)
+    }
+
+    async fn add_view(chain: &mut TestChain, parent: Multihash, number: u64) -> Multihash {
+        let view = if number == 1 {
+            TestView::new::<Hasher>(number, genesis_hash(), Some(1), None)
+        } else {
+            let qc = create_test_qc(parent, QUORUM_SIZE);
+            TestView::new::<Hasher>(number, parent, Some(number), Some(qc))
+        };
+
+        let hash = view.hash;
+        chain.add_view(view).await;
+
+        hash
+    }
+
+    async fn add_view_cus(
+        chain: &mut TestChain,
+        parent: Multihash,
+        number: u64,
+        cmd: TestCommand,
+    ) -> Multihash {
+        let view = if number == 1 {
+            TestView::new::<Hasher>(number, genesis_hash(), Some(cmd), None)
+        } else {
+            let qc = create_test_qc(parent, QUORUM_SIZE);
+            TestView::new::<Hasher>(number, parent, Some(cmd), Some(qc))
+        };
+
+        let hash = view.hash;
+        chain.add_view(view).await;
+
+        hash
+    }
+
+    fn create_test_qc(view_hash: Multihash, peer_count: u64) -> TestQuorumCertificate {
+        let mut sigs = HashMap::new();
+
+        for i in 0..peer_count {
+            sigs.insert(i, i);
+        }
+
+        QuorumCertificate {
+            view: view_hash,
+            sigs,
+        }
+    }
+
+    async fn add_view_and_update(
+        chain: &mut TestChain,
+        parent: Multihash,
+        number: u64,
+    ) -> (Multihash, Option<Vec<TestCommand>>) {
+        let hash = add_view(chain, parent, number).await;
+        let result = chain.update(&hash).await.unwrap();
+        (hash, result)
+    }
+
+    #[tokio::test]
+    async fn basic_chain_initialization() {
+        let chain = create_test_chain().await;
+
+        assert_eq!(chain.v_height(), 0);
+        assert_eq!(chain.locked_view_number().await, 0);
+        assert_eq!(chain.executed_view_number().await, 0);
+        assert_eq!(chain.leaf_view_number().await, 0);
+        assert_eq!(chain.highest_qc_view_number().await, 0);
+    }
+
+    #[tokio::test]
+    async fn add_view_basic() {
+        let mut chain = create_test_chain().await;
+
+        let hash = add_view(&mut chain, Multihash::default(), 1).await;
+        let retrieved = chain.get_view(&hash).await.unwrap();
+
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().number, 1);
+    }
+
+    #[tokio::test]
+    async fn single_view_update() {
+        let mut chain = create_test_chain().await;
+
+        let (hash, _) = add_view_and_update(&mut chain, Multihash::default(), 1).await;
+        let (_, res) = add_view_and_update(&mut chain, hash, 2).await;
+
+        assert!(res.is_none());
+        assert_eq!(chain.leaf_view_number().await, 1);
+    }
+
+    #[tokio::test]
+    async fn three_chain_execution() {
+        let mut chain = create_test_chain().await;
+
+        let (view1_hash, _) = add_view_and_update(&mut chain, Multihash::default(), 1).await;
+        let (view2_hash, _) = add_view_and_update(&mut chain, view1_hash, 2).await;
+        let (view3_hash, _) = add_view_and_update(&mut chain, view2_hash, 3).await;
+        let (_, view4_res) = add_view_and_update(&mut chain, view3_hash, 4).await;
+
+        let leaf_view = chain
+            .leaf_view()
+            .await
+            .unwrap()
+            .expect("Leaf view should exist");
+        let locked_view = chain
+            .locked_view()
+            .await
+            .unwrap()
+            .expect("Locked view should exist");
+        let executed_view = chain
+            .executed_view()
+            .await
+            .unwrap()
+            .expect("Executed view should exist");
+
+        // view3 should be leaf
+        // view2 should be locked
+        // view1 should be executed
+        assert_eq!(view4_res.as_ref().map(|r| r.len()), Some(1));
+        assert_eq!(view4_res.unwrap()[0], 1);
+        assert_eq!(leaf_view.number, 3);
+        assert_eq!(leaf_view.hash, view3_hash);
+        assert_eq!(locked_view.number, 2);
+        assert_eq!(locked_view.hash, view2_hash);
+        assert_eq!(executed_view.number, 1);
+        assert_eq!(executed_view.hash, view1_hash);
+    }
+
+    #[tokio::test]
+    async fn duplicate_vote_ignored() {
+        let mut chain = create_test_chain().await;
+
+        let hash = add_view(&mut chain, Multihash::default(), 1).await;
+
+        for _ in 0u64..QUORUM_SIZE {
+            let result = chain.on_receive_vote(hash, 0, 0).await.unwrap();
+            assert!(result.is_none(), "Vote should not trigger a QC yet");
+        }
+    }
+
+    #[tokio::test]
+    async fn safety_check_with_locked_view() {
+        let mut chain = create_test_chain().await;
+
+        let (view1_hash, _) = add_view_and_update(&mut chain, Multihash::default(), 1).await;
+        let (view3_hash, _) = add_view_and_update(&mut chain, view1_hash, 3).await; // skip 2
+        let (view4_hash, _) = add_view_and_update(&mut chain, view3_hash, 4).await;
+        let (view5_hash, _) = add_view_and_update(&mut chain, view4_hash, 5).await;
+
+        // Now, lock view should be view 3
+
+        let view2_hash = add_view(&mut chain, view1_hash, 2).await; // add view 2 after locking
+        let view6_hash = add_view(&mut chain, view5_hash, 6).await;
+        let view3_cus = add_view_cus(&mut chain, view2_hash, 3, 100).await;
+
+        let view2_res = chain.is_safe_view(&view2_hash).await.unwrap();
+        let view6_res = chain.is_safe_view(&view6_hash).await.unwrap();
+        let view3_cus_res = chain.is_safe_view(&view3_cus).await.unwrap();
+
+        assert_eq!(chain.locked_view_number().await, 3);
+        assert!(!view2_res, "View 2 should be unsafe");
+        assert!(view6_res, "View 6 should be safe");
+        assert!(
+            !view3_cus_res,
+            "View 3 with custom command should be unsafe"
+        );
     }
 }
