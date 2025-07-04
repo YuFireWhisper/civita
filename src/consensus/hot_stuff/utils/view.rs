@@ -12,8 +12,8 @@ pub struct View<T, P, S> {
     pub number: ViewNumber,
     pub hash: Multihash,
     pub parent_hash: Multihash,
-    pub cmd: Option<T>,
-    pub justify: Option<QuorumCertificate<Multihash, P, S>>,
+    pub cmd: T,
+    pub justify: QuorumCertificate<Multihash, P, S>,
 }
 
 impl<T, P, S> View<T, P, S>
@@ -25,8 +25,8 @@ where
     pub fn new<H: Hasher>(
         number: ViewNumber,
         parent_hash: Multihash,
-        cmd: Option<T>,
-        justify: Option<QuorumCertificate<Multihash, P, S>>,
+        cmd: T,
+        justify: QuorumCertificate<Multihash, P, S>,
     ) -> Self {
         let mut bytes = Vec::new();
         number.to_writer(&mut bytes).unwrap();
@@ -65,8 +65,8 @@ where
             number: ViewNumber::from_reader(reader)?,
             hash: Multihash::from_reader(reader)?,
             parent_hash: Multihash::from_reader(reader)?,
-            cmd: Option::<T>::from_reader(reader)?,
-            justify: Option::<QuorumCertificate<Multihash, P, S>>::from_reader(reader)?,
+            cmd: T::from_reader(reader)?,
+            justify: QuorumCertificate::<Multihash, P, S>::from_reader(reader)?,
         })
     }
 

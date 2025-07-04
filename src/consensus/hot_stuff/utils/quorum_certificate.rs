@@ -3,15 +3,27 @@ use std::{collections::HashMap, hash::Hash};
 use crate::traits::{serializable, Serializable};
 
 #[derive(Clone)]
-#[derive(Debug, Default)]
-pub struct QuorumCertificate<N, P, S> {
-    pub view: N,
+#[derive(Debug)]
+pub struct QuorumCertificate<T, P, S> {
+    pub view: T,
     pub sigs: HashMap<P, S>,
 }
 
-impl<N, P, S> Serializable for QuorumCertificate<N, P, S>
+impl<T, P, S> Default for QuorumCertificate<T, P, S>
 where
-    N: Serializable,
+    T: Default,
+{
+    fn default() -> Self {
+        QuorumCertificate {
+            view: T::default(),
+            sigs: HashMap::default(),
+        }
+    }
+}
+
+impl<T, P, S> Serializable for QuorumCertificate<T, P, S>
+where
+    T: Serializable,
     P: Serializable + Eq + Hash,
     S: Serializable,
 {
@@ -21,7 +33,7 @@ where
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         Ok(QuorumCertificate {
-            view: N::from_reader(reader)?,
+            view: T::from_reader(reader)?,
             sigs: HashMap::from_reader(reader)?,
         })
     }

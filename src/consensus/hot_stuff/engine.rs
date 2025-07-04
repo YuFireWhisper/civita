@@ -14,8 +14,10 @@ use crate::{
     },
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     network::{
-        traits::{gossipsub, storage, Gossipsub, Storage, Transport},
-        transport::Kad,
+        gossipsub::{self, Gossipsub},
+        storage,
+        transport::Transport,
+        Storage,
     },
     proposal::Proposal,
     resident,
@@ -28,16 +30,16 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 type ProofPair = (DrawProof, Signature);
 type Block<P> = utils::Block<P, PublicKey, ProofPair>;
 type View<P> = utils::View<Block<P>, PublicKey, ProofPair>;
-type Chain<P, S = Arc<Kad>> = chain::Chain<Block<P>, PublicKey, ProofPair, S>;
+type Chain<P> = chain::Chain<Block<P>, PublicKey, ProofPair>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
-    Storage(#[from] storage::Error),
+    Gossipsub(#[from] gossipsub::Error),
 
     #[error("{0}")]
-    Gossipsub(#[from] gossipsub::Error),
+    Storage(#[from] storage::Error),
 
     #[error("{0}")]
     Randomizer(#[from] randomizer::Error),
@@ -77,31 +79,29 @@ struct Vote {
     sig: Signature,
 }
 
-pub struct Engine<T, P, H>
+pub struct Engine<P, H>
 where
-    T: Transport,
     P: Proposal,
     H: Hasher,
 {
-    gossipsub: T::Gossipsub,
-    storage: T::Storage,
-    proposal_pool: ProposalPool<P>,
+    gossipsub: Arc<Gossipsub>,
+    storage: Arc<Storage>,
     sk: SecretKey,
+    proposal_pool: ProposalPool<P>,
     chain: Chain<P>,
-    records: Mpt<resident::Record, T::Storage>,
+    records: Mpt<resident::Record>,
     randomizer: Randomizer,
     config: Config,
     _marker: PhantomData<H>,
 }
 
-impl<T, P, H> Engine<T, P, H>
+impl<P, H> Engine<P, H>
 where
-    T: Transport,
     P: Proposal,
     H: Hasher,
 {
     pub async fn spawn(
-        transport: Arc<T>,
+        transport: Arc<Transport>,
         chain: Chain<P>,
         root_hash: Multihash,
         config: Config,
@@ -277,25 +277,15 @@ where
             return Ok(None);
         };
 
-        let Some(cmd) = view.cmd.as_ref() else {
-            return Ok(None);
-        };
-
-        let proof_hash = cmd.leader.1 .0.proof.to_hash();
+        let proof_hash = view.cmd.leader.1 .0.proof.to_hash();
 
         Ok(Some(proof_hash))
     }
 
     async fn is_leader_valid(&self, cur_view: &View<P>) -> Result<bool> {
-        let Some((pk, (proof, sig))) = cur_view.cmd.as_ref().map(|cmd| &cmd.leader) else {
-            return Ok(false);
-        };
+        let (pk, (proof, sig)) = &cur_view.cmd.leader;
 
         let Some(exec_view) = self.get_exec_view_at(&cur_view.hash).await? else {
-            return Ok(false);
-        };
-
-        let Some(exec_cmd) = exec_view.cmd.as_ref() else {
             return Ok(false);
         };
 
@@ -304,7 +294,7 @@ where
         self.is_role_valid(
             &cur_view.hash.to_bytes(),
             seed.digest(),
-            exec_cmd.executed_total_stakes,
+            exec_view.cmd.executed_total_stakes,
             (pk, (proof, sig)),
             true,
         )
@@ -323,10 +313,6 @@ where
         let Some(view) = self.chain.get_view(&exec_hash).await? else {
             return Ok(None);
         };
-
-        if view.cmd.is_none() {
-            return Ok(None);
-        }
 
         Ok(Some(view))
     }
@@ -391,10 +377,6 @@ where
             return Ok(false);
         };
 
-        let Some(exec_cmd) = exec_view.cmd.as_ref() else {
-            return Ok(false);
-        };
-
         let seed = Self::generate_seed(&exec_view.hash, jus_view.number);
 
         let jus_view_bytes = jus_view.hash.to_bytes();
@@ -406,7 +388,7 @@ where
                 .is_role_valid(
                     &jus_view_bytes,
                     seed.digest(),
-                    exec_cmd.executed_total_stakes,
+                    exec_view.cmd.executed_total_stakes,
                     (pk, (proof, sig)),
                     false,
                 )
@@ -432,14 +414,14 @@ where
 
         for prop in proposal {
             if !prop
-                .verify::<H, _>(&self.records)
+                .verify::<H>(&self.records)
                 .await
                 .map_err(|e| Error::Proposal(e.to_string()))?
             {
                 return Ok(None);
             }
 
-            prop.apply::<H, _>(&mut self.records)
+            prop.apply::<H>(&mut self.records)
                 .await
                 .map_err(|e| Error::Proposal(e.to_string()))?;
 
@@ -471,14 +453,14 @@ where
 
         for prop in proposal.into_iter() {
             if !prop
-                .verify::<H, _>(&self.records)
+                .verify::<H>(&self.records)
                 .await
                 .map_err(|e| Error::Proposal(e.to_string()))?
             {
                 continue;
             }
 
-            if (prop.apply::<H, _>(&mut self.records).await).is_err() {
+            if (prop.apply::<H>(&mut self.records).await).is_err() {
                 continue;
             }
 
@@ -532,10 +514,8 @@ where
             return Ok(false);
         }
 
-        if let Some(justify) = &view.justify {
-            if !self.is_justify_valid(justify).await? {
-                return Ok(false);
-            }
+        if !self.is_justify_valid(&view.justify).await? {
+            return Ok(false);
         }
 
         Ok(true)
@@ -554,10 +534,12 @@ where
         let cur_view_clone = cur_view.value().clone();
         drop(cur_view);
 
-        if let Some(cmd) = &cur_view_clone.cmd {
-            if let Err(e) = self.proposal_pool.remove(cmd.proposals.clone()).await {
-                log::warn!("Failed to remove proposals from pool: {e}");
-            }
+        if let Err(e) = self
+            .proposal_pool
+            .remove(cur_view_clone.cmd.proposals.clone())
+            .await
+        {
+            log::warn!("Failed to remove proposals from pool: {e}");
         }
 
         let _ = self.chain.update(&view_hash).await?;
@@ -578,10 +560,8 @@ where
             return Ok(());
         };
 
-        if let Some(cmd) = &view.cmd {
-            if let Err(e) = self.proposal_pool.remove(cmd.proposals.clone()).await {
-                log::warn!("Failed to remove proposals from pool: {e}");
-            }
+        if let Err(e) = self.proposal_pool.remove(view.cmd.proposals.clone()).await {
+            log::warn!("Failed to remove proposals from pool: {e}");
         }
 
         drop(view);
@@ -594,12 +574,10 @@ where
     }
 
     async fn cast_vote(&mut self, view: &View<P>, proof: DrawProof) -> Result<()> {
-        let Some(cmd) = view.cmd.as_ref() else {
-            return Ok(());
-        };
-
-        if let Some((exec_hash, total_stakes)) = self.apply_proposal(&cmd.proposals).await? {
-            if exec_hash != cmd.executed_root_hash || total_stakes != cmd.executed_total_stakes {
+        if let Some((exec_hash, total_stakes)) = self.apply_proposal(&view.cmd.proposals).await? {
+            if exec_hash != view.cmd.executed_root_hash
+                || total_stakes != view.cmd.executed_total_stakes
+            {
                 return Ok(());
             }
 
@@ -657,13 +635,7 @@ where
         leader_proof: &mut Option<DrawProof>,
         validator_proof: &mut Option<DrawProof>,
     ) -> Result<()> {
-        let Some(exec_view) = self.chain.executed_view().await? else {
-            return Ok(());
-        };
-
-        let Some(exec_cmd) = exec_view.cmd.as_ref() else {
-            return Ok(());
-        };
+        let exec_view = self.chain.executed_view().await?;
 
         let pk_hash = H::hash(&self.sk.public_key().to_vec()?);
         let stakes = self
@@ -678,7 +650,7 @@ where
 
         *leader_proof = self.randomizer.draw::<H>(
             seed.digest(),
-            exec_cmd.executed_total_stakes,
+            exec_view.cmd.executed_total_stakes,
             &self.sk,
             stakes,
             true,
@@ -686,7 +658,7 @@ where
 
         *validator_proof = self.randomizer.draw::<H>(
             seed.digest(),
-            exec_cmd.executed_total_stakes,
+            exec_view.cmd.executed_total_stakes,
             &self.sk,
             stakes,
             false,
