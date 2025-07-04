@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::{crypto::Multihash, network::behaviour::Behaviour, traits::Serializable};
 
+mod local_multi;
 mod local_one;
 mod network;
 
@@ -25,6 +26,7 @@ pub enum Error {
 pub enum Storage {
     Network(network::Storage),
     LocalOne(local_one::Storage),
+    LocalMulti(local_multi::Storage),
 }
 
 impl Storage {
@@ -34,6 +36,10 @@ impl Storage {
 
     pub fn new_local_one() -> Self {
         Storage::LocalOne(local_one::Storage::new())
+    }
+
+    pub fn new_local_multi(core: local_one::Storage) -> Self {
+        Storage::LocalMulti(local_multi::Storage::new(core))
     }
 
     pub(crate) fn handle_event(&self, event: Event) {
@@ -49,6 +55,7 @@ impl Storage {
         match self {
             Storage::Network(storage) => storage.put(key, value).await.map_err(Error::from),
             Storage::LocalOne(storage) => storage.put(key, value).map_err(Error::from),
+            Storage::LocalMulti(storage) => storage.put(key, value).map_err(Error::from),
         }
     }
 
@@ -60,6 +67,7 @@ impl Storage {
         match self {
             Storage::Network(storage) => storage.put_batch(items).await.map_err(Error::from),
             Storage::LocalOne(storage) => storage.put_batch(items).map_err(Error::from),
+            Storage::LocalMulti(storage) => storage.put_batch(items).map_err(Error::from),
         }
     }
 
@@ -70,6 +78,7 @@ impl Storage {
         match self {
             Storage::Network(storage) => storage.get(key).await.map_err(Error::from),
             Storage::LocalOne(storage) => storage.get(key).map_err(Error::from),
+            Storage::LocalMulti(storage) => storage.get(key).map_err(Error::from),
         }
     }
 }
