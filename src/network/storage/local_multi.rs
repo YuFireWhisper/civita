@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
 use crate::{crypto::Multihash, network::storage::local_one, traits::Serializable};
 
 pub struct Storage {
-    core: local_one::Storage,
+    core: Arc<local_one::Storage>,
 }
 
 impl Storage {
-    pub fn new(core: local_one::Storage) -> Self {
+    pub fn new(core: Arc<local_one::Storage>) -> Self {
         Self { core }
     }
 

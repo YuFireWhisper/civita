@@ -38,7 +38,7 @@ impl Storage {
         Storage::LocalOne(local_one::Storage::new())
     }
 
-    pub fn new_local_multi(core: local_one::Storage) -> Self {
+    pub fn new_local_multi(core: Arc<local_one::Storage>) -> Self {
         Storage::LocalMulti(local_multi::Storage::new(core))
     }
 
