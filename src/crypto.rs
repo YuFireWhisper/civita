@@ -97,6 +97,10 @@ impl PublicKey {
 }
 
 impl SecretKey {
+    pub fn random() -> Self {
+        SecretKey::Secp256k1(ec::SecretKey::<ark_secp256k1::Config>::random())
+    }
+
     pub fn suite(&self) -> Suite {
         match self {
             SecretKey::Secp256k1(_) => Suite::Secp256k1,
