@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::{crypto::Multihash, network::behaviour::Behaviour, traits::Serializable};
 
+mod local_one;
 mod network;
 
 pub use network::Config as NetworkConfig;
@@ -16,10 +17,14 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("{0}")]
     Network(#[from] network::Error),
+
+    #[error("{0}")]
+    LocalOne(#[from] local_one::Error),
 }
 
 pub enum Storage {
     Network(network::Storage),
+    LocalOne(local_one::Storage),
 }
 
 impl Storage {
@@ -27,9 +32,13 @@ impl Storage {
         Storage::Network(network::Storage::new(swarm, config))
     }
 
+    pub fn new_local_one() -> Self {
+        Storage::LocalOne(local_one::Storage::new())
+    }
+
     pub(crate) fn handle_event(&self, event: Event) {
-        match self {
-            Storage::Network(storage) => storage.handle_event(event),
+        if let Storage::Network(storage) = self {
+            storage.handle_event(event);
         }
     }
 
@@ -39,6 +48,7 @@ impl Storage {
     {
         match self {
             Storage::Network(storage) => storage.put(key, value).await.map_err(Error::from),
+            Storage::LocalOne(storage) => storage.put(key, value).map_err(Error::from),
         }
     }
 
@@ -49,6 +59,7 @@ impl Storage {
     {
         match self {
             Storage::Network(storage) => storage.put_batch(items).await.map_err(Error::from),
+            Storage::LocalOne(storage) => storage.put_batch(items).map_err(Error::from),
         }
     }
 
@@ -58,6 +69,7 @@ impl Storage {
     {
         match self {
             Storage::Network(storage) => storage.get(key).await.map_err(Error::from),
+            Storage::LocalOne(storage) => storage.get(key).map_err(Error::from),
         }
     }
 }
