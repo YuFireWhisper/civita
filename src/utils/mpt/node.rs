@@ -1,92 +1,63 @@
-use std::collections::BTreeMap;
-
 use crate::{
     crypto::{Hasher, Multihash},
     traits::{serializable, ConstantSize, Serializable},
-    utils::mpt::Nibble,
+    utils::mpt::{Nibble, Path},
 };
 
-const LEAF_PREFIX: u8 = 0x00;
-const EXTENSION_PREFIX: u8 = 0x01;
-const BRANCH_PREFIX: u8 = 0x02;
+const EMPTY_PREFIX: u8 = 0x00;
+const LEAF_PREFIX: u8 = 0x01;
+const EXTENSION_PREFIX: u8 = 0x02;
+const BRANCH_PREFIX: u8 = 0x03;
 
-#[derive(Debug)]
 #[derive(Clone)]
-#[derive(Eq, PartialEq)]
-pub struct Leaf<V> {
-    pub path: Vec<Nibble>,
-    pub value: V,
-}
-
 #[derive(Debug)]
-#[derive(Clone)]
 #[derive(Eq, PartialEq)]
-pub struct Extension {
-    pub path: Vec<Nibble>,
-    pub child: Multihash,
-}
-
-#[derive(Debug)]
-#[derive(Clone)]
-#[derive(Eq, PartialEq)]
-pub struct Branch<V> {
-    pub children: BTreeMap<Nibble, Multihash>,
-    pub value: Option<V>,
-}
-
-#[derive(Debug)]
-#[derive(Clone)]
-#[derive(Eq, PartialEq)]
-pub enum Node<V> {
+pub enum Node<T> {
     Empty,
-    Leaf(Leaf<V>),
-    Extension(Extension),
-    Branch(Branch<V>),
+    Leaf {
+        path: Path,
+        value: T,
+    },
+    Extension {
+        path: Path,
+        child: Multihash,
+    },
+    Branch {
+        children: Box<[Option<Multihash>; 16]>,
+        value: Option<T>,
+    },
 }
 
-impl<V> Node<V> {
-    pub fn new_leaf(remained: Vec<Nibble>, value: V) -> Self {
-        Node::Leaf(Leaf {
-            path: remained,
-            value,
-        })
-    }
-
-    pub fn new_extension(prefix: Vec<Nibble>, next: Multihash) -> Self {
-        Node::Extension(Extension {
-            path: prefix,
-            child: next,
-        })
-    }
-
-    pub fn new_branch(children: BTreeMap<Nibble, Multihash>, value: Option<V>) -> Self {
-        Node::Branch(Branch { children, value })
-    }
-}
-
-impl<V: Serializable> Node<V> {
+impl<T> Node<T>
+where
+    T: Serializable,
+{
     pub fn hash<H: Hasher>(&self) -> Multihash {
         match self {
             Node::Empty => H::hash(&[]),
             _ => H::hash(&self.to_vec().expect("Node serialization should not fail")),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Node::Empty)
+    }
 }
 
-impl<V: Serializable> Serializable for Node<V> {
+impl<T: Serializable> Serializable for Node<T> {
     fn serialized_size(&self) -> usize {
-        let prefix_size = u8::SIZE;
-
         match self {
-            Node::Empty => prefix_size,
-            Node::Leaf(leaf) => {
-                prefix_size + leaf.path.serialized_size() + leaf.value.serialized_size()
+            Node::Empty => Nibble::SIZE,
+            Node::Leaf { path, value } => {
+                Nibble::SIZE + path.serialized_size() + value.serialized_size()
             }
-            Node::Extension(ext) => {
-                prefix_size + ext.path.serialized_size() + ext.child.serialized_size()
+            Node::Extension { path, child } => {
+                Nibble::SIZE + path.serialized_size() + child.serialized_size()
             }
-            Node::Branch(branch) => {
-                prefix_size + branch.children.serialized_size() + branch.value.serialized_size()
+            Node::Branch { children, value } => {
+                Nibble::SIZE
+                    + children.iter().map(|c| c.serialized_size()).sum::<usize>()
+                    + value.serialized_size()
             }
         }
     }
@@ -95,60 +66,54 @@ impl<V: Serializable> Serializable for Node<V> {
         let prefix = u8::from_reader(reader)?;
 
         match prefix {
-            LEAF_PREFIX => {
-                let remained = Vec::<Nibble>::from_reader(reader)?;
-                let value = V::from_reader(reader)?;
-                Ok(Node::Leaf(Leaf {
-                    path: remained,
-                    value,
-                }))
-            }
-            EXTENSION_PREFIX => {
-                let prefix = Vec::<Nibble>::from_reader(reader)?;
-                let next = Multihash::from_reader(reader)?;
-                Ok(Node::Extension(Extension {
-                    path: prefix,
-                    child: next,
-                }))
-            }
-            BRANCH_PREFIX => {
-                let children = BTreeMap::<Nibble, Multihash>::from_reader(reader)?;
-                let value = Option::<V>::from_reader(reader)?;
-                Ok(Node::Branch(Branch { children, value }))
-            }
+            LEAF_PREFIX => Ok(Node::Leaf {
+                path: Vec::from_reader(reader)?,
+                value: T::from_reader(reader)?,
+            }),
+            EXTENSION_PREFIX => Ok(Node::Extension {
+                path: Vec::from_reader(reader)?,
+                child: Multihash::from_reader(reader)?,
+            }),
+            BRANCH_PREFIX => Ok(Node::Branch {
+                children: {
+                    let mut children = [None; 16];
+                    children.iter_mut().try_for_each(|child| {
+                        *child = Some(Multihash::from_reader(reader)?);
+                        Ok::<_, serializable::Error>(())
+                    })?;
+                    Box::new(children)
+                },
+                value: T::from_reader(reader).ok(),
+            }),
             _ => Err(serializable::Error(format!(
-                "Unknown node prefix: {}",
-                prefix
+                "Unknown node prefix: {prefix}"
             ))),
         }
     }
 
     fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        let prefix = match self {
-            Node::Empty => LEAF_PREFIX,
-            Node::Leaf(_) => LEAF_PREFIX,
-            Node::Extension(_) => EXTENSION_PREFIX,
-            Node::Branch(_) => BRANCH_PREFIX,
-        };
-
-        prefix.to_writer(writer)?;
-
         match self {
-            Node::Empty => {}
-            Node::Leaf(leaf) => {
-                leaf.path.to_writer(writer)?;
-                leaf.value.to_writer(writer)?;
+            Node::Empty => {
+                EMPTY_PREFIX.to_writer(writer)?;
             }
-            Node::Extension(ext) => {
-                ext.path.to_writer(writer)?;
-                ext.child.to_writer(writer)?;
+            Node::Leaf { path, value } => {
+                LEAF_PREFIX.to_writer(writer)?;
+                path.to_writer(writer)?;
+                value.to_writer(writer)?;
             }
-            Node::Branch(branch) => {
-                branch.children.to_writer(writer)?;
-                branch.value.to_writer(writer)?;
+            Node::Extension { path, child } => {
+                EXTENSION_PREFIX.to_writer(writer)?;
+                path.to_writer(writer)?;
+                child.to_writer(writer)?;
+            }
+            Node::Branch { children, value } => {
+                BRANCH_PREFIX.to_writer(writer)?;
+                for child in children.iter() {
+                    child.to_writer(writer)?;
+                }
+                value.to_writer(writer)?;
             }
         }
-
         Ok(())
     }
 }

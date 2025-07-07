@@ -1,327 +1,724 @@
-use std::{collections::BTreeMap, sync::Arc};
-
-use bytemuck::cast_slice;
-
 use crate::{
     crypto::{Hasher, Multihash},
-    network::{storage, CacheStorage, Storage},
     traits::Serializable,
-    utils::mpt::node::{Branch, Extension, Leaf, Node},
+    utils::mpt::{
+        node::Node,
+        proof::{ExistenceProof, NonExistenceProof},
+    },
 };
+use std::collections::HashMap;
 
 mod node;
+pub mod proof;
 
-type Nibble = u16;
-type Result<T, E = storage::Error> = std::result::Result<T, E>;
+pub use proof::Proof;
 
-pub struct Mpt<T> {
-    root_hash: Option<Multihash>,
-    original_root: Option<Multihash>,
-    storage: CacheStorage<Node<T>>,
+pub type Nibble = u8; // 0-15
+pub type Path = Vec<Nibble>;
+type Result<T, E> = std::result::Result<T, E>;
+
+#[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum Error {
+    #[error("Invalid proof")]
+    InvalidProof,
+
+    #[error("Key not found")]
+    KeyNotFound,
+
+    #[error("Invalid node structure")]
+    InvalidNode,
+
+    #[error("Partial mode operation not supported")]
+    PartialModeUnsupported,
 }
 
-impl<T> Mpt<T>
+#[derive(Clone, Copy)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+pub enum StorageMode {
+    Partial,
+    Full,
+}
+
+pub struct MerklePatriciaTrie<T> {
+    root_hash: Multihash,
+    storage: HashMap<Multihash, Node<T>>,
+    mode: StorageMode,
+}
+
+impl<T> MerklePatriciaTrie<T>
 where
-    T: Clone + Serializable + Send + Sync + 'static,
+    T: Clone + Eq + Serializable + Send + Sync + 'static,
 {
-    pub fn new(storage: Arc<Storage>) -> Self {
+    pub fn new(mode: StorageMode) -> Self {
         Self {
-            root_hash: None,
-            original_root: None,
-            storage: CacheStorage::new(storage),
+            root_hash: Multihash::default(),
+            storage: HashMap::new(),
+            mode,
         }
     }
 
-    pub fn with_root(storage: Arc<Storage>, root_hash: Multihash) -> Self {
-        Self {
-            root_hash: Some(root_hash),
-            original_root: Some(root_hash),
-            storage: CacheStorage::new(storage),
+    pub fn from_proof<H: Hasher>(proof: Proof<T>) -> Result<Self, Error> {
+        let mut storage = HashMap::new();
+        let mut root_hash = Multihash::default();
+
+        for node in proof.proof_nodes() {
+            let hash = node.hash::<H>();
+            storage.insert(hash, node.clone());
         }
-    }
 
-    pub async fn insert<H: Hasher>(&mut self, path: &[u8], value: T) -> Result<()> {
-        let path = cast_slice(path);
-
-        let root = self.get_root_node().await?;
-        let root = self.insert_rec::<H>(root, path, value).await?;
-
-        let hash = self.hash_and_insert::<H>(root)?;
-
-        self.root_hash = Some(hash);
-
-        Ok(())
-    }
-
-    async fn get_root_node(&mut self) -> Result<Node<T>> {
-        match self.root_hash {
-            Some(hash) => self.get_node(&hash).await,
-            None => Ok(Node::Empty),
+        if let Some(first_node) = proof.proof_nodes().first() {
+            root_hash = first_node.hash::<H>();
         }
-    }
 
-    async fn get_node(&self, hash: &Multihash) -> Result<Node<T>> {
-        self.storage
-            .get(hash)
-            .await?
-            .map_or_else(|| Ok(Node::Empty), |node| Ok(node.clone()))
-    }
-
-    async fn insert_rec<H: Hasher>(
-        &mut self,
-        node: Node<T>,
-        path: &[Nibble],
-        value: T,
-    ) -> Result<Node<T>> {
-        match node {
-            Node::Empty => Ok(self.create_leaf(path, value)),
-            Node::Leaf(leaf) => Box::pin(self.insert_leaf::<H>(leaf, path, value)).await,
-            Node::Extension(ext) => Box::pin(self.insert_ext::<H>(ext, path, value)).await,
-            Node::Branch(branch) => Box::pin(self.insert_branch::<H>(branch, path, value)).await,
-        }
-    }
-
-    fn create_leaf(&self, path: &[Nibble], value: T) -> Node<T> {
-        Node::Leaf(Leaf {
-            path: path.to_vec(),
-            value,
+        Ok(Self {
+            root_hash,
+            storage,
+            mode: StorageMode::Partial,
         })
     }
 
-    async fn insert_leaf<H: Hasher>(
-        &mut self,
-        leaf: Leaf<T>,
-        path: &[Nibble],
-        value: T,
-    ) -> Result<Node<T>> {
-        let common = Self::common_prefix(&leaf.path, path);
-
-        if common.len() == leaf.path.len() && common.len() == path.len() {
-            return Ok(Node::new_leaf(leaf.path, value));
-        }
-
-        if common.len() == leaf.path.len() {
-            let path = &path[common.len()..];
-
-            let child = self.insert_rec::<H>(Node::Empty, &path[1..], value).await?;
-            let hash = self.hash_and_insert::<H>(child)?;
-
-            let children = BTreeMap::from([(path[0], hash)]);
-
-            return Ok(Node::new_branch(children, Some(leaf.value)));
-        }
-
-        self.split_leaf::<H>(leaf, path, value, common.len()).await
+    pub fn root_hash(&self) -> Multihash {
+        self.root_hash
     }
 
-    fn hash_and_insert<H: Hasher>(&mut self, node: Node<T>) -> Result<Multihash> {
-        let hash = node.hash::<H>();
-        self.storage.insert(hash, node);
-        Ok(hash)
-    }
-
-    fn common_prefix(a: &[Nibble], b: &[Nibble]) -> Vec<Nibble> {
-        let mut common = Vec::new();
-        for (x, y) in a.iter().zip(b.iter()) {
-            if x == y {
-                common.push(*x);
-            } else {
-                break;
+    pub fn insert<H: Hasher>(&mut self, key: &[u8], value: T) -> Result<(), Error> {
+        match self.mode {
+            StorageMode::Partial => Err(Error::PartialModeUnsupported),
+            StorageMode::Full => {
+                let path = bytes_to_nibbles(key);
+                let new_root = self.insert_recursive::<H>(&path, value, &self.root_hash.clone())?;
+                self.root_hash = new_root;
+                Ok(())
             }
         }
-        common
     }
 
-    async fn split_leaf<H: Hasher>(
+    fn insert_recursive<H: Hasher>(
         &mut self,
-        leaf: Leaf<T>,
         path: &[Nibble],
         value: T,
-        common_len: usize,
-    ) -> Result<Node<T>> {
-        let leaf_path = &leaf.path[common_len..];
-        let new_path = &path[common_len..];
+        current_hash: &Multihash,
+    ) -> Result<Multihash, Error> {
+        let current_node = self
+            .storage
+            .get(current_hash)
+            .cloned()
+            .unwrap_or(Node::Empty);
 
-        let mut children = BTreeMap::new();
-
-        {
-            let child = Self::new_leaf_child(leaf_path, leaf.value);
-            let hash = self.hash_and_insert::<H>(child)?;
-            children.insert(leaf_path[0], hash);
-        }
-
-        {
-            let child = Self::new_leaf_child(new_path, value);
-            let hash = self.hash_and_insert::<H>(child)?;
-            children.insert(new_path[0], hash);
-        }
-
-        let branch = Node::new_branch(children, None);
-
-        if common_len == 0 {
-            return Ok(branch);
-        }
-
-        let hash = self.hash_and_insert::<H>(branch)?;
-
-        Ok(Node::new_extension(leaf_path[..common_len].to_vec(), hash))
-    }
-
-    fn new_leaf_child(path: &[Nibble], value: T) -> Node<T> {
-        if path.len() == 1 {
-            Node::new_leaf(vec![], value)
-        } else {
-            Node::new_leaf(path[1..].to_vec(), value)
-        }
-    }
-
-    async fn insert_ext<H: Hasher>(
-        &mut self,
-        ext: Extension,
-        path: &[Nibble],
-        value: T,
-    ) -> Result<Node<T>> {
-        let common = Self::common_prefix(&ext.path, path);
-
-        if common.len() == ext.path.len() {
-            let path = &path[common.len()..];
-
-            let child = self.get_node(&ext.child).await?;
-            let child = self.insert_rec::<H>(child, path, value).await?;
-            let hash = self.hash_and_insert::<H>(child)?;
-
-            Ok(Node::new_extension(ext.path, hash))
-        } else {
-            self.split_ext::<H>(&ext, path, value, common.len()).await
-        }
-    }
-
-    async fn split_ext<H: Hasher>(
-        &mut self,
-        ext: &Extension,
-        path: &[Nibble],
-        value: T,
-        common_len: usize,
-    ) -> Result<Node<T>> {
-        let ext_path = &ext.path[common_len..];
-        let new_path = &path[common_len..];
-
-        let mut children = BTreeMap::new();
-
-        {
-            let child = if ext_path.len() == 1 {
-                ext.child
-            } else {
-                let ext = Node::new_extension(ext_path[1..].to_vec(), ext.child);
-                self.hash_and_insert::<H>(ext)?
-            };
-
-            children.insert(ext_path[0], child);
-        }
-
-        {
-            let child = self
-                .insert_rec::<H>(Node::Empty, &new_path[1..], value)
-                .await?;
-            let hash = self.hash_and_insert::<H>(child)?;
-            children.insert(new_path[0], hash);
-        }
-
-        let branch = Node::new_branch(children, None);
-
-        if common_len == 0 {
-            return Ok(branch);
-        }
-
-        let hash = self.hash_and_insert::<H>(branch)?;
-
-        Ok(Node::new_extension(ext_path[..common_len].to_vec(), hash))
-    }
-
-    async fn insert_branch<H: Hasher>(
-        &mut self,
-        mut branch: Branch<T>,
-        path: &[Nibble],
-        value: T,
-    ) -> Result<Node<T>> {
-        if path.is_empty() {
-            branch.value = Some(value);
-        } else {
-            let idx = path[0];
-            let child = match branch.children.get(&idx) {
-                Some(hash) => self.get_node(hash).await?,
-                None => Node::Empty,
-            };
-            let child = self.insert_rec::<H>(child, &path[1..], value).await?;
-            let hash = self.hash_and_insert::<H>(child)?;
-            branch.children.insert(idx, hash);
-        }
-
-        Ok(Node::Branch(branch))
-    }
-
-    pub async fn get(&self, path: &[u8]) -> Result<Option<T>> {
-        let key = cast_slice(path);
-
-        let Some(hash) = self.root_hash else {
-            return Ok(None);
+        let new_node = match current_node {
+            Node::Empty => Node::Leaf {
+                path: path.to_vec(),
+                value,
+            },
+            Node::Leaf {
+                path: leaf_path,
+                value: leaf_value,
+            } => {
+                if leaf_path == path {
+                    Node::Leaf {
+                        path: leaf_path,
+                        value,
+                    }
+                } else {
+                    return self.handle_leaf_collision::<H>(leaf_path, leaf_value, path, value);
+                }
+            }
+            Node::Extension {
+                path: ext_path,
+                child,
+            } => {
+                return self.handle_extension_insert::<H>(ext_path, child, path, value);
+            }
+            Node::Branch {
+                mut children,
+                value: mut branch_value,
+            } => {
+                if path.is_empty() {
+                    branch_value = Some(value);
+                    Node::Branch {
+                        children,
+                        value: branch_value,
+                    }
+                } else {
+                    let idx = path[0] as usize;
+                    let child_hash = children[idx].unwrap_or_default();
+                    let new_child_hash =
+                        self.insert_recursive::<H>(&path[1..], value, &child_hash)?;
+                    children[idx] = Some(new_child_hash);
+                    Node::Branch {
+                        children,
+                        value: branch_value,
+                    }
+                }
+            }
         };
 
-        let root = self.get_node(&hash).await?;
-        self.get_rec(&root, key).await
+        let new_hash = new_node.hash::<H>();
+        self.storage.insert(new_hash, new_node);
+        Ok(new_hash)
     }
 
-    async fn get_rec(&self, node: &Node<T>, path: &[Nibble]) -> Result<Option<T>> {
+    fn handle_leaf_collision<H: Hasher>(
+        &mut self,
+        leaf_path: Path,
+        leaf_value: T,
+        new_path: &[Nibble],
+        new_value: T,
+    ) -> Result<Multihash, Error> {
+        let common_prefix = common_prefix(&leaf_path, new_path);
+        let common_len = common_prefix.len();
+
+        if common_len == 0 {
+            let mut children = [None; 16];
+
+            let leaf_remaining = &leaf_path[1..];
+            let new_remaining = &new_path[1..];
+
+            let leaf_node = if leaf_remaining.is_empty() {
+                Node::Leaf {
+                    path: vec![],
+                    value: leaf_value,
+                }
+            } else {
+                Node::Leaf {
+                    path: leaf_remaining.to_vec(),
+                    value: leaf_value,
+                }
+            };
+
+            let new_node = if new_remaining.is_empty() {
+                Node::Leaf {
+                    path: vec![],
+                    value: new_value,
+                }
+            } else {
+                Node::Leaf {
+                    path: new_remaining.to_vec(),
+                    value: new_value,
+                }
+            };
+
+            let leaf_hash = leaf_node.hash::<H>();
+            let new_hash = new_node.hash::<H>();
+
+            self.storage.insert(leaf_hash, leaf_node);
+            self.storage.insert(new_hash, new_node);
+
+            children[leaf_path[0] as usize] = Some(leaf_hash);
+            children[new_path[0] as usize] = Some(new_hash);
+
+            let branch = Node::Branch {
+                children: Box::new(children),
+                value: None,
+            };
+            let branch_hash = branch.hash::<H>();
+            self.storage.insert(branch_hash, branch);
+            Ok(branch_hash)
+        } else {
+            let branch_hash = self.create_divergent_branch::<H>(
+                &leaf_path[common_len..],
+                leaf_value,
+                &new_path[common_len..],
+                new_value,
+            )?;
+
+            let extension = Node::Extension {
+                path: common_prefix,
+                child: branch_hash,
+            };
+            let ext_hash = extension.hash::<H>();
+            self.storage.insert(ext_hash, extension);
+            Ok(ext_hash)
+        }
+    }
+
+    fn create_divergent_branch<H: Hasher>(
+        &mut self,
+        leaf_remaining: &[Nibble],
+        leaf_value: T,
+        new_remaining: &[Nibble],
+        new_value: T,
+    ) -> Result<Multihash, Error> {
+        let mut children = [None; 16];
+
+        let leaf_node = if leaf_remaining.len() == 1 {
+            Node::Leaf {
+                path: vec![],
+                value: leaf_value,
+            }
+        } else {
+            Node::Leaf {
+                path: leaf_remaining[1..].to_vec(),
+                value: leaf_value,
+            }
+        };
+
+        let new_node = if new_remaining.len() == 1 {
+            Node::Leaf {
+                path: vec![],
+                value: new_value,
+            }
+        } else {
+            Node::Leaf {
+                path: new_remaining[1..].to_vec(),
+                value: new_value,
+            }
+        };
+
+        let leaf_hash = leaf_node.hash::<H>();
+        let new_hash = new_node.hash::<H>();
+
+        self.storage.insert(leaf_hash, leaf_node);
+        self.storage.insert(new_hash, new_node);
+
+        children[leaf_remaining[0] as usize] = Some(leaf_hash);
+        children[new_remaining[0] as usize] = Some(new_hash);
+
+        let branch = Node::Branch {
+            children: Box::new(children),
+            value: None,
+        };
+        let branch_hash = branch.hash::<H>();
+        self.storage.insert(branch_hash, branch);
+        Ok(branch_hash)
+    }
+
+    fn handle_extension_insert<H: Hasher>(
+        &mut self,
+        ext_path: Path,
+        child: Multihash,
+        path: &[Nibble],
+        value: T,
+    ) -> Result<Multihash, Error> {
+        let common_prefix = common_prefix(&ext_path, path);
+        let common_len = common_prefix.len();
+
+        if common_len == ext_path.len() {
+            let remaining_path = &path[ext_path.len()..];
+            let new_child = self.insert_recursive::<H>(remaining_path, value, &child)?;
+            let new_extension = Node::Extension {
+                path: ext_path,
+                child: new_child,
+            };
+            let new_hash = new_extension.hash::<H>();
+            self.storage.insert(new_hash, new_extension);
+            Ok(new_hash)
+        } else {
+            let branch_hash = self.create_extension_branch::<H>(
+                &ext_path[common_len..],
+                child,
+                &path[common_len..],
+                value,
+            )?;
+
+            if common_len == 0 {
+                Ok(branch_hash)
+            } else {
+                let new_extension = Node::Extension {
+                    path: common_prefix,
+                    child: branch_hash,
+                };
+                let new_hash = new_extension.hash::<H>();
+                self.storage.insert(new_hash, new_extension);
+                Ok(new_hash)
+            }
+        }
+    }
+
+    fn create_extension_branch<H: Hasher>(
+        &mut self,
+        ext_remaining: &[Nibble],
+        old_child: Multihash,
+        new_remaining: &[Nibble],
+        new_value: T,
+    ) -> Result<Multihash, Error> {
+        let mut children = [None; 16];
+
+        let old_node = if ext_remaining.len() == 1 {
+            Node::Extension {
+                path: vec![],
+                child: old_child,
+            }
+        } else {
+            Node::Extension {
+                path: ext_remaining[1..].to_vec(),
+                child: old_child,
+            }
+        };
+
+        let new_node = if new_remaining.len() == 1 {
+            Node::Leaf {
+                path: vec![],
+                value: new_value,
+            }
+        } else {
+            Node::Leaf {
+                path: new_remaining[1..].to_vec(),
+                value: new_value,
+            }
+        };
+
+        let old_hash = old_node.hash::<H>();
+        let new_hash = new_node.hash::<H>();
+
+        self.storage.insert(old_hash, old_node);
+        self.storage.insert(new_hash, new_node);
+
+        children[ext_remaining[0] as usize] = Some(old_hash);
+        children[new_remaining[0] as usize] = Some(new_hash);
+
+        let branch = Node::Branch {
+            children: Box::new(children),
+            value: None,
+        };
+        let branch_hash = branch.hash::<H>();
+        self.storage.insert(branch_hash, branch);
+        Ok(branch_hash)
+    }
+
+    pub fn get(&self, key: &[u8]) -> Option<T> {
+        let path = bytes_to_nibbles(key);
+        self.get_recursive(&path, &self.root_hash)
+    }
+
+    fn get_recursive(&self, path: &[Nibble], current_hash: &Multihash) -> Option<T> {
+        let node = self.storage.get(current_hash)?;
+
         match node {
-            Node::Empty => Ok(None),
-            Node::Leaf(leaf) => {
-                if leaf.path == path {
-                    Ok(Some(leaf.value.clone()))
+            Node::Empty => None,
+            Node::Leaf {
+                path: leaf_path,
+                value,
+            } => {
+                if leaf_path == path {
+                    Some(value.clone())
                 } else {
-                    Ok(None)
+                    None
                 }
             }
-            Node::Extension(ext) => {
-                if path.starts_with(&ext.path) {
-                    let path = &path[ext.path.len()..];
-                    let child = self.get_node(&ext.child).await?;
-                    return Box::pin(self.get_rec(&child, path)).await;
+            Node::Extension {
+                path: ext_path,
+                child,
+            } => {
+                if path.len() >= ext_path.len() && path.starts_with(ext_path) {
+                    self.get_recursive(&path[ext_path.len()..], child)
+                } else {
+                    None
                 }
-
-                Ok(None)
             }
-            Node::Branch(branch) => {
+            Node::Branch { children, value } => {
                 if path.is_empty() {
-                    return Ok(branch.value.clone());
-                }
-
-                let idx = path[0];
-
-                match branch.children.get(&idx) {
-                    Some(hash) => {
-                        let path = &path[1..];
-                        let child = self.get_node(hash).await?;
-                        return Box::pin(self.get_rec(&child, path)).await;
+                    value.clone()
+                } else {
+                    let idx = path[0] as usize;
+                    if let Some(child_hash) = &children[idx] {
+                        self.get_recursive(&path[1..], child_hash)
+                    } else {
+                        None
                     }
-                    None => Ok(None),
                 }
             }
         }
     }
 
-    pub async fn commit(&mut self) -> Result<()> {
-        self.storage.commit().await?;
-        self.original_root = self.root_hash;
+    pub fn generate_proof<H: Hasher>(&self, key: &[u8]) -> Result<Proof<T>, Error> {
+        match self.mode {
+            StorageMode::Partial => Err(Error::PartialModeUnsupported),
+            StorageMode::Full => {
+                let path = bytes_to_nibbles(key);
+                let mut proof_nodes = Vec::new();
 
-        Ok(())
+                match self.collect_proof_nodes(&path, &self.root_hash, &mut proof_nodes) {
+                    Some(value) => Ok(Proof::Existence(ExistenceProof {
+                        key: key.to_vec(),
+                        value,
+                        proof_nodes,
+                    })),
+                    None => Ok(Proof::NonExistence(NonExistenceProof {
+                        key: key.to_vec(),
+                        proof_nodes,
+                    })),
+                }
+            }
+        }
     }
 
-    pub fn rollback(&mut self) {
-        self.storage.rollback();
-        self.root_hash = self.original_root;
+    fn collect_proof_nodes(
+        &self,
+        path: &[Nibble],
+        current_hash: &Multihash,
+        proof_nodes: &mut Vec<Node<T>>,
+    ) -> Option<T> {
+        let node = self.storage.get(current_hash)?;
+        proof_nodes.push(node.clone());
+
+        match node {
+            Node::Empty => None,
+            Node::Leaf {
+                path: leaf_path,
+                value,
+            } => {
+                if leaf_path == path {
+                    Some(value.clone())
+                } else {
+                    None
+                }
+            }
+            Node::Extension {
+                path: ext_path,
+                child,
+            } => {
+                if path.len() >= ext_path.len() && path.starts_with(ext_path) {
+                    self.collect_proof_nodes(&path[ext_path.len()..], child, proof_nodes)
+                } else {
+                    None
+                }
+            }
+            Node::Branch { children, value } => {
+                if path.is_empty() {
+                    value.clone()
+                } else {
+                    let idx = path[0] as usize;
+                    if let Some(child_hash) = &children[idx] {
+                        self.collect_proof_nodes(&path[1..], child_hash, proof_nodes)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
     }
 
-    pub fn root_hash(&self) -> Option<Multihash> {
-        self.root_hash
+    pub fn verify_proof<H: Hasher>(&self, proof: &Proof<T>) -> bool {
+        match proof {
+            Proof::Existence(existence_proof) => self.verify_existence_proof::<H>(existence_proof),
+            Proof::NonExistence(non_existence_proof) => {
+                self.verify_non_existence_proof::<H>(non_existence_proof)
+            }
+        }
+    }
+
+    fn verify_existence_proof<H: Hasher>(&self, proof: &ExistenceProof<T>) -> bool {
+        let path = bytes_to_nibbles(&proof.key);
+        let computed_root = self.compute_root_from_proof::<H>(&proof.proof_nodes, &path);
+
+        match computed_root {
+            Some(root_hash) => root_hash == self.root_hash,
+            None => false,
+        }
+    }
+
+    fn verify_non_existence_proof<H: Hasher>(&self, proof: &NonExistenceProof<T>) -> bool {
+        let path = bytes_to_nibbles(&proof.key);
+
+        if proof.proof_nodes.is_empty() {
+            return self.root_hash == Multihash::default();
+        }
+
+        let mut node_map = HashMap::new();
+        for node in &proof.proof_nodes {
+            let hash = node.hash::<H>();
+            node_map.insert(hash, node);
+        }
+
+        let root_node = proof.proof_nodes.first().unwrap();
+        let root_hash = root_node.hash::<H>();
+
+        if root_hash != self.root_hash {
+            return false;
+        }
+
+        Self::verify_non_existence_path(&node_map, &path, &root_hash)
+    }
+
+    fn verify_non_existence_path(
+        node_map: &HashMap<Multihash, &Node<T>>,
+        path: &[Nibble],
+        current_hash: &Multihash,
+    ) -> bool {
+        let node = match node_map.get(current_hash) {
+            Some(node) => node,
+            None => return false,
+        };
+
+        match node {
+            Node::Empty => true,
+            Node::Leaf {
+                path: leaf_path, ..
+            } => leaf_path != path,
+            Node::Extension {
+                path: ext_path,
+                child,
+            } => {
+                if path.len() >= ext_path.len() && path.starts_with(ext_path) {
+                    Self::verify_non_existence_path(node_map, &path[ext_path.len()..], child)
+                } else {
+                    true
+                }
+            }
+            Node::Branch { children, value } => {
+                if path.is_empty() {
+                    value.is_none()
+                } else {
+                    let idx = path[0] as usize;
+                    match &children[idx] {
+                        Some(child_hash) => {
+                            Self::verify_non_existence_path(node_map, &path[1..], child_hash)
+                        }
+                        None => true,
+                    }
+                }
+            }
+        }
+    }
+
+    fn compute_root_from_proof<H: Hasher>(
+        &self,
+        proof_nodes: &[Node<T>],
+        target_path: &[Nibble],
+    ) -> Option<Multihash> {
+        if proof_nodes.is_empty() {
+            return None;
+        }
+
+        let mut node_map = HashMap::new();
+        for node in proof_nodes {
+            let hash = node.hash::<H>();
+            node_map.insert(hash, node);
+        }
+
+        let root_node = proof_nodes.first()?;
+        let root_hash = root_node.hash::<H>();
+
+        Self::verify_path_consistency(&node_map, target_path, &root_hash)?;
+
+        Some(root_hash)
+    }
+
+    fn verify_path_consistency(
+        node_map: &HashMap<Multihash, &Node<T>>,
+        path: &[Nibble],
+        current_hash: &Multihash,
+    ) -> Option<()> {
+        let node = node_map.get(current_hash)?;
+
+        match node {
+            Node::Empty => Some(()),
+            Node::Leaf {
+                path: leaf_path, ..
+            } => {
+                if leaf_path == path {
+                    Some(())
+                } else {
+                    None
+                }
+            }
+            Node::Extension {
+                path: ext_path,
+                child,
+            } => {
+                if path.len() >= ext_path.len() && path.starts_with(ext_path) {
+                    Self::verify_path_consistency(node_map, &path[ext_path.len()..], child)
+                } else {
+                    None
+                }
+            }
+            Node::Branch { children, .. } => {
+                if path.is_empty() {
+                    Some(())
+                } else {
+                    let idx = path[0] as usize;
+                    if let Some(child_hash) = &children[idx] {
+                        Self::verify_path_consistency(node_map, &path[1..], child_hash)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn bytes_to_nibbles(bytes: &[u8]) -> Path {
+    let mut nibbles = Vec::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        nibbles.push((byte >> 4) & 0xF);
+        nibbles.push(byte & 0xF);
+    }
+    nibbles
+}
+
+fn common_prefix(a: &[Nibble], b: &[Nibble]) -> Path {
+    a.iter()
+        .zip(b.iter())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| *x)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::Sha256;
+
+    #[test]
+    fn successful_insert_and_get() {
+        let mut mpt = MerklePatriciaTrie::new(StorageMode::Full);
+
+        mpt.insert::<Sha256>(b"key1", "value1".to_string()).unwrap();
+        mpt.insert::<Sha256>(b"key2", "value2".to_string()).unwrap();
+
+        assert_eq!(mpt.get(b"key1"), Some("value1".to_string()));
+        assert_eq!(mpt.get(b"key2"), Some("value2".to_string()));
+        assert_eq!(mpt.get(b"key3"), None);
+    }
+
+    #[test]
+    fn proof_generation_and_verification() {
+        let mut mpt = MerklePatriciaTrie::new(StorageMode::Full);
+
+        mpt.insert::<Sha256>(b"key1", "value1".to_string()).unwrap();
+        mpt.insert::<Sha256>(b"key2", "value2".to_string()).unwrap();
+
+        let proof = mpt.generate_proof::<Sha256>(b"key1").unwrap();
+        let non_existence_proof = mpt.generate_proof::<Sha256>(b"key3").unwrap();
+
+        assert!(mpt.verify_proof::<Sha256>(&proof));
+        assert!(mpt.verify_proof::<Sha256>(&non_existence_proof));
+    }
+
+    #[test]
+    fn return_false_when_proof_is_invalid() {
+        let mut mpt = MerklePatriciaTrie::new(StorageMode::Full);
+        mpt.insert::<Sha256>(b"key1", "value1".to_string()).unwrap();
+        let proof = mpt.generate_proof::<Sha256>(b"key1").unwrap();
+
+        let mut other_mpt = MerklePatriciaTrie::new(StorageMode::Full);
+        other_mpt
+            .insert::<Sha256>(b"key2", "value2".to_string())
+            .unwrap();
+        let other_proof = other_mpt.generate_proof::<Sha256>(b"key2").unwrap();
+
+        assert!(mpt.verify_proof::<Sha256>(&proof));
+        assert!(!mpt.verify_proof::<Sha256>(&other_proof));
+
+        assert!(other_mpt.verify_proof::<Sha256>(&other_proof));
+        assert!(!other_mpt.verify_proof::<Sha256>(&proof));
+    }
+
+    #[test]
+    fn partial_mode_from_proof() {
+        let mut full_mpt = MerklePatriciaTrie::new(StorageMode::Full);
+        full_mpt
+            .insert::<Sha256>(b"key1", "value1".to_string())
+            .unwrap();
+
+        let proof = full_mpt.generate_proof::<Sha256>(b"key1").unwrap();
+        let partial_mpt = MerklePatriciaTrie::from_proof::<Sha256>(proof.clone()).unwrap();
+
+        assert_eq!(partial_mpt.get(b"key1"), Some("value1".to_string()));
+        assert!(partial_mpt.verify_proof::<Sha256>(&proof));
     }
 }
