@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 
 pub mod b_tree_map;
 pub mod b_tree_set;
+pub mod box_;
 pub mod hash_map;
 pub mod message_id;
 pub mod multiaddr;
