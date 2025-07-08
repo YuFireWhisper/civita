@@ -1,6 +1,6 @@
 use crate::{
     crypto::{Hasher, Multihash},
-    traits::{serializable, ConstantSize, Serializable},
+    traits::serializable::{self, ConstantSize, Serializable},
     utils::mpt::{Nibble, Path},
 };
 
@@ -11,12 +11,14 @@ const BRANCH_PREFIX: u8 = 0x03;
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Default)]
 #[derive(Eq, PartialEq)]
-pub enum Node<T> {
+pub enum Node {
+    #[default]
     Empty,
     Leaf {
         path: Path,
-        value: T,
+        value: Multihash,
     },
     Extension {
         path: Path,
@@ -24,67 +26,83 @@ pub enum Node<T> {
     },
     Branch {
         children: Box<[Option<Multihash>; 16]>,
-        value: Option<T>,
+        value: Option<Multihash>,
     },
 }
 
-impl<T> Node<T>
-where
-    T: Serializable,
-{
+impl Node {
+    pub fn new_leaf(path: Path, value: Multihash) -> Self {
+        Node::Leaf { path, value }
+    }
+
+    pub fn new_extension(path: Path, child: Multihash) -> Self {
+        Node::Extension { path, child }
+    }
+
+    pub fn new_branch(children: Box<[Option<Multihash>; 16]>, value: Option<Multihash>) -> Self {
+        Node::Branch { children, value }
+    }
+
+    pub fn new_branch_from_other(&self, value: Option<Multihash>) -> Self {
+        match self {
+            Node::Branch { children, .. } => Node::Branch {
+                children: children.clone(),
+                value,
+            },
+            _ => panic!("Cannot create branch from non-branch node"),
+        }
+    }
+
     pub fn hash<H: Hasher>(&self) -> Multihash {
         match self {
             Node::Empty => H::hash(&[]),
             _ => H::hash(&self.to_vec().expect("Node serialization should not fail")),
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        matches!(self, Node::Empty)
-    }
 }
 
-impl<T: Serializable> Serializable for Node<T> {
+impl Serializable for Node {
     fn serialized_size(&self) -> usize {
-        match self {
-            Node::Empty => Nibble::SIZE,
-            Node::Leaf { path, value } => {
-                Nibble::SIZE + path.serialized_size() + value.serialized_size()
+        Nibble::SIZE
+            + match self {
+                Node::Empty => Nibble::SIZE,
+                Node::Leaf { path, value } => path.serialized_size() + value.serialized_size(),
+                Node::Extension { path, child } => path.serialized_size() + child.serialized_size(),
+                Node::Branch { children, value } => {
+                    children
+                        .iter()
+                        .map(|c| c.as_ref().map_or(0, |c| c.serialized_size()))
+                        .sum::<usize>()
+                        + value.serialized_size()
+                }
             }
-            Node::Extension { path, child } => {
-                Nibble::SIZE + path.serialized_size() + child.serialized_size()
-            }
-            Node::Branch { children, value } => {
-                Nibble::SIZE
-                    + children.iter().map(|c| c.serialized_size()).sum::<usize>()
-                    + value.serialized_size()
-            }
-        }
     }
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let prefix = u8::from_reader(reader)?;
 
         match prefix {
+            EMPTY_PREFIX => Ok(Node::Empty),
             LEAF_PREFIX => Ok(Node::Leaf {
                 path: Vec::from_reader(reader)?,
-                value: T::from_reader(reader)?,
+                value: Multihash::from_reader(reader)?,
             }),
             EXTENSION_PREFIX => Ok(Node::Extension {
                 path: Vec::from_reader(reader)?,
                 child: Multihash::from_reader(reader)?,
             }),
-            BRANCH_PREFIX => Ok(Node::Branch {
-                children: {
-                    let mut children = [None; 16];
-                    children.iter_mut().try_for_each(|child| {
-                        *child = Some(Multihash::from_reader(reader)?);
-                        Ok::<_, serializable::Error>(())
-                    })?;
-                    Box::new(children)
-                },
-                value: T::from_reader(reader).ok(),
-            }),
+            BRANCH_PREFIX => {
+                let mut children: [Option<Multihash>; 16] = std::array::from_fn(|_| None);
+                children.iter_mut().try_for_each(|child| {
+                    *child = Option::from_reader(reader)?;
+                    Ok::<(), serializable::Error>(())
+                })?;
+                let value = Option::from_reader(reader)?;
+                Ok(Node::Branch {
+                    children: children.into(),
+                    value,
+                })
+            }
             _ => Err(serializable::Error(format!(
                 "Unknown node prefix: {prefix}"
             ))),
