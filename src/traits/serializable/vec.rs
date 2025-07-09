@@ -2,10 +2,14 @@ use crate::traits::{serializable, ConstantSize, Serializable};
 
 impl<T> Serializable for Vec<T>
 where
-    T: Serializable + ConstantSize,
+    T: Serializable,
 {
     fn serialized_size(&self) -> usize {
-        usize::SIZE + self.len() * T::SIZE
+        usize::SIZE
+            + self
+                .iter()
+                .map(|item| item.serialized_size())
+                .sum::<usize>()
     }
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
