@@ -1,5 +1,5 @@
 //! Define the general traits that are used in the project.
 
-pub mod byteable;
+pub mod serializable;
 
-pub use byteable::Byteable;
+pub use serializable::{ConstantSize, Serializable};

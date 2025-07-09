@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{HashArray, U32_LENGTH};
+use crate::traits::{serializable, ConstantSize, Serializable};
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -23,58 +23,27 @@ impl Record {
     pub fn new(stakes: u32, data: Vec<u8>) -> Self {
         Record { stakes, data }
     }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, Error> {
-        Self::try_from(bytes.to_vec())
-    }
-
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.into()
-    }
-
-    pub fn hash(&self) -> HashArray {
-        blake3::hash(&self.to_vec()).into()
-    }
 }
 
-impl TryFrom<&[u8]> for Record {
-    type Error = Error;
+impl Serializable for Record {
+    fn serialized_size(&self) -> usize {
+        u32::SIZE + usize::SIZE + self.data.len()
+    }
 
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < U32_LENGTH {
-            return Err(Error::InvalidLength);
-        }
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        let stakes = u32::from_reader(reader)?;
+        let data_length = usize::from_reader(reader)?;
 
-        let stakes = u32::from_le_bytes(
-            value[0..U32_LENGTH]
-                .try_into()
-                .map_err(|_| Error::InvalidLength)?,
-        );
-        let data = value[U32_LENGTH..].to_vec();
+        let mut data = vec![0; data_length];
+        reader.read_exact(&mut data)?;
 
         Ok(Record { stakes, data })
     }
-}
 
-impl TryFrom<Vec<u8>> for Record {
-    type Error = Error;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        (value.as_slice()).try_into()
-    }
-}
-
-impl From<&Record> for Vec<u8> {
-    fn from(record: &Record) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(U32_LENGTH + record.data.len());
-        bytes.extend_from_slice(&record.stakes.to_le_bytes());
-        bytes.extend_from_slice(&record.data);
-        bytes
-    }
-}
-
-impl From<Record> for Vec<u8> {
-    fn from(record: Record) -> Vec<u8> {
-        (&record).into()
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.stakes.to_writer(writer)?;
+        self.data.len().to_writer(writer)?;
+        writer.write_all(&self.data)?;
+        Ok(())
     }
 }
