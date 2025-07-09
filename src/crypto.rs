@@ -75,24 +75,24 @@ impl PublicKey {
     pub fn to_hash<H: Hasher>(&self) -> Multihash {
         match self {
             PublicKey::Secp256k1(pk) => {
-                H::hash(&pk.to_vec().expect("PublicKey should be serializable"))
+                // pk size is 32, so don't need to hash it
+                Multihash::wrap(0, &pk.to_vec().expect("PublicKey should be serializable"))
+                    .expect("Failed to wrap PublicKey into Multihash")
             }
         }
     }
+}
 
-    pub fn to_peer_id(&self) -> libp2p::PeerId {
-        match self {
-            PublicKey::Secp256k1(pk) => {
-                let pk = libp2p::identity::secp256k1::PublicKey::try_from_bytes(
-                    &pk.to_vec().expect("PublicKey should be serializable"),
-                )
-                .expect("Failed to convert PublicKey to libp2p Secp256k1 PublicKey");
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
-                let pk = libp2p::identity::PublicKey::from(pk);
-
-                libp2p::PeerId::from_public_key(&pk)
-            }
-        }
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other)
+            .expect("PublicKey should be comparable")
     }
 }
 
