@@ -1,5 +1,5 @@
 pub mod engine;
 
-mod chain;
-mod proposal_pool;
+pub mod chain;
+pub mod proposal_pool;
 mod utils;

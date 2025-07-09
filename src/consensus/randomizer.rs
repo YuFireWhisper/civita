@@ -5,23 +5,8 @@ use crate::{
     traits::serializable::{self, Serializable},
 };
 
-type Result<T> = std::result::Result<T, Error>;
-
 const TRUNCATED_HASH_SIZE_IN_BYTES: usize = 8;
 const TRUNCATED_HASH_SIZE_IN_BITS: usize = TRUNCATED_HASH_SIZE_IN_BYTES * 8;
-
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Binomial(#[from] statrs::distribution::BinomialError),
-
-    #[error("{0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Serializable(#[from] serializable::Error),
-}
 
 pub struct Randomizer {
     expected_leaders: u16,
@@ -51,16 +36,16 @@ impl Randomizer {
         sk: &crypto::SecretKey,
         stakes: u32,
         is_leader: bool,
-    ) -> Result<Option<DrawProof>> {
+    ) -> Option<DrawProof> {
         if total_stakes == 0 || stakes == 0 {
-            return Ok(None);
+            return None;
         }
 
         let input = Self::generate_input::<H>(seed, is_leader);
         let p = self.calc_p(total_stakes, is_leader);
 
         if !self.is_status_valid(p) {
-            return Ok(None);
+            return None;
         }
 
         let proof = sk.prove(input.digest());
@@ -70,7 +55,8 @@ impl Randomizer {
 
         let mut j = 0u32;
 
-        let dist = Binomial::new(p, stakes as u64)?;
+        let dist =
+            Binomial::new(p, stakes as u64).expect("Invalid binomial distribution parameters");
         let normalized_hash = hash_as_float / 2f64.powi(TRUNCATED_HASH_SIZE_IN_BITS as i32);
 
         while j <= stakes {
@@ -78,13 +64,13 @@ impl Randomizer {
             let upper_bound = self.binomial_cdf_sum(j + 1, dist);
 
             if normalized_hash >= lower_bound && normalized_hash < upper_bound {
-                return Ok(Some(DrawProof { proof, weight: j }));
+                return Some(DrawProof { proof, weight: j });
             }
 
             j += 1;
         }
 
-        Ok(None)
+        None
     }
 
     fn generate_input<H: Hasher>(seed: &[u8], is_leader: bool) -> Multihash {

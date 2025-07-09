@@ -1,128 +1,215 @@
-use std::collections::BTreeSet;
-
-use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
-    task::JoinHandle,
+use std::{
+    collections::{BTreeMap, HashSet},
+    marker::PhantomData,
 };
 
-use crate::{proposal::Proposal, traits::serializable};
+use tokio::{sync::mpsc, task::JoinHandle};
+
+use crate::{
+    crypto::{Hasher, Multihash},
+    proposal::MultiProposal,
+    traits::{serializable, Serializable},
+};
 
 type Result<T> = std::result::Result<T, Error>;
+
+const CHANNEL_CAPACITY: usize = 100;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("Proposal pool is not started")]
-    NotStarted,
-
-    #[error("Channel closed")]
-    ChannelClosed,
-
     #[error("{0}")]
+    Send(String),
+
+    #[error(transparent)]
     Serializable(#[from] serializable::Error),
+
+    #[error("Invalid proof")]
+    InvalidProof,
 }
 
-enum Action<P: Proposal> {
+enum InboundAction {
     Get,
-    Remove(BTreeSet<P>),
+    Remove(HashSet<Multihash>),
+    ChangeRoot(Multihash),
+    ValidateResult((Multihash, bool)),
 }
 
-pub struct ProposalPool<P: Proposal> {
+enum OutboundAction {
+    GetResult(Box<BTreeMap<Multihash, MultiProposal>>),
+    Validate(MultiProposal),
+}
+
+struct ProposalPoolInner<H> {
+    inbound_rx: mpsc::Receiver<InboundAction>,
+    outbound_tx: mpsc::Sender<OutboundAction>,
+    prop_rx: mpsc::Receiver<Vec<u8>>,
+    root_hash: Multihash,
+    capacity: usize,
+    pending_props: BTreeMap<Multihash, MultiProposal>,
+    validated_props: BTreeMap<Multihash, MultiProposal>,
+    _marker: PhantomData<H>,
+}
+
+pub struct ProposalPool<H> {
     handle: JoinHandle<()>,
-    action_tx: Sender<Action<P>>,
-    result_rx: Receiver<BTreeSet<P>>,
+    inbound_tx: mpsc::Sender<InboundAction>,
+    outbound_rx: mpsc::Receiver<OutboundAction>,
+    _marker: PhantomData<H>,
 }
 
-impl<P: Proposal> ProposalPool<P> {
-    pub fn new(mut rx: Receiver<Vec<u8>>, capacity: usize) -> Self {
-        const CHANNEL_CAPACITY: usize = 100;
+impl<H: Hasher> ProposalPoolInner<H> {
+    pub fn spawn(
+        inbound_rx: mpsc::Receiver<InboundAction>,
+        outbound_tx: mpsc::Sender<OutboundAction>,
+        prop_rx: mpsc::Receiver<Vec<u8>>,
+        root_hash: Multihash,
+        capacity: usize,
+    ) -> JoinHandle<()> {
+        let mut inner = Self {
+            inbound_rx,
+            outbound_tx,
+            prop_rx,
+            root_hash,
+            capacity,
+            pending_props: BTreeMap::new(),
+            validated_props: BTreeMap::new(),
+            _marker: PhantomData,
+        };
 
-        let (action_tx, mut action_rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let (result_tx, result_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        tokio::spawn(async move {
+            inner.run().await;
+        })
+    }
 
-        let handle = tokio::spawn(async move {
-            let mut proposals = BTreeSet::new();
+    async fn run(&mut self) {
+        loop {
+            tokio::select! {
+                Some(action) = self.inbound_rx.recv() => {
+                    if let Err(e) = self.handle_inbound_action(action).await {
+                        log::error!("{e}");
+                    }
+                },
 
-            loop {
-                tokio::select! {
-                    Some(msg) = rx.recv() => {
-                        if let Err(e) = Self::handle_message(msg, &mut proposals, capacity) {
-                            log::error!("Failed to handle message: {e}");
-                        }
-                    },
+                Some(prop) = self.prop_rx.recv() => {
+                    if let Err(e) = self.handle_proposal(prop).await {
+                        log::error!("Failed to handle proposal: {e}");
+                    }
+                },
 
-                    Some(action) = action_rx.recv() => {
-                        if let Err(e) = Self::handle_action(action, &mut proposals, &result_tx).await {
-                            log::error!("Failed to handle action: {e}");
-                        }
-                    },
+                else => {
+                    log::info!("Proposal pool task completed");
+                    break;
+                },
+            }
+        }
+    }
 
-                    else => {
-                        log::info!("Proposal pool task completed");
-                        break;
-                    },
+    async fn handle_inbound_action(&mut self, action: InboundAction) -> Result<()> {
+        match action {
+            InboundAction::Get => {
+                let result = std::mem::take(&mut self.validated_props);
+                self.outbound_tx
+                    .send(OutboundAction::GetResult(Box::new(result)))
+                    .await?;
+            }
+            InboundAction::Remove(to_remove) => {
+                self.pending_props.retain(|k, _| !to_remove.contains(k));
+                self.validated_props.retain(|k, _| !to_remove.contains(k));
+            }
+            InboundAction::ChangeRoot(new_hash) => {
+                self.root_hash = new_hash;
+                self.pending_props.clear();
+                self.validated_props.clear();
+            }
+            InboundAction::ValidateResult((id, valid)) => {
+                if let Some(prop) = self.pending_props.remove(&id) {
+                    if valid {
+                        self.validated_props.insert(id, prop);
+                    } else {
+                        log::warn!("Proposal with ID {id:?} was invalidated");
+                    }
+                } else {
+                    log::warn!("Proposal with ID {id:?} not found in pending props");
                 }
             }
-        });
+        }
+
+        Ok(())
+    }
+
+    async fn handle_proposal(&mut self, prop: Vec<u8>) -> Result<()> {
+        let prop = MultiProposal::from_slice(&prop)?;
+
+        if !prop.base_verify::<H>(&self.root_hash) {
+            return Err(Error::InvalidProof);
+        }
+
+        if self.pending_props.len() >= self.capacity {
+            self.pending_props.pop_last();
+        }
+
+        let id = prop.generate_id::<H>();
+        self.pending_props.insert(id, prop.clone());
+        self.outbound_tx
+            .send(OutboundAction::Validate(prop))
+            .await?;
+
+        Ok(())
+    }
+}
+
+impl<H: Hasher> ProposalPool<H> {
+    pub fn new(prop_rx: mpsc::Receiver<Vec<u8>>, root_hash: Multihash, capacity: usize) -> Self {
+        let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
+
+        let handle =
+            ProposalPoolInner::<H>::spawn(inbound_rx, outbound_tx, prop_rx, root_hash, capacity);
 
         Self {
             handle,
-            action_tx,
-            result_rx,
+            inbound_tx,
+            outbound_rx,
+            _marker: PhantomData,
         }
     }
 
-    fn handle_message(msg: Vec<u8>, proposals: &mut BTreeSet<P>, capacity: usize) -> Result<()> {
-        let proposal = P::from_slice(&msg)?;
-
-        proposals.insert(proposal);
-
-        if proposals.len() > capacity {
-            proposals.pop_first();
+    pub async fn get(&mut self) -> Result<BTreeMap<Multihash, MultiProposal>> {
+        while self.outbound_rx.try_recv().is_ok() {}
+        self.inbound_tx.send(InboundAction::Get).await?;
+        match self.outbound_rx.recv().await {
+            Some(OutboundAction::GetResult(result)) => Ok(*result),
+            _ => Err(Error::Send("Failed to get proposals".to_string())),
         }
+    }
 
+    pub async fn remove(&self, ids: HashSet<Multihash>) -> Result<()> {
+        self.inbound_tx.send(InboundAction::Remove(ids)).await?;
         Ok(())
     }
 
-    async fn handle_action(
-        action: Action<P>,
-        proposals: &mut BTreeSet<P>,
-        sender: &Sender<BTreeSet<P>>,
-    ) -> Result<()> {
-        match action {
-            Action::Get => {
-                let result = std::mem::take(proposals);
-                sender.send(result).await.map_err(|_| Error::ChannelClosed)
-            }
-            Action::Remove(to_remove) => {
-                proposals.retain(|p| !to_remove.contains(p));
-                Ok(())
-            }
-        }
-    }
-
-    pub async fn get(&mut self) -> Result<BTreeSet<P>> {
-        while self.result_rx.try_recv().is_ok() {}
-
-        self.action_tx
-            .send(Action::Get)
-            .await
-            .map_err(|_| Error::ChannelClosed)?;
-
-        Ok(self.result_rx.recv().await.unwrap_or_default())
-    }
-
-    pub async fn remove(&self, proposals: BTreeSet<P>) -> Result<()> {
-        self.action_tx
-            .send(Action::Remove(proposals))
-            .await
-            .map_err(|_| Error::ChannelClosed)?;
-
+    pub async fn change_root(&self, new_hash: Multihash) -> Result<()> {
+        self.inbound_tx
+            .send(InboundAction::ChangeRoot(new_hash))
+            .await?;
         Ok(())
     }
 }
 
-impl<P: Proposal> Drop for ProposalPool<P> {
+impl From<mpsc::error::SendError<InboundAction>> for Error {
+    fn from(e: mpsc::error::SendError<InboundAction>) -> Self {
+        Error::Send(e.to_string())
+    }
+}
+
+impl From<mpsc::error::SendError<OutboundAction>> for Error {
+    fn from(e: mpsc::error::SendError<OutboundAction>) -> Self {
+        Error::Send(e.to_string())
+    }
+}
+
+impl<H> Drop for ProposalPool<H> {
     fn drop(&mut self) {
         self.handle.abort();
     }

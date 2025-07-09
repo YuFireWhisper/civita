@@ -1,37 +1,30 @@
-use std::hash::Hash;
-
 use crate::{
-    consensus::hot_stuff::utils::{QuorumCertificate, ViewNumber},
+    consensus::hot_stuff::utils::{Block, QuorumCertificate, ViewNumber},
     crypto::{Hasher, Multihash},
     traits::{serializable, Serializable},
 };
 
 #[derive(Clone)]
 #[derive(Debug)]
-pub struct View<T, P, S> {
+pub struct View {
     pub number: ViewNumber,
     pub hash: Multihash,
     pub parent_hash: Multihash,
-    pub cmd: T,
-    pub justify: QuorumCertificate<Multihash, P, S>,
+    pub block: Block,
+    pub justify: QuorumCertificate,
 }
 
-impl<T, P, S> View<T, P, S>
-where
-    T: Serializable,
-    P: Serializable + Eq + Hash,
-    S: Serializable,
-{
+impl View {
     pub fn new<H: Hasher>(
         number: ViewNumber,
         parent_hash: Multihash,
-        cmd: T,
-        justify: QuorumCertificate<Multihash, P, S>,
+        block: Block,
+        justify: QuorumCertificate,
     ) -> Self {
         let mut bytes = Vec::new();
         number.to_writer(&mut bytes).unwrap();
         parent_hash.to_writer(&mut bytes).unwrap();
-        cmd.to_writer(&mut bytes).unwrap();
+        block.to_writer(&mut bytes).unwrap();
         justify.to_writer(&mut bytes).unwrap();
 
         let hash = H::hash(&bytes);
@@ -40,23 +33,18 @@ where
             number,
             hash,
             parent_hash,
-            cmd,
+            block,
             justify,
         }
     }
 }
 
-impl<T, P, S> Serializable for View<T, P, S>
-where
-    T: Serializable,
-    P: Serializable + Eq + Hash,
-    S: Serializable,
-{
+impl Serializable for View {
     fn serialized_size(&self) -> usize {
         self.number.serialized_size()
             + self.hash.serialized_size()
             + self.parent_hash.serialized_size()
-            + self.cmd.serialized_size()
+            + self.block.serialized_size()
             + self.justify.serialized_size()
     }
 
@@ -65,8 +53,8 @@ where
             number: ViewNumber::from_reader(reader)?,
             hash: Multihash::from_reader(reader)?,
             parent_hash: Multihash::from_reader(reader)?,
-            cmd: T::from_reader(reader)?,
-            justify: QuorumCertificate::<Multihash, P, S>::from_reader(reader)?,
+            block: Block::from_reader(reader)?,
+            justify: QuorumCertificate::from_reader(reader)?,
         })
     }
 
@@ -74,9 +62,8 @@ where
         self.number.to_writer(writer)?;
         self.hash.to_writer(writer)?;
         self.parent_hash.to_writer(writer)?;
-        self.cmd.to_writer(writer)?;
+        self.block.to_writer(writer)?;
         self.justify.to_writer(writer)?;
-
         Ok(())
     }
 }
