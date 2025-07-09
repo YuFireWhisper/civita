@@ -13,17 +13,27 @@ type QuorumCertificatePair = (ViewNumber, QuorumCertificate);
 
 type Result<T, E = storage::Error> = std::result::Result<T, E>;
 
-struct ExecutedView {
+pub struct ExecutedViewState {
     number: ViewNumber,
     hash: Multihash,
     parent: Multihash,
+}
+
+pub struct ChainState {
+    pub views: HashMap<Multihash, View>,
+    pub locked_view: ViewPair,
+    pub executed_view: ExecutedViewState,
+    pub leaf_view: ViewPair,
+    pub highest_qc_view: QuorumCertificatePair,
+    pub v_height: ViewNumber,
+    pub threshold: u64,
 }
 
 pub struct Chain {
     views: HashMap<Multihash, View>,
 
     locked_view: RwLock<ViewPair>,
-    executed_view: RwLock<ExecutedView>,
+    executed_view: RwLock<ExecutedViewState>,
     leaf_view: RwLock<ViewPair>,
     highest_qc_view: RwLock<QuorumCertificatePair>,
 
@@ -34,9 +44,10 @@ pub struct Chain {
 }
 
 impl Chain {
+    #[allow(dead_code)]
     pub fn new(threshold: u64) -> Self {
         let view_pair = (0, Multihash::default());
-        let executed_view = ExecutedView {
+        let executed_view = ExecutedViewState {
             number: 0,
             hash: Multihash::default(),
             parent: Multihash::default(),
@@ -51,6 +62,25 @@ impl Chain {
             v_height: 0,
             votes: HashMap::new(),
             threshold,
+        }
+    }
+
+    pub fn from_state(state: ChainState) -> Self {
+        let executed_view = ExecutedViewState {
+            number: state.executed_view.number,
+            hash: state.executed_view.hash,
+            parent: state.executed_view.parent,
+        };
+
+        Self {
+            views: state.views,
+            locked_view: RwLock::new(state.locked_view),
+            executed_view: RwLock::new(executed_view),
+            leaf_view: RwLock::new(state.leaf_view),
+            highest_qc_view: RwLock::new(state.highest_qc_view),
+            v_height: state.v_height,
+            votes: HashMap::new(),
+            threshold: state.threshold,
         }
     }
 
@@ -139,10 +169,6 @@ impl Chain {
         cmds
     }
 
-    pub fn v_height(&self) -> ViewNumber {
-        self.v_height
-    }
-
     pub async fn locked_view_number(&self) -> ViewNumber {
         self.locked_view.read().await.0
     }
@@ -159,25 +185,8 @@ impl Chain {
         self.highest_qc_view.read().await.0
     }
 
-    pub async fn locked_view_hash(&self) -> Multihash {
-        self.locked_view.read().await.1
-    }
-
     pub async fn executed_view_hash(&self) -> Multihash {
         self.executed_view.read().await.hash
-    }
-
-    pub async fn leaf_view_hash(&self) -> Multihash {
-        self.leaf_view.read().await.1
-    }
-
-    pub async fn highest_qc_view_hash(&self) -> Multihash {
-        self.highest_qc_view.read().await.1.view
-    }
-
-    pub async fn locked_view(&self) -> &View {
-        let hash = self.locked_view_hash().await;
-        self.get_view(&hash).expect("Locked view not found")
     }
 
     pub async fn executed_view(&self) -> &View {
@@ -193,16 +202,6 @@ impl Chain {
         let parent_hash = self.executed_view_parent().await;
         self.get_view(&parent_hash)
             .expect("Executed view parent not found")
-    }
-
-    pub async fn leaf_view(&self) -> &View {
-        let hash = self.leaf_view_hash().await;
-        self.get_view(&hash).expect("Leaf view not found")
-    }
-
-    pub async fn highest_qc_view(&self) -> &View {
-        let hash = self.highest_qc_view_hash().await;
-        self.get_view(&hash).expect("Highest QC view not found")
     }
 
     pub async fn is_safe_view(&self, view_hash: &Multihash) -> bool {
@@ -305,6 +304,33 @@ impl Chain {
             block,
             highest_qc,
         ))
+    }
+
+    #[allow(dead_code)]
+    pub async fn export_state(&self) -> ChainState {
+        let executed_view = self.executed_view.read().await;
+        let executed_view_number = executed_view.number;
+
+        let relevant_views: HashMap<Multihash, View> = self
+            .views
+            .iter()
+            .filter(|(_, view)| view.number >= executed_view_number)
+            .map(|(hash, view)| (*hash, view.clone()))
+            .collect();
+
+        ChainState {
+            views: relevant_views,
+            locked_view: *self.locked_view.read().await,
+            executed_view: ExecutedViewState {
+                number: executed_view.number,
+                hash: executed_view.hash,
+                parent: executed_view.parent,
+            },
+            leaf_view: *self.leaf_view.read().await,
+            highest_qc_view: self.highest_qc_view.read().await.clone(),
+            v_height: self.v_height,
+            threshold: self.threshold,
+        }
     }
 }
 

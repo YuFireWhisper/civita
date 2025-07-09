@@ -12,6 +12,10 @@ use crate::{
 };
 
 type Result<T> = std::result::Result<T, Error>;
+type ValidationPair = (
+    mpsc::Sender<(Multihash, bool)>,
+    mpsc::Receiver<MultiProposal>,
+);
 
 const CHANNEL_CAPACITY: usize = 100;
 
@@ -32,17 +36,13 @@ enum InboundAction {
     Get,
     Remove(HashSet<Multihash>),
     ChangeRoot(Multihash),
-    ValidateResult((Multihash, bool)),
-}
-
-enum OutboundAction {
-    GetResult(Box<BTreeMap<Multihash, MultiProposal>>),
-    Validate(MultiProposal),
 }
 
 struct ProposalPoolInner<H> {
     inbound_rx: mpsc::Receiver<InboundAction>,
-    outbound_tx: mpsc::Sender<OutboundAction>,
+    result_tx: mpsc::Sender<BTreeMap<Multihash, MultiProposal>>,
+    req_validation_tx: mpsc::Sender<MultiProposal>,
+    resp_validation_rx: mpsc::Receiver<(Multihash, bool)>,
     prop_rx: mpsc::Receiver<Vec<u8>>,
     root_hash: Multihash,
     capacity: usize,
@@ -54,21 +54,25 @@ struct ProposalPoolInner<H> {
 pub struct ProposalPool<H> {
     handle: JoinHandle<()>,
     inbound_tx: mpsc::Sender<InboundAction>,
-    outbound_rx: mpsc::Receiver<OutboundAction>,
+    result_rx: mpsc::Receiver<BTreeMap<Multihash, MultiProposal>>,
     _marker: PhantomData<H>,
 }
 
 impl<H: Hasher> ProposalPoolInner<H> {
     pub fn spawn(
         inbound_rx: mpsc::Receiver<InboundAction>,
-        outbound_tx: mpsc::Sender<OutboundAction>,
+        result_tx: mpsc::Sender<BTreeMap<Multihash, MultiProposal>>,
+        req_validation_tx: mpsc::Sender<MultiProposal>,
+        resp_validation_rx: mpsc::Receiver<(Multihash, bool)>,
         prop_rx: mpsc::Receiver<Vec<u8>>,
         root_hash: Multihash,
         capacity: usize,
     ) -> JoinHandle<()> {
         let mut inner = Self {
             inbound_rx,
-            outbound_tx,
+            result_tx,
+            req_validation_tx,
+            resp_validation_rx,
             prop_rx,
             root_hash,
             capacity,
@@ -97,6 +101,18 @@ impl<H: Hasher> ProposalPoolInner<H> {
                     }
                 },
 
+                Some((id, valid)) = self.resp_validation_rx.recv() => {
+                    if let Some(prop) = self.pending_props.remove(&id) {
+                        if valid {
+                            self.validated_props.insert(id, prop);
+                        } else {
+                            log::warn!("Proposal with ID {id:?} was invalidated");
+                        }
+                    } else {
+                        log::warn!("Proposal with ID {id:?} not found in pending props");
+                    }
+                },
+
                 else => {
                     log::info!("Proposal pool task completed");
                     break;
@@ -109,9 +125,7 @@ impl<H: Hasher> ProposalPoolInner<H> {
         match action {
             InboundAction::Get => {
                 let result = std::mem::take(&mut self.validated_props);
-                self.outbound_tx
-                    .send(OutboundAction::GetResult(Box::new(result)))
-                    .await?;
+                self.result_tx.send(result).await?;
             }
             InboundAction::Remove(to_remove) => {
                 self.pending_props.retain(|k, _| !to_remove.contains(k));
@@ -121,17 +135,6 @@ impl<H: Hasher> ProposalPoolInner<H> {
                 self.root_hash = new_hash;
                 self.pending_props.clear();
                 self.validated_props.clear();
-            }
-            InboundAction::ValidateResult((id, valid)) => {
-                if let Some(prop) = self.pending_props.remove(&id) {
-                    if valid {
-                        self.validated_props.insert(id, prop);
-                    } else {
-                        log::warn!("Proposal with ID {id:?} was invalidated");
-                    }
-                } else {
-                    log::warn!("Proposal with ID {id:?} not found in pending props");
-                }
             }
         }
 
@@ -151,35 +154,48 @@ impl<H: Hasher> ProposalPoolInner<H> {
 
         let id = prop.generate_id::<H>();
         self.pending_props.insert(id, prop.clone());
-        self.outbound_tx
-            .send(OutboundAction::Validate(prop))
-            .await?;
-
+        self.req_validation_tx.send(prop).await?;
         Ok(())
     }
 }
 
 impl<H: Hasher> ProposalPool<H> {
-    pub fn new(prop_rx: mpsc::Receiver<Vec<u8>>, root_hash: Multihash, capacity: usize) -> Self {
+    pub fn new(
+        prop_rx: mpsc::Receiver<Vec<u8>>,
+        root_hash: Multihash,
+        capacity: usize,
+    ) -> (Self, ValidationPair) {
         let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (result_tx, result_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (req_validation_tx, req_validation_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (resp_validation_tx, resp_validation_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
-        let handle =
-            ProposalPoolInner::<H>::spawn(inbound_rx, outbound_tx, prop_rx, root_hash, capacity);
+        let handle = ProposalPoolInner::<H>::spawn(
+            inbound_rx,
+            result_tx,
+            req_validation_tx,
+            resp_validation_rx,
+            prop_rx,
+            root_hash,
+            capacity,
+        );
 
-        Self {
-            handle,
-            inbound_tx,
-            outbound_rx,
-            _marker: PhantomData,
-        }
+        (
+            Self {
+                handle,
+                inbound_tx,
+                result_rx,
+                _marker: PhantomData,
+            },
+            (resp_validation_tx, req_validation_rx),
+        )
     }
 
     pub async fn get(&mut self) -> Result<BTreeMap<Multihash, MultiProposal>> {
-        while self.outbound_rx.try_recv().is_ok() {}
+        while self.result_rx.try_recv().is_ok() {}
         self.inbound_tx.send(InboundAction::Get).await?;
-        match self.outbound_rx.recv().await {
-            Some(OutboundAction::GetResult(result)) => Ok(*result),
+        match self.result_rx.recv().await {
+            Some(result) => Ok(result),
             _ => Err(Error::Send("Failed to get proposals".to_string())),
         }
     }
@@ -189,6 +205,7 @@ impl<H: Hasher> ProposalPool<H> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn change_root(&self, new_hash: Multihash) -> Result<()> {
         self.inbound_tx
             .send(InboundAction::ChangeRoot(new_hash))
@@ -203,8 +220,14 @@ impl From<mpsc::error::SendError<InboundAction>> for Error {
     }
 }
 
-impl From<mpsc::error::SendError<OutboundAction>> for Error {
-    fn from(e: mpsc::error::SendError<OutboundAction>) -> Self {
+impl From<mpsc::error::SendError<BTreeMap<Multihash, MultiProposal>>> for Error {
+    fn from(e: mpsc::error::SendError<BTreeMap<Multihash, MultiProposal>>) -> Self {
+        Error::Send(e.to_string())
+    }
+}
+
+impl From<mpsc::error::SendError<MultiProposal>> for Error {
+    fn from(e: mpsc::error::SendError<MultiProposal>) -> Self {
         Error::Send(e.to_string())
     }
 }

@@ -17,6 +17,7 @@ use crate::{
         storage,
         transport::Transport,
     },
+    proposal::MultiProposal,
     resident,
     traits::serializable::{self, ConstantSize, Serializable},
     utils::mpt::{self, MerklePatriciaTrie},
@@ -38,13 +39,10 @@ pub enum Error {
 
     #[error("{0}")]
     ProposalPool(#[from] proposal_pool::Error),
-
-    #[error("{0}")]
-    Proposal(String),
 }
 
 pub struct Config {
-    pub proposal_topic: u8,
+    pub prop_topic: u8,
     pub view_topic: u8,
     pub vote_topic: u8,
 
@@ -79,11 +77,15 @@ impl<H: Hasher> Engine<H> {
         root: mpt::Node,
         record: Option<resident::Record>,
         config: Config,
-    ) -> Result<()> {
+    ) -> Result<(
+        mpsc::Sender<(Multihash, bool)>,
+        mpsc::Receiver<MultiProposal>,
+    )> {
         let gossipsub = transport.gossipsub();
         let sk = transport.secret_key().clone();
-        let rx = gossipsub.subscribe(config.proposal_topic).await?;
-        let prop_pool = ProposalPool::<H>::new(rx, root.hash::<H>(), config.proposal_pool_capacity);
+        let rx = gossipsub.subscribe(config.prop_topic).await?;
+        let (prop_pool, rx) =
+            ProposalPool::<H>::new(rx, root.hash::<H>(), config.proposal_pool_capacity);
         let randomizer = Randomizer::new(config.expected_leaders, config.expected_members);
         let records = MerklePatriciaTrie::<H>::new_with_root(root);
 
@@ -108,7 +110,7 @@ impl<H: Hasher> Engine<H> {
             log::info!("Engine stopped");
         });
 
-        Ok(())
+        Ok(rx)
     }
 
     async fn run(&mut self, mut cur_view: ViewNumber) -> Result<()> {
@@ -137,6 +139,9 @@ impl<H: Hasher> Engine<H> {
                 continue;
             };
 
+            self.prop_pool
+                .remove(view.block.props.keys().cloned().collect())
+                .await?;
             self.chain.add_view(view.clone());
             self.chain.update(&view.hash).await;
 
@@ -148,7 +153,7 @@ impl<H: Hasher> Engine<H> {
                 }
             }
 
-            self.collec_votes(&mut vote_rx, &view_hash).await;
+            self.collect_votes(&mut vote_rx, &view_hash).await;
             cur_view += 1;
         }
     }
@@ -375,7 +380,11 @@ impl<H: Hasher> Engine<H> {
         Some(record.stakes)
     }
 
-    async fn collec_votes(&mut self, vote_rx: &mut mpsc::Receiver<Vec<u8>>, view_hash: &Multihash) {
+    async fn collect_votes(
+        &mut self,
+        vote_rx: &mut mpsc::Receiver<Vec<u8>>,
+        view_hash: &Multihash,
+    ) {
         let timeout = tokio::time::sleep(self.config.wait_leader_timeout);
         tokio::pin!(timeout);
 
