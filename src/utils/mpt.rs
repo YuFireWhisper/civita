@@ -1,13 +1,11 @@
 use std::{collections::HashMap, marker::PhantomData, mem};
 
-use crate::{
-    crypto::{Hasher, Multihash},
-    utils::mpt::{node::Node, proof::ExistenceProof},
-};
+use crate::crypto::{Hasher, Multihash};
 
 mod node;
-pub mod proof;
+mod proof;
 
+pub use node::Node;
 pub use proof::Proof;
 
 pub type Nibble = u8; // 0-15
@@ -20,7 +18,7 @@ struct PathTrie {
     is_single_path: bool,
 }
 
-pub struct MerklePatriciaTrie<H: Hasher> {
+pub struct MerklePatriciaTrie<H> {
     root_hash: Multihash,
     staged: PathTrie,
     nodes: HashMap<Multihash, Node>,
@@ -129,6 +127,19 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         Self::default()
     }
 
+    pub fn new_with_root(root: Node) -> Self {
+        let root_hash = root.hash::<H>();
+        let mut nodes = HashMap::new();
+        nodes.insert(root_hash, root);
+
+        Self {
+            root_hash,
+            staged: PathTrie::default(),
+            nodes,
+            _marker: PhantomData,
+        }
+    }
+
     pub fn insert_raw(&mut self, key: &[u8], value: Multihash) {
         let path = bytes_to_nibbles(key);
         self.staged.insert(&path, value);
@@ -167,7 +178,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
 
         let mut changeds = HashMap::new();
         let staged = mem::take(&mut self.staged);
-        let new_root = self.apply(&self.root_hash, &staged, &mut Some(&mut changeds));
+        let new_root = self.apply(&self.root_hash, &staged, &mut changeds);
 
         changeds.extend(self.nodes.iter().map(|(k, v)| (*k, v.clone())));
 
@@ -181,7 +192,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         &self,
         node_hash: &Multihash,
         path_trie: &PathTrie,
-        changeds: &mut Option<&mut HashMap<Multihash, Node>>,
+        changeds: &mut HashMap<Multihash, Node>,
     ) -> Node {
         let node = self.nodes.get(node_hash).unwrap().clone();
 
@@ -202,7 +213,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
     fn create_new_subtree(
         &self,
         path_trie: &PathTrie,
-        changed_nodes: &mut Option<&mut HashMap<Multihash, Node>>,
+        changed_nodes: &mut HashMap<Multihash, Node>,
     ) -> Node {
         if let Some((path, value)) = path_trie.get_single_path() {
             return Node::new_leaf(path, value);
@@ -214,7 +225,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
     fn create_branch_from_path_trie(
         &self,
         path_trie: &PathTrie,
-        changed_nodes: &mut Option<&mut HashMap<Multihash, Node>>,
+        changed_nodes: &mut HashMap<Multihash, Node>,
     ) -> Node {
         let mut children: [Option<Multihash>; 16] = [None; 16];
         let branch_value = path_trie.get_value_at_empty_path();
@@ -224,11 +235,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
             if !child_trie.is_empty() {
                 let child_node = self.create_new_subtree(&child_trie, changed_nodes);
                 let child_hash = child_node.hash::<H>();
-
-                if let Some(nodes) = changed_nodes {
-                    nodes.insert(child_hash, child_node);
-                }
-
+                changed_nodes.insert(child_hash, child_node);
                 *child = Some(child_hash);
             }
         });
@@ -244,7 +251,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         leaf_path: Vec<Nibble>,
         leaf_value: Multihash,
         path_trie: &PathTrie,
-        changeds: &mut Option<&mut HashMap<Multihash, Node>>,
+        changeds: &mut HashMap<Multihash, Node>,
     ) -> Node {
         let common_prefix = path_trie.find_common_prefix_with(&leaf_path);
 
@@ -263,7 +270,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         leaf_value: Multihash,
         path_trie: &PathTrie,
         common_prefix: Vec<Nibble>,
-        changed_nodes: &mut Option<&mut HashMap<Multihash, Node>>,
+        changed_nodes: &mut HashMap<Multihash, Node>,
     ) -> Node {
         let leaf_remaining = &leaf_path[common_prefix.len()..];
 
@@ -275,11 +282,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         } else {
             let leaf_child = Node::new_leaf(leaf_remaining[1..].to_vec(), leaf_value);
             let leaf_child_hash = leaf_child.hash::<H>();
-
-            if let Some(ref mut nodes) = changed_nodes {
-                nodes.insert(leaf_child_hash, leaf_child);
-            }
-
+            changed_nodes.insert(leaf_child_hash, leaf_child);
             branch_children[leaf_remaining[0] as usize] = Some(leaf_child_hash);
         }
 
@@ -297,11 +300,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
                 if !child_trie.is_empty() {
                     let child_node = self.create_new_subtree(&child_trie, changed_nodes);
                     let child_hash = child_node.hash::<H>();
-
-                    if let Some(ref mut nodes) = changed_nodes {
-                        nodes.insert(child_hash, child_node);
-                    }
-
+                    changed_nodes.insert(child_hash, child_node);
                     *child = Some(child_hash);
                 }
             });
@@ -315,11 +314,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
             branch
         } else {
             let branch_hash = branch.hash::<H>();
-
-            if let Some(ref mut nodes) = changed_nodes {
-                nodes.insert(branch_hash, branch.clone());
-            }
-
+            changed_nodes.insert(branch_hash, branch.clone());
             Node::Extension {
                 path: common_prefix,
                 child: branch_hash,
@@ -332,7 +327,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         ext_path: Vec<Nibble>,
         child_hash: Multihash,
         path_trie: &PathTrie,
-        changed_nodes: &mut Option<&mut HashMap<Multihash, Node>>,
+        changed_nodes: &mut HashMap<Multihash, Node>,
     ) -> Node {
         let common_prefix = path_trie.find_common_prefix_with(&ext_path);
 
@@ -340,11 +335,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
             let remaining_trie = path_trie.get_subtrie_after_prefix(&ext_path);
             let new_child = self.apply(&child_hash, &remaining_trie, changed_nodes);
             let new_child_hash = new_child.hash::<H>();
-
-            if let Some(ref mut nodes) = changed_nodes {
-                nodes.insert(new_child_hash, new_child);
-            }
-
+            changed_nodes.insert(new_child_hash, new_child);
             return Node::Extension {
                 path: ext_path,
                 child: new_child_hash,
@@ -366,7 +357,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         child_hash: Multihash,
         path_trie: &PathTrie,
         common_prefix: Vec<Nibble>,
-        changed_nodes: &mut Option<&mut HashMap<Multihash, Node>>,
+        changed_nodes: &mut HashMap<Multihash, Node>,
     ) -> Node {
         let ext_remaining = &ext_path[common_prefix.len()..];
 
@@ -383,11 +374,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
                 child: child_hash,
             };
             let new_ext_hash = new_ext.hash::<H>();
-
-            if let Some(ref mut nodes) = changed_nodes {
-                nodes.insert(new_ext_hash, new_ext);
-            }
-
+            changed_nodes.insert(new_ext_hash, new_ext);
             branch_children[ext_remaining[0] as usize] = Some(new_ext_hash);
         }
 
@@ -405,11 +392,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
                 if !child_trie.is_empty() {
                     let child_node = self.create_new_subtree(&child_trie, changed_nodes);
                     let child_hash = child_node.hash::<H>();
-
-                    if let Some(ref mut nodes) = changed_nodes {
-                        nodes.insert(child_hash, child_node);
-                    }
-
+                    changed_nodes.insert(child_hash, child_node);
                     *child = Some(child_hash);
                 }
             });
@@ -423,11 +406,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
             branch
         } else {
             let branch_hash = branch.hash::<H>();
-
-            if let Some(ref mut nodes) = changed_nodes {
-                nodes.insert(branch_hash, branch.clone());
-            }
-
+            changed_nodes.insert(branch_hash, branch.clone());
             Node::Extension {
                 path: common_prefix,
                 child: branch_hash,
@@ -440,7 +419,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         mut children: [Option<Multihash>; 16],
         branch_value: Option<Multihash>,
         path_trie: &PathTrie,
-        changed_nodes: &mut Option<&mut HashMap<Multihash, Node>>,
+        changed_nodes: &mut HashMap<Multihash, Node>,
     ) -> Node {
         let mut new_value = branch_value;
 
@@ -454,11 +433,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
                 let child_hash = child.unwrap_or_else(|| Node::Empty.hash::<H>());
                 let new_child = self.apply(&child_hash, &child_trie, changed_nodes);
                 let new_child_hash = new_child.hash::<H>();
-
-                if let Some(ref mut nodes) = changed_nodes {
-                    nodes.insert(new_child_hash, new_child);
-                }
-
+                changed_nodes.insert(new_child_hash, new_child);
                 *child = Some(new_child_hash);
             }
         });
@@ -469,13 +444,16 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         }
     }
 
-    pub fn uncommit_root(&self) -> Multihash {
+    pub fn uncommit_root(&self) -> (Multihash, HashMap<Multihash, Node>) {
         if self.staged.is_empty() {
-            return self.root_hash;
+            return (self.root_hash, HashMap::new());
         }
 
-        let new_root = self.apply(&self.root_hash, &self.staged, &mut None);
-        new_root.hash::<H>()
+        let mut changeds = HashMap::new();
+        let new_root = self.apply(&self.root_hash, &self.staged, &mut changeds);
+        let new_root_hash = new_root.hash::<H>();
+
+        (new_root_hash, changeds)
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Multihash> {
@@ -528,83 +506,7 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
         }
     }
 
-    pub fn generate_existence_proof(&self, key: &[u8], value: &[u8]) -> Option<Proof> {
-        let path = bytes_to_nibbles(key);
-        let value_hash = H::hash(value);
-
-        if let Some(stored_hash) = self.get_from_node(&self.root_hash, &path) {
-            if stored_hash != value_hash {
-                return None;
-            }
-        } else {
-            return None;
-        }
-
-        let mut proof_nodes = Vec::new();
-        let mut current_hash = self.root_hash;
-        let mut current_path = path.as_slice();
-
-        loop {
-            let node = self.nodes.get(&current_hash)?;
-            proof_nodes.push(node.clone());
-
-            match node {
-                Node::Empty => return None,
-                Node::Leaf {
-                    path: leaf_path,
-                    value: leaf_value,
-                } => {
-                    if leaf_path == current_path && *leaf_value == value_hash {
-                        return Some(Proof::new_existence(
-                            key.to_vec(),
-                            value.to_vec(),
-                            proof_nodes,
-                        ));
-                    } else {
-                        return None;
-                    }
-                }
-                Node::Extension {
-                    path: ext_path,
-                    child,
-                } => {
-                    if current_path.starts_with(ext_path) {
-                        current_path = &current_path[ext_path.len()..];
-                        current_hash = *child;
-                    } else {
-                        return None;
-                    }
-                }
-                Node::Branch {
-                    children,
-                    value: branch_value,
-                } => {
-                    if current_path.is_empty() {
-                        if let Some(stored_value) = branch_value {
-                            if *stored_value == value_hash {
-                                return Some(Proof::Existence(ExistenceProof {
-                                    key: key.to_vec(),
-                                    value: value.to_vec(),
-                                    nodes: proof_nodes,
-                                }));
-                            }
-                        }
-                        return None;
-                    } else {
-                        let nibble = current_path[0];
-                        if let Some(child_hash) = &children[nibble as usize] {
-                            current_path = &current_path[1..];
-                            current_hash = *child_hash;
-                        } else {
-                            return None;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn generate_non_existence_proof(&self, key: &[u8]) -> Option<Proof> {
+    pub fn generate_proof(&self, key: &[u8], expected_value: Option<Vec<u8>>) -> Option<Proof> {
         let path = bytes_to_nibbles(key);
 
         let mut proof_nodes = Vec::new();
@@ -616,52 +518,81 @@ impl<H: Hasher> MerklePatriciaTrie<H> {
             proof_nodes.push(node.clone());
 
             match node {
-                Node::Empty => {
-                    return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
-                }
-                Node::Leaf {
-                    path: leaf_path, ..
-                } => {
-                    if leaf_path != cur_path {
-                        return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
-                    } else {
+                Node::Empty => return None,
+                Node::Leaf { path, value } => {
+                    let Some(expected_value) = expected_value else {
+                        if path != cur_path {
+                            return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
+                        }
+                        return None;
+                    };
+
+                    if path != cur_path {
                         return None;
                     }
+
+                    if H::hash(&expected_value) == *value {
+                        return Some(Proof::new_existence(
+                            key.to_vec(),
+                            expected_value,
+                            proof_nodes,
+                        ));
+                    }
+
+                    return None;
                 }
                 Node::Extension {
                     path: ext_path,
                     child,
                 } => {
                     if cur_path.starts_with(ext_path) {
-                        cur_path = &cur_path[ext_path.len()..];
+                        cur_path = &cur_path[path.len()..];
                         cur_hash = *child;
                     } else {
-                        return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
+                        if expected_value.is_none() {
+                            return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
+                        }
+                        return None;
                     }
                 }
                 Node::Branch { children, value } => {
                     if cur_path.is_empty() {
-                        if value.is_none() {
-                            return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
-                        } else {
+                        if expected_value.is_some() != value.is_some() {
                             return None;
                         }
-                    } else {
-                        let nibble = cur_path[0];
-                        if nibble >= 16 {
-                            return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
+
+                        if value.is_some() {
+                            return Some(Proof::new_existence(
+                                key.to_vec(),
+                                expected_value.unwrap(),
+                                proof_nodes,
+                            ));
                         }
 
-                        if let Some(child_hash) = &children[nibble as usize] {
-                            cur_path = &cur_path[1..];
-                            cur_hash = *child_hash;
-                        } else {
+                        return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
+                    }
+
+                    let idx = cur_path[0] as usize;
+                    if idx >= 16 {
+                        return None;
+                    }
+
+                    if let Some(child) = &children[idx] {
+                        cur_path = &cur_path[1..];
+                        cur_hash = *child;
+                    } else {
+                        if expected_value.is_none() {
                             return Some(Proof::new_non_existence(key.to_vec(), proof_nodes));
                         }
+                        return None;
                     }
                 }
             }
         }
+    }
+
+    pub fn clear(&mut self) {
+        std::mem::take(&mut self.staged);
     }
 }
 
@@ -739,7 +670,7 @@ mod tests {
         mpt.commit();
 
         let existence_proof = mpt
-            .generate_existence_proof(key, value)
+            .generate_proof(key, Some(value.to_vec()))
             .expect("Failed to generate existence proof");
 
         assert!(existence_proof.verify::<TestHasher>(&mpt.root_hash));

@@ -1,40 +1,50 @@
 use crate::{
     crypto::{Hasher, Multihash},
-    utils::mpt::node::Node,
+    traits::{serializable, Serializable},
+    utils::mpt::{bytes_to_nibbles, node::Node},
 };
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
-pub struct ExistenceProof {
-    pub key: Vec<u8>,
-    pub value: Vec<u8>,
-    pub nodes: Vec<Node>,
+pub struct Proof {
+    key: Vec<u8>,
+    value: Option<Vec<u8>>,
+    nodes: Vec<Node>,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
-pub struct NonExistenceProof {
-    pub key: Vec<u8>,
-    pub nodes: Vec<Node>,
-}
+impl Proof {
+    pub fn new_existence(key: Vec<u8>, value: Vec<u8>, nodes: Vec<Node>) -> Self {
+        Proof {
+            key,
+            value: Some(value),
+            nodes,
+        }
+    }
 
-#[derive(Clone)]
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
-pub enum Proof {
-    Existence(ExistenceProof),
-    NonExistence(NonExistenceProof),
-}
+    pub fn new_non_existence(key: Vec<u8>, nodes: Vec<Node>) -> Self {
+        Proof {
+            key,
+            value: None,
+            nodes,
+        }
+    }
 
-impl ExistenceProof {
+    pub fn is_existence(&self) -> bool {
+        self.value.is_some()
+    }
+
+    pub fn is_non_existence(&self) -> bool {
+        self.value.is_none()
+    }
+
     pub fn verify<H: Hasher>(&self, root_hash: &Multihash) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
 
-        let mut cur_path = self.key.as_slice();
+        let path = bytes_to_nibbles(&self.key);
+        let mut cur_path = path.as_slice();
         let mut cur_hash = root_hash;
 
         if self.nodes.len() == 1 {
@@ -55,14 +65,21 @@ impl ExistenceProof {
                         return false;
                     }
 
-                    let value_hash = H::hash(&self.value);
+                    if path != cur_path {
+                        return self.is_non_existence();
+                    }
 
-                    return path == cur_path && value == &value_hash;
+                    if let Some(expected_value) = &self.value {
+                        let stored_hash = H::hash(expected_value);
+                        return value == &stored_hash;
+                    } else {
+                        return false;
+                    }
                 }
 
                 Node::Extension { path, child } => {
                     if !cur_path.starts_with(path) {
-                        return false;
+                        return self.is_non_existence();
                     }
 
                     cur_path = &cur_path[path.len()..];
@@ -70,8 +87,16 @@ impl ExistenceProof {
                 }
                 Node::Branch { children, value } => {
                     if cur_path.is_empty() {
-                        return value.as_ref().is_some_and(|v| v == &H::hash(&self.value))
-                            && i == self.nodes.len() - 1;
+                        match (&self.value, value) {
+                            (Some(expected_value), Some(stored_value)) => {
+                                let stored_hash = H::hash(expected_value);
+                                return stored_value == &stored_hash && i == self.nodes.len() - 1;
+                            }
+                            (None, None) => {
+                                return i == self.nodes.len() - 1;
+                            }
+                            _ => return false,
+                        }
                     }
 
                     let idx = cur_path[0] as usize;
@@ -84,7 +109,7 @@ impl ExistenceProof {
                         cur_path = &cur_path[1..];
                         cur_hash = child;
                     } else {
-                        return false;
+                        return self.is_non_existence();
                     }
                 }
             }
@@ -92,98 +117,53 @@ impl ExistenceProof {
 
         false
     }
-}
 
-impl NonExistenceProof {
-    pub fn verify<H: Hasher>(&self, root_hash: &Multihash) -> bool {
-        if self.nodes.is_empty() {
-            return false;
-        }
-
-        let mut cur_path = self.key.as_slice();
-        let mut cur_hash = root_hash;
-
-        if self.nodes.len() == 1 {
-            return self.nodes[0].hash::<H>() == *cur_hash;
-        }
-
-        for node in &self.nodes {
-            if node.hash::<H>() != *cur_hash {
-                return false;
-            }
-
-            match &node {
-                Node::Empty => {
-                    return false;
-                }
-                Node::Leaf { path, .. } => {
-                    return path != cur_path;
-                }
-                Node::Extension { path, child } => {
-                    if !cur_path.starts_with(path) {
-                        return false;
-                    }
-
-                    cur_path = &cur_path[path.len()..];
-                    cur_hash = child;
-                }
-                Node::Branch { children, value } => {
-                    if cur_path.is_empty() {
-                        return value.is_none();
-                    }
-
-                    let idx = cur_path[0] as usize;
-
-                    if idx >= 16 {
-                        return false;
-                    }
-
-                    if let Some(child) = &children[idx] {
-                        cur_path = &cur_path[1..];
-                        cur_hash = child;
-                    }
-                }
-            }
-        }
-
-        false
-    }
-}
-
-impl Proof {
-    pub fn new_existence(key: Vec<u8>, value: Vec<u8>, nodes: Vec<Node>) -> Self {
-        Proof::Existence(ExistenceProof { key, value, nodes })
+    pub fn verify_existence<H: Hasher>(&self, root_hash: &Multihash, key: &[u8]) -> bool {
+        self.key == key && self.is_existence() && self.verify::<H>(root_hash)
     }
 
-    pub fn new_non_existence(key: Vec<u8>, nodes: Vec<Node>) -> Self {
-        Proof::NonExistence(NonExistenceProof { key, nodes })
+    pub fn verify_non_existence<H: Hasher>(&self, root_hash: &Multihash, key: &[u8]) -> bool {
+        self.key == key && self.is_non_existence() && self.verify::<H>(root_hash)
     }
 
-    pub fn verify<H: Hasher>(&self, root_hash: &Multihash) -> bool {
-        match self {
-            Proof::Existence(p) => p.verify::<H>(root_hash),
-            Proof::NonExistence(p) => p.verify::<H>(root_hash),
-        }
+    pub fn verify_with_key<H: Hasher>(&self, root_hash: &Multihash, key: &[u8]) -> bool {
+        self.key == key && self.verify::<H>(root_hash)
     }
 
     pub fn key(&self) -> &[u8] {
-        match self {
-            Proof::Existence(p) => &p.key,
-            Proof::NonExistence(p) => &p.key,
-        }
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&Vec<u8>> {
+        self.value.as_ref()
     }
 
     pub fn nodes(&self) -> &[Node] {
-        match self {
-            Proof::Existence(p) => &p.nodes,
-            Proof::NonExistence(p) => &p.nodes,
-        }
+        &self.nodes
     }
 
     pub fn nodes_into(self) -> Vec<Node> {
-        match self {
-            Proof::Existence(p) => p.nodes,
-            Proof::NonExistence(p) => p.nodes,
-        }
+        self.nodes
+    }
+}
+
+impl Serializable for Proof {
+    fn serialized_size(&self) -> usize {
+        self.key.serialized_size() + self.value.serialized_size() + self.nodes.serialized_size()
+    }
+
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        Ok(Self {
+            key: Vec::from_reader(reader)?,
+            value: Option::from_reader(reader)?,
+            nodes: Vec::from_reader(reader)?,
+        })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.key.to_writer(writer)?;
+        self.value.to_writer(writer)?;
+        self.nodes.to_writer(writer)?;
+        Ok(())
     }
 }
