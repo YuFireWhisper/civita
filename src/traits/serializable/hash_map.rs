@@ -33,14 +33,12 @@ where
         Ok(map)
     }
 
-    fn to_writer<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
-        self.len().to_writer(writer)?;
+    fn to_writer<W: Write>(&self, writer: &mut W) {
+        self.len().to_writer(writer);
 
         for (key, value) in self {
-            key.to_writer(writer)?;
-            value.to_writer(writer)?;
+            key.to_writer(writer);
+            value.to_writer(writer);
         }
-
-        Ok(())
     }
 }

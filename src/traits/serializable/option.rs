@@ -21,15 +21,14 @@ where
         }
     }
 
-    fn to_writer<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
+    fn to_writer<W: Write>(&self, writer: &mut W) {
         match self {
             Some(value) => {
-                1u8.to_writer(writer)?;
-                value.to_writer(writer)?;
+                1u8.to_writer(writer);
+                value.to_writer(writer);
             }
-            None => 0u8.to_writer(writer)?,
+            None => 0u8.to_writer(writer),
         }
-        Ok(())
     }
 }
 

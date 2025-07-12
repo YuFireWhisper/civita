@@ -29,7 +29,7 @@ impl Storage {
     where
         T: Serializable,
     {
-        self.records.insert(key, value.to_vec()?);
+        self.records.insert(key, value.to_vec());
         Ok(())
     }
 
@@ -49,7 +49,7 @@ impl Storage {
     {
         self.records
             .get(key)
-            .map(|record| T::from_slice(&record.value()).map_err(Error::from))
+            .map(|record| T::from_slice(record.value()).map_err(Error::from))
             .transpose()
     }
 }

@@ -226,7 +226,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
             Node::Short(ref mut short) => {
                 Self::commit_node(&mut short.val, false, pending);
 
-                let bytes = short.to_vec().expect("Failed to serialize short node");
+                let bytes = short.to_vec();
 
                 if bytes.len() < 32 && !force {
                     return;
@@ -245,7 +245,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
                     }
                 });
 
-                let bytes = full.to_vec().expect("Failed to serialize full node");
+                let bytes = full.to_vec();
 
                 if bytes.len() < 32 && !force {
                     return;
@@ -298,7 +298,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
         nodes.push(self.root.clone());
 
         for n in nodes.iter() {
-            let enc = n.to_vec().expect("Failed to serialize node");
+            let enc = n.to_vec();
             let hash = n.cache().cloned().unwrap_or(H::hash(&enc));
             proof_db.insert(hash, enc);
         }
@@ -310,9 +310,11 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
         let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
-        let mut expected_hash = self.root.cache().cloned().unwrap_or_else(|| {
-            H::hash(&self.root.to_vec().expect("Failed to serialize root node"))
-        });
+        let mut expected_hash = self
+            .root
+            .cache()
+            .cloned()
+            .unwrap_or_else(|| H::hash(&self.root.to_vec()));
 
         loop {
             let cur = proof_db.get(&expected_hash)?;

@@ -16,9 +16,8 @@ macro_rules! impl_serializable_for_numeric {
                     Ok(<$type>::from_ne_bytes(buffer))
                 }
 
-                fn to_writer<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
-                    writer.write_all(&self.to_ne_bytes())?;
-                    Ok(())
+                fn to_writer<W: Write>(&self, writer: &mut W) {
+                    writer.write_all(&self.to_ne_bytes()).expect("Failed to write numeric value");
                 }
             }
 

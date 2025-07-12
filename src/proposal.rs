@@ -57,9 +57,7 @@ pub struct Proposal {
 
 impl Payload {
     pub fn hash<H: Hasher>(&self) -> Multihash {
-        *self
-            .hash_cache
-            .get_or_init(|| H::hash(&self.to_vec().expect("Payload should be serializable")))
+        *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
 
     pub fn sign<H: Hasher>(&self, sk: &SecretKey) -> Signature {
@@ -91,10 +89,9 @@ impl Serializable for Diff {
         Ok(Self { from, to })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.from.to_writer(writer)?;
-        self.to.to_writer(writer)?;
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.from.to_writer(writer);
+        self.to.to_writer(writer);
     }
 }
 impl Serializable for Payload {
@@ -125,16 +122,14 @@ impl Serializable for Payload {
         })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.code.to_writer(writer)?;
-        self.parent_root.to_writer(writer)?;
-        self.diff.to_writer(writer)?;
-        self.total_stakes_diff.to_writer(writer)?;
-        self.proposer_pk.to_writer(writer)?;
-        self.proposer_data.to_writer(writer)?;
-        self.proposal_stakes.to_writer(writer)?;
-
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.code.to_writer(writer);
+        self.parent_root.to_writer(writer);
+        self.diff.to_writer(writer);
+        self.total_stakes_diff.to_writer(writer);
+        self.proposer_pk.to_writer(writer);
+        self.proposer_data.to_writer(writer);
+        self.proposal_stakes.to_writer(writer);
     }
 }
 
@@ -151,10 +146,9 @@ impl Serializable for Witness {
         Ok(Self { sig, proofs })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.sig.to_writer(writer)?;
-        self.proofs.to_writer(writer)?;
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.sig.to_writer(writer);
+        self.proofs.to_writer(writer);
     }
 }
 
@@ -172,10 +166,9 @@ impl Serializable for Proposal {
         })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.payload.to_writer(writer)?;
-        self.witness.to_writer(writer)?;
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.payload.to_writer(writer);
+        self.witness.to_writer(writer);
     }
 }
 
@@ -219,7 +212,7 @@ mod tests {
         let prop = setup();
         let payload = prop.payload.clone();
 
-        let enc = payload.to_vec().expect("Payload should be serializable");
+        let enc = payload.to_vec();
         let dec = Payload::from_slice(&enc).expect("Payload should be deserializable");
 
         assert_eq!(
@@ -233,7 +226,7 @@ mod tests {
         let prop = setup();
         let witness = prop.witness.clone();
 
-        let enc = witness.to_vec().expect("Witness should be serializable");
+        let enc = witness.to_vec();
         let dec = Witness::from_slice(&enc).expect("Witness should be deserializable");
 
         assert_eq!(
@@ -246,7 +239,7 @@ mod tests {
     fn proposal_serialization() {
         let prop = setup();
 
-        let enc = prop.to_vec().expect("Proposal should be serializable");
+        let enc = prop.to_vec();
         let dec = Proposal::from_slice(&enc).expect("Proposal should be deserializable");
 
         assert_eq!(prop, dec, "Deserialized proposal should match the original");
