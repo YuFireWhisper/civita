@@ -6,6 +6,5 @@ pub mod vrf;
 
 pub use public_key::PublicKey;
 pub use secret_key::SecretKey;
-pub use signature::Signature;
 pub use signature::Signer;
 pub use signature::VerifiySignature;
