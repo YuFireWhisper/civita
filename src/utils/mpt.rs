@@ -4,7 +4,7 @@ use crate::{
     crypto::{Hasher, Multihash},
     traits::Serializable,
     utils::mpt::{
-        keys::{bytes_to_hex, prefix_len},
+        keys::{prefix_len, slice_to_hex},
         node::{Flags, Full, Short},
     },
 };
@@ -55,7 +55,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
     }
 
     pub fn update(&mut self, key: &[u8], val: Node) -> Result<()> {
-        let key_vec = bytes_to_hex(key);
+        let key_vec = slice_to_hex(key);
         let key = key_vec.as_slice();
 
         let root = std::mem::take(&mut self.root);
@@ -171,7 +171,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Node> {
-        let key = bytes_to_hex(key);
+        let key = slice_to_hex(key);
         Self::get_node(&self.root, &key, 0)
     }
 
@@ -262,7 +262,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
     }
 
     pub fn prove(&self, key: &[u8], proof_db: &mut HashMap<Multihash, Vec<u8>>) -> Result<bool> {
-        let key_vec = bytes_to_hex(key);
+        let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
         let mut prefix = Vec::new();
@@ -307,7 +307,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
     }
 
     pub fn verify_proof(&self, key: &[u8], proof_db: &HashMap<Multihash, Vec<u8>>) -> Option<Node> {
-        let key_vec = bytes_to_hex(key);
+        let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
         let mut expected_hash = self.root.cache().cloned().unwrap_or_else(|| {
@@ -393,11 +393,12 @@ mod tests {
 
     #[test]
     fn insert_and_commit() {
-        const KEY: &[u8] = &[0x1, 0x2, 0x3, 0x04];
-        const VALUE: &[u8] = &[0x5, 0x6, 0x7, 0x8];
-        const HASH_INPUT: &[u8] = &[2, 5, 32, 1, 2, 3, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 5, 6, 7, 8];
-
-        let expected_hash = TestHasher::hash(HASH_INPUT);
+        const KEY: &[u8] = &[1, 2, 3, 4];
+        const VALUE: &[u8] = &[5, 6, 7, 8];
+        const EXP: &[u8; 32] = &[
+            58, 79, 249, 90, 58, 219, 221, 240, 229, 209, 57, 149, 231, 28, 21, 178, 202, 43, 227,
+            210, 238, 35, 24, 224, 18, 68, 190, 14, 180, 23, 173, 189,
+        ];
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
@@ -406,13 +407,13 @@ mod tests {
 
         let hash = mpt.commit().expect("Failed to commit MPT");
 
-        assert_eq!(hash.to_bytes(), expected_hash.to_bytes());
+        assert_eq!(hash.digest(), EXP);
     }
 
     #[test]
     fn return_value_if_key_found() {
-        const KEY: &[u8] = &[0x1, 0x2, 0x3, 0x04];
-        const VALUE: &[u8] = &[0x5, 0x6, 0x7, 0x8];
+        const KEY: &[u8] = &[1, 2, 3, 4];
+        const VALUE: &[u8] = &[5, 6, 7, 8];
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
@@ -428,9 +429,9 @@ mod tests {
 
     #[test]
     fn return_none_if_key_not_found() {
-        const KEY: &[u8] = &[0x1, 0x2, 0x3, 0x04];
-        const VALUE: &[u8] = &[0x5, 0x6, 0x7, 0x8];
-        const NON_EXISTENT_KEY: &[u8] = &[0x9, 0xa, 0xb];
+        const KEY: &[u8] = &[1, 2, 3, 4];
+        const VALUE: &[u8] = &[5, 6, 7, 8];
+        const NON_EXISTENT_KEY: &[u8] = &[9, 10, 11];
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
@@ -445,8 +446,8 @@ mod tests {
 
     #[test]
     fn prove_and_verify() {
-        const KEY: &[u8] = &[0x1, 0x2, 0x3, 0x04];
-        const VALUE: &[u8] = &[0x5, 0x6, 0x7, 0x8];
+        const KEY: &[u8] = &[1, 2, 3, 4];
+        const VALUE: &[u8] = &[5, 6, 7, 8];
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 

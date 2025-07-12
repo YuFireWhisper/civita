@@ -1,7 +1,7 @@
 use crate::{
     crypto::Multihash,
     traits::{serializable, Serializable},
-    utils::mpt::keys::{compact_to_hex, hex_to_compact},
+    utils::mpt::keys::{hex_to_vec, vec_to_hex},
 };
 
 pub(super) const EMPTY_TAG: u8 = 0x00;
@@ -216,11 +216,11 @@ impl Serializable for Short {
     }
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let compact_len = u8::from_reader(reader)?;
-        let mut compact = vec![0u8; compact_len as usize];
+        let len = u8::from_reader(reader)?;
+        let mut vec = vec![0u8; len as usize];
+        reader.read_exact(&mut vec)?;
 
-        reader.read_exact(&mut compact)?;
-        let key = compact_to_hex(&compact);
+        let key = vec_to_hex(vec);
 
         Ok(Short {
             key,
@@ -232,11 +232,14 @@ impl Serializable for Short {
     fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
         SHORT_TAG.to_writer(writer)?;
 
-        let compact = hex_to_compact(&self.key);
+        let vec = hex_to_vec(&self.key);
+        let len = vec.len() as u8;
 
-        (compact.len() as u8).to_writer(writer)?;
-        writer.write_all(&compact)?;
+        len.to_writer(writer)?;
+        writer.write_all(&vec)?;
+
         self.val.to_writer(writer)?;
+
         Ok(())
     }
 }
