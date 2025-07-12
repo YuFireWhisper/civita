@@ -1,0 +1,45 @@
+[package]
+name = "civita-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+civita-serialize = { path = "../serialize" }
+
+libp2p = { version = "0.56", features = [
+  "identify",
+  "macros",
+  "kad",
+  "tcp",
+  "tokio",
+  "noise",
+  "yamux",
+  "gossipsub",
+  "secp256k1",
+] }
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+futures = "0.3"
+dashmap = "6.1"
+log = "0.4"
+rand = "0.9"
+mockall = { version = "0.13", features = ["nightly"] }
+async-trait = "0.1"
+blake3 = "1.8"
+ark-ff = "0.5"
+ark-ec = "0.5"
+ark-secp256k1 = "0.5"
+ark-serialize = "0.5"
+ark-std = "0.5"
+statrs = "0.18"
+derivative = "2.2"
+bytemuck = "1.23"
+
+[dev-dependencies]
+tempfile = "3.17"
+rstest = "0.25"
+num-bigint = "0.4"
+num-traits = "0.2"
+hex = "0.4"
