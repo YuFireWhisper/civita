@@ -334,6 +334,34 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
         }
     }
 
+    pub fn verify_proof_with_hash(
+        key: &[u8],
+        proof_db: &HashMap<Multihash, Vec<u8>>,
+        mut exp_hash: Multihash,
+    ) -> Option<Node> {
+        let key_vec = slice_to_hex(key);
+        let mut key = key_vec.as_slice();
+
+        loop {
+            let cur = proof_db.get(&exp_hash)?;
+            let node = Node::from_slice(cur).ok()?;
+
+            let (keyrest, cld) = Self::get_child(&node, key)?;
+
+            match cld {
+                Node::Empty => return None,
+                Node::Hash(hash) => {
+                    key = keyrest;
+                    exp_hash = hash;
+                }
+                Node::Value(_) => {
+                    return Some(cld);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn get_child<'a>(mut node: &Node, mut key: &'a [u8]) -> Option<(&'a [u8], Node)> {
         loop {
             match node {
@@ -391,10 +419,11 @@ mod tests {
     type TestHasher = sha2::Sha256;
     type TestMerklePatriciaTrie = MerklePatriciaTrie<TestHasher, HashMap<Multihash, Vec<u8>>>;
 
+    const KEY: &[u8] = &[1, 2, 3, 4];
+    const VALUE: &[u8] = &[5, 6, 7, 8];
+
     #[test]
     fn insert_and_commit() {
-        const KEY: &[u8] = &[1, 2, 3, 4];
-        const VALUE: &[u8] = &[5, 6, 7, 8];
         const EXP: &[u8; 32] = &[
             58, 79, 249, 90, 58, 219, 221, 240, 229, 209, 57, 149, 231, 28, 21, 178, 202, 43, 227,
             210, 238, 35, 24, 224, 18, 68, 190, 14, 180, 23, 173, 189,
@@ -412,9 +441,6 @@ mod tests {
 
     #[test]
     fn return_value_if_key_found() {
-        const KEY: &[u8] = &[1, 2, 3, 4];
-        const VALUE: &[u8] = &[5, 6, 7, 8];
-
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
         mpt.update(KEY, Node::Value(VALUE.to_vec()))
@@ -429,8 +455,6 @@ mod tests {
 
     #[test]
     fn return_none_if_key_not_found() {
-        const KEY: &[u8] = &[1, 2, 3, 4];
-        const VALUE: &[u8] = &[5, 6, 7, 8];
         const NON_EXISTENT_KEY: &[u8] = &[9, 10, 11];
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
@@ -446,9 +470,6 @@ mod tests {
 
     #[test]
     fn prove_and_verify() {
-        const KEY: &[u8] = &[1, 2, 3, 4];
-        const VALUE: &[u8] = &[5, 6, 7, 8];
-
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
         mpt.update(KEY, Node::Value(VALUE.to_vec()))
@@ -462,5 +483,59 @@ mod tests {
         assert!(prove_res);
         assert!(verify_res.is_some());
         assert_eq!(verify_res.unwrap(), Node::Value(VALUE.to_vec()));
+    }
+
+    #[test]
+    fn verify_proof_with_hash() {
+        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+
+        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+            .expect("Failed to update MPT");
+        let root_hash = mpt.commit().expect("Failed to commit MPT");
+
+        let mut proof_db = HashMap::new();
+
+        let prove_res = mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+        let verify_res = TestMerklePatriciaTrie::verify_proof_with_hash(KEY, &proof_db, root_hash);
+
+        assert!(prove_res);
+        assert!(verify_res.is_some());
+        assert_eq!(verify_res.unwrap(), Node::Value(VALUE.to_vec()));
+    }
+
+    #[test]
+    fn false_if_incorrect_proof() {
+        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+
+        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+            .expect("Failed to update MPT");
+        mpt.commit().expect("Failed to commit MPT");
+
+        let mut proof_db = HashMap::new();
+        let _ = mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+
+        let mut proof_db = HashMap::new();
+        proof_db.insert(Multihash::default(), vec![0; 32]);
+
+        let verify_res = mpt.verify_proof(KEY, &proof_db);
+
+        assert!(verify_res.is_none());
+    }
+
+    #[test]
+    fn false_if_incorrect_hash() {
+        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+
+        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+            .expect("Failed to update MPT");
+        let _ = mpt.commit().expect("Failed to commit MPT");
+        let root_hash = Multihash::default(); // Intentionally incorrect hash
+
+        let mut proof_db = HashMap::new();
+        let _ = mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+
+        let verify_res = TestMerklePatriciaTrie::verify_proof_with_hash(KEY, &proof_db, root_hash);
+
+        assert!(verify_res.is_none());
     }
 }
