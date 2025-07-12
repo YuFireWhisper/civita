@@ -69,8 +69,46 @@ impl Proposal {
         }
     }
 
+    pub fn code(&self) -> u8 {
+        self.unsigned.code
+    }
+
+    pub fn parent_root(&self) -> &Multihash {
+        &self.unsigned.parent_root
+    }
+
+    pub fn diff(&self) -> &BTreeMap<Vec<u8>, Diff> {
+        &self.unsigned.diff
+    }
+
+    pub fn total_stakes_diff(&self) -> i32 {
+        self.unsigned.total_stakes_diff
+    }
+
+    pub fn proposer(&self) -> &PublicKey {
+        &self.unsigned.proposer
+    }
+
+    pub fn proposer_data(&self) -> Option<&Vec<u8>> {
+        self.unsigned.proposer_data.as_ref()
+    }
+
+    pub fn proofs(&self) -> &ProofDb {
+        &self.unsigned.proofs
+    }
+
     pub fn hash<H: Hasher>(&self) -> Multihash {
         *self.hash_cache.get_or_init(|| self.unsigned.hash::<H>())
+    }
+
+    pub fn proposer_sig(&self) -> &Signature {
+        &self.proposer_sig
+    }
+
+    pub fn verify_signature<H: Hasher>(&self) -> bool {
+        let hash = self.hash::<H>();
+        self.proposer()
+            .verify_signature(hash.to_bytes().as_slice(), self.proposer_sig())
     }
 }
 
@@ -190,5 +228,23 @@ mod tests {
             proposal, dec,
             "Deserialized proposal should match the original"
         );
+    }
+
+    #[test]
+    fn true_if_signature_is_valid() {
+        let proposal = default_proposal();
+        let is_valid = proposal.verify_signature::<TestHasher>();
+
+        assert!(is_valid, "Proposal signature should be valid");
+    }
+
+    #[test]
+    fn false_if_signature_is_invalid() {
+        let mut proposal = default_proposal();
+        proposal.unsigned.proposer = SecretKey::random().public_key();
+
+        let is_valid = proposal.verify_signature::<TestHasher>();
+
+        assert!(!is_valid, "Proposal signature should be invalid");
     }
 }
