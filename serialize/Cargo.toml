@@ -1,0 +1,10 @@
+[package]
+name = "civita-serialize"
+version.workspace = true
+edition.workspace = true
+
+[features]
+libp2p = ["dep:libp2p"]
+
+[dependencies]
+libp2p = { version = "0.56", optional = true }
