@@ -1,20 +1,13 @@
-use std::fmt::Debug;
-
-use crate::{
-    crypto::traits::{secret_key::SecretKey, PublicKey},
-    traits::serializable::Serializable,
-};
-
-pub trait Signature: Clone + Debug + Eq + Serializable + Sync + Send + 'static {}
+use crate::crypto::traits::{secret_key::SecretKey, PublicKey};
 
 pub trait Signer: SecretKey {
-    type Signature: Signature;
+    type Signature;
 
     fn sign(&self, msg: &[u8]) -> Self::Signature;
 }
 
 pub trait VerifiySignature: PublicKey {
-    type Signature: Signature;
+    type Signature;
 
     fn verify_signature(&self, msg: &[u8], sig: &Self::Signature) -> bool;
 }

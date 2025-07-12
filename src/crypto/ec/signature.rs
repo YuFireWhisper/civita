@@ -48,8 +48,6 @@ where
     }
 }
 
-impl<C: SWCurveConfig + HasherConfig> traits::Signature for Signature<Affine<C>, C::ScalarField> {}
-
 impl<C: SWCurveConfig + HasherConfig> traits::Signer for SecretKey<C> {
     type Signature = Signature<Affine<C>, C::ScalarField>;
 
