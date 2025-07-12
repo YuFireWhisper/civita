@@ -172,10 +172,6 @@ impl Serializable for Suite {
     }
 }
 
-// impl ConstantSize for Suite {
-//     const SIZE: usize = 1;
-// }
-
 impl Serializable for PublicKey {
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let suite = Suite::from_reader(reader)?;
