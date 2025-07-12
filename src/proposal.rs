@@ -24,91 +24,59 @@ pub struct Diff {
 
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Eq, PartialEq)]
-pub struct UnSignedProposal {
+#[derive(Derivative)]
+#[derivative(Eq, PartialEq)]
+pub struct Payload {
     pub code: u8,
     pub parent_root: Multihash,
     pub diff: BTreeMap<Vec<u8>, Diff>,
     pub total_stakes_diff: i32,
-    pub proposer: PublicKey,
+    pub proposer_pk: PublicKey,
     pub proposer_data: Option<Vec<u8>>,
+    pub proposal_stakes: u32,
+
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    hash_cache: OnceLock<Multihash>,
+}
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+pub struct Witness {
+    pub sig: Signature,
     pub proofs: ProofDb,
 }
 
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Derivative)]
-#[derivative(Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Proposal {
-    unsigned: UnSignedProposal,
-    proposer_sig: Signature,
-    #[derivative(PartialEq = "ignore")]
-    hash_cache: OnceLock<Multihash>,
+    pub payload: Payload,
+    pub witness: Witness,
 }
 
-impl UnSignedProposal {
+impl Payload {
     pub fn hash<H: Hasher>(&self) -> Multihash {
-        let input = self
-            .to_vec()
-            .expect("UnSignedProposal should be serializable");
-        H::hash(&input)
+        *self
+            .hash_cache
+            .get_or_init(|| H::hash(&self.to_vec().expect("Payload should be serializable")))
+    }
+
+    pub fn sign<H: Hasher>(&self, sk: &SecretKey) -> Signature {
+        sk.sign(&self.hash::<H>().to_bytes())
     }
 }
 
 impl Proposal {
-    pub fn new<H: Hasher>(unsigned: UnSignedProposal, sk: &SecretKey) -> Self {
-        let hash = unsigned.hash::<H>();
-        let proposer_sig = sk.sign(hash.to_bytes().as_slice());
-        let hash_cache = OnceLock::new();
-        hash_cache.set(hash).expect("Hash cache should be empty");
-
-        Self {
-            unsigned,
-            proposer_sig,
-            hash_cache,
-        }
-    }
-
-    pub fn code(&self) -> u8 {
-        self.unsigned.code
-    }
-
-    pub fn parent_root(&self) -> &Multihash {
-        &self.unsigned.parent_root
-    }
-
-    pub fn diff(&self) -> &BTreeMap<Vec<u8>, Diff> {
-        &self.unsigned.diff
-    }
-
-    pub fn total_stakes_diff(&self) -> i32 {
-        self.unsigned.total_stakes_diff
-    }
-
-    pub fn proposer(&self) -> &PublicKey {
-        &self.unsigned.proposer
-    }
-
-    pub fn proposer_data(&self) -> Option<&Vec<u8>> {
-        self.unsigned.proposer_data.as_ref()
-    }
-
-    pub fn proofs(&self) -> &ProofDb {
-        &self.unsigned.proofs
-    }
-
-    pub fn hash<H: Hasher>(&self) -> Multihash {
-        *self.hash_cache.get_or_init(|| self.unsigned.hash::<H>())
-    }
-
-    pub fn proposer_sig(&self) -> &Signature {
-        &self.proposer_sig
+    pub fn new(payload: Payload, witness: Witness) -> Self {
+        Self { payload, witness }
     }
 
     pub fn verify_signature<H: Hasher>(&self) -> bool {
-        let hash = self.hash::<H>();
-        self.proposer()
-            .verify_signature(hash.to_bytes().as_slice(), self.proposer_sig())
+        let msg = self.payload.hash::<H>().to_bytes();
+        self.payload
+            .proposer_pk
+            .verify_signature(&msg, &self.witness.sig)
     }
 }
 
@@ -129,8 +97,7 @@ impl Serializable for Diff {
         Ok(())
     }
 }
-
-impl Serializable for UnSignedProposal {
+impl Serializable for Payload {
     fn serialized_size(&self) -> usize {
         unimplemented!(
             "Calculate size will very slowly, please just use Vec::new() without capacity"
@@ -142,18 +109,19 @@ impl Serializable for UnSignedProposal {
         let parent_root = Multihash::from_reader(reader)?;
         let diff = BTreeMap::<Vec<u8>, Diff>::from_reader(reader)?;
         let total_stakes_diff = i32::from_reader(reader)?;
-        let proposer = PublicKey::from_reader(reader)?;
+        let proposer_pk = PublicKey::from_reader(reader)?;
         let proposer_data = Option::<Vec<u8>>::from_reader(reader)?;
-        let proofs = ProofDb::from_reader(reader)?;
+        let proposal_stakes = u32::from_reader(reader)?;
 
         Ok(Self {
             code,
             parent_root,
             diff,
             total_stakes_diff,
-            proposer,
+            proposer_pk,
             proposer_data,
-            proofs,
+            proposal_stakes,
+            hash_cache: OnceLock::new(),
         })
     }
 
@@ -162,10 +130,30 @@ impl Serializable for UnSignedProposal {
         self.parent_root.to_writer(writer)?;
         self.diff.to_writer(writer)?;
         self.total_stakes_diff.to_writer(writer)?;
-        self.proposer.to_writer(writer)?;
+        self.proposer_pk.to_writer(writer)?;
         self.proposer_data.to_writer(writer)?;
-        self.proofs.to_writer(writer)?;
+        self.proposal_stakes.to_writer(writer)?;
 
+        Ok(())
+    }
+}
+
+impl Serializable for Witness {
+    fn serialized_size(&self) -> usize {
+        unimplemented!(
+            "Calculate size will very slowly, please just use Vec::new() without capacity"
+        );
+    }
+
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        let sig = Signature::from_reader(reader)?;
+        let proofs = ProofDb::from_reader(reader)?;
+        Ok(Self { sig, proofs })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.sig.to_writer(writer)?;
+        self.proofs.to_writer(writer)?;
         Ok(())
     }
 }
@@ -179,15 +167,14 @@ impl Serializable for Proposal {
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         Ok(Self {
-            unsigned: UnSignedProposal::from_reader(reader)?,
-            proposer_sig: Signature::from_reader(reader)?,
-            hash_cache: OnceLock::new(),
+            payload: Payload::from_reader(reader)?,
+            witness: Witness::from_reader(reader)?,
         })
     }
 
     fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.unsigned.to_writer(writer)?;
-        self.proposer_sig.to_writer(writer)?;
+        self.payload.to_writer(writer)?;
+        self.witness.to_writer(writer)?;
         Ok(())
     }
 }
@@ -200,51 +187,91 @@ mod tests {
 
     type TestHasher = sha2::Sha256;
 
-    fn default_proposal() -> Proposal {
+    fn setup() -> Proposal {
         let sk = SecretKey::random();
         let pk = sk.public_key();
 
-        let unsigned = UnSignedProposal {
+        let payload = Payload {
             code: 1,
             parent_root: Multihash::default(),
             diff: BTreeMap::new(),
             total_stakes_diff: 0,
-            proposer: pk.clone(),
+            proposer_pk: pk.clone(),
             proposer_data: None,
-            proofs: ProofDb::new(),
+            proposal_stakes: 0,
+            hash_cache: OnceLock::new(),
         };
 
-        Proposal::new::<TestHasher>(unsigned, &sk)
+        let witness = create_witness_with_sk(&payload, &sk);
+
+        Proposal::new(payload, witness)
+    }
+
+    fn create_witness_with_sk(payload: &Payload, sk: &SecretKey) -> Witness {
+        let sig = payload.sign::<TestHasher>(sk);
+        let proofs = ProofDb::new();
+
+        Witness { sig, proofs }
     }
 
     #[test]
-    fn proposal_serialization() {
-        let proposal = default_proposal();
+    fn payload_serialization() {
+        let prop = setup();
+        let payload = prop.payload.clone();
 
-        let enc = proposal.to_vec().expect("Proposal should be serializable");
-        let dec = Proposal::from_slice(&enc).expect("Proposal should be deserializable");
+        let enc = payload.to_vec().expect("Payload should be serializable");
+        let dec = Payload::from_slice(&enc).expect("Payload should be deserializable");
 
         assert_eq!(
-            proposal, dec,
-            "Deserialized proposal should match the original"
+            payload, dec,
+            "Deserialized payload should match the original"
         );
     }
 
     #[test]
+    fn witness_serialization() {
+        let prop = setup();
+        let witness = prop.witness.clone();
+
+        let enc = witness.to_vec().expect("Witness should be serializable");
+        let dec = Witness::from_slice(&enc).expect("Witness should be deserializable");
+
+        assert_eq!(
+            witness, dec,
+            "Deserialized witness should match the original"
+        );
+    }
+
+    #[test]
+    fn proposal_serialization() {
+        let prop = setup();
+
+        let enc = prop.to_vec().expect("Proposal should be serializable");
+        let dec = Proposal::from_slice(&enc).expect("Proposal should be deserializable");
+
+        assert_eq!(prop, dec, "Deserialized proposal should match the original");
+    }
+
+    #[test]
     fn true_if_signature_is_valid() {
-        let proposal = default_proposal();
-        let is_valid = proposal.verify_signature::<TestHasher>();
+        let prop = setup();
+
+        let is_valid = prop.verify_signature::<TestHasher>();
 
         assert!(is_valid, "Proposal signature should be valid");
     }
 
     #[test]
     fn false_if_signature_is_invalid() {
-        let mut proposal = default_proposal();
-        proposal.unsigned.proposer = SecretKey::random().public_key();
+        let mut prop = setup();
+        let other = SecretKey::random();
+        prop.witness = create_witness_with_sk(&prop.payload, &other);
 
-        let is_valid = proposal.verify_signature::<TestHasher>();
+        let is_valid = prop.verify_signature::<TestHasher>();
 
-        assert!(!is_valid, "Proposal signature should be invalid");
+        assert!(
+            !is_valid,
+            "Proposal signature should be invalid after changing the code"
+        );
     }
 }
