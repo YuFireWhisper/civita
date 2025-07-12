@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::traits::{serializable, ConstantSize, Serializable};
+use crate::traits::{serializable, Serializable};
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -26,10 +26,6 @@ impl Record {
 }
 
 impl Serializable for Record {
-    fn serialized_size(&self) -> usize {
-        u32::SIZE + usize::SIZE + self.data.len()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         Ok(Record {
             stakes: u32::from_reader(reader)?,

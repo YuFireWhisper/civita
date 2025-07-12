@@ -1,10 +1,6 @@
-use crate::traits::{serializable, ConstantSize, Serializable};
+use crate::traits::{serializable, Serializable};
 
 impl Serializable for String {
-    fn serialized_size(&self) -> usize {
-        usize::SIZE + self.len()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let size = usize::from_reader(reader)?;
         let mut buffer = vec![0; size];
@@ -14,6 +10,8 @@ impl Serializable for String {
 
     fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         self.len().to_writer(writer);
-        writer.write_all(self.as_bytes());
+        writer
+            .write_all(self.as_bytes())
+            .expect("Failed to write string");
     }
 }

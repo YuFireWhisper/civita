@@ -2,10 +2,10 @@ use std::fmt::Debug;
 
 use crate::{
     crypto::traits::{hasher::Multihash, secret_key::SecretKey, PublicKey},
-    traits::serializable::{ConstantSize, Serializable},
+    traits::serializable::Serializable,
 };
 
-pub trait Proof: Clone + Debug + Eq + Serializable + ConstantSize + Sync + Send + 'static {
+pub trait Proof: Clone + Debug + Eq + Serializable + Sync + Send + 'static {
     fn proof_to_hash(&self) -> Multihash;
 }
 

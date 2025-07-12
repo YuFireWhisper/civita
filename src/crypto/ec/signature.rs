@@ -14,7 +14,7 @@ use crate::{
         traits::{self, SecretKey as _},
         Hasher,
     },
-    traits::serializable::{ConstantSize, Error as SerializableError, Serializable},
+    traits::serializable::{Error as SerializableError, Serializable},
 };
 
 #[derive(Clone)]
@@ -31,10 +31,6 @@ where
     P: CanonicalSerialize + CanonicalDeserialize,
     S: CanonicalSerialize + CanonicalDeserialize,
 {
-    fn serialized_size(&self) -> usize {
-        self.r.compressed_size() + self.s.compressed_size()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, SerializableError> {
         let r = P::deserialize_compressed(reader.by_ref())?;
         let s = S::deserialize_compressed(reader.by_ref())?;
@@ -50,10 +46,6 @@ where
             .serialize_compressed(writer.by_ref())
             .expect("Failed to serialize s");
     }
-}
-
-impl<C: SWCurveConfig + HasherConfig> ConstantSize for Signature<Affine<C>, C::ScalarField> {
-    const SIZE: usize = Affine::<C>::SIZE + C::ScalarField::MODULUS_BIT_SIZE as usize / 8usize;
 }
 
 impl<C: SWCurveConfig + HasherConfig> traits::Signature for Signature<Affine<C>, C::ScalarField> {}

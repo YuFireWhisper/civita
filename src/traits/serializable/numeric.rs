@@ -1,15 +1,11 @@
 use std::io::{Read, Write};
 
-use crate::traits::serializable::{ConstantSize, Error, Serializable};
+use crate::traits::serializable::{Error, Serializable};
 
 macro_rules! impl_serializable_for_numeric {
     ($($type:ty),*) => {
         $(
             impl Serializable for $type {
-                fn serialized_size(&self) -> usize {
-                    size_of::<$type>()
-                }
-
                 fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error> {
                     let mut buffer = [0u8; size_of::<$type>()];
                     reader.read_exact(&mut buffer)?;
@@ -19,10 +15,6 @@ macro_rules! impl_serializable_for_numeric {
                 fn to_writer<W: Write>(&self, writer: &mut W) {
                     writer.write_all(&self.to_ne_bytes()).expect("Failed to write numeric value");
                 }
-            }
-
-            impl ConstantSize for $type {
-                const SIZE: usize = size_of::<$type>();
             }
         )*
     };

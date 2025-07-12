@@ -2,13 +2,10 @@ use std::fmt::Debug;
 
 use crate::{
     crypto::traits::{secret_key::SecretKey, PublicKey},
-    traits::serializable::{ConstantSize, Serializable},
+    traits::serializable::Serializable,
 };
 
-pub trait Signature:
-    Clone + Debug + Eq + Serializable + ConstantSize + Sync + Send + 'static
-{
-}
+pub trait Signature: Clone + Debug + Eq + Serializable + Sync + Send + 'static {}
 
 pub trait Signer: SecretKey {
     type Signature: Signature;

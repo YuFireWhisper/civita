@@ -9,7 +9,7 @@ use rand::Rng;
 
 use crate::{
     crypto::traits,
-    traits::serializable::{ConstantSize, Error, Serializable},
+    traits::serializable::{Error, Serializable},
 };
 
 #[derive(Derivative)]
@@ -30,10 +30,6 @@ impl<C: SWCurveConfig> SecretKey<C> {
 }
 
 impl<C: SWCurveConfig> Serializable for SecretKey<C> {
-    fn serialized_size(&self) -> usize {
-        self.sk.compressed_size()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, Error> {
         let sk =
             C::ScalarField::deserialize_compressed(reader).map_err(|e| Error(e.to_string()))?;
@@ -45,10 +41,6 @@ impl<C: SWCurveConfig> Serializable for SecretKey<C> {
             .serialize_compressed(writer)
             .expect("Failed to serialize SecretKey");
     }
-}
-
-impl<C: SWCurveConfig> ConstantSize for SecretKey<C> {
-    const SIZE: usize = C::ScalarField::MODULUS_BIT_SIZE as usize / 8usize;
 }
 
 impl<C: SWCurveConfig> traits::SecretKey for SecretKey<C> {

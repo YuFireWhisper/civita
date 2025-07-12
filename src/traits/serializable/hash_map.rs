@@ -4,21 +4,13 @@ use std::{
     io::{Read, Write},
 };
 
-use crate::traits::serializable::{ConstantSize, Error, Serializable};
+use crate::traits::serializable::{Error, Serializable};
 
 impl<K, V> Serializable for HashMap<K, V>
 where
     K: Serializable + Eq + Hash,
     V: Serializable,
 {
-    fn serialized_size(&self) -> usize {
-        usize::SIZE
-            + self
-                .iter()
-                .map(|(k, v)| k.serialized_size() + v.serialized_size())
-                .sum::<usize>()
-    }
-
     fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error> {
         let size = usize::from_reader(reader)?;
 

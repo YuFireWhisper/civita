@@ -79,10 +79,6 @@ impl Proposal {
 }
 
 impl Serializable for Diff {
-    fn serialized_size(&self) -> usize {
-        self.from.serialized_size() + self.to.serialized_size()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let from = resident::Record::from_reader(reader)?;
         let to = resident::Record::from_reader(reader)?;
@@ -95,12 +91,6 @@ impl Serializable for Diff {
     }
 }
 impl Serializable for Payload {
-    fn serialized_size(&self) -> usize {
-        unimplemented!(
-            "Calculate size will very slowly, please just use Vec::new() without capacity"
-        );
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let code = u8::from_reader(reader)?;
         let parent_root = Multihash::from_reader(reader)?;
@@ -134,12 +124,6 @@ impl Serializable for Payload {
 }
 
 impl Serializable for Witness {
-    fn serialized_size(&self) -> usize {
-        unimplemented!(
-            "Calculate size will very slowly, please just use Vec::new() without capacity"
-        );
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let sig = Signature::from_reader(reader)?;
         let proofs = ProofDb::from_reader(reader)?;
@@ -153,12 +137,6 @@ impl Serializable for Witness {
 }
 
 impl Serializable for Proposal {
-    fn serialized_size(&self) -> usize {
-        unimplemented!(
-            "Calculate size will very slowly, please just use Vec::new() without capacity"
-        );
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         Ok(Self {
             payload: Payload::from_reader(reader)?,

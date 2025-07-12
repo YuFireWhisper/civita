@@ -2,4 +2,4 @@
 
 pub mod serializable;
 
-pub use serializable::{ConstantSize, Serializable};
+pub use serializable::Serializable;

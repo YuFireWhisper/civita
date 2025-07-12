@@ -3,10 +3,6 @@ use libp2p::{multihash::Multihash, PeerId};
 use crate::traits::{serializable, Serializable};
 
 impl Serializable for PeerId {
-    fn serialized_size(&self) -> usize {
-        self.as_ref().serialized_size()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let multihash = Multihash::from_reader(reader)?;
         PeerId::from_multihash(multihash)
