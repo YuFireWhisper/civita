@@ -90,6 +90,7 @@ impl Serializable for Diff {
         self.to.to_writer(writer);
     }
 }
+
 impl Serializable for Payload {
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let code = u8::from_reader(reader)?;
