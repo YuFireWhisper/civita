@@ -13,12 +13,10 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 mod keys;
 mod node;
+pub mod storage;
 
 pub use node::Node;
-
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum StorageError {}
+pub use storage::{Storage, StorageError};
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -28,26 +26,6 @@ pub enum Error {
 
     #[error("Missing node")]
     MissingNode,
-}
-
-pub trait Storage {
-    fn get(&self, hash: &Multihash) -> Result<Option<Vec<u8>>, StorageError>;
-
-    fn put(&mut self, hash: Multihash, data: Vec<u8>) -> Result<(), StorageError>;
-
-    fn batch_put<I>(&mut self, entries: I) -> Result<(), StorageError>
-    where
-        I: IntoIterator<Item = (Multihash, Vec<u8>)>,
-    {
-        for (hash, data) in entries {
-            self.put(hash, data)?;
-        }
-        Ok(())
-    }
-
-    fn delete(&mut self, hash: &Multihash) -> Result<(), StorageError>;
-
-    fn has(&self, hash: &Multihash) -> Result<bool, StorageError>;
 }
 
 pub struct MerklePatriciaTrie<H, S> {
