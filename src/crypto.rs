@@ -5,7 +5,7 @@ use crate::{
         vrf::{Proof as _, Prover as _, VerifyProof},
         SecretKey as _, Signer as _, VerifiySignature,
     },
-    traits::{serializable, ConstantSize, Serializable},
+    traits::{serializable, Serializable},
 };
 
 mod ec;
@@ -158,10 +158,6 @@ impl Proof {
 }
 
 impl Serializable for Suite {
-    fn serialized_size(&self) -> usize {
-        u8::SIZE
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         match u8::from_reader(reader)? {
             0 => Ok(Suite::Secp256k1),
@@ -176,18 +172,11 @@ impl Serializable for Suite {
     }
 }
 
-impl ConstantSize for Suite {
-    const SIZE: usize = 1;
-}
+// impl ConstantSize for Suite {
+//     const SIZE: usize = 1;
+// }
 
 impl Serializable for PublicKey {
-    fn serialized_size(&self) -> usize {
-        Suite::SIZE
-            + match self {
-                PublicKey::Secp256k1(_) => short_weierstrass::Affine::<ark_secp256k1::Config>::SIZE,
-            }
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let suite = Suite::from_reader(reader)?;
 
@@ -208,13 +197,6 @@ impl Serializable for PublicKey {
 }
 
 impl Serializable for SecretKey {
-    fn serialized_size(&self) -> usize {
-        Suite::SIZE
-            + match self {
-                SecretKey::Secp256k1(_) => ec::SecretKey::<ark_secp256k1::Config>::SIZE,
-            }
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let suite = Suite::from_reader(reader)?;
 
@@ -235,18 +217,6 @@ impl Serializable for SecretKey {
 }
 
 impl Serializable for Signature {
-    fn serialized_size(&self) -> usize {
-        Suite::SIZE
-            + match self {
-                Signature::Secp256k1(_) => {
-                    ec::Signature::<
-                        short_weierstrass::Affine<ark_secp256k1::Config>,
-                        ark_secp256k1::Fr,
-                    >::SIZE
-                }
-            }
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let suite = Suite::from_reader(reader)?;
 
@@ -268,18 +238,6 @@ impl Serializable for Signature {
 }
 
 impl Serializable for Proof {
-    fn serialized_size(&self) -> usize {
-        Suite::SIZE
-            + match self {
-                Proof::Secp256k1(_) => {
-                    ec::vrf::Proof::<
-                        short_weierstrass::Affine<ark_secp256k1::Config>,
-                        ark_secp256k1::Fr,
-                    >::SIZE
-                }
-            }
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let suite = Suite::from_reader(reader)?;
 

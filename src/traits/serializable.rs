@@ -18,8 +18,6 @@ pub mod vec;
 pub struct Error(pub String);
 
 pub trait Serializable: Sized {
-    fn serialized_size(&self) -> usize;
-
     fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error>;
     fn to_writer<W: Write>(&self, writer: &mut W);
     fn from_slice(slice: &[u8]) -> Result<Self, Error> {
@@ -33,9 +31,9 @@ pub trait Serializable: Sized {
     }
 }
 
-pub trait ConstantSize {
-    const SIZE: usize;
-}
+// pub trait ConstantSize {
+//     const SIZE: usize;
+// }
 
 impl std::error::Error for Error {}
 impl std::fmt::Display for Error {

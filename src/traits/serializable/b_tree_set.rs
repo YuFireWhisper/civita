@@ -1,15 +1,11 @@
 use std::collections::BTreeSet;
 
-use crate::traits::serializable::{self, ConstantSize, Serializable};
+use crate::traits::serializable::{self, Serializable};
 
 impl<V> Serializable for BTreeSet<V>
 where
     V: Serializable + Ord,
 {
-    fn serialized_size(&self) -> usize {
-        usize::SIZE + self.iter().map(|v| v.serialized_size()).sum::<usize>()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let size = usize::from_reader(reader)?;
         let mut set = BTreeSet::new();

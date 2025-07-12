@@ -184,10 +184,6 @@ impl Default for Flags {
 }
 
 impl Serializable for Full {
-    fn serialized_size(&self) -> usize {
-        unimplemented!()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let mut children = std::array::from_fn(|_| Node::Empty);
 
@@ -210,10 +206,6 @@ impl Serializable for Full {
 }
 
 impl Serializable for Short {
-    fn serialized_size(&self) -> usize {
-        unimplemented!()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let len = u8::from_reader(reader)?;
         let mut vec = vec![0u8; len as usize];
@@ -242,10 +234,6 @@ impl Serializable for Short {
 }
 
 impl Serializable for Node {
-    fn serialized_size(&self) -> usize {
-        unimplemented!()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let tag = u8::from_reader(reader)?;
 

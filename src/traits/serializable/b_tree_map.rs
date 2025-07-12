@@ -1,20 +1,12 @@
 use std::collections::BTreeMap;
 
-use crate::traits::{serializable, ConstantSize, Serializable};
+use crate::traits::{serializable, Serializable};
 
 impl<K, V> Serializable for BTreeMap<K, V>
 where
     K: Serializable + Ord,
     V: Serializable,
 {
-    fn serialized_size(&self) -> usize {
-        usize::SIZE
-            + self
-                .iter()
-                .map(|(k, v)| k.serialized_size() + v.serialized_size())
-                .sum::<usize>()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let size = usize::from_reader(reader)?;
         let mut map = BTreeMap::new();

@@ -1,7 +1,6 @@
 use std::fmt::Debug;
 
 use ark_ec::{short_weierstrass::Affine, AffineRepr, CurveGroup};
-use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::{
@@ -17,7 +16,7 @@ use crate::{
             SecretKey as _,
         },
     },
-    traits::serializable::{ConstantSize, Error as SerializableError, Serializable},
+    traits::serializable::{Error as SerializableError, Serializable},
 };
 
 mod challenge_generator;
@@ -55,10 +54,6 @@ where
     P: CanonicalSerialize + CanonicalDeserialize,
     S: CanonicalSerialize + CanonicalDeserialize,
 {
-    fn serialized_size(&self) -> usize {
-        self.gamma.compressed_size() + self.c.compressed_size() + self.s.compressed_size()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, SerializableError> {
         let gamma = P::deserialize_compressed(reader.by_ref())?;
         let c = S::deserialize_compressed(reader.by_ref())?;
@@ -78,14 +73,6 @@ where
             .serialize_compressed(writer.by_ref())
             .expect("Failed to serialize s");
     }
-}
-
-impl<C> ConstantSize for Proof<Affine<C>, C::ScalarField>
-where
-    C: hash_to_curve::Config,
-{
-    const SIZE: usize =
-        Affine::<C>::SIZE + 2 * (C::ScalarField::MODULUS_BIT_SIZE as usize / 8usize);
 }
 
 impl<C> Prover for SecretKey<C>

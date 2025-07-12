@@ -2,14 +2,10 @@ use libp2p::multihash;
 
 use crate::{
     crypto::Multihash,
-    traits::{serializable, ConstantSize, Serializable},
+    traits::{serializable, Serializable},
 };
 
 impl Serializable for Multihash {
-    fn serialized_size(&self) -> usize {
-        u64::SIZE + u8::SIZE + self.digest().len()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let code = u64::from_reader(reader)?;
         let size = u8::from_reader(reader)?;

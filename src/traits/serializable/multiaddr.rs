@@ -1,12 +1,8 @@
 use libp2p::Multiaddr;
 
-use crate::traits::{serializable, ConstantSize, Serializable};
+use crate::traits::{serializable, Serializable};
 
 impl Serializable for Multiaddr {
-    fn serialized_size(&self) -> usize {
-        usize::SIZE + self.len()
-    }
-
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
         let size = usize::from_reader(reader)?;
 
