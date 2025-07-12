@@ -1,133 +1,194 @@
-// use std::{collections::BTreeMap, sync::OnceLock};
-//
-// use crate::{
-//     crypto::{Hasher, Multihash, PublicKey, Signature},
-//     resident,
-//     traits::{serializable, ConstantSize, Serializable},
-//     utils::mpt::Proof,
-// };
-//
-// #[derive(Debug)]
-// #[derive(Clone)]
-// #[derive(Eq, PartialEq)]
-// pub struct Diff {
-//     pub from: resident::Record,
-//     pub to: resident::Record,
-//     pub proof: Proof,
-// }
-//
-// #[derive(Debug)]
-// #[derive(Clone)]
-// #[derive(Eq, PartialEq)]
-// pub struct Proposal {
-//     pub code: u8,
-//     pub diff: BTreeMap<PublicKey, Diff>,
-//     pub total_stakes_diff: i32,
-//     pub initiator: PublicKey,
-//     pub initiator_data: Vec<u8>,
-//     pub initiator_sig: Signature,
-// }
-//
-// #[derive(Debug)]
-// #[derive(Clone)]
-// #[derive(Eq, PartialEq)]
-// pub struct MultiProposal {
-//     pub code: u8,
-//     pub diff: BTreeMap<PublicKey, (Proof, resident::Record)>,
-//     pub total_stakes_diff: i32,
-//     pub initiator: PublicKey,
-//     pub initiator_data: Vec<u8>,
-//     pub initiator_sig: Signature,
-//     id_cache: OnceLock<Multihash>,
-// }
-//
-// impl MultiProposal {
-//     pub fn base_verify<H: Hasher>(&self, root_hash: &Multihash) -> bool {
-//         if self.diff.is_empty() {
-//             return false;
-//         }
-//
-//         for (pk, (proof, _)) in &self.diff {
-//             let key = pk.to_hash::<H>().to_bytes();
-//             if !proof.verify_with_key::<H>(root_hash, &key) {
-//                 return false;
-//             }
-//         }
-//
-//         let id = self.generate_id::<H>().to_bytes();
-//
-//         if !self.initiator.verify_signature(&id, &self.initiator_sig) {
-//             return false;
-//         }
-//
-//         true
-//     }
-//
-//     pub fn generate_id<H: Hasher>(&self) -> Multihash {
-//         if let Some(id) = self.id_cache.get() {
-//             return *id;
-//         }
-//
-//         let mut data = Vec::new();
-//
-//         self.code
-//             .to_writer(&mut data)
-//             .expect("Failed to serialize code");
-//
-//         for (pk, (_, record)) in &self.diff {
-//             pk.to_writer(&mut data)
-//                 .expect("Failed to serialize public key");
-//             record
-//                 .to_writer(&mut data)
-//                 .expect("Failed to serialize record");
-//         }
-//
-//         self.total_stakes_diff
-//             .to_writer(&mut data)
-//             .expect("Failed to serialize total stakes diff");
-//         self.initiator
-//             .to_writer(&mut data)
-//             .expect("Failed to serialize initiator");
-//         self.initiator_data
-//             .to_writer(&mut data)
-//             .expect("Failed to serialize initiator data");
-//
-//         let id = H::hash(&data);
-//         self.id_cache.set(id).expect("Failed to set id cache");
-//
-//         id
-//     }
-// }
-//
-// impl Serializable for MultiProposal {
-//     fn serialized_size(&self) -> usize {
-//         u8::SIZE
-//             + self.diff.serialized_size()
-//             + self.total_stakes_diff.serialized_size()
-//             + self.initiator.serialized_size()
-//             + self.initiator_data.serialized_size()
-//             + self.initiator_sig.serialized_size()
-//     }
-//
-//     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-//         Ok(Self {
-//             code: u8::from_reader(reader)?,
-//             diff: BTreeMap::<PublicKey, (Proof, resident::Record)>::from_reader(reader)?,
-//             total_stakes_diff: i32::from_reader(reader)?,
-//             initiator: PublicKey::from_reader(reader)?,
-//             initiator_data: Vec::from_reader(reader)?,
-//             initiator_sig: Signature::from_reader(reader)?,
-//             id_cache: OnceLock::new(),
-//         })
-//     }
-//
-//     fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-//         self.code.to_writer(writer)?;
-//         self.diff.to_writer(writer)?;
-//         self.total_stakes_diff.to_writer(writer)?;
-//         self.initiator.to_writer(writer)?;
-//         self.initiator_data.to_writer(writer)?;
-//         self.initiator_sig.to_writer(writer)?;
-//         Ok(())
-//     }
-// }
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::OnceLock,
+};
+
+use derivative::Derivative;
+
+use crate::{
+    crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
+    resident,
+    traits::{serializable, Serializable},
+};
+
+type ProofDb = HashMap<Multihash, Vec<u8>>;
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Default)]
+#[derive(Eq, PartialEq)]
+pub struct Diff {
+    pub from: resident::Record,
+    pub to: resident::Record,
+}
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+pub struct UnSignedProposal {
+    pub code: u8,
+    pub parent_root: Multihash,
+    pub diff: BTreeMap<Vec<u8>, Diff>,
+    pub total_stakes_diff: i32,
+    pub proposer: PublicKey,
+    pub proposer_data: Option<Vec<u8>>,
+    pub proofs: ProofDb,
+}
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Eq, PartialEq)]
+pub struct Proposal {
+    unsigned: UnSignedProposal,
+    proposer_sig: Signature,
+    #[derivative(PartialEq = "ignore")]
+    hash_cache: OnceLock<Multihash>,
+}
+
+impl UnSignedProposal {
+    pub fn hash<H: Hasher>(&self) -> Multihash {
+        let input = self
+            .to_vec()
+            .expect("UnSignedProposal should be serializable");
+        H::hash(&input)
+    }
+}
+
+impl Proposal {
+    pub fn new<H: Hasher>(unsigned: UnSignedProposal, sk: &SecretKey) -> Self {
+        let hash = unsigned.hash::<H>();
+        let proposer_sig = sk.sign(hash.to_bytes().as_slice());
+        let hash_cache = OnceLock::new();
+        hash_cache.set(hash).expect("Hash cache should be empty");
+
+        Self {
+            unsigned,
+            proposer_sig,
+            hash_cache,
+        }
+    }
+
+    pub fn hash<H: Hasher>(&self) -> Multihash {
+        *self.hash_cache.get_or_init(|| self.unsigned.hash::<H>())
+    }
+}
+
+impl Serializable for Diff {
+    fn serialized_size(&self) -> usize {
+        self.from.serialized_size() + self.to.serialized_size()
+    }
+
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        let from = resident::Record::from_reader(reader)?;
+        let to = resident::Record::from_reader(reader)?;
+        Ok(Self { from, to })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.from.to_writer(writer)?;
+        self.to.to_writer(writer)?;
+        Ok(())
+    }
+}
+
+impl Serializable for UnSignedProposal {
+    fn serialized_size(&self) -> usize {
+        unimplemented!(
+            "Calculate size will very slowly, please just use Vec::new() without capacity"
+        );
+    }
+
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        let code = u8::from_reader(reader)?;
+        let parent_root = Multihash::from_reader(reader)?;
+        let diff = BTreeMap::<Vec<u8>, Diff>::from_reader(reader)?;
+        let total_stakes_diff = i32::from_reader(reader)?;
+        let proposer = PublicKey::from_reader(reader)?;
+        let proposer_data = Option::<Vec<u8>>::from_reader(reader)?;
+        let proofs = ProofDb::from_reader(reader)?;
+
+        Ok(Self {
+            code,
+            parent_root,
+            diff,
+            total_stakes_diff,
+            proposer,
+            proposer_data,
+            proofs,
+        })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.code.to_writer(writer)?;
+        self.parent_root.to_writer(writer)?;
+        self.diff.to_writer(writer)?;
+        self.total_stakes_diff.to_writer(writer)?;
+        self.proposer.to_writer(writer)?;
+        self.proposer_data.to_writer(writer)?;
+        self.proofs.to_writer(writer)?;
+
+        Ok(())
+    }
+}
+
+impl Serializable for Proposal {
+    fn serialized_size(&self) -> usize {
+        unimplemented!(
+            "Calculate size will very slowly, please just use Vec::new() without capacity"
+        );
+    }
+
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
+        Ok(Self {
+            unsigned: UnSignedProposal::from_reader(reader)?,
+            proposer_sig: Signature::from_reader(reader)?,
+            hash_cache: OnceLock::new(),
+        })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+        self.unsigned.to_writer(writer)?;
+        self.proposer_sig.to_writer(writer)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::crypto::SecretKey;
+
+    use super::*;
+
+    type TestHasher = sha2::Sha256;
+
+    fn default_proposal() -> Proposal {
+        let sk = SecretKey::random();
+        let pk = sk.public_key();
+
+        let unsigned = UnSignedProposal {
+            code: 1,
+            parent_root: Multihash::default(),
+            diff: BTreeMap::new(),
+            total_stakes_diff: 0,
+            proposer: pk.clone(),
+            proposer_data: None,
+            proofs: ProofDb::new(),
+        };
+
+        Proposal::new::<TestHasher>(unsigned, &sk)
+    }
+
+    #[test]
+    fn proposal_serialization() {
+        let proposal = default_proposal();
+
+        let enc = proposal.to_vec().expect("Proposal should be serializable");
+        let dec = Proposal::from_slice(&enc).expect("Proposal should be deserializable");
+
+        assert_eq!(
+            proposal, dec,
+            "Deserialized proposal should match the original"
+        );
+    }
+}
