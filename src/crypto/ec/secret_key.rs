@@ -40,10 +40,10 @@ impl<C: SWCurveConfig> Serializable for SecretKey<C> {
         Ok(Self::new(sk))
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), Error> {
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         self.sk
             .serialize_compressed(writer)
-            .map_err(|e| Error(e.to_string()))
+            .expect("Failed to serialize SecretKey");
     }
 }
 

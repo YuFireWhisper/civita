@@ -76,8 +76,7 @@ impl PublicKey {
         match self {
             PublicKey::Secp256k1(pk) => {
                 // pk size is 32, so don't need to hash it
-                Multihash::wrap(0, &pk.to_vec().expect("PublicKey should be serializable"))
-                    .expect("Failed to wrap PublicKey into Multihash")
+                Multihash::wrap(0, &pk.to_vec()).expect("Failed to wrap PublicKey into Multihash")
             }
         }
     }
@@ -128,10 +127,8 @@ impl SecretKey {
     pub fn to_libp2p_key(&self) -> libp2p::identity::Keypair {
         match self {
             SecretKey::Secp256k1(sk) => {
-                let sk = libp2p::identity::secp256k1::SecretKey::try_from_bytes(
-                    sk.to_vec().expect("SecretKey should be serializable"),
-                )
-                .expect("Failed to convert SecretKey to libp2p Secp256k1 SecretKey");
+                let sk = libp2p::identity::secp256k1::SecretKey::try_from_bytes(sk.to_vec())
+                    .expect("Failed to convert SecretKey to libp2p Secp256k1 SecretKey");
                 libp2p::identity::secp256k1::Keypair::from(sk).into()
             }
         }
@@ -172,7 +169,7 @@ impl Serializable for Suite {
         }
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         match self {
             Suite::Secp256k1 => 0u8.to_writer(writer),
         }
@@ -201,8 +198,8 @@ impl Serializable for PublicKey {
         }
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.suite().to_writer(writer)?;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.suite().to_writer(writer);
 
         match self {
             PublicKey::Secp256k1(pk) => pk.to_writer(writer),
@@ -228,8 +225,8 @@ impl Serializable for SecretKey {
         }
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.suite().to_writer(writer)?;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.suite().to_writer(writer);
 
         match self {
             SecretKey::Secp256k1(sk) => sk.to_writer(writer),
@@ -261,8 +258,8 @@ impl Serializable for Signature {
         }
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.suite().to_writer(writer)?;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.suite().to_writer(writer);
 
         match self {
             Signature::Secp256k1(sig) => sig.to_writer(writer),
@@ -294,8 +291,8 @@ impl Serializable for Proof {
         }
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.suite().to_writer(writer)?;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.suite().to_writer(writer);
 
         match self {
             Proof::Secp256k1(proof) => proof.to_writer(writer),

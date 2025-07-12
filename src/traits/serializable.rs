@@ -21,15 +21,15 @@ pub trait Serializable: Sized {
     fn serialized_size(&self) -> usize;
 
     fn from_reader<R: Read>(reader: &mut R) -> Result<Self, Error>;
-    fn to_writer<W: Write>(&self, writer: &mut W) -> Result<(), Error>;
+    fn to_writer<W: Write>(&self, writer: &mut W);
     fn from_slice(slice: &[u8]) -> Result<Self, Error> {
         let mut reader = slice;
         Self::from_reader(&mut reader)
     }
-    fn to_vec(&self) -> Result<Vec<u8>, Error> {
+    fn to_vec(&self) -> Vec<u8> {
         let mut writer = Vec::new();
-        self.to_writer(&mut writer)?;
-        Ok(writer)
+        self.to_writer(&mut writer);
+        writer
     }
 }
 

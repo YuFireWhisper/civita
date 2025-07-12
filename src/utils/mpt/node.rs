@@ -201,12 +201,11 @@ impl Serializable for Full {
         })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        FULL_TAG.to_writer(writer)?;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        FULL_TAG.to_writer(writer);
         self.children
             .iter()
-            .try_for_each(|child| child.to_writer(writer))?;
-        Ok(())
+            .for_each(|child| child.to_writer(writer));
     }
 }
 
@@ -229,18 +228,16 @@ impl Serializable for Short {
         })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        SHORT_TAG.to_writer(writer)?;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        SHORT_TAG.to_writer(writer);
 
         let vec = hex_to_vec(&self.key);
         let len = vec.len() as u8;
 
-        len.to_writer(writer)?;
-        writer.write_all(&vec)?;
+        len.to_writer(writer);
+        writer.write_all(&vec).expect("Failed to write key");
 
-        self.val.to_writer(writer)?;
-
-        Ok(())
+        self.val.to_writer(writer);
     }
 }
 
@@ -274,27 +271,25 @@ impl Serializable for Node {
         }
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         match self {
-            Node::Empty => EMPTY_TAG.to_writer(writer)?,
+            Node::Empty => EMPTY_TAG.to_writer(writer),
             Node::Full(full) => {
                 // full will write its own tag
-                full.to_writer(writer)?;
+                full.to_writer(writer);
             }
             Node::Short(short) => {
                 // short will write its own tag
-                short.to_writer(writer)?;
+                short.to_writer(writer);
             }
             Node::Hash(hash) => {
-                HASH_TAG.to_writer(writer)?;
-                hash.to_writer(writer)?;
+                HASH_TAG.to_writer(writer);
+                hash.to_writer(writer);
             }
             Node::Value(value) => {
-                VALUE_TAG.to_writer(writer)?;
-                value.to_writer(writer)?;
+                VALUE_TAG.to_writer(writer);
+                value.to_writer(writer);
             }
         }
-
-        Ok(())
     }
 }

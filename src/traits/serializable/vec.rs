@@ -21,11 +21,10 @@ where
         Ok(vec)
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.len().to_writer(writer)?;
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.len().to_writer(writer);
         for item in self {
-            item.to_writer(writer)?;
+            item.to_writer(writer);
         }
-        Ok(())
     }
 }

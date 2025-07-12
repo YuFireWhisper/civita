@@ -13,7 +13,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
-pub(super) enum Error {
+pub enum Error {
     #[error("{0}")]
     Subscribe(#[from] SubscriptionError),
 

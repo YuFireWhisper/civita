@@ -67,12 +67,16 @@ where
         Ok(Self { gamma, c, s })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), SerializableError> {
-        self.gamma.serialize_compressed(writer.by_ref())?;
-        self.c.serialize_compressed(writer.by_ref())?;
-        self.s.serialize_compressed(writer.by_ref())?;
-
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.gamma
+            .serialize_compressed(writer.by_ref())
+            .expect("Failed to serialize gamma");
+        self.c
+            .serialize_compressed(writer.by_ref())
+            .expect("Failed to serialize c");
+        self.s
+            .serialize_compressed(writer.by_ref())
+            .expect("Failed to serialize s");
     }
 }
 

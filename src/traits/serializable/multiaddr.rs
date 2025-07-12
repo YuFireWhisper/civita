@@ -16,13 +16,13 @@ impl Serializable for Multiaddr {
         Multiaddr::try_from(bytes).map_err(|e| serializable::Error(e.to_string()))
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         let bytes = self.to_vec();
         let size = bytes.len();
 
-        size.to_writer(writer)?;
-        writer.write_all(&bytes)?;
-
-        Ok(())
+        size.to_writer(writer);
+        writer
+            .write_all(&bytes)
+            .expect("Failed to write Multiaddr bytes");
     }
 }

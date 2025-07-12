@@ -31,19 +31,14 @@ impl Serializable for Record {
     }
 
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let stakes = u32::from_reader(reader)?;
-        let data_length = usize::from_reader(reader)?;
-
-        let mut data = vec![0; data_length];
-        reader.read_exact(&mut data)?;
-
-        Ok(Record { stakes, data })
+        Ok(Record {
+            stakes: u32::from_reader(reader)?,
+            data: Vec::from_reader(reader)?,
+        })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.stakes.to_writer(writer)?;
-        self.data.len().to_writer(writer)?;
-        writer.write_all(&self.data)?;
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.stakes.to_writer(writer);
+        self.data.to_writer(writer);
     }
 }

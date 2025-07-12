@@ -42,11 +42,13 @@ where
         Ok(Self { r, s })
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), SerializableError> {
-        self.r.serialize_compressed(writer.by_ref())?;
-        self.s.serialize_compressed(writer.by_ref())?;
-
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.r
+            .serialize_compressed(writer.by_ref())
+            .expect("Failed to serialize r");
+        self.s
+            .serialize_compressed(writer.by_ref())
+            .expect("Failed to serialize s");
     }
 }
 

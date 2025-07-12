@@ -144,7 +144,7 @@ impl Storage {
         T: Serializable + Sync + Send + 'static,
     {
         let key = RecordKey::new(&key.to_bytes());
-        let record = Record::new(key, value.to_vec()?);
+        let record = Record::new(key, value.to_vec());
 
         let mut swarm = self.swarm.lock().await;
         let query_id = swarm
@@ -177,7 +177,7 @@ impl Storage {
 
         for (hash, value) in items {
             let key = libp2p::kad::RecordKey::new(&hash.to_bytes());
-            let record = libp2p::kad::Record::new(key, value.to_vec()?);
+            let record = libp2p::kad::Record::new(key, value.to_vec());
             records.push(record);
         }
 

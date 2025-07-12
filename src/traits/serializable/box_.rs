@@ -13,7 +13,7 @@ where
         Ok(Box::new(inner))
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         self.as_ref().to_writer(writer)
     }
 }

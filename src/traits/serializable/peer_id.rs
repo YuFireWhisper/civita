@@ -13,7 +13,7 @@ impl Serializable for PeerId {
             .map_err(|_| serializable::Error("Failed to convert Multihash to PeerId".to_string()))
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         self.as_ref().to_writer(writer)
     }
 }

@@ -20,11 +20,12 @@ impl Serializable for Multihash {
         Ok(Multihash::wrap(code, &digest)?)
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.code().to_writer(writer)?;
-        self.size().to_writer(writer)?;
-        writer.write_all(self.digest())?;
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.code().to_writer(writer);
+        self.size().to_writer(writer);
+        writer
+            .write_all(self.digest())
+            .expect("Failed to write digest");
     }
 }
 

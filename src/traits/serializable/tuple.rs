@@ -15,10 +15,9 @@ where
         Ok((a, b))
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), serializable::Error> {
-        self.0.to_writer(writer)?;
-        self.1.to_writer(writer)?;
-        Ok(())
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.0.to_writer(writer);
+        self.1.to_writer(writer);
     }
 }
 

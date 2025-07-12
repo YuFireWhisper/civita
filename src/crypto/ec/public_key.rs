@@ -16,8 +16,9 @@ impl<C: SWCurveConfig> Serializable for Affine<C> {
         Self::deserialize_compressed(reader).map_err(Error::from)
     }
 
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), Error> {
-        self.serialize_compressed(writer).map_err(Error::from)
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.serialize_compressed(writer)
+            .expect("Failed to serialize Affine point");
     }
 }
 
