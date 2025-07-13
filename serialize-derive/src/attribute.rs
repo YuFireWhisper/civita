@@ -1,37 +1,53 @@
-use syn::{Field, Meta};
+use syn::{meta::ParseNestedMeta, Field};
 
 const SKIP: &str = "skip";
+const SERIALIZE_WITH: &str = "serialize_with";
+const DESERIALIZE_WITH: &str = "deserialize_with";
 
-enum Attribute {
-    Skip,
+#[derive(Default)]
+pub(crate) struct Attributes {
+    pub skip: bool,
+    pub serialize_with: Option<syn::Path>,
+    pub deserialize_with: Option<syn::Path>,
 }
 
-impl Attribute {
-    pub fn from_field(field: &Field) -> Option<Self> {
-        field.attrs.iter().find_map(|attr| {
-            if attr.path().is_ident("serialize") {
-                match &attr.meta {
-                    Meta::List(list) => Self::from_string(&list.tokens.to_string()),
-                    _ => None,
-                }
-            } else {
-                None
+impl Attributes {
+    pub fn from_field(field: &Field) -> Self {
+        let mut attrs = Attributes::default();
+
+        for attr in &field.attrs {
+            if !attr.path().is_ident("serialize") {
+                continue;
             }
-        })
-    }
 
-    pub fn from_string(s: &str) -> Option<Self> {
-        match s {
-            SKIP => Some(Self::Skip),
-            _ => None,
+            let _ = attr.parse_nested_meta(|meta| attrs.parse_nested_meta(&meta));
         }
+
+        attrs
     }
 
-    pub fn is_skip(&self) -> bool {
-        matches!(self, Self::Skip)
-    }
-}
+    fn parse_nested_meta(&mut self, meta: &ParseNestedMeta) -> syn::Result<()> {
+        if meta.path.is_ident(SKIP) {
+            self.skip = true;
+            return Ok(());
+        }
 
-pub fn is_skip(field: &Field) -> bool {
-    Attribute::from_field(field).is_some_and(|attr| attr.is_skip())
+        if meta.path.is_ident(SERIALIZE_WITH) {
+            let str_lit: syn::LitStr = meta.value()?.parse()?;
+            let path = syn::parse_str::<syn::Path>(&str_lit.value())
+                .map_err(|_| meta.error("Failed to parse serialize_with path"))?;
+            self.serialize_with = Some(path);
+            return Ok(());
+        }
+
+        if meta.path.is_ident(DESERIALIZE_WITH) {
+            let str_lit: syn::LitStr = meta.value()?.parse()?;
+            let path = syn::parse_str::<syn::Path>(&str_lit.value())
+                .map_err(|_| meta.error("Failed to parse deserialize_with path"))?;
+            self.deserialize_with = Some(path);
+            return Ok(());
+        }
+
+        Err(meta.error("Unknown attribute"))
+    }
 }
