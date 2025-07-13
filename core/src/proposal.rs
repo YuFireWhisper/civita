@@ -6,10 +6,12 @@ use std::{
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
 use derivative::Derivative;
+use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
+    utils::mpt::{self, MerklePatriciaTrie, Node},
 };
 
 type ProofDb = HashMap<Multihash, Vec<u8>>;
@@ -72,15 +74,100 @@ impl Payload {
     }
 }
 
+impl Witness {
+    pub fn new(sig: Signature, proofs: ProofDb, vdf_proof: Vec<u8>) -> Self {
+        Self {
+            sig,
+            proofs,
+            vdf_proof,
+        }
+    }
+
+    pub fn verify<H: Hasher, S: mpt::Storage>(
+        &self,
+        payload: &Payload,
+        root_hash: Multihash,
+        vdf_difficulty: u64,
+        vdf: WesolowskiVDF,
+        mpt: &MerklePatriciaTrie<H, S>,
+    ) -> bool {
+        if payload.parent_root != root_hash {
+            return false;
+        }
+
+        let hash = payload.hash::<H>().to_bytes();
+
+        if !payload.proposer_pk.verify_signature(&hash, &self.sig) {
+            return false;
+        }
+
+        if vdf.verify(&hash, vdf_difficulty, &self.vdf_proof).is_err() {
+            return false;
+        }
+
+        if !self.verify_proposer(payload, mpt) {
+            return false;
+        }
+
+        if !self.verify_diff(payload, mpt) {
+            return false;
+        }
+
+        true
+    }
+
+    fn verify_proposer<H: Hasher, S: mpt::Storage>(
+        &self,
+        payload: &Payload,
+        mpt: &MerklePatriciaTrie<H, S>,
+    ) -> bool {
+        let key = payload.proposer_pk.to_hash::<H>().to_bytes();
+
+        let Some(Node::Value(bytes)) = mpt.verify_proof(&key, &self.proofs) else {
+            return false;
+        };
+
+        let record = resident::Record::from_slice(&bytes)
+            .expect("Bytes is from root hash, it should be valid");
+
+        record.stakes == payload.proposal_stakes
+    }
+
+    fn verify_diff<H: Hasher, S: mpt::Storage>(
+        &self,
+        payload: &Payload,
+        mpt: &MerklePatriciaTrie<H, S>,
+    ) -> bool {
+        for (key, diff) in &payload.diff {
+            let Some(Node::Value(bytes)) = mpt.verify_proof(key, &self.proofs) else {
+                return false;
+            };
+
+            let record = resident::Record::from_slice(&bytes)
+                .expect("Bytes is from root hash, it should be valid");
+
+            if record != diff.from {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 impl Proposal {
     pub fn new(payload: Payload, witness: Witness) -> Self {
         Self { payload, witness }
     }
 
-    pub fn verify_signature<H: Hasher>(&self) -> bool {
-        let msg = self.payload.hash::<H>().to_bytes();
-        self.payload
-            .proposer_pk
-            .verify_signature(&msg, &self.witness.sig)
+    pub fn verify<H: Hasher, S: mpt::Storage>(
+        &self,
+        root_hash: Multihash,
+        vdf_difficulty: u64,
+        vdf: WesolowskiVDF,
+        mpt: &MerklePatriciaTrie<H, S>,
+    ) -> bool {
+        self.witness
+            .verify(&self.payload, root_hash, vdf_difficulty, vdf, mpt)
     }
 }
