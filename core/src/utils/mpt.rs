@@ -311,40 +311,20 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
         key: &[u8],
         proof_db: &HashMap<Multihash, Vec<u8>>,
     ) -> Option<Vec<u8>> {
-        let key_vec = slice_to_hex(key);
-        let mut key = key_vec.as_slice();
-
-        let mut expected_hash = self
+        let expected_hash = self
             .root
             .cache()
             .cloned()
             .unwrap_or_else(|| H::hash(&self.root.to_vec()));
 
-        loop {
-            let cur = proof_db.get(&expected_hash)?;
-            let node = Node::from_slice(cur).ok()?;
-
-            let (keyrest, cld) = Self::get_child(&node, key)?;
-
-            match cld {
-                Node::Empty => return None,
-                Node::Hash(hash) => {
-                    key = keyrest;
-                    expected_hash = hash;
-                }
-                Node::Value(val) => {
-                    return Some(val);
-                }
-                _ => {}
-            }
-        }
+        Self::verify_proof_with_hash(key, proof_db, expected_hash)
     }
 
     pub fn verify_proof_with_hash(
         key: &[u8],
         proof_db: &HashMap<Multihash, Vec<u8>>,
         mut exp_hash: Multihash,
-    ) -> Option<Node> {
+    ) -> Option<Vec<u8>> {
         let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
@@ -360,8 +340,8 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
                     key = keyrest;
                     exp_hash = hash;
                 }
-                Node::Value(_) => {
-                    return Some(cld);
+                Node::Value(val) => {
+                    return Some(val);
                 }
                 _ => {}
             }
@@ -505,7 +485,7 @@ mod tests {
 
         assert!(prove_res);
         assert!(verify_res.is_some());
-        assert_eq!(verify_res.unwrap(), Node::Value(VALUE.to_vec()));
+        assert_eq!(verify_res.unwrap(), VALUE.to_vec());
     }
 
     #[test]
