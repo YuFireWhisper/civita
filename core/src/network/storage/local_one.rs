@@ -1,17 +1,15 @@
+use civita_serialize::Serialize;
 use dashmap::DashMap;
 
-use crate::{
-    crypto::Multihash,
-    traits::{serializable, Serializable},
-};
+use crate::crypto::Multihash;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("{0}")]
-    Serializable(#[from] serializable::Error),
+    #[error(transparent)]
+    Serialization(#[from] civita_serialize::Error),
 }
 
 #[derive(Debug)]
@@ -27,7 +25,7 @@ impl Storage {
 
     pub fn put<T>(&self, key: Multihash, value: T) -> Result<()>
     where
-        T: Serializable,
+        T: Serialize,
     {
         self.records.insert(key, value.to_vec());
         Ok(())
@@ -35,7 +33,7 @@ impl Storage {
 
     pub fn put_batch<T, I>(&self, items: I) -> Result<()>
     where
-        T: Serializable,
+        T: Serialize,
         I: IntoIterator<Item = (Multihash, T)>,
     {
         items
@@ -45,7 +43,7 @@ impl Storage {
 
     pub fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
     where
-        T: Serializable,
+        T: Serialize,
     {
         self.records
             .get(key)

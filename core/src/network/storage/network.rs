@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use civita_serialize::Serialize;
 use dashmap::DashMap;
 use libp2p::{
     kad::{QueryId, QueryResult, Quorum, Record, RecordKey},
@@ -10,34 +11,30 @@ use tokio::{
     time::Duration,
 };
 
-use crate::{
-    crypto::Multihash,
-    network::behaviour::Behaviour,
-    traits::{serializable, Serializable},
-};
+use crate::{crypto::Multihash, network::behaviour::Behaviour};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("{0}")]
+    #[error(transparent)]
     Put(#[from] libp2p::kad::PutRecordError),
 
-    #[error("{0}")]
+    #[error(transparent)]
     Get(#[from] libp2p::kad::GetRecordError),
 
     #[error("Waiting for Kademlia operation timed out after {0:?}")]
     Timeout(#[from] tokio::time::error::Elapsed),
 
-    #[error("{0}")]
+    #[error(transparent)]
     Oneshot(#[from] tokio::sync::oneshot::error::RecvError),
 
-    #[error("{0}")]
+    #[error(transparent)]
     Store(#[from] libp2p::kad::store::Error),
 
-    #[error("{0}")]
-    Serializable(#[from] serializable::Error),
+    #[error(transparent)]
+    Serialization(#[from] civita_serialize::Error),
 }
 
 #[derive(Debug)]
@@ -123,7 +120,7 @@ impl Storage {
 
     pub async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
     where
-        T: Serializable + Sync + Send + 'static,
+        T: Serialize + Sync + Send + 'static,
     {
         let key = RecordKey::new(&key.to_bytes());
 
@@ -141,7 +138,7 @@ impl Storage {
 
     pub async fn put<T>(&self, key: Multihash, value: T) -> Result<()>
     where
-        T: Serializable + Sync + Send + 'static,
+        T: Serialize + Sync + Send + 'static,
     {
         let key = RecordKey::new(&key.to_bytes());
         let record = Record::new(key, value.to_vec());
@@ -163,7 +160,7 @@ impl Storage {
 
     pub async fn put_batch<T, I>(&self, items: I) -> Result<()>
     where
-        T: Serializable + Sync + Send + 'static,
+        T: Serialize + Sync + Send + 'static,
         I: IntoIterator<Item = (Multihash, T)>,
     {
         let items: Vec<_> = items.into_iter().collect();

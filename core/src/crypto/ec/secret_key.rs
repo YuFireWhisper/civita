@@ -4,13 +4,11 @@ use ark_ec::{
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use civita_serialize::Serialize;
 use derivative::Derivative;
 use rand::Rng;
 
-use crate::{
-    crypto::traits,
-    traits::serializable::{Error, Serializable},
-};
+use crate::crypto::traits;
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Copy(bound = ""))]
@@ -29,10 +27,10 @@ impl<C: SWCurveConfig> SecretKey<C> {
     }
 }
 
-impl<C: SWCurveConfig> Serializable for SecretKey<C> {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, Error> {
-        let sk =
-            C::ScalarField::deserialize_compressed(reader).map_err(|e| Error(e.to_string()))?;
+impl<C: SWCurveConfig> Serialize for SecretKey<C> {
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, civita_serialize::Error> {
+        let sk = C::ScalarField::deserialize_compressed(reader)
+            .map_err(|e| civita_serialize::Error(e.to_string()))?;
         Ok(Self::new(sk))
     }
 

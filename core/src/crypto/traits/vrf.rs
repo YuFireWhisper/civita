@@ -1,11 +1,8 @@
 use std::fmt::Debug;
 
-use crate::{
-    crypto::traits::{hasher::Multihash, secret_key::SecretKey, PublicKey},
-    traits::serializable::Serializable,
-};
+use crate::crypto::traits::{hasher::Multihash, secret_key::SecretKey, PublicKey};
 
-pub trait Proof: Clone + Debug + Eq + Serializable + Sync + Send + 'static {
+pub trait Proof: Clone + Debug + Eq + Sync + Send + 'static {
     fn proof_to_hash(&self) -> Multihash;
 }
 

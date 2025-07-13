@@ -1,18 +1,15 @@
+use civita_serialize::Serialize;
+use civita_serialize_derive::Serialize;
+
 use crate::{
     crypto::Multihash,
-    traits::{serializable, Serializable},
     utils::mpt::keys::{hex_to_vec, vec_to_hex},
 };
-
-pub(super) const EMPTY_TAG: u8 = 0x00;
-pub(super) const FULL_TAG: u8 = 0x01;
-pub(super) const SHORT_TAG: u8 = 0x02;
-pub(super) const HASH_TAG: u8 = 0x03;
-pub(super) const VALUE_TAG: u8 = 0x04;
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize)]
 pub struct Flags {
     pub hash: Option<Multihash>,
     pub is_dirty: bool,
@@ -22,6 +19,7 @@ pub struct Flags {
 #[derive(Debug)]
 #[derive(Default)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize)]
 pub struct Full {
     pub children: Box<[Node; 17]>,
     pub flags: Flags,
@@ -30,9 +28,12 @@ pub struct Full {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize)]
 pub struct Short {
+    #[serialize(serialize_with = "serialize_key", deserialize_with = "deserialize_key")]
     pub key: Vec<u8>, // Hex
     pub val: Box<Node>,
+    #[serialize(skip)]
     pub flags: Flags,
 }
 
@@ -40,6 +41,7 @@ pub struct Short {
 #[derive(Debug)]
 #[derive(Default)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize)]
 pub enum Node {
     #[default]
     Empty,
@@ -183,101 +185,10 @@ impl Default for Flags {
     }
 }
 
-impl Serializable for Full {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let mut children = std::array::from_fn(|_| Node::Empty);
-
-        for child in children.iter_mut() {
-            *child = Node::from_reader(reader)?;
-        }
-
-        Ok(Full {
-            children: children.into(),
-            flags: Flags::default(),
-        })
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        FULL_TAG.to_writer(writer);
-        self.children
-            .iter()
-            .for_each(|child| child.to_writer(writer));
-    }
+fn serialize_key<W: std::io::Write>(key: &[u8], writer: &mut W) {
+    hex_to_vec(key).to_writer(writer);
 }
 
-impl Serializable for Short {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let len = u8::from_reader(reader)?;
-        let mut vec = vec![0u8; len as usize];
-        reader.read_exact(&mut vec)?;
-
-        let key = vec_to_hex(vec);
-
-        Ok(Short {
-            key,
-            val: Box::new(Node::from_reader(reader)?),
-            flags: Flags::default(),
-        })
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        SHORT_TAG.to_writer(writer);
-
-        let vec = hex_to_vec(&self.key);
-        let len = vec.len() as u8;
-
-        len.to_writer(writer);
-        writer.write_all(&vec).expect("Failed to write key");
-
-        self.val.to_writer(writer);
-    }
-}
-
-impl Serializable for Node {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let tag = u8::from_reader(reader)?;
-
-        match tag {
-            EMPTY_TAG => Ok(Node::Empty),
-            FULL_TAG => {
-                let full = Full::from_reader(reader)?;
-                Ok(Node::Full(full))
-            }
-            SHORT_TAG => {
-                let short = Short::from_reader(reader)?;
-                Ok(Node::Short(short))
-            }
-            HASH_TAG => {
-                let hash = Multihash::from_reader(reader)?;
-                Ok(Node::Hash(hash))
-            }
-            VALUE_TAG => {
-                let value = Vec::from_reader(reader)?;
-                Ok(Node::Value(value))
-            }
-            _ => Err(serializable::Error(format!("Unknown tag: {tag}"))),
-        }
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        match self {
-            Node::Empty => EMPTY_TAG.to_writer(writer),
-            Node::Full(full) => {
-                // full will write its own tag
-                full.to_writer(writer);
-            }
-            Node::Short(short) => {
-                // short will write its own tag
-                short.to_writer(writer);
-            }
-            Node::Hash(hash) => {
-                HASH_TAG.to_writer(writer);
-                hash.to_writer(writer);
-            }
-            Node::Value(value) => {
-                VALUE_TAG.to_writer(writer);
-                value.to_writer(writer);
-            }
-        }
-    }
+fn deserialize_key<R: std::io::Read>(reader: &mut R) -> Result<Vec<u8>, civita_serialize::Error> {
+    Vec::from_reader(reader).map(vec_to_hex)
 }
