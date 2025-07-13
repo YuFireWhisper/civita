@@ -38,6 +38,7 @@ ark-serialize = "0.5"
 ark-std = "0.5"
 statrs = "0.18"
 derivative = "2.2"
+vdf = "0.1"
 
 [dev-dependencies]
 tempfile = "3.17"
