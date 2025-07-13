@@ -1,10 +1,12 @@
 use std::{collections::HashMap, marker::PhantomData};
 
+use civita_serialize::Serialize;
+
 use crate::{
     crypto::{Hasher, Multihash},
     utils::mpt::{
         keys::{prefix_len, slice_to_hex},
-        node::{Flags, Full, Short},
+        node::{Flags, Full, Node, Short},
     },
 };
 
@@ -14,8 +16,6 @@ mod keys;
 mod node;
 pub mod storage;
 
-use civita_serialize::Serialize;
-pub use node::Node;
 pub use storage::{Storage, StorageError};
 
 #[derive(Debug)]
@@ -306,7 +306,11 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
         Ok(true)
     }
 
-    pub fn verify_proof(&self, key: &[u8], proof_db: &HashMap<Multihash, Vec<u8>>) -> Option<Node> {
+    pub fn verify_proof(
+        &self,
+        key: &[u8],
+        proof_db: &HashMap<Multihash, Vec<u8>>,
+    ) -> Option<Vec<u8>> {
         let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
@@ -328,8 +332,8 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
                     key = keyrest;
                     expected_hash = hash;
                 }
-                Node::Value(_) => {
-                    return Some(cld);
+                Node::Value(val) => {
+                    return Some(val);
                 }
                 _ => {}
             }
@@ -483,7 +487,7 @@ mod tests {
 
         assert!(prove_res);
         assert!(verify_res.is_some());
-        assert_eq!(verify_res.unwrap(), Node::Value(VALUE.to_vec()));
+        assert_eq!(verify_res.unwrap(), VALUE.to_vec());
     }
 
     #[test]
