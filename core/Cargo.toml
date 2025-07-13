@@ -24,7 +24,6 @@ libp2p = { version = "0.56", features = [
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
-serde = { version = "1.0", features = ["derive"] }
 futures = "0.3"
 dashmap = "6.1"
 log = "0.4"
@@ -39,7 +38,6 @@ ark-serialize = "0.5"
 ark-std = "0.5"
 statrs = "0.18"
 derivative = "2.2"
-bytemuck = "1.23"
 
 [dev-dependencies]
 tempfile = "3.17"
