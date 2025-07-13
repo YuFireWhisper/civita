@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 libp2p = ["dep:libp2p"]
-ark-secp256k1 = ["dep:ark-secp256k1"]
+ark-secp256k1 = ["dep:ark-secp256k1", "dep:ark-serialize"]
 
 [dependencies]
 libp2p = { version = "0.56", optional = true }
