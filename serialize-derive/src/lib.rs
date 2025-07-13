@@ -9,9 +9,10 @@ mod struct_impl;
 
 #[proc_macro_derive(Serialize, attributes(serialize))]
 pub fn derive_serialize(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+    let mut input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
-    let generics = &input.generics;
+    let generics = &mut input.generics;
+    add_trait_bounds(generics);
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let expanded = match &input.data {
@@ -31,4 +32,14 @@ pub fn derive_serialize(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+fn add_trait_bounds(generics: &mut syn::Generics) {
+    generics.params.iter_mut().for_each(|param| {
+        if let syn::GenericParam::Type(ty_param) = param {
+            ty_param
+                .bounds
+                .push(syn::parse_quote!(civita_serialize::Serialize));
+        }
+    });
 }
