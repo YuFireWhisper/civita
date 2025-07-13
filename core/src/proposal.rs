@@ -11,7 +11,7 @@ use vdf::{WesolowskiVDF, VDF};
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
-    utils::mpt::{self, MerklePatriciaTrie, Node},
+    utils::mpt::{self, MerklePatriciaTrie},
 };
 
 type ProofDb = HashMap<Multihash, Vec<u8>>;
@@ -123,7 +123,7 @@ impl Witness {
     ) -> bool {
         let key = payload.proposer_pk.to_hash::<H>().to_bytes();
 
-        let Some(Node::Value(bytes)) = mpt.verify_proof(&key, &self.proofs) else {
+        let Some(bytes) = mpt.verify_proof(&key, &self.proofs) else {
             return false;
         };
 
@@ -139,7 +139,7 @@ impl Witness {
         mpt: &MerklePatriciaTrie<H, S>,
     ) -> bool {
         for (key, diff) in &payload.diff {
-            let Some(Node::Value(bytes)) = mpt.verify_proof(key, &self.proofs) else {
+            let Some(bytes) = mpt.verify_proof(key, &self.proofs) else {
                 return false;
             };
 
