@@ -1,11 +1,10 @@
 use ark_ec::short_weierstrass;
+use civita_serialize::Serialize;
+use civita_serialize_derive::Serialize;
 
-use crate::{
-    crypto::traits::{
-        vrf::{Proof as _, Prover as _, VerifyProof},
-        SecretKey as _, Signer as _, VerifiySignature,
-    },
-    traits::{serializable, Serializable},
+use crate::crypto::traits::{
+    vrf::{Proof as _, Prover as _, VerifyProof},
+    SecretKey as _, Signer as _, VerifiySignature,
 };
 
 mod ec;
@@ -17,6 +16,7 @@ pub use traits::hasher::{Hasher, Multihash};
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Hash)]
+#[derive(Serialize)]
 pub enum Suite {
     Secp256k1,
 }
@@ -25,6 +25,7 @@ pub enum Suite {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Hash)]
+#[derive(Serialize)]
 pub enum PublicKey {
     Secp256k1(short_weierstrass::Affine<ark_secp256k1::Config>),
 }
@@ -33,6 +34,7 @@ pub enum PublicKey {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Hash)]
+#[derive(Serialize)]
 pub enum SecretKey {
     Secp256k1(ec::SecretKey<ark_secp256k1::Config>),
 }
@@ -41,6 +43,7 @@ pub enum SecretKey {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Hash)]
+#[derive(Serialize)]
 pub enum Signature {
     Secp256k1(ec::Signature<short_weierstrass::Affine<ark_secp256k1::Config>, ark_secp256k1::Fr>),
 }
@@ -49,6 +52,7 @@ pub enum Signature {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Hash)]
+#[derive(Serialize)]
 pub enum Proof {
     Secp256k1(ec::vrf::Proof<short_weierstrass::Affine<ark_secp256k1::Config>, ark_secp256k1::Fr>),
 }
@@ -153,103 +157,6 @@ impl Proof {
     pub fn to_hash(&self) -> Multihash {
         match self {
             Proof::Secp256k1(proof) => proof.proof_to_hash(),
-        }
-    }
-}
-
-impl Serializable for Suite {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        match u8::from_reader(reader)? {
-            0 => Ok(Suite::Secp256k1),
-            _ => Err(serializable::Error("Unknown suite".to_string())),
-        }
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        match self {
-            Suite::Secp256k1 => 0u8.to_writer(writer),
-        }
-    }
-}
-
-impl Serializable for PublicKey {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let suite = Suite::from_reader(reader)?;
-
-        match suite {
-            Suite::Secp256k1 => Ok(PublicKey::Secp256k1(short_weierstrass::Affine::<
-                ark_secp256k1::Config,
-            >::from_reader(reader)?)),
-        }
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        self.suite().to_writer(writer);
-
-        match self {
-            PublicKey::Secp256k1(pk) => pk.to_writer(writer),
-        }
-    }
-}
-
-impl Serializable for SecretKey {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let suite = Suite::from_reader(reader)?;
-
-        match suite {
-            Suite::Secp256k1 => Ok(SecretKey::Secp256k1(
-                ec::SecretKey::<ark_secp256k1::Config>::from_reader(reader)?,
-            )),
-        }
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        self.suite().to_writer(writer);
-
-        match self {
-            SecretKey::Secp256k1(sk) => sk.to_writer(writer),
-        }
-    }
-}
-
-impl Serializable for Signature {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let suite = Suite::from_reader(reader)?;
-
-        match suite {
-            Suite::Secp256k1 => Ok(Signature::Secp256k1(ec::Signature::<
-                short_weierstrass::Affine<ark_secp256k1::Config>,
-                ark_secp256k1::Fr,
-            >::from_reader(reader)?)),
-        }
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        self.suite().to_writer(writer);
-
-        match self {
-            Signature::Secp256k1(sig) => sig.to_writer(writer),
-        }
-    }
-}
-
-impl Serializable for Proof {
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, serializable::Error> {
-        let suite = Suite::from_reader(reader)?;
-
-        match suite {
-            Suite::Secp256k1 => Ok(Proof::Secp256k1(ec::vrf::Proof::<
-                short_weierstrass::Affine<ark_secp256k1::Config>,
-                ark_secp256k1::Fr,
-            >::from_reader(reader)?)),
-        }
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        self.suite().to_writer(writer);
-
-        match self {
-            Proof::Secp256k1(proof) => proof.to_writer(writer),
         }
     }
 }

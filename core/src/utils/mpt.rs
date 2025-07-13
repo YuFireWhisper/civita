@@ -2,7 +2,6 @@ use std::{collections::HashMap, marker::PhantomData};
 
 use crate::{
     crypto::{Hasher, Multihash},
-    traits::Serializable,
     utils::mpt::{
         keys::{prefix_len, slice_to_hex},
         node::{Flags, Full, Short},
@@ -15,6 +14,7 @@ mod keys;
 mod node;
 pub mod storage;
 
+use civita_serialize::Serialize;
 pub use node::Node;
 pub use storage::{Storage, StorageError};
 
@@ -426,10 +426,9 @@ mod tests {
 
     #[test]
     fn insert_and_commit() {
-        const EXP: &[u8; 32] = &[
-            58, 79, 249, 90, 58, 219, 221, 240, 229, 209, 57, 149, 231, 28, 21, 178, 202, 43, 227,
-            210, 238, 35, 24, 224, 18, 68, 190, 14, 180, 23, 173, 189,
-        ];
+        let key_hex = slice_to_hex(KEY);
+        let exp_node = Short::new(key_hex, Node::Value(VALUE.to_vec()));
+        let exp = TestHasher::hash(&exp_node.to_vec());
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
@@ -438,7 +437,7 @@ mod tests {
 
         let hash = mpt.commit().expect("Failed to commit MPT");
 
-        assert_eq!(hash.digest(), EXP);
+        assert_eq!(hash, exp);
     }
 
     #[test]

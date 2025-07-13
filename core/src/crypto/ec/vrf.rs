@@ -1,22 +1,19 @@
 use std::fmt::Debug;
 
 use ark_ec::{short_weierstrass::Affine, AffineRepr, CurveGroup};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use civita_serialize_derive::Serialize;
 
-use crate::{
-    crypto::{
-        ec::{
-            hash_to_curve::{self, HashToCurve},
-            secret_key::SecretKey,
-        },
-        traits::{
-            self,
-            hasher::{Hasher, Multihash},
-            vrf::{Prover, VerifyProof},
-            SecretKey as _,
-        },
+use crate::crypto::{
+    ec::{
+        hash_to_curve::{self, HashToCurve},
+        secret_key::SecretKey,
     },
-    traits::serializable::{Error as SerializableError, Serializable},
+    traits::{
+        self,
+        hasher::{Hasher, Multihash},
+        vrf::{Prover, VerifyProof},
+        SecretKey as _,
+    },
 };
 
 mod challenge_generator;
@@ -26,6 +23,7 @@ mod nonce_generator;
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Hash)]
+#[derive(Serialize)]
 pub struct Proof<P, S> {
     pub gamma: P,
     pub c: S,
@@ -46,32 +44,6 @@ where
         bytes.push(DOMAIN_SEPARATOR_BACK);
 
         C::Hasher::hash(&bytes)
-    }
-}
-
-impl<P, S> Serializable for Proof<P, S>
-where
-    P: CanonicalSerialize + CanonicalDeserialize,
-    S: CanonicalSerialize + CanonicalDeserialize,
-{
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, SerializableError> {
-        let gamma = P::deserialize_compressed(reader.by_ref())?;
-        let c = S::deserialize_compressed(reader.by_ref())?;
-        let s = S::deserialize_compressed(reader.by_ref())?;
-
-        Ok(Self { gamma, c, s })
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        self.gamma
-            .serialize_compressed(writer.by_ref())
-            .expect("Failed to serialize gamma");
-        self.c
-            .serialize_compressed(writer.by_ref())
-            .expect("Failed to serialize c");
-        self.s
-            .serialize_compressed(writer.by_ref())
-            .expect("Failed to serialize s");
     }
 }
 

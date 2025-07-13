@@ -5,47 +5,24 @@ use ark_ec::{
     CurveGroup,
 };
 use ark_ff::PrimeField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalSerialize;
+use civita_serialize_derive::Serialize;
 use rand::Rng;
 
-use crate::{
-    crypto::{
-        ec::{secret_key::SecretKey, HasherConfig},
-        traits::{self, SecretKey as _},
-        Hasher,
-    },
-    traits::serializable::{Error as SerializableError, Serializable},
+use crate::crypto::{
+    ec::{secret_key::SecretKey, HasherConfig},
+    traits::{self, SecretKey as _},
+    Hasher,
 };
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Hash)]
+#[derive(Serialize)]
 pub struct Signature<P, S> {
     pub r: P,
     pub s: S,
-}
-
-impl<P, S> Serializable for Signature<P, S>
-where
-    P: CanonicalSerialize + CanonicalDeserialize,
-    S: CanonicalSerialize + CanonicalDeserialize,
-{
-    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, SerializableError> {
-        let r = P::deserialize_compressed(reader.by_ref())?;
-        let s = S::deserialize_compressed(reader.by_ref())?;
-
-        Ok(Self { r, s })
-    }
-
-    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
-        self.r
-            .serialize_compressed(writer.by_ref())
-            .expect("Failed to serialize r");
-        self.s
-            .serialize_compressed(writer.by_ref())
-            .expect("Failed to serialize s");
-    }
 }
 
 impl<C: SWCurveConfig + HasherConfig> traits::Signer for SecretKey<C> {

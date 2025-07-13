@@ -1,4 +1,4 @@
-use libp2p::{multihash::Multihash, PeerId};
+use libp2p::{gossipsub::MessageId, multihash::Multihash, Multiaddr, PeerId};
 
 use crate::*;
 
@@ -31,5 +31,26 @@ impl Serialize for PeerId {
 
     fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
         self.as_ref().to_writer(writer)
+    }
+}
+
+impl Serialize for Multiaddr {
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self> {
+        let bytes = Vec::from_reader(reader)?;
+        Multiaddr::try_from(bytes).map_err(|e| Error(e.to_string()))
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.to_vec().to_writer(writer);
+    }
+}
+
+impl Serialize for MessageId {
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self> {
+        Ok(MessageId(Vec::from_reader(reader)?))
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.0.to_writer(writer)
     }
 }

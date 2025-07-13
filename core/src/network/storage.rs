@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use civita_serialize::Serialize;
 use libp2p::{kad::Event, Swarm};
 use tokio::sync::Mutex;
 
-use crate::{crypto::Multihash, network::behaviour::Behaviour, traits::Serializable};
+use crate::{crypto::Multihash, network::behaviour::Behaviour};
 
 mod local_multi;
 mod local_one;
@@ -50,7 +51,7 @@ impl Storage {
 
     pub async fn put<T>(&self, key: Multihash, value: T) -> Result<()>
     where
-        T: Serializable + Send + Sync + 'static,
+        T: Serialize + Send + Sync + 'static,
     {
         match self {
             Storage::Network(storage) => storage.put(key, value).await.map_err(Error::from),
@@ -61,7 +62,7 @@ impl Storage {
 
     pub async fn put_batch<T, I>(&self, items: I) -> Result<()>
     where
-        T: Serializable + Send + Sync + 'static,
+        T: Serialize + Send + Sync + 'static,
         I: IntoIterator<Item = (Multihash, T)>,
     {
         match self {
@@ -73,7 +74,7 @@ impl Storage {
 
     pub async fn get<T>(&self, key: &Multihash) -> Result<Option<T>>
     where
-        T: Serializable + Send + Sync + 'static,
+        T: Serialize + Send + Sync + 'static,
     {
         match self {
             Storage::Network(storage) => storage.get(key).await.map_err(Error::from),

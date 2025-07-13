@@ -1,11 +1,11 @@
 use std::{collections::HashSet, sync::Arc};
 
+use civita_serialize::Serialize;
 use dashmap::{mapref::one::Ref, DashMap};
 
 use crate::{
     crypto::Multihash,
     network::{storage, Storage},
-    traits::Serializable,
 };
 
 pub struct CacheStorage<T> {
@@ -16,7 +16,7 @@ pub struct CacheStorage<T> {
 
 impl<T> CacheStorage<T>
 where
-    T: Serializable + Sync + Send + 'static,
+    T: Serialize + Sync + Send + 'static,
 {
     pub fn new(storage: Arc<Storage>) -> Self {
         Self {

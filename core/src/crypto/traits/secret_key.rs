@@ -1,8 +1,8 @@
 use std::fmt::Debug;
 
-use crate::traits::serializable::Serializable;
+use civita_serialize::Serialize;
 
-pub trait SecretKey: Clone + Debug + Eq + Serializable + Sync + Send + 'static {
+pub trait SecretKey: Clone + Debug + Eq + Serialize + Sync + Send + 'static {
     type PublicKey;
 
     fn random() -> Self;
