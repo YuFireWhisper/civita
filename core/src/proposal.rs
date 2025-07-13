@@ -46,6 +46,7 @@ pub struct Payload {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize)]
 pub struct Witness {
     pub sig: Signature,
     pub proofs: ProofDb,
@@ -55,6 +56,7 @@ pub struct Witness {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
+#[derive(Serialize)]
 pub struct Proposal {
     pub payload: Payload,
     pub witness: Witness,
