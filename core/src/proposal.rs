@@ -11,7 +11,7 @@ use vdf::{WesolowskiVDF, VDF};
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
-    utils::mpt::{self, MerklePatriciaTrie},
+    utils::mpt::{self, Trie},
 };
 
 type ProofDb = HashMap<Multihash, Vec<u8>>;
@@ -89,7 +89,7 @@ impl Witness {
         root_hash: Multihash,
         vdf_difficulty: u64,
         vdf: WesolowskiVDF,
-        mpt: &MerklePatriciaTrie<H, S>,
+        mpt: &Trie<H, S>,
     ) -> bool {
         if payload.parent_root != root_hash {
             return false;
@@ -119,7 +119,7 @@ impl Witness {
     fn verify_proposer<H: Hasher, S: mpt::Storage>(
         &self,
         payload: &Payload,
-        mpt: &MerklePatriciaTrie<H, S>,
+        mpt: &Trie<H, S>,
     ) -> bool {
         let key = payload.proposer_pk.to_hash::<H>().to_bytes();
 
@@ -133,11 +133,7 @@ impl Witness {
         record.stakes == payload.proposal_stakes
     }
 
-    fn verify_diff<H: Hasher, S: mpt::Storage>(
-        &self,
-        payload: &Payload,
-        mpt: &MerklePatriciaTrie<H, S>,
-    ) -> bool {
+    fn verify_diff<H: Hasher, S: mpt::Storage>(&self, payload: &Payload, mpt: &Trie<H, S>) -> bool {
         for (key, diff) in &payload.diff {
             let Some(bytes) = mpt.verify_proof(key, &self.proofs) else {
                 return false;
@@ -165,7 +161,7 @@ impl Proposal {
         root_hash: Multihash,
         vdf_difficulty: u64,
         vdf: WesolowskiVDF,
-        mpt: &MerklePatriciaTrie<H, S>,
+        mpt: &Trie<H, S>,
     ) -> bool {
         self.witness
             .verify(&self.payload, root_hash, vdf_difficulty, vdf, mpt)
