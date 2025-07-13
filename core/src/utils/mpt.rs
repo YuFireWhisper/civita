@@ -28,16 +28,16 @@ pub enum Error {
     MissingNode,
 }
 
-pub struct MerklePatriciaTrie<H, S> {
+pub struct Trie<H, S> {
     root: Node,
     storage: S,
     cache: HashMap<Multihash, Node>,
     _marker: PhantomData<H>,
 }
 
-impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
+impl<H: Hasher, S: Storage> Trie<H, S> {
     pub fn empty(storage: S) -> Self {
-        MerklePatriciaTrie {
+        Trie {
             root: Node::Empty,
             storage,
             cache: HashMap::new(),
@@ -46,7 +46,7 @@ impl<H: Hasher, S: Storage> MerklePatriciaTrie<H, S> {
     }
 
     pub fn from_root(root_hash: Multihash, storage: S) -> Self {
-        MerklePatriciaTrie {
+        Trie {
             root: Node::Hash(root_hash),
             storage,
             cache: HashMap::new(),
@@ -403,7 +403,7 @@ mod tests {
     use super::*;
 
     type TestHasher = sha2::Sha256;
-    type TestMerklePatriciaTrie = MerklePatriciaTrie<TestHasher, HashMap<Multihash, Vec<u8>>>;
+    type TestMerklePatriciaTrie = Trie<TestHasher, HashMap<Multihash, Vec<u8>>>;
 
     const KEY: &[u8] = &[1, 2, 3, 4];
     const VALUE: &[u8] = &[5, 6, 7, 8];
