@@ -44,7 +44,7 @@ pub struct Diff {
 #[derive(Serialize)]
 pub struct Payload {
     pub code: u8,
-    pub parent_root: Multihash,
+    pub parent: Multihash,
     pub diff: BTreeMap<Vec<u8>, Diff>,
     pub total_stakes_diff: i32,
     pub proposer_pk: PublicKey,
@@ -71,8 +71,8 @@ pub struct Witness {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Proposal {
-    pub payload: Payload,
-    pub witness: Witness,
+    payload: Payload,
+    witness: Witness,
 }
 
 impl Payload {
@@ -133,7 +133,7 @@ impl Proposal {
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
     ) -> bool {
-        if &self.payload.parent_root != root_hash {
+        if &self.payload.parent != root_hash {
             return false;
         }
 
@@ -199,6 +199,14 @@ impl Proposal {
 
         true
     }
+
+    pub fn parent(&self) -> Multihash {
+        self.payload.parent
+    }
+
+    pub fn proposer_stakes(&self) -> u32 {
+        self.payload.proposal_stakes
+    }
 }
 
 #[cfg(test)]
@@ -243,7 +251,7 @@ mod tests {
 
         let payload = Payload {
             code: 0,
-            parent_root: root_hash,
+            parent: root_hash,
             diff,
             total_stakes_diff: 100,
             proposer_pk,

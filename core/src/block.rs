@@ -13,6 +13,8 @@ use crate::{
     utils::mpt::{self, ProofResult, Storage, Trie},
 };
 
+pub mod tree;
+
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
@@ -35,7 +37,7 @@ pub struct Payload {
     pub height: u64,
     pub proposer_pk: PublicKey,
     pub proposer_data: Option<Vec<u8>>,
-    pub proposal_stakes: u32,
+    pub proposer_stakes: u32,
 
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
@@ -56,8 +58,8 @@ pub struct Witness {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Block {
-    pub payload: Payload,
-    pub witness: Witness,
+    payload: Payload,
+    witness: Witness,
 }
 
 impl Payload {
@@ -142,6 +144,26 @@ impl Block {
         let record = resident::Record::from_slice(&bytes)
             .expect("Bytes is from root hash, it should be valid");
 
-        record.stakes == self.payload.proposal_stakes
+        record.stakes == self.payload.proposer_stakes
+    }
+
+    pub fn height(&self) -> u64 {
+        self.payload.height
+    }
+
+    pub fn parent(&self) -> Multihash {
+        self.payload.parent
+    }
+
+    pub fn proposer_stakes(&self) -> u32 {
+        self.payload.proposer_stakes
+    }
+
+    pub fn vdf_proof(&self) -> &[u8] {
+        &self.witness.vdf_proof
+    }
+
+    pub fn proposals(&self) -> &HashSet<Multihash> {
+        &self.payload.proposals
     }
 }
