@@ -3,6 +3,7 @@ pub mod b_tree;
 pub mod bool;
 pub mod box_;
 pub mod hash_map;
+pub mod hash_set;
 pub mod numeric;
 pub mod option;
 pub mod string;
