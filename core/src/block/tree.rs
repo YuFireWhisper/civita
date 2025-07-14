@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    marker::PhantomData,
-};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::{
     block::Block,
@@ -13,177 +10,143 @@ pub struct Node {
     pub block: Block,
     pub parent: Option<Multihash>,
     pub children: HashSet<Multihash>,
-    pub stakes: u32,
-    pub is_final: bool,
+    pub weight: u32,
+    pub cumulative_weight: u32,
+    pub is_finalized: bool,
     pub is_checkpoint: bool,
-    pub cumulative_stakes: u32,
+}
+
+pub struct SubTree {
+    pub nodes: HashMap<Multihash, Node>,
+    pub proposals: HashMap<Multihash, Proposal>,
+    pub height_idx: BTreeMap<u64, HashSet<Multihash>>,
+    pub best_chain_tip: Option<Multihash>,
+    pub root_checkpoint: Multihash,
+    pub is_active: bool,
 }
 
 #[derive(Default)]
-pub struct Tree<H: Hasher> {
-    pub nodes: HashMap<Multihash, Node>,
-    pub proposals: HashMap<Multihash, Proposal>,
-
-    pub height_idx: BTreeMap<u64, HashSet<Multihash>>,
-    pub checkpoint_blocks: Vec<Multihash>,
-    pub finalized_blocks: HashSet<Multihash>,
-
-    pub best: Option<Multihash>,
-    pub total_stakes: u32,
-
-    pub branch_stakes: HashMap<Multihash, u32>,
-    pub branch_proposals: HashMap<Multihash, Multihash>,
-
+pub struct Tree {
+    pub checkpoints: Vec<Multihash>,
+    pub subtrees: HashMap<Multihash, SubTree>,
+    pub active_checkpoint: Option<Multihash>,
+    pub total_weight: u32,
     pub ancestors_cache: HashMap<(Multihash, Multihash), bool>,
-
-    _marker: PhantomData<H>,
 }
 
 impl Node {
-    pub fn new(block: Block, stakes: u32) -> Self {
-        let parent = if block.height() > 0 {
-            Some(block.parent())
+    pub fn new(block: Block) -> Self {
+        let parent = if block.height > 0 {
+            Some(block.parent)
         } else {
             None
         };
 
         Node {
+            weight: block.proposer_weight,
+            cumulative_weight: block.proposer_weight,
             block,
             parent,
             children: HashSet::new(),
-            stakes,
-            is_final: false,
+            is_finalized: false,
             is_checkpoint: false,
-            cumulative_stakes: stakes,
         }
     }
 }
 
-impl<H: Hasher> Tree<H> {
-    pub fn add_block(&mut self, block: Block) -> bool {
-        let hash = block.hash::<H>();
-        let height = block.height();
+impl SubTree {
+    pub fn new(root_checkpoint: Multihash) -> Self {
+        SubTree {
+            nodes: HashMap::new(),
+            proposals: HashMap::new(),
+            height_idx: BTreeMap::new(),
+            best_chain_tip: None,
+            root_checkpoint,
+            is_active: true,
+        }
+    }
 
-        if height > 0 && !self.nodes.contains_key(&block.parent()) {
-            return false;
+    pub fn add_block<H: Hasher>(&mut self, block: Block) -> Option<i32> {
+        let hash = block.hash::<H>();
+        let height = block.height;
+
+        if height > 0 && !self.nodes.contains_key(&block.parent) {
+            return None;
         }
 
-        let Some(stakes) = self.calc_block_stakes(&block) else {
-            return false;
-        };
-
-        let mut node = Node::new(block, stakes);
+        let mut node = Node::new(block);
+        let mut total_weight_diff = 0;
 
         if let Some(parent_hash) = node.parent {
             if let Some(parent_node) = self.nodes.get_mut(&parent_hash) {
-                node.cumulative_stakes += parent_node.cumulative_stakes;
+                node.cumulative_weight += parent_node.cumulative_weight;
                 parent_node.children.insert(hash);
+            }
+        }
+
+        for proposal_hash in &node.block.proposals {
+            if let Some(proposal) = self.proposals.get(proposal_hash) {
+                node.weight += proposal.proposer_weight;
+                node.cumulative_weight += proposal.proposer_weight;
+                total_weight_diff += proposal.total_weight_diff;
             }
         }
 
         self.nodes.insert(hash, node);
         self.height_idx.entry(height).or_default().insert(hash);
+        self.update_best_chain(hash);
 
-        self.update_best(hash);
-        self.check_for_checkpoint(&hash);
-
-        true
+        Some(total_weight_diff)
     }
 
-    fn calc_block_stakes(&mut self, block: &Block) -> Option<u32> {
-        let mut stakes = block.proposer_stakes();
-
-        block
-            .proposals()
-            .iter()
-            .filter_map(|proposal| self.proposals.get(proposal).map(|p| p.proposer_stakes()))
-            .for_each(|s| stakes += s);
-
-        Some(stakes)
-    }
-
-    fn update_best(&mut self, candidate_hash: Multihash) {
+    fn update_best_chain(&mut self, candidate_hash: Multihash) {
         let Some(candidate) = self.nodes.get(&candidate_hash) else {
             return;
         };
 
-        let Some(cur_hash) = self.best else {
-            self.best = Some(candidate_hash);
+        let Some(current_best) = self.best_chain_tip else {
+            self.best_chain_tip = Some(candidate_hash);
             return;
         };
 
-        let cur = self.nodes.get(&cur_hash).unwrap();
+        let current = self.nodes.get(&current_best).unwrap();
 
-        if candidate.cumulative_stakes > cur.cumulative_stakes {
-            self.best = Some(candidate_hash);
-            return;
-        }
-
-        if candidate.stakes == cur.stakes && candidate.block.vdf_proof() > cur.block.vdf_proof() {
-            self.best = Some(candidate_hash);
+        if candidate.cumulative_weight > current.cumulative_weight {
+            self.best_chain_tip = Some(candidate_hash);
         }
     }
 
-    fn check_for_checkpoint(&mut self, block_hash: &Multihash) {
-        let Some(node) = self.nodes.get(block_hash) else {
-            return;
-        };
+    pub fn finalize_to_checkpoint(&mut self, checkpoint_hash: Multihash) {
+        let mut current = Some(checkpoint_hash);
 
-        if node.stakes * 3 > self.total_stakes * 2 {
-            self.generate_checkpoint(*block_hash);
+        while let Some(hash) = current {
+            if let Some(node) = self.nodes.get_mut(&hash) {
+                node.is_finalized = true;
+                current = node.parent;
+            } else {
+                break;
+            }
         }
-    }
 
-    fn generate_checkpoint(&mut self, block_hash: Multihash) {
-        if let Some(node) = self.nodes.get_mut(&block_hash) {
+        if let Some(node) = self.nodes.get_mut(&checkpoint_hash) {
             node.is_checkpoint = true;
         }
 
-        self.checkpoint_blocks.push(block_hash);
-        self.finalize_branch(block_hash);
-        self.clean_up_non_finalized();
+        self.is_active = false;
+
+        self.clean_non_finalized_branches();
     }
 
-    fn finalize_branch(&mut self, block_hash: Multihash) {
-        let mut cur = Some(block_hash);
-
-        while let Some(hash) = cur {
-            let Some(node) = self.nodes.get_mut(&hash) else {
-                break;
-            };
-
-            if node.is_final {
-                break;
-            }
-
-            node.is_final = true;
-            self.finalized_blocks.insert(hash);
-            cur = node.parent;
-        }
-    }
-
-    fn clean_up_non_finalized(&mut self) {
-        let (c_hash, c_height) = self
-            .checkpoint_blocks
-            .last()
-            .as_ref()
-            .map(|h| {
-                let node = self.nodes.get(h).unwrap();
-                (**h, node.block.height())
-            })
-            .unwrap();
-
+    fn clean_non_finalized_branches(&mut self) {
         let blocks_to_remove: Vec<Multihash> = self
-            .height_idx
-            .get(&c_height)
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|&hash| hash != &c_hash && !self.finalized_blocks.contains(hash))
-                    .cloned()
-                    .collect()
+            .nodes
+            .keys()
+            .filter(|&&hash| {
+                let node = &self.nodes[&hash];
+                !node.is_finalized
             })
-            .unwrap_or_default();
+            .cloned()
+            .collect();
 
         for hash in blocks_to_remove {
             self.remove_branch(hash);
@@ -206,27 +169,90 @@ impl<H: Hasher> Tree<H> {
                     to_remove.push_back(child_hash);
                 }
 
-                self.height_idx
-                    .entry(node.block.height())
-                    .and_modify(|set| {
-                        set.remove(&hash);
-                    });
+                self.height_idx.entry(node.block.height).and_modify(|set| {
+                    set.remove(&hash);
+                });
 
                 visited.insert(hash);
             }
         }
     }
+}
 
-    pub fn add_proposal(&mut self, proposal: Proposal) -> bool {
-        let hash = proposal.parent();
+impl Tree {
+    pub fn new() -> Self {
+        Self {
+            checkpoints: Vec::new(),
+            subtrees: HashMap::new(),
+            active_checkpoint: None,
+            total_weight: 0,
+            ancestors_cache: HashMap::new(),
+        }
+    }
 
-        if !self.nodes.contains_key(&hash) {
+    pub fn add_block<H: Hasher>(&mut self, block: Block) -> bool {
+        let checkpoint_hash = block.parent_checkpoint;
+
+        if !self.subtrees.contains_key(&checkpoint_hash) {
+            if let Some(active_cp) = self.active_checkpoint {
+                if checkpoint_hash != active_cp {
+                    return false;
+                }
+            } else {
+                self.subtrees
+                    .insert(checkpoint_hash, SubTree::new(checkpoint_hash));
+                self.active_checkpoint = Some(checkpoint_hash);
+                self.checkpoints.push(checkpoint_hash);
+            }
+        }
+
+        let subtree = self.subtrees.get_mut(&checkpoint_hash).unwrap();
+
+        if !subtree.is_active {
             return false;
         }
 
-        self.proposals.insert(hash, proposal);
+        subtree.add_block::<H>(block).is_some_and(|weight_diff| {
+            self.total_weight = self.total_weight.saturating_add_signed(weight_diff);
+            self.check_for_checkpoint(checkpoint_hash);
+            true
+        })
+    }
 
-        true
+    fn check_for_checkpoint(&mut self, current_checkpoint: Multihash) {
+        let Some(subtree) = self.subtrees.get(&current_checkpoint) else {
+            return;
+        };
+
+        let Some(best_tip) = subtree.best_chain_tip else {
+            return;
+        };
+
+        let Some(best_node) = subtree.nodes.get(&best_tip) else {
+            return;
+        };
+
+        if best_node.cumulative_weight * 3 > self.total_weight * 2 {
+            self.generate_checkpoint(current_checkpoint, best_tip);
+        }
+    }
+
+    fn generate_checkpoint(&mut self, current_checkpoint: Multihash, new_checkpoint: Multihash) {
+        if let Some(subtree) = self.subtrees.get_mut(&current_checkpoint) {
+            subtree.finalize_to_checkpoint(new_checkpoint);
+        }
+
+        let new_subtree = SubTree::new(new_checkpoint);
+        self.subtrees.insert(new_checkpoint, new_subtree);
+
+        self.active_checkpoint = Some(new_checkpoint);
+        self.checkpoints.push(new_checkpoint);
+    }
+
+    pub fn get_current_best_tip(&self) -> Option<Multihash> {
+        let active_cp = self.active_checkpoint?;
+        let subtree = self.subtrees.get(&active_cp)?;
+        subtree.best_chain_tip
     }
 
     pub fn is_ancestor(&mut self, ancestor: Multihash, descendant: Multihash) -> bool {
@@ -242,6 +268,21 @@ impl<H: Hasher> Tree<H> {
     }
 
     fn is_ancestor_uncached(&self, ancestor: Multihash, descendant: Multihash) -> bool {
+        for subtree in self.subtrees.values() {
+            if subtree.nodes.contains_key(&descendant) {
+                return self.is_ancestor_in_subtree(subtree, ancestor, descendant);
+            }
+        }
+
+        self.is_ancestor_across_checkpoints(ancestor, descendant)
+    }
+
+    fn is_ancestor_in_subtree(
+        &self,
+        subtree: &SubTree,
+        ancestor: Multihash,
+        descendant: Multihash,
+    ) -> bool {
         let mut current = Some(descendant);
 
         while let Some(hash) = current {
@@ -249,7 +290,7 @@ impl<H: Hasher> Tree<H> {
                 return true;
             }
 
-            if let Some(node) = self.nodes.get(&hash) {
+            if let Some(node) = subtree.nodes.get(&hash) {
                 current = node.parent;
             } else {
                 break;
@@ -259,32 +300,47 @@ impl<H: Hasher> Tree<H> {
         false
     }
 
-    pub fn add_blocks_batch(&mut self, blocks: Vec<Block>) -> Vec<bool> {
-        blocks
-            .into_iter()
-            .map(|block| self.add_block(block))
-            .collect()
+    fn is_ancestor_across_checkpoints(&self, ancestor: Multihash, descendant: Multihash) -> bool {
+        let ancestor_pos = self.checkpoints.iter().position(|&cp| cp == ancestor);
+        let descendant_pos = self.checkpoints.iter().position(|&cp| cp == descendant);
+
+        match (ancestor_pos, descendant_pos) {
+            (Some(a_pos), Some(d_pos)) => a_pos < d_pos,
+            _ => false,
+        }
     }
 
-    pub fn get_branch_info(&self, from: Multihash, to: Multihash) -> Option<Vec<Multihash>> {
-        let mut path = Vec::new();
-        let mut current = Some(to);
+    pub fn get_finalized_chain(&self) -> Vec<Multihash> {
+        let mut chain = Vec::new();
 
-        while let Some(hash) = current {
-            if hash == from {
-                path.reverse();
-                return Some(path);
-            }
+        for &checkpoint in &self.checkpoints {
+            if let Some(subtree) = self.subtrees.get(&checkpoint) {
+                let finalized_blocks: Vec<Multihash> = subtree
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| node.is_finalized)
+                    .map(|(&hash, _)| hash)
+                    .collect();
 
-            path.push(hash);
-
-            if let Some(node) = self.nodes.get(&hash) {
-                current = node.parent;
-            } else {
-                break;
+                chain.extend(finalized_blocks);
             }
         }
 
-        None
+        chain
+    }
+
+    pub fn prune_old_subtrees(&mut self, keep_count: usize) {
+        if self.checkpoints.len() <= keep_count {
+            return;
+        }
+
+        let to_remove = self.checkpoints.len() - keep_count;
+        let old_checkpoints: Vec<Multihash> = self.checkpoints.drain(..to_remove).collect();
+
+        for checkpoint in old_checkpoints {
+            self.subtrees.remove(&checkpoint);
+        }
+
+        self.ancestors_cache.clear();
     }
 }
