@@ -62,9 +62,11 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
         }
     }
 
-    pub fn update(&mut self, key: &[u8], val: Node) -> Result<()> {
+    pub fn update(&mut self, key: &[u8], val: Vec<u8>) -> Result<()> {
         let key_vec = slice_to_hex(key);
         let key = key_vec.as_slice();
+
+        let val = Node::Value(val);
 
         let root = std::mem::take(&mut self.root);
         let (_, root) = self.insert(root, &[], key, val)?;
@@ -436,7 +438,7 @@ mod tests {
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
 
         let hash = mpt.commit().expect("Failed to commit MPT");
@@ -448,7 +450,7 @@ mod tests {
     fn return_value_if_key_found() {
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
         mpt.commit().expect("Failed to commit MPT");
 
@@ -464,7 +466,7 @@ mod tests {
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
         mpt.commit().expect("Failed to commit MPT");
 
@@ -477,7 +479,7 @@ mod tests {
     fn prove_and_verify() {
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
         mpt.commit().expect("Failed to commit MPT");
 
@@ -493,7 +495,7 @@ mod tests {
     fn correct_existence_proof() {
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
         mpt.commit().expect("Failed to commit MPT");
 
@@ -512,7 +514,7 @@ mod tests {
 
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
         mpt.commit().expect("Failed to commit MPT");
 
@@ -530,7 +532,7 @@ mod tests {
     fn false_if_incorrect_proof() {
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
         mpt.commit().expect("Failed to commit MPT");
 
@@ -549,7 +551,7 @@ mod tests {
     fn false_if_incorrect_hash() {
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
-        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+        mpt.update(KEY, VALUE.to_vec())
             .expect("Failed to update MPT");
         let _ = mpt.commit().expect("Failed to commit MPT");
         let root_hash = Multihash::default(); // Intentionally incorrect hash
