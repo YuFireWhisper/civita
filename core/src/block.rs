@@ -93,35 +93,6 @@ impl Witness {
             vdf_proof,
         })
     }
-
-    pub fn verify<H: Hasher>(
-        &self,
-        payload: &Payload,
-        vdf: WesolowskiVDF,
-        vdf_difficulty: u64,
-        mpt: Trie<H, impl Storage>,
-    ) -> bool {
-        let hash = payload.hash::<H>().to_bytes();
-
-        if !payload.proposer_pk.verify_signature(&hash, &self.sig) {
-            return false;
-        }
-
-        if vdf.verify(&hash, vdf_difficulty, &self.vdf_proof).is_err() {
-            return false;
-        }
-
-        let key = payload.proposer_pk.to_hash::<H>().to_bytes();
-
-        let Some(ProofResult::Exists(bytes)) = mpt.verify_proof(&key, &self.proofs) else {
-            return false;
-        };
-
-        let record = resident::Record::from_slice(&bytes)
-            .expect("Bytes is from root hash, it should be valid");
-
-        record.stakes == payload.proposal_stakes
-    }
 }
 
 impl Block {
@@ -133,12 +104,44 @@ impl Block {
         self.payload.hash::<H>()
     }
 
-    pub fn verify<H: Hasher, S: Storage>(
+    pub fn verify<H: Hasher>(
         &self,
-        vdf: WesolowskiVDF,
+        root_hash: Multihash,
+        vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
-        mpt: Trie<H, S>,
     ) -> bool {
-        self.witness.verify(&self.payload, vdf, vdf_difficulty, mpt)
+        if self.payload.parent != root_hash {
+            return false;
+        }
+
+        let hash = self.payload.hash::<H>().to_bytes();
+
+        if !self
+            .payload
+            .proposer_pk
+            .verify_signature(&hash, &self.witness.sig)
+        {
+            return false;
+        }
+
+        if vdf
+            .verify(&hash, vdf_difficulty, &self.witness.vdf_proof)
+            .is_err()
+        {
+            return false;
+        }
+
+        let key = self.payload.proposer_pk.to_hash::<H>().to_bytes();
+
+        let Some(ProofResult::Exists(bytes)) =
+            mpt::verify_proof_with_hash(&key, &self.witness.proofs, root_hash)
+        else {
+            return false;
+        };
+
+        let record = resident::Record::from_slice(&bytes)
+            .expect("Bytes is from root hash, it should be valid");
+
+        record.stakes == self.payload.proposal_stakes
     }
 }

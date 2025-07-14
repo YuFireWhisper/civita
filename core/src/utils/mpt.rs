@@ -338,65 +338,56 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
             .cloned()
             .unwrap_or_else(|| H::hash(&self.root.to_vec()));
 
-        Self::verify_proof_with_hash(key, proof_db, expected_hash)
+        verify_proof_with_hash(key, proof_db, expected_hash)
     }
+}
 
-    pub fn verify_proof_with_hash(
-        key: &[u8],
-        proof_db: &HashMap<Multihash, Vec<u8>>,
-        mut exp_hash: Multihash,
-    ) -> Option<ProofResult> {
-        let key_vec = slice_to_hex(key);
-        let mut key = key_vec.as_slice();
+pub fn verify_proof_with_hash(
+    key: &[u8],
+    proof_db: &HashMap<Multihash, Vec<u8>>,
+    mut exp_hash: Multihash,
+) -> Option<ProofResult> {
+    let key_vec = slice_to_hex(key);
+    let mut key = key_vec.as_slice();
 
-        loop {
-            let cur = proof_db.get(&exp_hash)?;
-            let node = Node::from_slice(cur).ok()?;
+    loop {
+        let cur = proof_db.get(&exp_hash)?;
+        let node = Node::from_slice(cur).ok()?;
 
-            let Some((keyrest, cld)) = Self::get_child(&node, key) else {
-                return Some(ProofResult::NotExists);
-            };
+        let Some((keyrest, cld)) = get_child(&node, key) else {
+            return Some(ProofResult::NotExists);
+        };
 
-            match cld {
-                Node::Empty => return Some(ProofResult::NotExists),
-                Node::Hash(hash) => {
-                    key = keyrest;
-                    exp_hash = hash;
-                }
-                Node::Value(val) => {
-                    return Some(ProofResult::Exists(val));
-                }
-                _ => {}
+        match cld {
+            Node::Empty => return Some(ProofResult::NotExists),
+            Node::Hash(hash) => {
+                key = keyrest;
+                exp_hash = hash;
             }
+            Node::Value(val) => {
+                return Some(ProofResult::Exists(val));
+            }
+            _ => {}
         }
     }
+}
 
-    fn get_child<'a>(mut node: &Node, mut key: &'a [u8]) -> Option<(&'a [u8], Node)> {
-        loop {
-            match node {
-                Node::Short(short) => {
-                    if key.len() < short.key.len() {
-                        return None;
-                    }
-                    if key[..short.key.len()] != short.key {
-                        return None;
-                    }
-                    node = &short.val;
-                    key = &key[short.key.len()..];
-                }
-                Node::Full(full) => {
-                    if key.is_empty() {
-                        return None;
-                    }
-                    let idx = key[0] as usize;
-                    node = &full.children[idx];
-                    key = &key[1..];
-                }
-                Node::Hash(_) | Node::Empty | Node::Value(_) => {
-                    return Some((key, node.clone()));
-                }
+fn get_child<'a>(node: &Node, key: &'a [u8]) -> Option<(&'a [u8], Node)> {
+    match node {
+        Node::Short(short) => {
+            if key.len() < short.key.len() || key[..short.key.len()] != short.key {
+                return None;
             }
+            Some((&key[short.key.len()..], *short.val.clone()))
         }
+        Node::Full(full) => {
+            if key.is_empty() {
+                return None;
+            }
+            let idx = key[0] as usize;
+            Some((&key[1..], full.children[idx].clone()))
+        }
+        Node::Hash(_) | Node::Empty | Node::Value(_) => Some((key, node.clone())),
     }
 }
 
@@ -559,7 +550,7 @@ mod tests {
         let mut proof_db = HashMap::new();
         mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
 
-        let verify_res = TestMerklePatriciaTrie::verify_proof_with_hash(KEY, &proof_db, root_hash);
+        let verify_res = verify_proof_with_hash(KEY, &proof_db, root_hash);
 
         assert!(verify_res.is_none());
     }
