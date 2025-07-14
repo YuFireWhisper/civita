@@ -261,7 +261,7 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
         }
     }
 
-    pub fn prove(&self, key: &[u8], proof_db: &mut HashMap<Multihash, Vec<u8>>) -> Result<bool> {
+    pub fn prove(&self, key: &[u8], proof_db: &mut HashMap<Multihash, Vec<u8>>) -> Result<()> {
         let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
@@ -303,7 +303,7 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
             proof_db.insert(hash, enc);
         }
 
-        Ok(true)
+        Ok(())
     }
 
     pub fn verify_proof(
@@ -462,10 +462,9 @@ mod tests {
         mpt.commit().expect("Failed to commit MPT");
 
         let mut proof_db = HashMap::new();
-        let prove_res = mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
         let verify_res = mpt.verify_proof(KEY, &proof_db);
 
-        assert!(prove_res);
         assert!(verify_res.is_some());
         assert_eq!(verify_res.unwrap(), VALUE.to_vec());
     }
@@ -480,10 +479,9 @@ mod tests {
 
         let mut proof_db = HashMap::new();
 
-        let prove_res = mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
         let verify_res = TestMerklePatriciaTrie::verify_proof_with_hash(KEY, &proof_db, root_hash);
 
-        assert!(prove_res);
         assert!(verify_res.is_some());
         assert_eq!(verify_res.unwrap(), VALUE.to_vec());
     }
@@ -497,7 +495,7 @@ mod tests {
         mpt.commit().expect("Failed to commit MPT");
 
         let mut proof_db = HashMap::new();
-        let _ = mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
 
         let mut proof_db = HashMap::new();
         proof_db.insert(Multihash::default(), vec![0; 32]);
@@ -517,7 +515,7 @@ mod tests {
         let root_hash = Multihash::default(); // Intentionally incorrect hash
 
         let mut proof_db = HashMap::new();
-        let _ = mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
 
         let verify_res = TestMerklePatriciaTrie::verify_proof_with_hash(KEY, &proof_db, root_hash);
 
