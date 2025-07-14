@@ -13,6 +13,8 @@ use crate::{
     utils::mpt::{self, ProofResult, Storage, Trie},
 };
 
+pub mod tree;
+
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
@@ -35,7 +37,7 @@ pub struct Payload {
     pub height: u64,
     pub proposer_pk: PublicKey,
     pub proposer_data: Option<Vec<u8>>,
-    pub proposal_stakes: u32,
+    pub proposer_stakes: u32,
 
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
@@ -56,8 +58,8 @@ pub struct Witness {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Block {
-    pub payload: Payload,
-    pub witness: Witness,
+    payload: Payload,
+    witness: Witness,
 }
 
 impl Payload {
@@ -93,35 +95,6 @@ impl Witness {
             vdf_proof,
         })
     }
-
-    pub fn verify<H: Hasher>(
-        &self,
-        payload: &Payload,
-        vdf: WesolowskiVDF,
-        vdf_difficulty: u64,
-        mpt: Trie<H, impl Storage>,
-    ) -> bool {
-        let hash = payload.hash::<H>().to_bytes();
-
-        if !payload.proposer_pk.verify_signature(&hash, &self.sig) {
-            return false;
-        }
-
-        if vdf.verify(&hash, vdf_difficulty, &self.vdf_proof).is_err() {
-            return false;
-        }
-
-        let key = payload.proposer_pk.to_hash::<H>().to_bytes();
-
-        let Some(ProofResult::Exists(bytes)) = mpt.verify_proof(&key, &self.proofs) else {
-            return false;
-        };
-
-        let record = resident::Record::from_slice(&bytes)
-            .expect("Bytes is from root hash, it should be valid");
-
-        record.stakes == payload.proposal_stakes
-    }
 }
 
 impl Block {
@@ -133,12 +106,64 @@ impl Block {
         self.payload.hash::<H>()
     }
 
-    pub fn verify<H: Hasher, S: Storage>(
+    pub fn verify<H: Hasher>(
         &self,
-        vdf: WesolowskiVDF,
+        root_hash: Multihash,
+        vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
-        mpt: Trie<H, S>,
     ) -> bool {
-        self.witness.verify(&self.payload, vdf, vdf_difficulty, mpt)
+        if self.payload.parent != root_hash {
+            return false;
+        }
+
+        let hash = self.payload.hash::<H>().to_bytes();
+
+        if !self
+            .payload
+            .proposer_pk
+            .verify_signature(&hash, &self.witness.sig)
+        {
+            return false;
+        }
+
+        if vdf
+            .verify(&hash, vdf_difficulty, &self.witness.vdf_proof)
+            .is_err()
+        {
+            return false;
+        }
+
+        let key = self.payload.proposer_pk.to_hash::<H>().to_bytes();
+
+        let Some(ProofResult::Exists(bytes)) =
+            mpt::verify_proof_with_hash(&key, &self.witness.proofs, root_hash)
+        else {
+            return false;
+        };
+
+        let record = resident::Record::from_slice(&bytes)
+            .expect("Bytes is from root hash, it should be valid");
+
+        record.stakes == self.payload.proposer_stakes
+    }
+
+    pub fn height(&self) -> u64 {
+        self.payload.height
+    }
+
+    pub fn parent(&self) -> Multihash {
+        self.payload.parent
+    }
+
+    pub fn proposer_stakes(&self) -> u32 {
+        self.payload.proposer_stakes
+    }
+
+    pub fn vdf_proof(&self) -> &[u8] {
+        &self.witness.vdf_proof
+    }
+
+    pub fn proposals(&self) -> &HashSet<Multihash> {
+        &self.payload.proposals
     }
 }

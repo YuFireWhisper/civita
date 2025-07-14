@@ -44,7 +44,7 @@ pub struct Diff {
 #[derive(Serialize)]
 pub struct Payload {
     pub code: u8,
-    pub parent_root: Multihash,
+    pub parent: Multihash,
     pub diff: BTreeMap<Vec<u8>, Diff>,
     pub total_stakes_diff: i32,
     pub proposer_pk: PublicKey,
@@ -71,8 +71,8 @@ pub struct Witness {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Proposal {
-    pub payload: Payload,
-    pub witness: Witness,
+    payload: Payload,
+    witness: Witness,
 }
 
 impl Payload {
@@ -120,60 +120,70 @@ impl Witness {
             vdf_proof,
         })
     }
+}
 
-    pub fn verify<H: Hasher, S: mpt::Storage>(
+impl Proposal {
+    pub fn new(payload: Payload, witness: Witness) -> Self {
+        Self { payload, witness }
+    }
+
+    pub fn verify<H: Hasher>(
         &self,
-        payload: &Payload,
-        root_hash: Multihash,
-        vdf_difficulty: u64,
+        root_hash: &Multihash,
         vdf: &WesolowskiVDF,
-        mpt: &Trie<H, S>,
+        vdf_difficulty: u64,
     ) -> bool {
-        if payload.parent_root != root_hash {
+        if &self.payload.parent != root_hash {
             return false;
         }
 
-        let hash = payload.hash::<H>().to_bytes();
+        let hash = self.payload.hash::<H>().to_bytes();
 
-        if !payload.proposer_pk.verify_signature(&hash, &self.sig) {
+        if !self
+            .payload
+            .proposer_pk
+            .verify_signature(&hash, &self.witness.sig)
+        {
             return false;
         }
 
-        if vdf.verify(&hash, vdf_difficulty, &self.vdf_proof).is_err() {
+        if vdf
+            .verify(&hash, vdf_difficulty, &self.witness.vdf_proof)
+            .is_err()
+        {
             return false;
         }
 
-        if !self.verify_proposer(payload, mpt) {
+        if !self.verify_proposer::<H>(*root_hash) {
             return false;
         }
 
-        if !self.verify_diff(payload, mpt) {
+        if !self.verify_diff(*root_hash) {
             return false;
         }
 
         true
     }
 
-    fn verify_proposer<H: Hasher, S: mpt::Storage>(
-        &self,
-        payload: &Payload,
-        mpt: &Trie<H, S>,
-    ) -> bool {
-        let key = payload.proposer_pk.to_hash::<H>().to_bytes();
+    fn verify_proposer<H: Hasher>(&self, root_hash: Multihash) -> bool {
+        let key = self.payload.proposer_pk.to_hash::<H>().to_bytes();
 
-        let Some(ProofResult::Exists(bytes)) = mpt.verify_proof(&key, &self.proofs) else {
+        let Some(ProofResult::Exists(bytes)) =
+            mpt::verify_proof_with_hash(&key, &self.witness.proofs, root_hash)
+        else {
             return false;
         };
 
         let record = resident::Record::from_slice(&bytes)
             .expect("Bytes is from root hash, it should be valid");
 
-        record.stakes == payload.proposal_stakes
+        record.stakes == self.payload.proposal_stakes
     }
 
-    fn verify_diff<H: Hasher, S: mpt::Storage>(&self, payload: &Payload, mpt: &Trie<H, S>) -> bool {
-        for (key, diff) in &payload.diff {
-            let Some(res) = mpt.verify_proof(key, &self.proofs) else {
+    fn verify_diff(&self, root_hash: Multihash) -> bool {
+        for (key, diff) in &self.payload.diff {
+            let Some(res) = mpt::verify_proof_with_hash(key, &self.witness.proofs, root_hash)
+            else {
                 return false;
             };
 
@@ -189,22 +199,13 @@ impl Witness {
 
         true
     }
-}
 
-impl Proposal {
-    pub fn new(payload: Payload, witness: Witness) -> Self {
-        Self { payload, witness }
+    pub fn parent(&self) -> Multihash {
+        self.payload.parent
     }
 
-    pub fn verify<H: Hasher, S: mpt::Storage>(
-        &self,
-        root_hash: Multihash,
-        vdf_difficulty: u64,
-        vdf: &WesolowskiVDF,
-        mpt: &Trie<H, S>,
-    ) -> bool {
-        self.witness
-            .verify(&self.payload, root_hash, vdf_difficulty, vdf, mpt)
+    pub fn proposer_stakes(&self) -> u32 {
+        self.payload.proposal_stakes
     }
 }
 
@@ -250,7 +251,7 @@ mod tests {
 
         let payload = Payload {
             code: 0,
-            parent_root: root_hash,
+            parent: root_hash,
             diff,
             total_stakes_diff: 100,
             proposer_pk,
@@ -266,7 +267,9 @@ mod tests {
             Witness::from_payload::<TestHasher, _>(&payload, &sk, &vdf, vdf_difficulty, &mpt)
                 .unwrap();
 
-        let is_valid = witness.verify(&payload, root_hash, vdf_difficulty, &vdf, &mpt);
+        let proposal = Proposal::new(payload, witness);
+
+        let is_valid = proposal.verify::<TestHasher>(&root_hash, &vdf, vdf_difficulty);
 
         assert!(is_valid, "Witness should be valid");
     }
