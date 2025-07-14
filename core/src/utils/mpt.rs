@@ -28,6 +28,14 @@ pub enum Error {
     MissingNode,
 }
 
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+pub enum ProofResult {
+    Exists(Vec<u8>),
+    NotExists,
+}
+
 pub struct Trie<H, S> {
     root: Node,
     storage: S,
@@ -270,16 +278,20 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
         let mut cur = self.root.clone();
 
         while !key.is_empty() && !cur.is_empty() {
-            match cur {
+            match &cur {
                 Node::Short(short) => {
-                    if prefix_len(key, &short.key) == 0 {
-                        cur = Node::Empty;
-                    } else {
-                        cur = *short.val;
-                        prefix.extend_from_slice(short.key.as_ref());
-                        key = &key[short.key.len()..];
+                    let len = prefix_len(key, &short.key);
+
+                    if len != short.key.len() {
+                        break;
                     }
+
+                    prefix.extend_from_slice(short.key.as_ref());
+                    key = &key[len..];
+
                     nodes.push(cur.clone());
+
+                    cur = *short.val.clone();
                 }
                 Node::Full(full) => {
                     cur = full.children[key[0] as usize].to_owned();
@@ -291,8 +303,15 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
                     let node = self.resolve_node(&cur)?.ok_or(Error::MissingNode)?;
                     cur = node;
                 }
+                Node::Value(_) => {
+                    break;
+                }
                 _ => panic!("Unexpected node type in prove: {cur:?}"),
             }
+        }
+
+        if !cur.is_empty() {
+            nodes.push(cur.clone());
         }
 
         nodes.push(self.root.clone());
@@ -310,7 +329,7 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
         &self,
         key: &[u8],
         proof_db: &HashMap<Multihash, Vec<u8>>,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<ProofResult> {
         let expected_hash = self
             .root
             .cache()
@@ -324,7 +343,7 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
         key: &[u8],
         proof_db: &HashMap<Multihash, Vec<u8>>,
         mut exp_hash: Multihash,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<ProofResult> {
         let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
@@ -332,16 +351,18 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
             let cur = proof_db.get(&exp_hash)?;
             let node = Node::from_slice(cur).ok()?;
 
-            let (keyrest, cld) = Self::get_child(&node, key)?;
+            let Some((keyrest, cld)) = Self::get_child(&node, key) else {
+                return Some(ProofResult::NotExists);
+            };
 
             match cld {
-                Node::Empty => return None,
+                Node::Empty => return Some(ProofResult::NotExists),
                 Node::Hash(hash) => {
                     key = keyrest;
                     exp_hash = hash;
                 }
                 Node::Value(val) => {
-                    return Some(val);
+                    return Some(ProofResult::Exists(val));
                 }
                 _ => {}
             }
@@ -352,25 +373,24 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
         loop {
             match node {
                 Node::Short(short) => {
-                    if key.len() < short.key.len() || key[..short.key.len()] != short.key {
+                    if key.len() < short.key.len() {
+                        return None;
+                    }
+                    if key[..short.key.len()] != short.key {
                         return None;
                     }
                     node = &short.val;
                     key = &key[short.key.len()..];
                 }
-
                 Node::Full(full) => {
+                    if key.is_empty() {
+                        return None;
+                    }
                     let idx = key[0] as usize;
                     node = &full.children[idx];
                     key = &key[1..];
                 }
-                Node::Hash(_) => {
-                    return Some((key, node.clone()));
-                }
-                Node::Empty => {
-                    return Some((key, Node::Empty));
-                }
-                Node::Value(_) => {
+                Node::Hash(_) | Node::Empty | Node::Value(_) => {
                     return Some((key, node.clone()));
                 }
             }
@@ -466,24 +486,44 @@ mod tests {
         let verify_res = mpt.verify_proof(KEY, &proof_db);
 
         assert!(verify_res.is_some());
-        assert_eq!(verify_res.unwrap(), VALUE.to_vec());
+        assert_eq!(verify_res.unwrap(), ProofResult::Exists(VALUE.to_vec()));
     }
 
     #[test]
-    fn verify_proof_with_hash() {
+    fn correct_existence_proof() {
         let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
 
         mpt.update(KEY, Node::Value(VALUE.to_vec()))
             .expect("Failed to update MPT");
-        let root_hash = mpt.commit().expect("Failed to commit MPT");
+        mpt.commit().expect("Failed to commit MPT");
 
         let mut proof_db = HashMap::new();
-
         mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
-        let verify_res = TestMerklePatriciaTrie::verify_proof_with_hash(KEY, &proof_db, root_hash);
+
+        let verify_res = mpt.verify_proof(KEY, &proof_db);
 
         assert!(verify_res.is_some());
-        assert_eq!(verify_res.unwrap(), VALUE.to_vec());
+        assert_eq!(verify_res.unwrap(), ProofResult::Exists(VALUE.to_vec()));
+    }
+
+    #[test]
+    fn correct_non_existence_proof() {
+        const NON_EXISTENT_KEY: &[u8] = &[9, 10, 11];
+
+        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+
+        mpt.update(KEY, Node::Value(VALUE.to_vec()))
+            .expect("Failed to update MPT");
+        mpt.commit().expect("Failed to commit MPT");
+
+        let mut proof_db = HashMap::new();
+        mpt.prove(NON_EXISTENT_KEY, &mut proof_db)
+            .expect("Failed to prove non-existent key");
+
+        let verify_res = mpt.verify_proof(NON_EXISTENT_KEY, &proof_db);
+
+        assert!(verify_res.is_some());
+        assert_eq!(verify_res.unwrap(), ProofResult::NotExists);
     }
 
     #[test]
