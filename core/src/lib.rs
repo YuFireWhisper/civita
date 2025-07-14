@@ -1,4 +1,5 @@
 // pub mod consensus;
+pub mod block;
 pub mod constants;
 pub mod crypto;
 pub mod network;
