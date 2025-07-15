@@ -343,4 +343,18 @@ impl Tree {
 
         self.ancestors_cache.clear();
     }
+
+    pub fn append_proposals<I>(&mut self, proposals: I)
+    where
+        I: IntoIterator<Item = Proposal>,
+    {
+        for proposal in proposals {
+            let hash = proposal.hash();
+            let checkpoint_hash = proposal.parent_checkpoint;
+
+            if let Some(subtree) = self.subtrees.get_mut(&checkpoint_hash) {
+                subtree.proposals.insert(hash, proposal);
+            }
+        }
+    }
 }
