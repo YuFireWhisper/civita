@@ -2,8 +2,9 @@ use libp2p::{
     gossipsub::{self, MessageAuthenticity},
     identity::Keypair,
     kad::{self, store::MemoryStore},
+    request_response::{self, cbor::codec::Codec, ProtocolSupport},
     swarm::NetworkBehaviour,
-    PeerId,
+    PeerId, StreamProtocol,
 };
 
 #[derive(Debug)]
@@ -22,6 +23,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Event {
     Gossipsub(Box<gossipsub::Event>),
     Kad(Box<kad::Event>),
+    RequestResponse(Box<request_response::Event<Vec<u8>, Vec<u8>>>),
 }
 
 #[derive(NetworkBehaviour)]
@@ -29,14 +31,20 @@ pub enum Event {
 pub struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<MemoryStore>,
+    req_resp: request_response::Behaviour<Codec<Vec<u8>, Vec<u8>>>,
 }
 
 impl Behaviour {
     pub fn new(key: Keypair, peer_id: PeerId) -> Result<Self> {
         let gossipsub = Self::create_gossipsub(key)?;
         let kad = Self::create_kad(peer_id);
+        let req_resp = Self::create_req_resp();
 
-        Ok(Self { gossipsub, kad })
+        Ok(Self {
+            gossipsub,
+            kad,
+            req_resp,
+        })
     }
 
     fn create_gossipsub(key: Keypair) -> Result<gossipsub::Behaviour> {
@@ -55,6 +63,16 @@ impl Behaviour {
         kad::Behaviour::new(peer_id, MemoryStore::new(peer_id))
     }
 
+    fn create_req_resp() -> request_response::Behaviour<Codec<Vec<u8>, Vec<u8>>> {
+        request_response::Behaviour::new(
+            [(
+                StreamProtocol::new(env!("CARGO_PKG_NAME")),
+                ProtocolSupport::Full,
+            )],
+            request_response::Config::default(),
+        )
+    }
+
     pub fn gossipsub(&self) -> &gossipsub::Behaviour {
         &self.gossipsub
     }
@@ -69,6 +87,14 @@ impl Behaviour {
 
     pub fn kad_mut(&mut self) -> &mut kad::Behaviour<MemoryStore> {
         &mut self.kad
+    }
+
+    pub fn req_resp(&self) -> &request_response::Behaviour<Codec<Vec<u8>, Vec<u8>>> {
+        &self.req_resp
+    }
+
+    pub fn req_resp_mut(&mut self) -> &mut request_response::Behaviour<Codec<Vec<u8>, Vec<u8>>> {
+        &mut self.req_resp
     }
 }
 
@@ -87,6 +113,12 @@ impl From<gossipsub::Event> for Event {
 impl From<kad::Event> for Event {
     fn from(event: kad::Event) -> Self {
         Event::Kad(Box::new(event))
+    }
+}
+
+impl From<request_response::Event<Vec<u8>, Vec<u8>>> for Event {
+    fn from(event: request_response::Event<Vec<u8>, Vec<u8>>) -> Self {
+        Event::RequestResponse(Box::new(event))
     }
 }
 

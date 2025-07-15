@@ -17,7 +17,7 @@ use crate::{
     network::{
         behaviour::{self, Behaviour},
         gossipsub::{self, Gossipsub},
-        storage, Storage,
+        request_response, storage, Storage,
     },
 };
 
@@ -33,6 +33,7 @@ pub struct Transport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     gossipsub: Arc<Gossipsub>,
     storage: Arc<Storage>,
+    req_resp: Arc<request_response::RequestResponse>,
     local_peer_id: PeerId,
     listen_addr: Multiaddr,
     sk: SecretKey,
@@ -74,10 +75,14 @@ impl Transport {
         let gossipsub = Gossipsub::new_network(swarm.clone(), peer_id, gossipsub_config).await;
         let gossipsub = Arc::new(gossipsub);
 
+        let req_resp = request_response::RequestResponse::new_network(swarm.clone());
+        let req_resp = Arc::new(req_resp);
+
         let transport = Self {
             swarm,
             gossipsub,
             storage,
+            req_resp,
             local_peer_id: peer_id,
             listen_addr,
             sk,
@@ -116,6 +121,7 @@ impl Transport {
         let swarm = self.swarm.clone();
         let gossipsub = self.gossipsub.clone();
         let storage = self.storage.clone();
+        let req_resp = self.req_resp.clone();
         let receive_interval = self.config.receive_interval;
 
         tokio::spawn(async move {
@@ -130,6 +136,11 @@ impl Transport {
                             },
                             behaviour::Event::Kad(event) => {
                                 storage.handle_event(*event);
+                            },
+                            behaviour::Event::RequestResponse(event) => {
+                                if let Err(e) = req_resp.handle_event_network(*event).await {
+                                    log::error!("Error handling request response event: {e:?}");
+                                }
                             },
                         }
                     },
