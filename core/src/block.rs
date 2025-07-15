@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     sync::OnceLock,
 };
 
@@ -29,7 +29,7 @@ pub enum Error {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Block {
-    pub proposals: HashSet<Multihash>,
+    pub proposals: BTreeSet<Multihash>,
     pub parent: Multihash,
     pub parent_checkpoint: Multihash,
     pub height: u64,
