@@ -2,6 +2,7 @@ mod behaviour;
 
 pub mod cache_storage;
 pub mod gossipsub;
+pub mod request_response;
 pub mod storage;
 pub mod transport;
 
