@@ -20,9 +20,6 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("{0:?}")]
-    Vdf(vdf::InvalidIterations),
-
     #[error(transparent)]
     Mpt(#[from] mpt::Error),
 }
@@ -31,14 +28,14 @@ pub enum Error {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Payload {
+pub struct Block {
     pub proposals: HashSet<Multihash>,
     pub parent: Multihash,
+    pub parent_checkpoint: Multihash,
     pub height: u64,
     pub proposer_pk: PublicKey,
     pub proposer_data: Option<Vec<u8>>,
-    pub proposer_stakes: u32,
-
+    pub proposer_weight: u32,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -53,117 +50,75 @@ pub struct Witness {
     pub vdf_proof: Vec<u8>,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
-#[derive(Serialize)]
-pub struct Block {
-    payload: Payload,
-    witness: Witness,
-}
-
-impl Payload {
+impl Block {
     pub fn hash<H: Hasher>(&self) -> Multihash {
         *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
-}
 
-impl Witness {
-    pub fn from_payload<H: Hasher, S: Storage>(
-        payload: &Payload,
+    pub fn generate_witness<H: Hasher, S: Storage>(
+        &self,
         sk: &SecretKey,
         vdf: WesolowskiVDF,
         vdf_difficulty: u64,
         mpt: Trie<H, S>,
-    ) -> Result<Self> {
-        let hash = payload.hash::<H>().to_bytes();
+    ) -> Result<Witness> {
+        let hash = self.hash::<H>().to_bytes();
 
         let sig = sk.sign(&hash);
 
         let mut proofs = HashMap::new();
-        let key = payload.proposer_pk.to_hash::<H>().to_bytes();
-
+        let key = self.proposer_pk.to_hash::<H>().to_bytes();
         mpt.prove(&key, &mut proofs)?;
 
         let vdf_proof = vdf
-            .solve(&payload.parent.to_bytes(), vdf_difficulty)
+            .solve(&self.parent.to_bytes(), vdf_difficulty)
             .expect("VDF solve failed");
 
-        Ok(Self {
+        Ok(Witness {
             sig,
             proofs,
             vdf_proof,
         })
     }
-}
-
-impl Block {
-    pub fn new(payload: Payload, witness: Witness) -> Self {
-        Self { payload, witness }
-    }
-
-    pub fn hash<H: Hasher>(&self) -> Multihash {
-        self.payload.hash::<H>()
-    }
 
     pub fn verify<H: Hasher>(
         &self,
-        root_hash: Multihash,
-        vdf: &WesolowskiVDF,
-        vdf_difficulty: u64,
+        witness: &Witness,
+        parent: &Multihash,
+        checkpoint: &Multihash,
     ) -> bool {
-        if self.payload.parent != root_hash {
+        if &self.parent != parent || &self.parent_checkpoint != checkpoint {
             return false;
         }
 
-        let hash = self.payload.hash::<H>().to_bytes();
+        let hash = self.hash::<H>().to_bytes();
 
-        if !self
-            .payload
-            .proposer_pk
-            .verify_signature(&hash, &self.witness.sig)
-        {
+        if !self.proposer_pk.verify_signature(&hash, &witness.sig) {
             return false;
         }
 
-        if vdf
-            .verify(&hash, vdf_difficulty, &self.witness.vdf_proof)
-            .is_err()
-        {
-            return false;
-        }
+        let key = self.proposer_pk.to_hash::<H>().to_bytes();
+        self.verify_proof(&key, &witness.proofs, self.proposer_weight)
+    }
 
-        let key = self.payload.proposer_pk.to_hash::<H>().to_bytes();
-
-        let Some(ProofResult::Exists(bytes)) =
-            mpt::verify_proof_with_hash(&key, &self.witness.proofs, root_hash)
-        else {
+    fn verify_proof(
+        &self,
+        key: &[u8],
+        proofs: &HashMap<Multihash, Vec<u8>>,
+        exp_weight: u32,
+    ) -> bool {
+        let Some(res) = mpt::verify_proof_with_hash(key, proofs, self.parent) else {
             return false;
         };
 
-        let record = resident::Record::from_slice(&bytes)
+        let ProofResult::Exists(resident_bytes) = res else {
+            // If the proof does not exist, we expect no record
+            return exp_weight == 0;
+        };
+
+        let record = resident::Record::from_slice(&resident_bytes)
             .expect("Bytes is from root hash, it should be valid");
 
-        record.stakes == self.payload.proposer_stakes
-    }
-
-    pub fn height(&self) -> u64 {
-        self.payload.height
-    }
-
-    pub fn parent(&self) -> Multihash {
-        self.payload.parent
-    }
-
-    pub fn proposer_stakes(&self) -> u32 {
-        self.payload.proposer_stakes
-    }
-
-    pub fn vdf_proof(&self) -> &[u8] {
-        &self.witness.vdf_proof
-    }
-
-    pub fn proposals(&self) -> &HashSet<Multihash> {
-        &self.payload.proposals
+        record.weight == exp_weight
     }
 }

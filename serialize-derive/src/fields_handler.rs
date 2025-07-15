@@ -152,7 +152,8 @@ impl FieldsHandler {
             let ser_expr = if ty.is_enum() {
                 Self::serialize_expr(&attrs, quote! { #var_name })
             } else {
-                Self::serialize_expr(&attrs, quote! { self.#i })
+                let index = syn::Index::from(i);
+                Self::serialize_expr(&attrs, quote! { self.#index })
             };
 
             from_reader_stmts.push(quote! { let #var_name = #de_expr; });

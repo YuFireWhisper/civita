@@ -13,13 +13,16 @@ pub enum Error {
 #[derive(PartialEq, Eq)]
 #[derive(Serialize)]
 pub struct Record {
-    pub stakes: u32,
+    pub weight: u32,
     pub data: Vec<u8>,
 }
 
 impl Record {
     pub fn new(stakes: u32, data: Vec<u8>) -> Self {
-        Record { stakes, data }
+        Record {
+            weight: stakes,
+            data,
+        }
     }
 }
 //
