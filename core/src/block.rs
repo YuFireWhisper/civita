@@ -58,9 +58,8 @@ impl Block {
     pub fn generate_witness<H: Hasher, S: Storage>(
         &self,
         sk: &SecretKey,
-        vdf: WesolowskiVDF,
-        vdf_difficulty: u64,
         mpt: Trie<H, S>,
+        vdf_proof: Vec<u8>,
     ) -> Result<Witness> {
         let hash = self.hash::<H>().to_bytes();
 
@@ -69,10 +68,6 @@ impl Block {
         let mut proofs = HashMap::new();
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
         mpt.prove(&key, &mut proofs)?;
-
-        let vdf_proof = vdf
-            .solve(&self.parent.to_bytes(), vdf_difficulty)
-            .expect("VDF solve failed");
 
         Ok(Witness {
             sig,
@@ -86,6 +81,8 @@ impl Block {
         witness: &Witness,
         parent: &Multihash,
         checkpoint: &Multihash,
+        vdf: &WesolowskiVDF,
+        vdf_difficulty: u64,
     ) -> bool {
         if &self.parent != parent || &self.parent_checkpoint != checkpoint {
             return false;
@@ -98,7 +95,16 @@ impl Block {
         }
 
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        self.verify_proof(&key, &witness.proofs, self.proposer_weight)
+
+        if !self.verify_proof(&key, &witness.proofs, self.proposer_weight) {
+            return false;
+        }
+
+        if !self.verify_vdf_proof::<H>(&key, vdf, &witness.vdf_proof, vdf_difficulty) {
+            return false;
+        }
+
+        true
     }
 
     fn verify_proof(
@@ -120,5 +126,16 @@ impl Block {
             .expect("Bytes is from root hash, it should be valid");
 
         record.weight == exp_weight
+    }
+
+    fn verify_vdf_proof<H: Hasher>(
+        &self,
+        key: &[u8],
+        vdf: &WesolowskiVDF,
+        vdf_proof: &[u8],
+        vdf_difficulty: u64,
+    ) -> bool {
+        let c = H::hash(&[self.parent.to_bytes().as_slice(), key].concat()).to_bytes();
+        vdf.verify(&c, vdf_difficulty, vdf_proof).is_ok()
     }
 }
