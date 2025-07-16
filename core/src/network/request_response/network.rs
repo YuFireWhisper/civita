@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use libp2p::{
-    request_response::{self, ResponseChannel},
+    request_response::{OutboundFailure, OutboundRequestId, ResponseChannel},
     PeerId, Swarm,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::network::{behaviour::Behaviour, request_response::Event};
+use crate::network::{
+    behaviour::Behaviour,
+    request_response::{Event, Message},
+};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
-type Message = request_response::Message<Vec<u8>, Vec<u8>>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -18,36 +21,72 @@ pub enum Error {
     SendResponse,
 
     #[error("{0}")]
-    SendError(String),
+    Send(String),
+
+    #[error("Timeout while waiting for response")]
+    Timeout,
+
+    #[error(transparent)]
+    OutboundFailure(#[from] OutboundFailure),
+
+    #[error("Channel closed")]
+    ChannelClosed,
+}
+
+enum ReqeustResult {
+    GotResponse(Vec<u8>),
+    Failed(OutboundFailure),
 }
 
 pub struct RequestResponse {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
-    tx: Option<mpsc::Sender<Message>>,
+    tx: mpsc::Sender<Message>,
+
+    waiting_resp: DashMap<OutboundRequestId, oneshot::Sender<ReqeustResult>>,
 }
 
 impl RequestResponse {
-    pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>) -> Self {
-        Self { swarm, tx: None }
+    pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>, tx: mpsc::Sender<Message>) -> Self {
+        Self {
+            swarm,
+            tx,
+            waiting_resp: DashMap::new(),
+        }
     }
 
     pub async fn handle_event(&self, event: Event) -> Result<()> {
-        if let Event::Message { message, .. } = event {
-            if let Some(tx) = &self.tx {
-                tx.send(message).await?;
+        match event {
+            Event::Message { message, .. } => match message {
+                Message::Request { .. } => {
+                    self.tx.send(message).await?;
+                }
+                Message::Response {
+                    response,
+                    request_id,
+                } => {
+                    if let Some(tx) = self.waiting_resp.remove(&request_id) {
+                        let _ = tx.1.send(ReqeustResult::GotResponse(response));
+                    }
+                }
+            },
+            Event::OutboundFailure {
+                request_id, error, ..
+            } => {
+                if let Some(tx) = self.waiting_resp.remove(&request_id) {
+                    let _ = tx.1.send(ReqeustResult::Failed(error));
+                }
             }
+            _ => {}
         }
-
         Ok(())
     }
 
-    pub async fn send_request(&self, peer_id: PeerId, request: Vec<u8>) -> Result<()> {
+    pub async fn send_request(&self, peer_id: PeerId, request: Vec<u8>) {
         let mut swarm = self.swarm.lock().await;
         let _ = swarm
             .behaviour_mut()
             .req_resp_mut()
             .send_request(&peer_id, request);
-        Ok(())
     }
 
     pub async fn send_response(
@@ -63,10 +102,35 @@ impl RequestResponse {
             .map_err(|_| Error::SendResponse)?;
         Ok(())
     }
+
+    pub async fn send_request_and_wait(
+        &self,
+        peer_id: PeerId,
+        request: Vec<u8>,
+        timeout: tokio::time::Duration,
+    ) -> Result<Vec<u8>> {
+        let (tx, rx) = oneshot::channel();
+        let mut swarm = self.swarm.lock().await;
+        let id = swarm
+            .behaviour_mut()
+            .req_resp_mut()
+            .send_request(&peer_id, request);
+
+        self.waiting_resp.insert(id, tx);
+
+        tokio::select! {
+            res = rx => match res {
+                Ok(ReqeustResult::GotResponse(response)) => Ok(response),
+                Ok(ReqeustResult::Failed(error)) => Err(Error::OutboundFailure(error)),
+                Err(_) => Err(Error::ChannelClosed),
+            },
+            _ = tokio::time::sleep(timeout) => Err(Error::Timeout),
+        }
+    }
 }
 
-impl From<mpsc::error::SendError<Message>> for Error {
-    fn from(e: mpsc::error::SendError<Message>) -> Self {
-        Error::SendError(e.to_string())
+impl<T> From<mpsc::error::SendError<T>> for Error {
+    fn from(e: mpsc::error::SendError<T>) -> Self {
+        Error::Send(e.to_string())
     }
 }
