@@ -115,6 +115,10 @@ impl SubTree {
     pub fn leaf(&self) -> &Node {
         self.nodes.get(&self.leaf_hash).expect("Leaf should exist")
     }
+
+    pub fn root(&self) -> &Node {
+        self.nodes.get(&self.root_hash).expect("Root should exist")
+    }
 }
 
 impl Tree {
@@ -125,7 +129,7 @@ impl Tree {
         }
     }
 
-    pub fn add_block<H: Hasher>(
+    pub fn update<H: Hasher>(
         &mut self,
         block: Block,
         props: &HashMap<Multihash, Proposal>,
@@ -148,7 +152,7 @@ impl Tree {
 
         let node = Node::new(block, props, checkpoint.leaf().total_weight);
 
-        if node.weight as f64 > (2.0 / 3.0) * node.total_weight as f64 {
+        if node.weight as f64 > (2.0 / 3.0) * checkpoint.root().weight as f64 {
             self.update_checkpoint::<H>(node);
             return Ok(true);
         }
