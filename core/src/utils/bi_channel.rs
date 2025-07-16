@@ -25,6 +25,11 @@ impl<T, U> BiChannel<T, U> {
     pub async fn recv_some(&mut self) -> Result<U> {
         self.rx.recv().await.ok_or(Error::ChannelClosed)
     }
+
+    pub async fn send_and_recv(&mut self, item: T) -> Result<U> {
+        self.tx.send(item).await.map_err(Error::from)?;
+        self.recv_some().await
+    }
 }
 
 pub fn bi_channel<T, U>(cap: usize) -> (BiChannel<T, U>, BiChannel<U, T>) {
