@@ -104,12 +104,11 @@ impl Proposal {
     pub fn verify<H: Hasher>(
         &self,
         witness: &Witness,
-        parent: &Multihash,
         checkpoint: &Multihash,
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
     ) -> bool {
-        if &self.parent != parent || &self.parent_checkpoint != checkpoint {
+        if &self.parent_checkpoint != checkpoint {
             return false;
         }
 
@@ -243,8 +242,7 @@ mod tests {
             .generate_witness(&sk, &vdf, vdf_difficulty, &mpt)
             .expect("Witness generation should succeed");
 
-        let is_valid =
-            prop.verify::<TestHasher>(&witness, &root_hash, &root_hash, &vdf, vdf_difficulty);
+        let is_valid = prop.verify::<TestHasher>(&witness, &root_hash, &vdf, vdf_difficulty);
 
         assert!(is_valid, "Witness should be valid");
     }

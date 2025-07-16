@@ -79,12 +79,11 @@ impl Block {
     pub fn verify<H: Hasher>(
         &self,
         witness: &Witness,
-        parent: &Multihash,
-        checkpoint: &Multihash,
+        checkpoint: &Block,
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
     ) -> bool {
-        if &self.parent != parent || &self.parent_checkpoint != checkpoint {
+        if self.parent_checkpoint != checkpoint.hash::<H>() || self.height <= checkpoint.height {
             return false;
         }
 

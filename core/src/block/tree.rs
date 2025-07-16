@@ -11,7 +11,6 @@ type Result<T, E = Missing> = std::result::Result<T, E>;
 #[derive(Debug)]
 pub enum Missing {
     Block(Multihash),
-    Proposal(Multihash),
 }
 
 pub struct Node {
@@ -174,5 +173,36 @@ impl Tree {
             .get(&self.checkpoint)
             .and_then(|subtree| subtree.nodes.get(&subtree.leaf_hash))
             .expect("Leaf should exist")
+    }
+
+    pub fn get_block(&self, hash: &Multihash) -> Option<&Block> {
+        self.checkpoints
+            .values()
+            .find_map(|subtree| subtree.nodes.get(hash).map(|node| &node.block))
+    }
+
+    pub fn checkpoint_height(&self) -> u64 {
+        self.checkpoints
+            .get(&self.checkpoint)
+            .map_or(0, |subtree| subtree.root().block.height)
+    }
+
+    pub fn contains(&self, hash: &Multihash) -> bool {
+        self.checkpoints
+            .values()
+            .any(|subtree| subtree.nodes.contains_key(hash))
+    }
+
+    pub fn checkpoint(&self) -> &Block {
+        &self
+            .checkpoints
+            .get(&self.checkpoint)
+            .and_then(|subtree| subtree.nodes.get(&subtree.root_hash))
+            .expect("Checkpoint should exist")
+            .block
+    }
+
+    pub fn checkpoint_hash(&self) -> Multihash {
+        self.checkpoint
     }
 }
