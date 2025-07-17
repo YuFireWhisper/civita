@@ -1,19 +1,12 @@
+use std::sync::OnceLock;
+
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
 
 use crate::{
-    crypto::Multihash,
+    crypto::{Hasher, Multihash},
     utils::trie::keys::{hex_to_vec, vec_to_hex},
 };
-
-#[derive(Clone)]
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
-#[derive(Serialize)]
-pub struct Flags {
-    pub hash: Option<Multihash>,
-    pub is_dirty: bool,
-}
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -22,7 +15,8 @@ pub struct Flags {
 #[derive(Serialize)]
 pub struct Full {
     pub children: Box<[Node; 17]>,
-    pub flags: Flags,
+    #[serialize(skip)]
+    pub hash_cache: OnceLock<Multihash>,
 }
 
 #[derive(Clone)]
@@ -34,7 +28,17 @@ pub struct Short {
     pub key: Vec<u8>, // Hex
     pub val: Box<Node>,
     #[serialize(skip)]
-    pub flags: Flags,
+    pub hash_cache: OnceLock<Multihash>,
+}
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize)]
+pub struct Value {
+    pub val: Vec<u8>,
+    #[serialize(skip)]
+    hash_cache: OnceLock<Multihash>,
 }
 
 #[derive(Clone)]
@@ -48,31 +52,22 @@ pub enum Node {
     Full(Full),
     Short(Short),
     Hash(Multihash),
-    Value(Vec<u8>),
+    Value(Value),
 }
 
 impl Full {
-    pub fn new<T: Into<Box<[Node; 17]>>>(children: T) -> Self {
-        Full {
-            children: children.into(),
-            flags: Flags::default(),
-        }
+    pub fn hash<H: Hasher>(&self) -> Multihash {
+        *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
 
-    pub fn cache(&self) -> Option<&Multihash> {
-        if self.flags.is_dirty {
-            None
-        } else {
-            self.flags.hash.as_ref()
+    pub fn hash_children<H: Hasher>(&self) {
+        if self.hash_cache.get().is_some() {
+            return; // Already hashed
         }
-    }
 
-    pub fn cache_into(self) -> Option<Multihash> {
-        if self.flags.is_dirty {
-            None
-        } else {
-            self.flags.hash
-        }
+        self.children.iter().for_each(|child| {
+            child.hash_children::<H>();
+        });
     }
 }
 
@@ -81,106 +76,75 @@ impl Short {
         Short {
             key,
             val: val.into(),
-            flags: Flags::default(),
+            hash_cache: OnceLock::new(),
         }
     }
 
-    pub fn cache(&self) -> Option<&Multihash> {
-        if self.flags.is_dirty {
-            None
-        } else {
-            self.flags.hash.as_ref()
+    pub fn hash<H: Hasher>(&self) -> Multihash {
+        *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
+    }
+
+    pub fn hash_children<H: Hasher>(&self) {
+        if self.hash_cache.get().is_some() {
+            return; // Already hashed
+        }
+        self.val.hash_children::<H>();
+    }
+}
+
+impl Value {
+    pub fn new(val: Vec<u8>) -> Self {
+        Value {
+            val,
+            hash_cache: OnceLock::new(),
         }
     }
 
-    pub fn cache_into(self) -> Option<Multihash> {
-        if self.flags.is_dirty {
-            None
-        } else {
-            self.flags.hash
-        }
+    pub fn hash<H: Hasher>(&self) -> Multihash {
+        *self.hash_cache.get_or_init(|| H::hash(&self.val))
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.val
     }
 }
 
 impl Node {
-    pub fn new_full(node: Full) -> Self {
-        Node::Full(node)
+    pub fn new_short<T: Into<Node>>(key: Vec<u8>, val: T) -> Self {
+        Node::Short(Short::new(key, val.into()))
     }
 
-    pub fn new_short(node: Short) -> Self {
-        Node::Short(node)
+    pub fn new_value(val: Vec<u8>) -> Self {
+        Node::Value(Value::new(val))
     }
 
-    pub fn into_full(self) -> Full {
-        match self {
-            Node::Full(full) => full,
-            _ => panic!("Node is not a Full node"),
-        }
-    }
-
-    pub fn into_short(self) -> Short {
-        match self {
-            Node::Short(short) => short,
-            _ => panic!("Node is not a Short node"),
-        }
-    }
-
-    pub fn into_hash(self) -> Multihash {
-        match self {
-            Node::Hash(hash) => hash,
-            _ => panic!("Node is not a Hash node"),
-        }
-    }
-
-    pub fn into_value(self) -> Vec<u8> {
-        match self {
-            Node::Value(value) => value,
-            _ => panic!("Node is not a Value node"),
-        }
+    pub fn from_full(full: Full) -> Self {
+        Node::Full(full)
     }
 
     pub fn is_empty(&self) -> bool {
         matches!(self, Node::Empty)
     }
 
-    pub fn is_full(&self) -> bool {
-        matches!(self, Node::Full { .. })
-    }
-
-    pub fn is_short(&self) -> bool {
-        matches!(self, Node::Short { .. })
-    }
-
-    pub fn is_hash(&self) -> bool {
-        matches!(self, Node::Hash(_))
-    }
-
     pub fn is_value(&self) -> bool {
         matches!(self, Node::Value(_))
     }
 
-    pub fn cache(&self) -> Option<&Multihash> {
+    pub fn hash<H: Hasher>(&self) -> Multihash {
         match self {
-            Node::Full(full) => full.cache(),
-            Node::Short(short) => short.cache(),
-            _ => None,
+            Node::Full(full) => full.hash::<H>(),
+            Node::Short(short) => short.hash::<H>(),
+            Node::Value(value) => value.hash::<H>(),
+            Node::Hash(hash) => *hash,
+            Node::Empty => Multihash::default(),
         }
     }
 
-    pub fn cache_into(self) -> Option<Multihash> {
+    pub fn hash_children<H: Hasher>(&self) {
         match self {
-            Node::Full(full) => full.cache_into(),
-            Node::Short(short) => short.cache_into(),
-            _ => None,
-        }
-    }
-}
-
-impl Default for Flags {
-    fn default() -> Self {
-        Self {
-            hash: None,
-            is_dirty: true,
+            Node::Full(full) => full.hash_children::<H>(),
+            Node::Short(short) => short.hash_children::<H>(),
+            Node::Hash(_) | Node::Value(_) | Node::Empty => {}
         }
     }
 }
@@ -191,4 +155,10 @@ fn serialize_key<W: std::io::Write>(key: &[u8], writer: &mut W) {
 
 fn deserialize_key<R: std::io::Read>(reader: &mut R) -> Result<Vec<u8>, civita_serialize::Error> {
     Vec::from_reader(reader).map(vec_to_hex)
+}
+
+impl From<Full> for Node {
+    fn from(full: Full) -> Self {
+        Node::Full(full)
+    }
 }

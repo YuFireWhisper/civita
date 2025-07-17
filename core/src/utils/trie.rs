@@ -1,32 +1,18 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::{collections::HashMap, marker::PhantomData, sync::OnceLock};
 
 use civita_serialize::Serialize;
+use derivative::Derivative;
 
 use crate::{
     crypto::{Hasher, Multihash},
     utils::trie::{
         keys::{prefix_len, slice_to_hex},
-        node::{Flags, Full, Node, Short},
+        node::{Full, Node},
     },
 };
 
-type Result<T, E = Error> = std::result::Result<T, E>;
-
 mod keys;
 mod node;
-pub mod storage;
-
-pub use storage::{Storage, StorageError};
-
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Storage(#[from] StorageError),
-
-    #[error("Missing node")]
-    MissingNode,
-}
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -34,74 +20,77 @@ pub enum Error {
 pub enum ProofResult {
     Exists(Vec<u8>),
     NotExists,
+    Invalid,
 }
 
-pub struct Trie<H, S> {
+#[derive(Derivative)]
+#[derivative(Default(bound = ""))]
+pub struct Trie<H> {
     root: Node,
-    storage: S,
-    cache: HashMap<Multihash, Node>,
     _marker: PhantomData<H>,
 }
 
-impl<H: Hasher, S: Storage> Trie<H, S> {
-    pub fn empty(storage: S) -> Self {
-        Trie {
-            root: Node::Empty,
-            storage,
-            cache: HashMap::new(),
-            _marker: PhantomData,
-        }
+impl<H: Hasher> Trie<H> {
+    pub fn empty() -> Self {
+        Self::default()
     }
 
-    pub fn from_root(root_hash: Multihash, storage: S) -> Self {
-        Trie {
+    pub fn from_root(root_hash: Multihash) -> Self {
+        Self {
             root: Node::Hash(root_hash),
-            storage,
-            cache: HashMap::new(),
             _marker: PhantomData,
         }
     }
 
-    pub fn update(&mut self, key: &[u8], val: Vec<u8>) -> Result<()> {
+    pub fn update(
+        &mut self,
+        key: &[u8],
+        val: Vec<u8>,
+        guile: Option<&HashMap<Multihash, Vec<u8>>>,
+    ) -> bool {
         let key_vec = slice_to_hex(key);
         let key = key_vec.as_slice();
 
-        let val = Node::Value(val);
+        let val = Node::new_value(val);
 
-        let root = std::mem::take(&mut self.root);
-        let (_, root) = self.insert(root, &[], key, val)?;
-
-        self.root = root;
-
-        Ok(())
+        Self::insert_new(&mut self.root, &[], key, val, guile)
     }
 
-    fn insert(&self, mut node: Node, prefix: &[u8], key: &[u8], val: Node) -> Result<(bool, Node)> {
+    /// Returns true if is dirty, false if not.
+    fn insert_new(
+        node: &mut Node,
+        prefix: &[u8],
+        key: &[u8],
+        val: Node,
+        guide: Option<&HashMap<Multihash, Vec<u8>>>,
+    ) -> bool {
         if key.is_empty() {
-            if node.is_value() {
-                return Ok((node == val, val));
+            if node.is_value() && node == &val {
+                return false;
             }
-            return Ok((true, val));
+            *node = val;
+            return true;
         }
 
         match node {
-            Node::Short(ref mut short) => {
+            Node::Short(short) => {
                 let match_len = prefix_len(prefix, &short.key);
 
-                if match_len == key.len() {
-                    let s_val = std::mem::take(&mut short.val);
+                if match_len == short.key.len() {
+                    let mut s_val = std::mem::take(&mut short.val);
+
                     let prefix = &[prefix, &short.key[..match_len]].concat();
                     let key = &key[match_len..];
-                    let (is_dirty, nn) = self.insert(*s_val, prefix, key, val)?;
+
+                    let is_dirty = Self::insert_new(&mut s_val, prefix, key, val, guide);
 
                     if !is_dirty {
-                        return Ok((false, node));
+                        return false;
                     }
 
-                    short.val = Box::new(nn);
-                    short.flags = Flags::default();
+                    short.hash_cache = OnceLock::new();
 
-                    return Ok((true, node));
+                    return true;
                 }
 
                 let mut branch = Full::default();
@@ -110,304 +99,241 @@ impl<H: Hasher, S: Storage> Trie<H, S> {
                     let idx = short.key[match_len] as usize;
                     let prefix = &[prefix, &short.key[..match_len]].concat();
                     let key = &short.key[match_len + 1..];
-                    branch.children[idx] = self.insert(Node::Empty, prefix, key, val.clone())?.1;
+                    Self::insert_new(
+                        &mut branch.children[idx],
+                        prefix,
+                        key,
+                        *short.val.clone(),
+                        guide,
+                    );
                 }
 
                 {
                     let idx = key[match_len] as usize;
                     let prefix = &[prefix, &key[..match_len]].concat();
                     let key = &key[match_len + 1..];
-                    branch.children[idx] = self.insert(Node::Empty, prefix, key, val)?.1;
+                    Self::insert_new(&mut branch.children[idx], prefix, key, val, guide);
                 }
 
                 if match_len == 0 {
-                    return Ok((true, Node::new_full(branch)));
+                    *node = Node::from_full(branch);
+                    return true;
                 }
 
                 let key = short.key.split_off(match_len);
-                let short = Short::new(key, Node::new_full(branch));
+                *node = Node::new_short(key, branch);
 
-                Ok((true, Node::new_short(short)))
+                true
             }
             Node::Full(ref mut full) => {
                 let idx = key[0] as usize;
-                let child = std::mem::take(&mut full.children[idx]);
 
                 let prefix = &[prefix, &key[..1]].concat();
                 let key = &key[1..];
 
-                let (is_dirty, nn) = self.insert(child, prefix, key, val)?;
+                let is_dirty = Self::insert_new(&mut full.children[idx], prefix, key, val, guide);
 
                 if !is_dirty {
-                    return Ok((false, node));
+                    return false;
                 }
 
-                full.children[idx] = nn;
-                full.flags = Flags::default();
+                full.hash_cache = OnceLock::new();
 
-                Ok((true, node))
+                true
             }
-            Node::Empty => Ok((true, Node::new_short(Short::new(key.to_vec(), val)))),
-            Node::Hash(_) => {
-                let rn = self.resolve_node(&node)?.ok_or(Error::MissingNode)?;
-
-                let (is_dirty, nn) = self.insert(rn.clone(), prefix, key, val)?;
-
-                if !is_dirty {
-                    return Ok((false, rn));
-                }
-
-                Ok((true, nn))
+            Node::Empty => {
+                *node = Node::new_short(key.to_vec(), val);
+                true
             }
-            _ => panic!("Unexpected node type in insert: {node:?}"),
+            Node::Hash(hash) => {
+                let Some(rn) = Self::resolve_from_guide(hash, guide) else {
+                    return false;
+                };
+
+                *node = rn;
+
+                Self::insert_new(node, prefix, key, val, guide)
+            }
+            Node::Value(_) => {
+                panic!("Unexpected value node in insert_new: {node:?}");
+            }
         }
     }
 
-    fn resolve_node(&self, node: &Node) -> Result<Option<Node>> {
-        let Node::Hash(hash) = node else {
-            return Ok(None);
-        };
-
-        if let Some(cached_node) = self.cache.get(hash) {
-            return Ok(Some(cached_node.clone()));
-        }
-
-        if let Some(data) = self.storage.get(hash)? {
-            let loaded_node = Node::from_slice(&data).expect("Node bytes should be valid");
-            return Ok(Some(loaded_node));
-        }
-
-        Err(Error::MissingNode)
+    fn resolve_from_guide(
+        hash: &Multihash,
+        guide: Option<&HashMap<Multihash, Vec<u8>>>,
+    ) -> Option<Node> {
+        guide
+            .and_then(|g| g.get(hash))
+            .map(|data| Node::from_slice(data).expect("Node bytes should be valid"))
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<Node> {
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let key = slice_to_hex(key);
         Self::get_node(&self.root, &key, 0)
     }
 
-    fn get_node(node: &Node, key: &[u8], pos: usize) -> Option<Node> {
+    fn get_node(node: &Node, key: &[u8], pos: usize) -> Option<Vec<u8>> {
         match node {
             Node::Empty => None,
+            Node::Value(val) => Some(val.as_slice().to_vec()),
             Node::Short(short) => {
-                if key.len() - pos < short.key.len() || key[pos..pos + short.key.len()] != short.key
-                {
+                if !key[pos..].starts_with(&short.key) {
                     return None;
                 }
-
                 Self::get_node(&short.val, key, pos + short.key.len())
             }
-            Node::Full(full) => {
-                let idx = key[pos] as usize;
-                Self::get_node(&full.children[idx], key, pos + 1)
-            }
-            Node::Hash(_) | Node::Value(_) => Some(node.clone()),
+            Node::Full(full) => Self::get_node(&full.children[key[pos] as usize], key, pos + 1),
+            Node::Hash(_) => None,
         }
     }
 
-    pub fn commit(&mut self) -> Result<Multihash> {
-        if self.root.is_empty() {
-            return Ok(Multihash::default());
-        }
-
-        if let Some(hash) = self.root.cache() {
-            return Ok(*hash);
-        }
-
-        let mut root = std::mem::take(&mut self.root);
-        let mut pending = HashMap::new();
-
-        Self::commit_node(&mut root, true, &mut pending);
-
-        self.storage
-            .batch_put(pending)
-            .expect("Failed to batch put pending nodes");
-
-        self.root = root;
-
-        Ok(*self.root.cache().expect("Root node should have a hash"))
+    pub fn commit(&mut self) -> Multihash {
+        self.root.hash_children::<H>();
+        self.root.hash::<H>()
     }
 
-    fn commit_node(node: &mut Node, force: bool, pending: &mut HashMap<Multihash, Vec<u8>>) {
-        if node.is_empty() || node.is_hash() {
-            return;
-        }
-
-        match node {
-            Node::Short(ref mut short) => {
-                Self::commit_node(&mut short.val, false, pending);
-
-                let bytes = short.to_vec();
-
-                if bytes.len() < 32 && !force {
-                    return;
-                }
-
-                let hash = H::hash(&bytes);
-                pending.insert(hash, bytes);
-
-                short.flags.hash = Some(hash);
-                short.flags.is_dirty = false;
-            }
-            Node::Full(full) => {
-                full.children.iter_mut().for_each(|child| {
-                    if !child.is_empty() {
-                        Self::commit_node(child, false, pending);
-                    }
-                });
-
-                let bytes = full.to_vec();
-
-                if bytes.len() < 32 && !force {
-                    return;
-                }
-
-                let hash = H::hash(&bytes);
-                pending.insert(hash, bytes);
-
-                full.flags.hash = Some(hash);
-                full.flags.is_dirty = false;
-            }
-            _ => {}
-        }
-    }
-
-    pub fn prove(&self, key: &[u8], proof_db: &mut HashMap<Multihash, Vec<u8>>) -> Result<()> {
+    pub fn prove(&self, key: &[u8], proof_db: &mut HashMap<Multihash, Vec<u8>>) -> bool {
         let key_vec = slice_to_hex(key);
         let mut key = key_vec.as_slice();
 
-        let mut prefix = Vec::new();
-        let mut nodes = Vec::new();
+        let mut changes = Vec::new();
         let mut cur = self.root.clone();
 
         while !key.is_empty() && !cur.is_empty() {
+            if !cur.is_empty() {
+                let hash = cur.hash::<H>();
+                if proof_db.insert(hash, cur.to_vec()).is_none() {
+                    changes.push(hash);
+                }
+            }
+
             match &cur {
                 Node::Short(short) => {
-                    let len = prefix_len(key, &short.key);
-
-                    if len != short.key.len() {
+                    if !key.starts_with(&short.key) {
                         break;
                     }
-
-                    prefix.extend_from_slice(short.key.as_ref());
-                    key = &key[len..];
-
-                    nodes.push(cur.clone());
-
+                    key = &key[short.key.len()..];
                     cur = *short.val.clone();
                 }
                 Node::Full(full) => {
                     cur = full.children[key[0] as usize].to_owned();
-                    prefix.push(key[0]);
                     key = &key[1..];
-                    nodes.push(cur.clone());
                 }
                 Node::Hash(_) => {
-                    let node = self.resolve_node(&cur)?.ok_or(Error::MissingNode)?;
-                    cur = node;
+                    changes.iter().for_each(|h| {
+                        proof_db.remove(h);
+                    });
+                    return false;
                 }
                 Node::Value(_) => {
-                    break;
+                    panic!("Unexpected value node in proof generation: {cur:?}");
                 }
-                _ => panic!("Unexpected node type in prove: {cur:?}"),
-            }
+                Node::Empty => {
+                    panic!("Unexpected empty node in proof generation");
+                }
+            };
         }
 
-        if !cur.is_empty() {
-            nodes.push(cur.clone());
-        }
-
-        nodes.push(self.root.clone());
-
-        for n in nodes.iter() {
-            let enc = n.to_vec();
-            let hash = n.cache().cloned().unwrap_or(H::hash(&enc));
-            proof_db.insert(hash, enc);
-        }
-
-        Ok(())
+        true
     }
 
-    pub fn verify_proof(
-        &self,
-        key: &[u8],
-        proof_db: &HashMap<Multihash, Vec<u8>>,
-    ) -> Option<ProofResult> {
-        let expected_hash = self
-            .root
-            .cache()
-            .cloned()
-            .unwrap_or_else(|| H::hash(&self.root.to_vec()));
-
+    pub fn verify_proof(&self, key: &[u8], proof_db: &HashMap<Multihash, Vec<u8>>) -> ProofResult {
+        let expected_hash = self.root.hash::<H>();
         verify_proof_with_hash(key, proof_db, expected_hash)
     }
+}
+
+enum TraversalResult<'a> {
+    Continue {
+        remaining_key: &'a [u8],
+        next_hash: Multihash,
+    },
+    Found(Vec<u8>),
+    NotFound,
 }
 
 pub fn verify_proof_with_hash(
     key: &[u8],
     proof_db: &HashMap<Multihash, Vec<u8>>,
     mut exp_hash: Multihash,
-) -> Option<ProofResult> {
+) -> ProofResult {
     let key_vec = slice_to_hex(key);
     let mut key = key_vec.as_slice();
 
     loop {
-        let cur = proof_db.get(&exp_hash)?;
-        let node = Node::from_slice(cur).ok()?;
-
-        let Some((keyrest, cld)) = get_child(&node, key) else {
-            return Some(ProofResult::NotExists);
+        let Some(cur) = proof_db.get(&exp_hash) else {
+            return ProofResult::Invalid;
         };
 
-        match cld {
-            Node::Empty => return Some(ProofResult::NotExists),
-            Node::Hash(hash) => {
-                key = keyrest;
-                exp_hash = hash;
+        let Ok(node) = Node::from_slice(cur) else {
+            return ProofResult::Invalid;
+        };
+
+        match traverse_node(&node, key) {
+            TraversalResult::Continue {
+                remaining_key,
+                next_hash,
+            } => {
+                key = remaining_key;
+                exp_hash = next_hash;
             }
+            TraversalResult::Found(value) => {
+                return ProofResult::Exists(value);
+            }
+            TraversalResult::NotFound => {
+                return ProofResult::NotExists;
+            }
+        }
+    }
+}
+
+fn traverse_node<'a>(mut node: &Node, mut key: &'a [u8]) -> TraversalResult<'a> {
+    loop {
+        match node {
+            Node::Short(short) => {
+                if !key.starts_with(&short.key) {
+                    return TraversalResult::NotFound;
+                }
+
+                key = &key[short.key.len()..];
+                node = &short.val;
+            }
+
+            Node::Full(full) => {
+                if key.is_empty() {
+                    if let Node::Value(val) = &full.children[16] {
+                        return TraversalResult::Found(val.as_slice().to_vec());
+                    } else {
+                        return TraversalResult::NotFound;
+                    }
+                } else {
+                    let idx = key[0] as usize;
+                    key = &key[1..];
+                    node = &full.children[idx];
+                }
+            }
+
             Node::Value(val) => {
-                return Some(ProofResult::Exists(val));
+                if key.is_empty() {
+                    return TraversalResult::Found(val.as_slice().to_vec());
+                } else {
+                    return TraversalResult::NotFound;
+                }
             }
-            _ => {}
-        }
-    }
-}
 
-fn get_child<'a>(node: &Node, key: &'a [u8]) -> Option<(&'a [u8], Node)> {
-    match node {
-        Node::Short(short) => {
-            if key.len() < short.key.len() || key[..short.key.len()] != short.key {
-                return None;
+            Node::Hash(hash) => {
+                return TraversalResult::Continue {
+                    remaining_key: key,
+                    next_hash: *hash,
+                };
             }
-            Some((&key[short.key.len()..], *short.val.clone()))
-        }
-        Node::Full(full) => {
-            if key.is_empty() {
-                return None;
+
+            Node::Empty => {
+                return TraversalResult::NotFound;
             }
-            let idx = key[0] as usize;
-            Some((&key[1..], full.children[idx].clone()))
         }
-        Node::Hash(_) | Node::Empty | Node::Value(_) => Some((key, node.clone())),
-    }
-}
-
-impl Storage for HashMap<Multihash, Vec<u8>> {
-    fn get(&self, hash: &Multihash) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.get(hash).cloned())
-    }
-
-    fn put(&mut self, hash: Multihash, data: Vec<u8>) -> Result<(), StorageError> {
-        self.insert(hash, data);
-        Ok(())
-    }
-
-    fn delete(&mut self, hash: &Multihash) -> Result<(), StorageError> {
-        self.remove(hash);
-        Ok(())
-    }
-
-    fn has(&self, hash: &Multihash) -> Result<bool, StorageError> {
-        Ok(self.contains_key(hash))
     }
 }
 
@@ -416,142 +342,210 @@ mod tests {
     use super::*;
 
     type TestHasher = sha2::Sha256;
-    type TestMerklePatriciaTrie = Trie<TestHasher, HashMap<Multihash, Vec<u8>>>;
+    type TestTrie = Trie<TestHasher>;
 
-    const KEY: &[u8] = &[1, 2, 3, 4];
-    const VALUE: &[u8] = &[5, 6, 7, 8];
+    const KEY1: &[u8] = b"key1";
+    const VALUE1: &[u8] = b"value1";
 
-    #[test]
-    fn insert_and_commit() {
-        let key_hex = slice_to_hex(KEY);
-        let exp_node = Short::new(key_hex, Node::Value(VALUE.to_vec()));
-        let exp = TestHasher::hash(&exp_node.to_vec());
+    const KEY2: &[u8] = b"key2";
+    const VALUE2: &[u8] = b"value2";
 
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
-
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-
-        let hash = mpt.commit().expect("Failed to commit MPT");
-
-        assert_eq!(hash, exp);
-    }
+    const KEY3: &[u8] = b"key3";
+    const VALUE3: &[u8] = b"value3";
 
     #[test]
-    fn return_value_if_key_found() {
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    fn return_some_if_key_found() {
+        let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-        mpt.commit().expect("Failed to commit MPT");
+        mpt.update(KEY1, VALUE1.to_vec(), None);
+        mpt.update(KEY2, VALUE2.to_vec(), None);
+        mpt.update(KEY3, VALUE3.to_vec(), None);
 
-        let result = mpt.get(KEY);
+        let res1 = mpt.get(KEY1);
+        let res2 = mpt.get(KEY2);
+        let res3 = mpt.get(KEY3);
 
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), Node::Value(VALUE.to_vec()));
+        assert_eq!(res1, Some(VALUE1.to_vec()));
+        assert_eq!(res2, Some(VALUE2.to_vec()));
+        assert_eq!(res3, Some(VALUE3.to_vec()));
     }
 
     #[test]
     fn return_none_if_key_not_found() {
-        const NON_EXISTENT_KEY: &[u8] = &[9, 10, 11];
+        let mut mpt = TestTrie::empty();
 
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+        mpt.update(KEY1, VALUE1.to_vec(), None);
+        mpt.update(KEY2, VALUE2.to_vec(), None);
+        mpt.update(KEY3, VALUE3.to_vec(), None);
 
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-        mpt.commit().expect("Failed to commit MPT");
+        let res = mpt.get(b"non_existent_key");
 
-        let result = mpt.get(NON_EXISTENT_KEY);
-
-        assert!(result.is_none());
+        assert!(res.is_none());
     }
 
     #[test]
-    fn prove_and_verify() {
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    fn corrent_hash_after_commit() {
+        let key_hex = slice_to_hex(KEY1);
+        let node = Node::new_short(key_hex, Node::new_value(VALUE1.to_vec()));
+        let exp = node.hash::<TestHasher>();
 
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-        mpt.commit().expect("Failed to commit MPT");
+        let mut mpt = TestTrie::empty();
 
-        let mut proof_db = HashMap::new();
-        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
-        let verify_res = mpt.verify_proof(KEY, &proof_db);
+        mpt.update(KEY1, VALUE1.to_vec(), None);
 
-        assert!(verify_res.is_some());
-        assert_eq!(verify_res.unwrap(), ProofResult::Exists(VALUE.to_vec()));
+        let root_hash = mpt.commit();
+
+        assert_eq!(root_hash, exp);
     }
 
     #[test]
-    fn correct_existence_proof() {
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    fn verify_exists_proof() {
+        let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-        mpt.commit().expect("Failed to commit MPT");
+        mpt.update(KEY1, VALUE1.to_vec(), None);
+        mpt.update(KEY2, VALUE2.to_vec(), None);
+        mpt.update(KEY3, VALUE3.to_vec(), None);
+        let _ = mpt.commit();
 
         let mut proof_db = HashMap::new();
-        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
 
-        let verify_res = mpt.verify_proof(KEY, &proof_db);
+        let prove_res1 = mpt.prove(KEY1, &mut proof_db);
+        let prove_res2 = mpt.prove(KEY2, &mut proof_db);
+        let prove_res3 = mpt.prove(KEY3, &mut proof_db);
 
-        assert!(verify_res.is_some());
-        assert_eq!(verify_res.unwrap(), ProofResult::Exists(VALUE.to_vec()));
+        let verify_res1 = mpt.verify_proof(KEY1, &proof_db);
+        let verify_res2 = mpt.verify_proof(KEY2, &proof_db);
+        let verify_res3 = mpt.verify_proof(KEY3, &proof_db);
+
+        assert!(prove_res1, "Failed to prove key1");
+        assert!(prove_res2, "Failed to prove key2");
+        assert!(prove_res3, "Failed to prove key3");
+
+        assert_eq!(verify_res1, ProofResult::Exists(VALUE1.to_vec()));
+        assert_eq!(verify_res2, ProofResult::Exists(VALUE2.to_vec()));
+        assert_eq!(verify_res3, ProofResult::Exists(VALUE3.to_vec()));
     }
 
     #[test]
-    fn correct_non_existence_proof() {
-        const NON_EXISTENT_KEY: &[u8] = &[9, 10, 11];
+    fn verify_not_exists_proof() {
+        let mut mpt = TestTrie::empty();
 
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
-
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-        mpt.commit().expect("Failed to commit MPT");
+        mpt.update(KEY1, VALUE1.to_vec(), None);
+        let _ = mpt.commit();
 
         let mut proof_db = HashMap::new();
-        mpt.prove(NON_EXISTENT_KEY, &mut proof_db)
-            .expect("Failed to prove non-existent key");
 
-        let verify_res = mpt.verify_proof(NON_EXISTENT_KEY, &proof_db);
+        let prove_res = mpt.prove(KEY2, &mut proof_db);
+        let verify_res = mpt.verify_proof(KEY2, &proof_db);
 
-        assert!(verify_res.is_some());
-        assert_eq!(verify_res.unwrap(), ProofResult::NotExists);
+        assert!(prove_res, "Failed to prove non-existent key");
+        assert_eq!(verify_res, ProofResult::NotExists);
     }
 
     #[test]
-    fn false_if_incorrect_proof() {
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    fn verify_invalid_proof() {
+        let mpt = TestTrie::empty();
 
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-        mpt.commit().expect("Failed to commit MPT");
+        let proof_db = HashMap::new();
 
-        let mut proof_db = HashMap::new();
-        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+        let verify_res = mpt.verify_proof(KEY1, &proof_db);
 
-        let mut proof_db = HashMap::new();
-        proof_db.insert(Multihash::default(), vec![0; 32]);
-
-        let verify_res = mpt.verify_proof(KEY, &proof_db);
-
-        assert!(verify_res.is_none());
+        assert_eq!(verify_res, ProofResult::Invalid);
     }
 
     #[test]
-    fn false_if_incorrect_hash() {
-        let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    fn prove_with_hash_root() {
+        let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY, VALUE.to_vec())
-            .expect("Failed to update MPT");
-        let _ = mpt.commit().expect("Failed to commit MPT");
-        let root_hash = Multihash::default(); // Intentionally incorrect hash
+        mpt.update(KEY1, VALUE1.to_vec(), None);
+        mpt.update(KEY2, VALUE2.to_vec(), None);
+        mpt.update(KEY3, VALUE3.to_vec(), None);
+        let root_hash = mpt.commit();
+
+        mpt.root = Node::Hash(root_hash);
 
         let mut proof_db = HashMap::new();
-        mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+        let prove_res = mpt.prove(KEY1, &mut proof_db);
 
-        let verify_res = verify_proof_with_hash(KEY, &proof_db, root_hash);
-
-        assert!(verify_res.is_none());
+        assert!(!prove_res);
+        assert!(
+            proof_db.is_empty(),
+            "Proof DB should be empty for hash root"
+        );
     }
+
+    //
+    // #[test]
+    // fn correct_existence_proof() {
+    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    //
+    //     mpt.update(KEY, VALUE.to_vec())
+    //         .expect("Failed to update MPT");
+    //     mpt.commit().expect("Failed to commit MPT");
+    //
+    //     let mut proof_db = HashMap::new();
+    //     mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+    //
+    //     let verify_res = mpt.verify_proof(KEY, &proof_db);
+    //
+    //     assert!(verify_res.is_some());
+    //     assert_eq!(verify_res.unwrap(), ProofResult::Exists(VALUE.to_vec()));
+    // }
+    //
+    // #[test]
+    // fn correct_non_existence_proof() {
+    //     const NON_EXISTENT_KEY: &[u8] = &[9, 10, 11];
+    //
+    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    //
+    //     mpt.update(KEY, VALUE.to_vec())
+    //         .expect("Failed to update MPT");
+    //     mpt.commit().expect("Failed to commit MPT");
+    //
+    //     let mut proof_db = HashMap::new();
+    //     mpt.prove(NON_EXISTENT_KEY, &mut proof_db)
+    //         .expect("Failed to prove non-existent key");
+    //
+    //     let verify_res = mpt.verify_proof(NON_EXISTENT_KEY, &proof_db);
+    //
+    //     assert!(verify_res.is_some());
+    //     assert_eq!(verify_res.unwrap(), ProofResult::NotExists);
+    // }
+    //
+    // #[test]
+    // fn false_if_incorrect_proof() {
+    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    //
+    //     mpt.update(KEY, VALUE.to_vec())
+    //         .expect("Failed to update MPT");
+    //     mpt.commit().expect("Failed to commit MPT");
+    //
+    //     let mut proof_db = HashMap::new();
+    //     mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+    //
+    //     let mut proof_db = HashMap::new();
+    //     proof_db.insert(Multihash::default(), vec![0; 32]);
+    //
+    //     let verify_res = mpt.verify_proof(KEY, &proof_db);
+    //
+    //     assert!(verify_res.is_none());
+    // }
+    //
+    // #[test]
+    // fn false_if_incorrect_hash() {
+    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
+    //
+    //     mpt.update(KEY, VALUE.to_vec())
+    //         .expect("Failed to update MPT");
+    //     let _ = mpt.commit().expect("Failed to commit MPT");
+    //     let root_hash = Multihash::default(); // Intentionally incorrect hash
+    //
+    //     let mut proof_db = HashMap::new();
+    //     mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
+    //
+    //     let verify_res = verify_proof_with_hash(KEY, &proof_db, root_hash);
+    //
+
+    //     assert!(verify_res.is_none());
+    // }
 }
