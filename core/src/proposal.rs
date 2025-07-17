@@ -19,10 +19,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Mpt(#[from] trie::Error),
-}
+pub enum Error {}
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -71,12 +68,12 @@ impl Proposal {
         sk.sign(&self.hash::<H>().to_bytes())
     }
 
-    pub fn generate_witness<H: Hasher, S: trie::Storage>(
+    pub fn generate_witness<H: Hasher>(
         &self,
         sk: &SecretKey,
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
-        mpt: &Trie<H, S>,
+        mpt: &Trie<H>,
     ) -> Result<Witness> {
         let hash = self.hash::<H>().to_bytes();
 
@@ -84,11 +81,14 @@ impl Proposal {
 
         let mut proofs = ProofDb::new();
         for key in self.diffs.keys() {
-            mpt.prove(key, &mut proofs)?;
+            assert!(
+                mpt.prove(key, &mut proofs),
+                "Failed to generate proof for key: {key:?}",
+            );
         }
 
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        mpt.prove(&key, &mut proofs)?;
+        assert!(mpt.prove(&key, &mut proofs), "Failed to generate proof");
 
         let vdf_proof = vdf
             .solve(&hash, vdf_difficulty)
@@ -149,22 +149,24 @@ impl Proposal {
         exp_weight: Option<u32>,
         exp_record: Option<&resident::Record>,
     ) -> bool {
-        let Some(res) = trie::verify_proof_with_hash(key, proofs, self.parent) else {
-            return false;
+        let res = match trie::verify_proof_with_hash(key, proofs, self.parent) {
+            ProofResult::Exists(resident_bytes) => resident_bytes,
+            ProofResult::NotExists => {
+                // If the proof does not exist, we expect no record
+                return exp_weight.is_none() && exp_record.is_none();
+            }
+            ProofResult::Invalid => {
+                return false;
+            }
         };
 
-        let ProofResult::Exists(resident_bytes) = res else {
-            // If the proof does not exist, we expect no record
-            return exp_weight.is_none() && exp_record.is_none();
-        };
-
-        let record = resident::Record::from_slice(&resident_bytes)
+        let record = resident::Record::from_slice(&res)
             .expect("Bytes is from root hash, it should be valid");
 
-        let exp_weight = exp_weight.map_or(0, |w| w);
-
-        if record.weight != exp_weight {
-            return false;
+        if let Some(exp_weight) = exp_weight {
+            if record.weight != exp_weight {
+                return false;
+            }
         }
 
         if let Some(exp_record) = exp_record {
@@ -190,14 +192,14 @@ mod tests {
     use super::*;
 
     type TestHasher = sha2::Sha256;
-    type Trie = trie::Trie<TestHasher, HashMap<Multihash, Vec<u8>>>;
+    type Trie = trie::Trie<TestHasher>;
 
     #[test]
     fn success_create_witness_from_payload() {
         let sk = SecretKey::random();
         let proposer_pk = sk.public_key();
 
-        let mut mpt = Trie::empty(HashMap::new());
+        let mut mpt = Trie::empty();
 
         let key = proposer_pk.to_hash::<TestHasher>().to_bytes();
 
@@ -211,8 +213,8 @@ mod tests {
             data: vec![4, 5, 6],
         };
 
-        mpt.update(&key, from.to_vec()).unwrap();
-        let root_hash = mpt.commit().unwrap();
+        mpt.update(&key, from.to_vec(), None);
+        let root_hash = mpt.commit();
 
         let mut diff = BTreeMap::new();
         diff.insert(

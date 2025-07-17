@@ -10,7 +10,7 @@ use vdf::{WesolowskiVDF, VDF};
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
-    utils::trie::{self, ProofResult, Storage, Trie},
+    utils::trie::{self, ProofResult, Trie},
 };
 
 pub mod tree;
@@ -19,10 +19,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Mpt(#[from] trie::Error),
-}
+pub enum Error {}
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -55,10 +52,10 @@ impl Block {
         *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
 
-    pub fn generate_witness<H: Hasher, S: Storage>(
+    pub fn generate_witness<H: Hasher>(
         &self,
         sk: &SecretKey,
-        mpt: Trie<H, S>,
+        mpt: Trie<H>,
         vdf_proof: Vec<u8>,
     ) -> Result<Witness> {
         let hash = self.hash::<H>().to_bytes();
@@ -67,7 +64,7 @@ impl Block {
 
         let mut proofs = HashMap::new();
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        mpt.prove(&key, &mut proofs)?;
+        assert!(mpt.prove(&key, &mut proofs), "Failed to generate proof");
 
         Ok(Witness {
             sig,
@@ -112,9 +109,7 @@ impl Block {
         proofs: &HashMap<Multihash, Vec<u8>>,
         exp_weight: u32,
     ) -> bool {
-        let Some(res) = trie::verify_proof_with_hash(key, proofs, self.parent) else {
-            return false;
-        };
+        let res = trie::verify_proof_with_hash(key, proofs, self.parent);
 
         let ProofResult::Exists(resident_bytes) = res else {
             // If the proof does not exist, we expect no record

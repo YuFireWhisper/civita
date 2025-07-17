@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-type Trie<H> = trie::Trie<H, HashMap<Multihash, Vec<u8>>>;
+type Trie<H> = trie::Trie<H>;
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 const TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(1);
