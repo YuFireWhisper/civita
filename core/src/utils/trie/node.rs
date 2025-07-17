@@ -3,7 +3,7 @@ use civita_serialize_derive::Serialize;
 
 use crate::{
     crypto::Multihash,
-    utils::mpt::keys::{hex_to_vec, vec_to_hex},
+    utils::trie::keys::{hex_to_vec, vec_to_hex},
 };
 
 #[derive(Clone)]

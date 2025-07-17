@@ -1,2 +1,2 @@
 pub mod bi_channel;
-pub mod mpt;
+pub mod trie;

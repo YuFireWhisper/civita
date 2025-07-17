@@ -10,7 +10,7 @@ use vdf::{WesolowskiVDF, VDF};
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
-    utils::mpt::{self, ProofResult, Storage, Trie},
+    utils::trie::{self, ProofResult, Storage, Trie},
 };
 
 pub mod tree;
@@ -21,7 +21,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Mpt(#[from] mpt::Error),
+    Mpt(#[from] trie::Error),
 }
 
 #[derive(Clone)]
@@ -112,7 +112,7 @@ impl Block {
         proofs: &HashMap<Multihash, Vec<u8>>,
         exp_weight: u32,
     ) -> bool {
-        let Some(res) = mpt::verify_proof_with_hash(key, proofs, self.parent) else {
+        let Some(res) = trie::verify_proof_with_hash(key, proofs, self.parent) else {
             return false;
         };
 

@@ -11,7 +11,7 @@ use vdf::{WesolowskiVDF, VDF};
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
-    utils::mpt::{self, ProofResult, Trie},
+    utils::trie::{self, ProofResult, Trie},
 };
 
 type ProofDb = HashMap<Multihash, Vec<u8>>;
@@ -21,7 +21,7 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Mpt(#[from] mpt::Error),
+    Mpt(#[from] trie::Error),
 }
 
 #[derive(Clone)]
@@ -71,7 +71,7 @@ impl Proposal {
         sk.sign(&self.hash::<H>().to_bytes())
     }
 
-    pub fn generate_witness<H: Hasher, S: mpt::Storage>(
+    pub fn generate_witness<H: Hasher, S: trie::Storage>(
         &self,
         sk: &SecretKey,
         vdf: &WesolowskiVDF,
@@ -149,7 +149,7 @@ impl Proposal {
         exp_weight: Option<u32>,
         exp_record: Option<&resident::Record>,
     ) -> bool {
-        let Some(res) = mpt::verify_proof_with_hash(key, proofs, self.parent) else {
+        let Some(res) = trie::verify_proof_with_hash(key, proofs, self.parent) else {
             return false;
         };
 
@@ -190,7 +190,7 @@ mod tests {
     use super::*;
 
     type TestHasher = sha2::Sha256;
-    type Trie = mpt::Trie<TestHasher, HashMap<Multihash, Vec<u8>>>;
+    type Trie = trie::Trie<TestHasher, HashMap<Multihash, Vec<u8>>>;
 
     #[test]
     fn success_create_witness_from_payload() {

@@ -4,7 +4,7 @@ use civita_serialize::Serialize;
 
 use crate::{
     crypto::{Hasher, Multihash},
-    utils::mpt::{
+    utils::trie::{
         keys::{prefix_len, slice_to_hex},
         node::{Flags, Full, Node, Short},
     },
