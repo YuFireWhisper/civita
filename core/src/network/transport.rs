@@ -4,7 +4,7 @@ use libp2p::{Multiaddr, PeerId};
 
 use crate::{
     crypto::SecretKey,
-    network::{Gossipsub, Storage},
+    network::{request_response::RequestResponse, Gossipsub, Storage},
 };
 
 mod network;
@@ -71,6 +71,12 @@ impl Transport {
     pub fn storage(&self) -> Arc<Storage> {
         match self {
             Transport::Network(transport) => transport.storage(),
+        }
+    }
+
+    pub fn request_response(&self) -> Arc<RequestResponse> {
+        match self {
+            Transport::Network(transport) => transport.request_response(),
         }
     }
 }

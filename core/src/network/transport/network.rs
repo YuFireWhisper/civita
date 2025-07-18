@@ -195,6 +195,10 @@ impl Transport {
     pub fn storage(&self) -> Arc<Storage> {
         self.storage.clone()
     }
+
+    pub fn request_response(&self) -> Arc<request_response::RequestResponse> {
+        self.req_resp.clone()
+    }
 }
 
 impl std::fmt::Debug for Transport {
