@@ -24,7 +24,7 @@ pub enum Error {
 pub enum RequestResponse {
     Network {
         network: network::RequestResponse,
-        rx: mpsc::Receiver<Message>,
+        rx: Mutex<mpsc::Receiver<Message>>,
     },
 }
 
@@ -32,7 +32,10 @@ impl RequestResponse {
     pub fn new_network(swarm: Arc<Mutex<Swarm<Behaviour>>>) -> Self {
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         let network = network::RequestResponse::new(swarm, tx);
-        Self::Network { network, rx }
+        Self::Network {
+            network,
+            rx: Mutex::new(rx),
+        }
     }
 
     pub async fn handle_event_network(&self, event: Event) -> Result<()> {
@@ -69,6 +72,12 @@ impl RequestResponse {
                 .send_response(ch, response)
                 .await
                 .map_err(Error::from),
+        }
+    }
+
+    pub async fn recv(&self) -> Option<Message> {
+        match self {
+            Self::Network { rx, .. } => rx.lock().await.recv().await,
         }
     }
 }

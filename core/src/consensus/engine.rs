@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 use civita_serialize::Serialize;
 use dashmap::DashMap;
-use libp2p::PeerId;
+use libp2p::{request_response::Message, PeerId};
 use tokio::sync::{Mutex, RwLock};
 use vdf::WesolowskiVDF;
 
@@ -43,8 +43,8 @@ pub enum Error {
 }
 
 struct Proposals {
-    validated: DashMap<Multihash, Proposal>,
-    waiting_parent: DashMap<Multihash, Vec<Proposal>>,
+    validated: DashMap<Multihash, (Proposal, proposal::Witness)>,
+    waiting_parent: DashMap<Multihash, Vec<(Proposal, proposal::Witness)>>,
 }
 
 pub struct Engine<H: Hasher> {
@@ -76,7 +76,9 @@ impl<H: Hasher> Engine<H> {
         witness.to_writer(&mut bytes);
 
         self.gossipsub.publish(self.proposal_topic, bytes).await?;
-        self.props.validated.insert(prop.hash::<H>(), prop);
+        self.props
+            .validated
+            .insert(prop.hash::<H>(), (prop, witness));
 
         Ok(())
     }
@@ -84,6 +86,7 @@ impl<H: Hasher> Engine<H> {
     pub async fn run(&self) -> Result<()> {
         let mut prop_rx = self.gossipsub.subscribe(self.proposal_topic).await?;
         let mut block_rx = self.gossipsub.subscribe(self.block_topic).await?;
+        let req_resp = self.req_resp.clone();
 
         loop {
             tokio::select! {
@@ -121,6 +124,18 @@ impl<H: Hasher> Engine<H> {
                         log::error!("Failed to handle block: {e}");
                     }
                 }
+                Some(msg) = req_resp.recv() => {
+                    if let Message::Request { request, channel, .. } = msg {
+                        let Ok(hash) = Multihash::from_slice(&request) else {
+                            continue;
+                        };
+
+                        if let Some(entry) = self.props.validated.get(&hash) {
+                            let bytes = (entry.value()).to_vec();
+                            req_resp.send_response(channel, bytes).await?;
+                        }
+                    }
+                },
             }
         }
     }
@@ -138,7 +153,7 @@ impl<H: Hasher> Engine<H> {
                 .waiting_parent
                 .entry(prop.parent)
                 .or_default()
-                .push(prop);
+                .push((prop, witness));
             return Ok(());
         };
 
@@ -149,7 +164,7 @@ impl<H: Hasher> Engine<H> {
             .verify_proposal(prop, &witness, parent, trie_root)
             .await
         {
-            self.props.validated.insert(hash, prop);
+            self.props.validated.insert(hash, (prop, witness));
         }
 
         Ok(())
@@ -261,19 +276,20 @@ impl<H: Hasher> Engine<H> {
         let mut props = HashMap::new();
 
         for hash in hashes {
-            if let Some((_, prop)) = self.props.validated.remove(hash) {
-                props.insert(*hash, prop);
+            if let Some((_, pair)) = self.props.validated.remove(hash) {
+                props.insert(*hash, pair.0);
                 continue;
             }
 
-            let Some((prop, witness)) = self.take_or_fetch_proposal(peer, hash).await else {
+            let Some(((prop, witness), checked)) = self.take_or_fetch_proposal(peer, hash).await
+            else {
                 continue;
             };
 
-            let Some(witness) = witness else {
+            if checked {
                 props.insert(*hash, prop);
                 continue;
-            };
+            }
 
             let prop = self
                 .verify_proposal(prop, &witness, parent, trie_root)
@@ -302,9 +318,9 @@ impl<H: Hasher> Engine<H> {
         &self,
         peer: PeerId,
         hash: &Multihash,
-    ) -> Option<(Proposal, Option<proposal::Witness>)> {
-        if let Some((_, prop)) = self.props.validated.remove(hash) {
-            return Some((prop, None));
+    ) -> Option<((Proposal, proposal::Witness), bool)> {
+        if let Some((_, pair)) = self.props.validated.remove(hash) {
+            return Some((pair, true));
         }
 
         let bytes = self
@@ -316,6 +332,6 @@ impl<H: Hasher> Engine<H> {
         let prop = Proposal::from_slice(&bytes).ok()?;
         let witness = proposal::Witness::from_slice(&bytes).ok()?;
 
-        Some((prop, Some(witness)))
+        Some(((prop, witness), false))
     }
 }
