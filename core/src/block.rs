@@ -13,7 +13,7 @@ use crate::{
     utils::trie::{self, ProofResult, Trie},
 };
 
-pub mod tree;
+pub(crate) mod tree;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -34,7 +34,7 @@ pub struct Block {
     pub proposer_data: Option<Vec<u8>>,
     pub proposer_weight: u32,
     #[serialize(skip)]
-    hash_cache: OnceLock<Multihash>,
+    pub(crate) hash_cache: OnceLock<Multihash>,
 }
 
 #[derive(Clone)]

@@ -4,44 +4,46 @@ use crate::{
     block::Block,
     crypto::{Hasher, Multihash},
     proposal::Proposal,
+    utils::trie::Trie,
 };
 
-type Result<T, E = Missing> = std::result::Result<T, E>;
-
-#[derive(Debug)]
-pub enum Missing {
-    Block(Multihash),
-}
-
-pub struct Node {
+pub struct Node<H> {
     pub block: Block,
     pub children: HashSet<Multihash>,
+    pub trie: Trie<H>,
     pub weight: u32,
     pub total_weight: u32,
 }
 
-pub struct SubTree {
+pub struct SubTree<H> {
     pub leaf_hash: Multihash,
     pub root_hash: Multihash,
     pub parent_checkpoint: Multihash,
-    pub nodes: HashMap<Multihash, Node>,
+    pub nodes: HashMap<Multihash, Node<H>>,
 }
 
 #[derive(Default)]
-pub struct Tree {
+pub struct Tree<H> {
     pub checkpoint: Multihash,
-    pub checkpoints: HashMap<Multihash, SubTree>,
+    pub checkpoints: HashMap<Multihash, SubTree<H>>,
 }
 
-impl Node {
-    pub fn new(block: Block, props: &HashMap<Multihash, Proposal>, base_weight: u32) -> Self {
+impl<H: Hasher> Node<H> {
+    pub fn new(
+        block: Block,
+        props: &HashMap<Multihash, Proposal>,
+        trie: Trie<H>,
+        base_weight: u32,
+    ) -> Self {
         let (weight, total_weight_diff) = Self::calc_weight_and_total_weight_diff(&block, props);
+        let total_weight = base_weight.saturating_add_signed(total_weight_diff);
 
         Node {
             block,
             children: HashSet::new(),
+            trie,
             weight,
-            total_weight: base_weight.saturating_add_signed(total_weight_diff),
+            total_weight,
         }
     }
 
@@ -61,11 +63,15 @@ impl Node {
 
         (weight, total_weight_diff)
     }
+
+    pub fn hash(&self) -> Multihash {
+        self.block.hash::<H>()
+    }
 }
 
-impl SubTree {
-    pub fn new<H: Hasher>(leaf: Node) -> Self {
-        let leaf_hash = leaf.block.hash::<H>();
+impl<H: Hasher> SubTree<H> {
+    pub fn new(leaf: Node<H>) -> Self {
+        let leaf_hash = leaf.hash();
         let parent_checkpoint = leaf.block.parent_checkpoint;
         let nodes = HashMap::from([(leaf_hash, leaf)]);
 
@@ -77,22 +83,23 @@ impl SubTree {
         }
     }
 
-    pub fn update<H: Hasher>(&mut self, node: Node) -> Result<()> {
-        let hash = node.block.hash::<H>();
+    pub fn update(&mut self, node: Node<H>) {
+        assert!(
+            self.nodes.contains_key(&node.block.parent),
+            "Parent node must exist"
+        );
 
-        if !self.nodes.contains_key(&node.block.parent) {
-            return Err(Missing::Block(node.block.parent));
-        }
-        self.update_leaf::<H>(&node);
+        self.update_leaf(&node);
+
+        let hash = node.hash();
         self.nodes.insert(hash, node);
-        Ok(())
     }
 
-    fn update_leaf<H: Hasher>(&mut self, candidate: &Node) {
+    fn update_leaf(&mut self, candidate: &Node<H>) {
         let leaf = self.nodes.get(&self.leaf_hash).expect("Leaf should exist");
 
         if candidate.total_weight > leaf.total_weight {
-            self.leaf_hash = candidate.block.hash::<H>();
+            self.leaf_hash = candidate.hash();
         }
     }
 
@@ -111,16 +118,16 @@ impl SubTree {
         self.nodes = nodes;
     }
 
-    pub fn leaf(&self) -> &Node {
+    pub fn leaf(&self) -> &Node<H> {
         self.nodes.get(&self.leaf_hash).expect("Leaf should exist")
     }
 
-    pub fn root(&self) -> &Node {
+    pub fn root(&self) -> &Node<H> {
         self.nodes.get(&self.root_hash).expect("Root should exist")
     }
 }
 
-impl Tree {
+impl<H: Hasher> Tree<H> {
     pub fn new() -> Self {
         Tree {
             checkpoint: Multihash::default(),
@@ -128,20 +135,21 @@ impl Tree {
         }
     }
 
-    pub fn update<H: Hasher>(
+    pub fn update(
         &mut self,
         block: Block,
         props: &HashMap<Multihash, Proposal>,
-    ) -> Result<bool, Missing> {
+        trie: Trie<H>,
+    ) -> bool {
         if block.parent_checkpoint != self.checkpoint {
-            return Ok(false);
+            return false;
         }
 
         if self.checkpoint == Multihash::default() {
             // Block is the genesis block
-            let node = Node::new(block, props, 0);
-            self.update_checkpoint::<H>(node);
-            return Ok(true);
+            let node = Node::new(block, props, trie, 0);
+            self.update_checkpoint(node);
+            return true;
         }
 
         let checkpoint = self
@@ -149,26 +157,26 @@ impl Tree {
             .get_mut(&self.checkpoint)
             .expect("Checkpoint should exist");
 
-        let node = Node::new(block, props, checkpoint.leaf().total_weight);
+        let node = Node::new(block, props, trie, checkpoint.leaf().total_weight);
 
         if node.weight as f64 > (2.0 / 3.0) * checkpoint.root().weight as f64 {
-            self.update_checkpoint::<H>(node);
-            return Ok(true);
+            self.update_checkpoint(node);
+            return true;
         }
 
-        checkpoint.update::<H>(node)?;
+        checkpoint.update(node);
 
-        Ok(true)
+        true
     }
 
-    fn update_checkpoint<H: Hasher>(&mut self, node: Node) {
-        let hash = node.block.hash::<H>();
-        let sub_tree = SubTree::new::<H>(node);
+    fn update_checkpoint(&mut self, node: Node<H>) {
+        let hash = node.hash();
+        let sub_tree = SubTree::new(node);
         self.checkpoint = hash;
         self.checkpoints.insert(hash, sub_tree);
     }
 
-    pub fn get_leaf(&self) -> &Node {
+    pub fn get_leaf(&self) -> &Node<H> {
         self.checkpoints
             .get(&self.checkpoint)
             .and_then(|subtree| subtree.nodes.get(&subtree.leaf_hash))
@@ -181,18 +189,6 @@ impl Tree {
             .find_map(|subtree| subtree.nodes.get(hash).map(|node| &node.block))
     }
 
-    pub fn checkpoint_height(&self) -> u64 {
-        self.checkpoints
-            .get(&self.checkpoint)
-            .map_or(0, |subtree| subtree.root().block.height)
-    }
-
-    pub fn contains(&self, hash: &Multihash) -> bool {
-        self.checkpoints
-            .values()
-            .any(|subtree| subtree.nodes.contains_key(hash))
-    }
-
     pub fn checkpoint(&self) -> &Block {
         &self
             .checkpoints
@@ -202,7 +198,15 @@ impl Tree {
             .block
     }
 
-    pub fn checkpoint_hash(&self) -> Multihash {
-        self.checkpoint
+    pub fn get_trie(&self, hash: &Multihash) -> Option<&Trie<H>> {
+        self.checkpoints
+            .values()
+            .find_map(|subtree| subtree.nodes.get(hash).map(|node| &node.trie))
+    }
+
+    pub fn get_node(&self, hash: &Multihash) -> Option<&Node<H>> {
+        self.checkpoints
+            .values()
+            .find_map(|subtree| subtree.nodes.get(hash))
     }
 }

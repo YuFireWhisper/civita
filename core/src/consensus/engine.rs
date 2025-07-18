@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 use civita_serialize::Serialize;
 use dashmap::DashMap;
@@ -52,9 +52,9 @@ pub struct Engine<H: Hasher> {
     req_resp: Arc<RequestResponse>,
     props: Proposals,
     waiting_blocks: DashMap<Multihash, Vec<Block>>,
-    validate_prop_ch: Mutex<BiChannel<Proposal, Proposal>>,
-    block_tree: RwLock<Tree>,
-    mpt: Trie<H>,
+    validate_prop_ch: Mutex<BiChannel<Proposal, Option<Proposal>>>,
+    block_tree: RwLock<Tree<H>>,
+    mpt: RwLock<Trie<H>>,
     sk: SecretKey,
     vdf: WesolowskiVDF,
     vdf_difficulty: u64,
@@ -62,15 +62,14 @@ pub struct Engine<H: Hasher> {
     block_topic: u8,
 }
 
-impl Proposals {
-    pub fn contains(&self, hash: &Multihash) -> bool {
-        self.validated.contains_key(hash) || self.waiting_parent.contains_key(hash)
-    }
-}
-
 impl<H: Hasher> Engine<H> {
     pub async fn propose(&self, prop: Proposal) -> Result<()> {
-        let witness = prop.generate_witness(&self.sk, &self.vdf, self.vdf_difficulty, &self.mpt)?;
+        let witness = prop.generate_witness(
+            &self.sk,
+            self.mpt.read().await.deref(),
+            &self.vdf,
+            self.vdf_difficulty,
+        )?;
 
         let mut bytes = Vec::new();
         prop.to_writer(&mut bytes);
@@ -127,23 +126,14 @@ impl<H: Hasher> Engine<H> {
     }
 
     async fn on_recv_proposal(&self, prop: Proposal, witness: proposal::Witness) -> Result<()> {
-        if !prop.verify::<H>(
-            &witness,
-            &self.checkpoint_hash().await,
-            &self.vdf,
-            self.vdf_difficulty,
-        ) {
-            return Ok(());
-        }
-
         let hash = prop.hash::<H>();
 
-        if self.props.contains(&hash) {
+        if self.props.validated.contains_key(&hash) {
             return Ok(());
         }
 
         let tree = self.block_tree.read().await;
-        let Some(parent) = tree.get_block(&prop.parent) else {
+        let Some(node) = tree.get_node(&prop.parent) else {
             self.props
                 .waiting_parent
                 .entry(prop.parent)
@@ -152,27 +142,39 @@ impl<H: Hasher> Engine<H> {
             return Ok(());
         };
 
-        if parent.height <= self.checkpoint_height().await {
-            return Ok(());
-        }
+        let parent = &node.block;
+        let trie_root = node.trie.root_hash();
 
-        let prop = self
-            .validate_prop_ch
-            .lock()
+        if let Some(prop) = self
+            .verify_proposal(prop, &witness, parent, trie_root)
             .await
-            .send_and_recv(prop)
-            .await?;
-        self.props.validated.insert(hash, prop);
+        {
+            self.props.validated.insert(hash, prop);
+        }
 
         Ok(())
     }
 
-    async fn checkpoint_hash(&self) -> Multihash {
-        self.block_tree.read().await.checkpoint_hash()
-    }
+    async fn verify_proposal(
+        &self,
+        prop: Proposal,
+        witness: &proposal::Witness,
+        parent: &Block,
+        trie_root: Multihash,
+    ) -> Option<Proposal> {
+        if !prop.verify::<H>(
+            witness,
+            parent,
+            self.block_tree.read().await.checkpoint(),
+            trie_root,
+            &self.vdf,
+            self.vdf_difficulty,
+        ) {
+            return None;
+        }
 
-    async fn checkpoint_height(&self) -> u64 {
-        self.block_tree.read().await.checkpoint_height()
+        let mut channel = self.validate_prop_ch.lock().await;
+        channel.send_and_recv(prop).await.ok().flatten()
     }
 
     async fn on_recv_block(&self, block: Block, witness: block::Witness) -> Result<()> {
@@ -186,15 +188,6 @@ impl<H: Hasher> Engine<H> {
         }
 
         let hash = block.hash::<H>();
-
-        if block.height <= self.checkpoint_height().await {
-            let _ = self.waiting_blocks.remove(&hash);
-            return Ok(());
-        }
-
-        if self.contains_block(&hash).await {
-            return Ok(());
-        }
 
         let tree = self.block_tree.read().await;
         let Some(parent) = tree.get_block(&block.parent) else {
@@ -221,7 +214,7 @@ impl<H: Hasher> Engine<H> {
         bs.push(block);
 
         for block in bs.into_iter().rev() {
-            if !self.verify_block(block).await {
+            if !self.try_update_block(block).await {
                 return Ok(());
             }
         }
@@ -229,40 +222,100 @@ impl<H: Hasher> Engine<H> {
         Ok(())
     }
 
-    async fn contains_block(&self, hash: &Multihash) -> bool {
-        self.block_tree.read().await.contains(hash)
+    async fn try_update_block(&self, block: Block) -> bool {
+        let pk_hash = block.proposer_pk.to_hash::<H>();
+        let peer = PeerId::from_multihash(pk_hash).expect("PeerId should be valid");
+
+        let Some(trie) = self
+            .block_tree
+            .read()
+            .await
+            .get_trie(&block.parent)
+            .cloned()
+        else {
+            return false;
+        };
+
+        let Some((props, trie)) = self
+            .collect_proposals(peer, &block, &block.proposals, trie)
+            .await
+        else {
+            return false;
+        };
+
+        self.block_tree.write().await.update(block, &props, trie)
     }
 
-    async fn verify_block(&self, block: Block) -> bool {
-        let mut props = HashMap::new();
-        let peer = PeerId::from_multihash(block.proposer_pk.to_hash::<H>())
-            .expect("PeerId should be valid");
+    async fn collect_proposals<'a, I>(
+        &self,
+        peer: PeerId,
+        parent: &Block,
+        hashes: I,
+        mut trie: Trie<H>,
+    ) -> Option<(HashMap<Multihash, Proposal>, Trie<H>)>
+    where
+        I: IntoIterator<Item = &'a Multihash>,
+    {
+        let trie_root = trie.root_hash();
 
-        for hash in block.proposals.iter() {
-            if let Some((_, p)) = self.props.validated.remove(hash) {
-                props.insert(*hash, p);
+        let mut props = HashMap::new();
+
+        for hash in hashes {
+            if let Some((_, prop)) = self.props.validated.remove(hash) {
+                props.insert(*hash, prop);
                 continue;
             }
 
-            let Ok(prop) = self
-                .req_resp
-                .send_reqeust_and_wait(peer, hash.to_bytes(), TIMEOUT)
-                .await
-            else {
-                return false;
+            let Some((prop, witness)) = self.take_or_fetch_proposal(peer, hash).await else {
+                continue;
             };
 
-            if let Ok(prop) = Proposal::from_slice(&prop) {
+            let Some(witness) = witness else {
                 props.insert(*hash, prop);
-            } else {
-                return false;
+                continue;
+            };
+
+            let prop = self
+                .verify_proposal(prop, &witness, parent, trie_root)
+                .await?;
+
+            let proofs = Some(&witness.proofs);
+
+            for (key, diff) in prop.diffs.iter() {
+                if !trie.update(key, diff.to.to_vec(), proofs) {
+                    return None;
+                }
             }
+
+            props.insert(*hash, prop);
         }
 
-        self.block_tree
-            .write()
+        trie.commit();
+
+        let own_pk_bytes = self.sk.public_key().to_hash::<H>().to_bytes();
+        trie.reduce_one(&own_pk_bytes);
+
+        Some((props, trie))
+    }
+
+    async fn take_or_fetch_proposal(
+        &self,
+        peer: PeerId,
+        hash: &Multihash,
+    ) -> Option<(Proposal, Option<proposal::Witness>)> {
+        if let Some((_, prop)) = self.props.validated.remove(hash) {
+            return Some((prop, None));
+        }
+
+        let bytes = self
+            .req_resp
+            .send_reqeust_and_wait(peer, hash.to_bytes(), TIMEOUT)
             .await
-            .update::<H>(block, &props)
-            .unwrap()
+            .ok()?;
+
+        let prop = Proposal::from_slice(&bytes).ok()?;
+        let witness = proposal::Witness::from_slice(&bytes).ok()?;
+
+        Some((prop, Some(witness)))
     }
 }
