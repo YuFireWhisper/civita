@@ -69,6 +69,25 @@ impl Full {
             child.hash_children::<H>();
         });
     }
+
+    pub fn merge_with(&mut self, other: &Full) -> bool {
+        let mut changed = false;
+
+        self.children
+            .iter_mut()
+            .zip(other.children.iter())
+            .for_each(|(a, b)| {
+                if a.merge_with(b) {
+                    changed = true;
+                }
+            });
+
+        if changed {
+            self.hash_cache = OnceLock::new();
+        }
+
+        changed
+    }
 }
 
 impl Short {
@@ -89,6 +108,20 @@ impl Short {
             return; // Already hashed
         }
         self.val.hash_children::<H>();
+    }
+
+    pub fn merge_with(&mut self, other: &Short) -> bool {
+        if self.key != other.key {
+            return false;
+        }
+
+        let changed = self.val.merge_with(&other.val);
+
+        if changed {
+            self.hash_cache = OnceLock::new();
+        }
+
+        changed
     }
 }
 
@@ -147,14 +180,47 @@ impl Node {
             Node::Hash(_) | Node::Value(_) | Node::Empty => {}
         }
     }
+
+    /// Merge this node with another node
+    /// Returns true if any changes were made
+    pub fn merge_with(&mut self, other: &Node) -> bool {
+        if matches!(self, Node::Hash(_)) {
+            *self = other.clone();
+            return true;
+        }
+
+        match (self, other) {
+            (Node::Full(a), Node::Full(b)) => a.merge_with(b),
+            (Node::Short(a), Node::Short(b)) => a.merge_with(b),
+            (Node::Value(a), Node::Value(b)) => a.val == b.val,
+            (_, Node::Hash(_)) => false,
+            _ => false,
+        }
+    }
 }
 
 fn serialize_key<W: std::io::Write>(key: &[u8], writer: &mut W) {
-    hex_to_vec(key).to_writer(writer);
+    (key.len() as u32).to_writer(writer);
+
+    if key.len() % 2 == 1 {
+        let mut padded_key = vec![0];
+        padded_key.extend_from_slice(key);
+        hex_to_vec(&padded_key).to_writer(writer);
+    } else {
+        hex_to_vec(key).to_writer(writer);
+    }
 }
 
 fn deserialize_key<R: std::io::Read>(reader: &mut R) -> Result<Vec<u8>, civita_serialize::Error> {
-    Vec::from_reader(reader).map(vec_to_hex)
+    let original_len = u32::from_reader(reader)? as usize;
+    let bytes = Vec::from_reader(reader)?;
+    let mut hex_nibbles = vec_to_hex(bytes);
+
+    if original_len % 2 == 1 {
+        hex_nibbles.remove(0);
+    }
+
+    Ok(hex_nibbles)
 }
 
 impl From<Full> for Node {

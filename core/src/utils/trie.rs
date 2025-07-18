@@ -24,6 +24,7 @@ pub enum ProofResult {
 }
 
 #[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
 #[derivative(Default(bound = ""))]
 pub struct Trie<H> {
     root: Node,
@@ -39,6 +40,39 @@ impl<H: Hasher> Trie<H> {
         Self {
             root: Node::Hash(root_hash),
             _marker: PhantomData,
+        }
+    }
+
+    pub fn from_root_with_guide(root_hash: Multihash, guide: HashMap<Multihash, Vec<u8>>) -> Self {
+        let mut trie = Self {
+            root: Node::Hash(root_hash),
+            _marker: PhantomData,
+        };
+
+        Self::expand_node_from_guide(&mut trie.root, &guide);
+
+        trie
+    }
+
+    fn expand_node_from_guide(node: &mut Node, guide: &HashMap<Multihash, Vec<u8>>) {
+        match node {
+            Node::Hash(hash) => {
+                if let Some(data) = guide.get(hash) {
+                    if let Ok(resolved_node) = Node::from_slice(data) {
+                        *node = resolved_node;
+                        Self::expand_node_from_guide(node, guide);
+                    }
+                }
+            }
+            Node::Full(full) => {
+                for child in full.children.iter_mut() {
+                    Self::expand_node_from_guide(child, guide);
+                }
+            }
+            Node::Short(short) => {
+                Self::expand_node_from_guide(&mut short.val, guide);
+            }
+            Node::Value(_) | Node::Empty => {}
         }
     }
 
@@ -204,6 +238,13 @@ impl<H: Hasher> Trie<H> {
         while !key.is_empty() && !cur.is_empty() {
             if !cur.is_empty() {
                 let hash = cur.hash::<H>();
+
+                if let Some(n) = proof_db.remove(&hash) {
+                    let mut n = Node::from_slice(&n).expect("Node bytes should be valid");
+                    n.merge_with(&cur);
+                    cur = n;
+                }
+
                 if proof_db.insert(hash, cur.to_vec()).is_none() {
                     changes.push(hash);
                 }
@@ -242,6 +283,16 @@ impl<H: Hasher> Trie<H> {
     pub fn verify_proof(&self, key: &[u8], proof_db: &HashMap<Multihash, Vec<u8>>) -> ProofResult {
         let expected_hash = self.root.hash::<H>();
         verify_proof_with_hash(key, proof_db, expected_hash)
+    }
+
+    pub fn reduce_one(&self, key: &[u8]) -> Self {
+        let mut proofs = HashMap::new();
+        assert!(self.prove(key, &mut proofs), "Failed to prove key");
+        Self::from_root_with_guide(self.root.hash::<H>(), proofs)
+    }
+
+    pub fn root_hash(&self) -> Multihash {
+        self.root.hash::<H>()
     }
 }
 
@@ -344,10 +395,10 @@ mod tests {
     type TestHasher = sha2::Sha256;
     type TestTrie = Trie<TestHasher>;
 
-    const KEY1: &[u8] = b"key1";
+    const KEY1: &[u8] = b"key_1";
     const VALUE1: &[u8] = b"value1";
 
-    const KEY2: &[u8] = b"key2";
+    const KEY2: &[u8] = b"key_2";
     const VALUE2: &[u8] = b"value2";
 
     const KEY3: &[u8] = b"key3";
@@ -473,79 +524,4 @@ mod tests {
             "Proof DB should be empty for hash root"
         );
     }
-
-    //
-    // #[test]
-    // fn correct_existence_proof() {
-    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
-    //
-    //     mpt.update(KEY, VALUE.to_vec())
-    //         .expect("Failed to update MPT");
-    //     mpt.commit().expect("Failed to commit MPT");
-    //
-    //     let mut proof_db = HashMap::new();
-    //     mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
-    //
-    //     let verify_res = mpt.verify_proof(KEY, &proof_db);
-    //
-    //     assert!(verify_res.is_some());
-    //     assert_eq!(verify_res.unwrap(), ProofResult::Exists(VALUE.to_vec()));
-    // }
-    //
-    // #[test]
-    // fn correct_non_existence_proof() {
-    //     const NON_EXISTENT_KEY: &[u8] = &[9, 10, 11];
-    //
-    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
-    //
-    //     mpt.update(KEY, VALUE.to_vec())
-    //         .expect("Failed to update MPT");
-    //     mpt.commit().expect("Failed to commit MPT");
-    //
-    //     let mut proof_db = HashMap::new();
-    //     mpt.prove(NON_EXISTENT_KEY, &mut proof_db)
-    //         .expect("Failed to prove non-existent key");
-    //
-    //     let verify_res = mpt.verify_proof(NON_EXISTENT_KEY, &proof_db);
-    //
-    //     assert!(verify_res.is_some());
-    //     assert_eq!(verify_res.unwrap(), ProofResult::NotExists);
-    // }
-    //
-    // #[test]
-    // fn false_if_incorrect_proof() {
-    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
-    //
-    //     mpt.update(KEY, VALUE.to_vec())
-    //         .expect("Failed to update MPT");
-    //     mpt.commit().expect("Failed to commit MPT");
-    //
-    //     let mut proof_db = HashMap::new();
-    //     mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
-    //
-    //     let mut proof_db = HashMap::new();
-    //     proof_db.insert(Multihash::default(), vec![0; 32]);
-    //
-    //     let verify_res = mpt.verify_proof(KEY, &proof_db);
-    //
-    //     assert!(verify_res.is_none());
-    // }
-    //
-    // #[test]
-    // fn false_if_incorrect_hash() {
-    //     let mut mpt = TestMerklePatriciaTrie::empty(HashMap::new());
-    //
-    //     mpt.update(KEY, VALUE.to_vec())
-    //         .expect("Failed to update MPT");
-    //     let _ = mpt.commit().expect("Failed to commit MPT");
-    //     let root_hash = Multihash::default(); // Intentionally incorrect hash
-    //
-    //     let mut proof_db = HashMap::new();
-    //     mpt.prove(KEY, &mut proof_db).expect("Failed to prove key");
-    //
-    //     let verify_res = verify_proof_with_hash(KEY, &proof_db, root_hash);
-    //
-
-    //     assert!(verify_res.is_none());
-    // }
 }
