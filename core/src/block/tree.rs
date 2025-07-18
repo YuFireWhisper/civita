@@ -176,11 +176,22 @@ impl<H: Hasher> Tree<H> {
         self.checkpoints.insert(hash, sub_tree);
     }
 
+    pub fn get_leaf_hash(&self) -> Multihash {
+        self.checkpoint_tree().leaf_hash
+    }
+
+    pub fn get_leaf_height(&self) -> u64 {
+        self.checkpoint_tree().leaf().block.height
+    }
+
     pub fn get_leaf(&self) -> &Node<H> {
+        self.checkpoint_tree().leaf()
+    }
+
+    fn checkpoint_tree(&self) -> &SubTree<H> {
         self.checkpoints
             .get(&self.checkpoint)
-            .and_then(|subtree| subtree.nodes.get(&subtree.leaf_hash))
-            .expect("Leaf should exist")
+            .expect("Checkpoint should exist")
     }
 
     pub fn get_block(&self, hash: &Multihash) -> Option<&Block> {
@@ -196,6 +207,10 @@ impl<H: Hasher> Tree<H> {
             .and_then(|subtree| subtree.nodes.get(&subtree.root_hash))
             .expect("Checkpoint should exist")
             .block
+    }
+
+    pub fn checkpoint_hash(&self) -> Multihash {
+        self.checkpoint
     }
 
     pub fn get_trie(&self, hash: &Multihash) -> Option<&Trie<H>> {

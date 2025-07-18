@@ -1,10 +1,15 @@
-use std::{collections::HashMap, ops::Deref, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    ops::Deref,
+    sync::{Arc, OnceLock},
+};
 
 use civita_serialize::Serialize;
 use dashmap::DashMap;
+use derivative::Derivative;
 use libp2p::{request_response::Message, PeerId};
-use tokio::sync::{Mutex, RwLock};
-use vdf::WesolowskiVDF;
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
     block::{self, tree::Tree, Block},
@@ -12,9 +17,10 @@ use crate::{
     network::{
         gossipsub,
         request_response::{self, RequestResponse},
-        Gossipsub,
+        Gossipsub, Transport,
     },
     proposal::{self, Proposal},
+    resident,
     utils::{
         bi_channel::{self, BiChannel},
         trie,
@@ -23,6 +29,7 @@ use crate::{
 
 type Trie<H> = trie::Trie<H>;
 type Result<T, E = Error> = std::result::Result<T, E>;
+type ValidationChannel = BiChannel<Proposal, Option<Proposal>>;
 
 const TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(1);
 
@@ -42,9 +49,32 @@ pub enum Error {
     Proposal(#[from] proposal::Error),
 }
 
+#[derive(Default)]
 struct Proposals {
     validated: DashMap<Multihash, (Proposal, proposal::Witness)>,
     waiting_parent: DashMap<Multihash, Vec<(Proposal, proposal::Witness)>>,
+}
+
+struct VdfExecutor {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    rx: mpsc::UnboundedReceiver<(Vec<u8>, u64)>,
+    vdf: WesolowskiVDF,
+    cur_task: Option<oneshot::Receiver<Vec<u8>>>,
+}
+
+#[derive(Derivative)]
+#[derivative(Default(bound = ""))]
+pub struct EngineBuilder<H: Hasher> {
+    gossipsub: Option<Arc<Gossipsub>>,
+    req_resp: Option<Arc<RequestResponse>>,
+    validation_channel: Option<Mutex<ValidationChannel>>,
+    block_tree: Option<RwLock<Tree<H>>>,
+    mpt: Option<RwLock<Trie<H>>>,
+    sk: Option<SecretKey>,
+    vdf: Option<WesolowskiVDF>,
+    vdf_difficulty: Option<u64>,
+    proposal_topic: Option<u8>,
+    block_topic: Option<u8>,
 }
 
 pub struct Engine<H: Hasher> {
@@ -52,7 +82,7 @@ pub struct Engine<H: Hasher> {
     req_resp: Arc<RequestResponse>,
     props: Proposals,
     waiting_blocks: DashMap<Multihash, Vec<Block>>,
-    validate_prop_ch: Mutex<BiChannel<Proposal, Option<Proposal>>>,
+    validation_channel: Mutex<ValidationChannel>,
     block_tree: RwLock<Tree<H>>,
     mpt: RwLock<Trie<H>>,
     sk: SecretKey,
@@ -60,6 +90,148 @@ pub struct Engine<H: Hasher> {
     vdf_difficulty: u64,
     proposal_topic: u8,
     block_topic: u8,
+    vdf_task_tx: mpsc::UnboundedSender<(Vec<u8>, u64)>,
+    vdf_result_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+}
+
+impl VdfExecutor {
+    pub async fn spawn(
+        vdf: WesolowskiVDF,
+    ) -> (
+        mpsc::UnboundedReceiver<Vec<u8>>,
+        mpsc::UnboundedSender<(Vec<u8>, u64)>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (result_tx, result_rx) = mpsc::unbounded_channel();
+
+        let executor = Self {
+            tx: result_tx,
+            rx,
+            vdf,
+            cur_task: None,
+        };
+
+        tokio::spawn(executor.run());
+
+        (result_rx, tx)
+    }
+
+    async fn run(mut self) {
+        let mut cur: Option<oneshot::Receiver<Vec<u8>>> = None;
+
+        loop {
+            tokio::select! {
+                Some((challenge, difficulty)) = self.rx.recv() => {
+                    self.on_recv_task(challenge, difficulty).await;
+                }
+                Some(res) = async {
+                    match &mut cur {
+                        Some(rx) => Some(rx.await),
+                        None => None,
+                    }
+                } => {
+                    cur = None;
+
+                    if let Ok(res) = res {
+                        self.tx.send(res).expect("Failed to send VDF result");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn on_recv_task(&mut self, challenge: Vec<u8>, difficulty: u64) {
+        if let Some(task) = self.cur_task.take() {
+            drop(task);
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let vdf = self.vdf.clone();
+
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || {
+                vdf.solve(&challenge, difficulty)
+                    .expect("VDF proof should be valid")
+            })
+            .await;
+
+            if let Ok(res) = res {
+                let _ = tx.send(res);
+            }
+        });
+
+        self.cur_task = Some(rx);
+    }
+}
+
+impl<H: Hasher> EngineBuilder<H> {
+    pub fn with_transport(mut self, transport: Arc<Transport>) -> Self {
+        self.gossipsub = Some(transport.gossipsub());
+        self.req_resp = Some(transport.request_response());
+        self.sk = Some(transport.secret_key().clone());
+        self
+    }
+
+    pub fn with_validation_channel(mut self, channel: ValidationChannel) -> Self {
+        self.validation_channel = Some(Mutex::new(channel));
+        self
+    }
+
+    pub fn with_block_tree(mut self, tree: Tree<H>) -> Self {
+        self.block_tree = Some(RwLock::new(tree));
+        self
+    }
+
+    pub fn with_mpt(mut self, mpt: Trie<H>) -> Self {
+        self.mpt = Some(RwLock::new(mpt));
+        self
+    }
+
+    pub fn with_vdf(mut self, vdf: WesolowskiVDF, difficulty: u64) -> Self {
+        self.vdf = Some(vdf);
+        self.vdf_difficulty = Some(difficulty);
+        self
+    }
+
+    pub fn with_topics(mut self, proposal_topic: u8, block_topic: u8) -> Self {
+        self.proposal_topic = Some(proposal_topic);
+        self.block_topic = Some(block_topic);
+        self
+    }
+
+    pub async fn build(self) -> Option<Engine<H>> {
+        let gossipsub = self.gossipsub?;
+        let req_resp = self.req_resp?;
+        let props = Proposals::default();
+        let waiting_blocks = DashMap::new();
+        let validation_channel = self.validation_channel?;
+        let block_tree = self.block_tree?;
+        let mpt = self.mpt?;
+        let sk = self.sk?;
+        let vdf = self.vdf?;
+        let vdf_difficulty = self.vdf_difficulty?;
+        let proposal_topic = self.proposal_topic?;
+        let block_topic = self.block_topic?;
+
+        let (vdf_result_rx, vdf_task_tx) = VdfExecutor::spawn(vdf.clone()).await;
+
+        Some(Engine {
+            gossipsub,
+            req_resp,
+            props,
+            waiting_blocks,
+            validation_channel,
+            block_tree,
+            mpt,
+            sk,
+            vdf,
+            vdf_difficulty,
+            proposal_topic,
+            block_topic,
+            vdf_task_tx,
+            vdf_result_rx: Some(vdf_result_rx),
+        })
+    }
 }
 
 impl<H: Hasher> Engine<H> {
@@ -83,10 +255,16 @@ impl<H: Hasher> Engine<H> {
         Ok(())
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         let mut prop_rx = self.gossipsub.subscribe(self.proposal_topic).await?;
         let mut block_rx = self.gossipsub.subscribe(self.block_topic).await?;
         let req_resp = self.req_resp.clone();
+        let mut vdf_result_rx = self
+            .vdf_result_rx
+            .take()
+            .expect("VDF result receiver should be set");
+
+        self.start_vdf_mining().await;
 
         loop {
             tokio::select! {
@@ -120,8 +298,16 @@ impl<H: Hasher> Engine<H> {
                         continue;
                     };
 
-                    if let Err(e) = self.on_recv_block(block, witness).await {
-                        log::error!("Failed to handle block: {e}");
+                    match self.on_recv_block(block, witness).await {
+                        Ok(true) => {
+                            self.start_vdf_mining().await;
+                        }
+                        Ok(false) => {
+                            continue;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to handle block: {e}");
+                        }
                     }
                 }
                 Some(msg) = req_resp.recv() => {
@@ -136,7 +322,26 @@ impl<H: Hasher> Engine<H> {
                         }
                     }
                 },
+                Some(vdf_result) = vdf_result_rx.recv() => {
+                    if let Err(e) = self.on_vdf_solved(vdf_result).await {
+                        log::error!("Failed to handle VDF result: {e}");
+                    }
+                }
             }
+        }
+    }
+
+    async fn start_vdf_mining(&self) {
+        let leaf_hash = self.block_tree.read().await.get_leaf_hash().to_vec();
+        let self_pk_bytes = self.sk.public_key().to_hash::<H>().to_vec();
+
+        let mut challenge_data = Vec::with_capacity(leaf_hash.len() + self_pk_bytes.len());
+        challenge_data.extend_from_slice(&leaf_hash);
+        challenge_data.extend_from_slice(&self_pk_bytes);
+        let challenge = H::hash(&challenge_data).to_bytes();
+
+        if let Err(e) = self.vdf_task_tx.send((challenge, self.vdf_difficulty)) {
+            log::error!("Failed to send VDF task: {e}");
         }
     }
 
@@ -188,18 +393,18 @@ impl<H: Hasher> Engine<H> {
             return None;
         }
 
-        let mut channel = self.validate_prop_ch.lock().await;
+        let mut channel = self.validation_channel.lock().await;
         channel.send_and_recv(prop).await.ok().flatten()
     }
 
-    async fn on_recv_block(&self, block: Block, witness: block::Witness) -> Result<()> {
+    async fn on_recv_block(&self, block: Block, witness: block::Witness) -> Result<bool> {
         if !block.verify::<H>(
             &witness,
             self.block_tree.read().await.checkpoint(),
             &self.vdf,
             self.vdf_difficulty,
         ) {
-            return Ok(());
+            return Ok(false);
         }
 
         let hash = block.hash::<H>();
@@ -214,11 +419,11 @@ impl<H: Hasher> Engine<H> {
             let p = block.parent;
             bs.push(block);
             self.waiting_blocks.insert(p, bs);
-            return Ok(());
+            return Ok(false);
         };
 
         if parent.height != block.height.wrapping_add(1) {
-            return Ok(());
+            return Ok(false);
         }
 
         let mut bs = self
@@ -230,11 +435,14 @@ impl<H: Hasher> Engine<H> {
 
         for block in bs.into_iter().rev() {
             if !self.try_update_block(block).await {
-                return Ok(());
+                return Ok(false);
             }
         }
 
-        Ok(())
+        let leaf_hash = self.block_tree.read().await.get_leaf_hash();
+        self.props.validated.retain(|_, v| v.0.parent == leaf_hash);
+
+        Ok(true)
     }
 
     async fn try_update_block(&self, block: Block) -> bool {
@@ -333,5 +541,47 @@ impl<H: Hasher> Engine<H> {
         let witness = proposal::Witness::from_slice(&bytes).ok()?;
 
         Some(((prop, witness), false))
+    }
+
+    async fn on_vdf_solved(&self, proof: Vec<u8>) -> Result<()> {
+        let tree = self.block_tree.read().await;
+        let leaf = tree.get_leaf();
+
+        let parent = leaf.hash();
+        let parent_checkpoint = tree.checkpoint_hash();
+        let height = leaf.block.height.wrapping_add(1);
+        let props = self
+            .props
+            .validated
+            .iter()
+            .map(|v| *v.key())
+            .collect::<BTreeSet<_>>();
+        let proposer_pk = self.sk.public_key();
+        let proposer_weight = self
+            .mpt
+            .read()
+            .await
+            .get(&proposer_pk.to_hash::<H>().to_bytes())
+            .map_or(0, |v| resident::Record::from_slice(&v).unwrap().weight);
+
+        let block = Block {
+            parent,
+            parent_checkpoint,
+            height,
+            proposals: props,
+            proposer_pk,
+            proposer_weight,
+            hash_cache: OnceLock::new(),
+        };
+
+        let witness = block
+            .generate_witness(&self.sk, &leaf.trie, proof)
+            .expect("Failed to generate block witness");
+
+        let bytes = (block, witness).to_vec();
+
+        self.gossipsub.publish(self.block_topic, bytes).await?;
+
+        Ok(())
     }
 }

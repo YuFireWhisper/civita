@@ -26,12 +26,11 @@ pub enum Error {}
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Block {
-    pub proposals: BTreeSet<Multihash>,
     pub parent: Multihash,
     pub parent_checkpoint: Multihash,
     pub height: u64,
+    pub proposals: BTreeSet<Multihash>,
     pub proposer_pk: PublicKey,
-    pub proposer_data: Option<Vec<u8>>,
     pub proposer_weight: u32,
     #[serialize(skip)]
     pub(crate) hash_cache: OnceLock<Multihash>,
@@ -55,7 +54,7 @@ impl Block {
     pub fn generate_witness<H: Hasher>(
         &self,
         sk: &SecretKey,
-        mpt: Trie<H>,
+        mpt: &Trie<H>,
         vdf_proof: Vec<u8>,
     ) -> Result<Witness> {
         let hash = self.hash::<H>().to_bytes();

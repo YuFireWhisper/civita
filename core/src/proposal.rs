@@ -284,7 +284,6 @@ mod tests {
             parent_checkpoint: Multihash::default(),
             height,
             proposer_pk,
-            proposer_data: None,
             proposer_weight: PROPOSER_WEIGHT,
             hash_cache: OnceLock::new(),
         }
