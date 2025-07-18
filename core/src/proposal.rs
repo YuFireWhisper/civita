@@ -9,6 +9,7 @@ use derivative::Derivative;
 use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
+    block::Block,
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
     utils::trie::{self, ProofResult, Trie},
@@ -64,16 +65,12 @@ impl Proposal {
         *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
 
-    pub fn sign<H: Hasher>(&self, sk: &SecretKey) -> Signature {
-        sk.sign(&self.hash::<H>().to_bytes())
-    }
-
     pub fn generate_witness<H: Hasher>(
         &self,
         sk: &SecretKey,
+        trie: &Trie<H>,
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
-        mpt: &Trie<H>,
     ) -> Result<Witness> {
         let hash = self.hash::<H>().to_bytes();
 
@@ -82,13 +79,13 @@ impl Proposal {
         let mut proofs = ProofDb::new();
         for key in self.diffs.keys() {
             assert!(
-                mpt.prove(key, &mut proofs),
+                trie.prove(key, &mut proofs),
                 "Failed to generate proof for key: {key:?}",
             );
         }
 
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        assert!(mpt.prove(&key, &mut proofs), "Failed to generate proof");
+        assert!(trie.prove(&key, &mut proofs), "Failed to generate proof");
 
         let vdf_proof = vdf
             .solve(&hash, vdf_difficulty)
@@ -104,11 +101,17 @@ impl Proposal {
     pub fn verify<H: Hasher>(
         &self,
         witness: &Witness,
-        checkpoint: &Multihash,
+        parent: &Block,
+        checkpoint: &Block,
+        trie_root: Multihash,
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
     ) -> bool {
-        if &self.parent_checkpoint != checkpoint {
+        if self.parent != parent.hash::<H>() || self.parent_checkpoint != checkpoint.hash::<H>() {
+            return false;
+        }
+
+        if parent.height <= checkpoint.height {
             return false;
         }
 
@@ -125,31 +128,32 @@ impl Proposal {
             return false;
         }
 
-        if !self.verify_proposer::<H>(&witness.proofs) {
+        if !self.verify_proposer::<H>(trie_root, &witness.proofs) {
             return false;
         }
 
-        if !self.verify_diff(&witness.proofs) {
+        if !self.verify_diff(trie_root, &witness.proofs) {
             return false;
         }
 
         true
     }
 
-    fn verify_proposer<H: Hasher>(&self, proofs: &ProofDb) -> bool {
+    fn verify_proposer<H: Hasher>(&self, trie_root: Multihash, proofs: &ProofDb) -> bool {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
         let exp = (self.proposer_weight != 0).then_some(self.proposer_weight);
-        self.verify_proof(&key, proofs, exp, None)
+        self.verify_proof(&key, trie_root, proofs, exp, None)
     }
 
     fn verify_proof(
         &self,
         key: &[u8],
+        trie_root: Multihash,
         proofs: &ProofDb,
         exp_weight: Option<u32>,
         exp_record: Option<&resident::Record>,
     ) -> bool {
-        let res = match trie::verify_proof_with_hash(key, proofs, self.parent) {
+        let res = match trie::verify_proof_with_hash(key, proofs, trie_root) {
             ProofResult::Exists(resident_bytes) => resident_bytes,
             ProofResult::NotExists => {
                 // If the proof does not exist, we expect no record
@@ -178,15 +182,17 @@ impl Proposal {
         true
     }
 
-    fn verify_diff(&self, proofs: &ProofDb) -> bool {
+    fn verify_diff(&self, trie_root: Multihash, proofs: &ProofDb) -> bool {
         self.diffs
             .iter()
-            .all(|(key, diff)| self.verify_proof(key, proofs, None, diff.from.as_ref()))
+            .all(|(key, diff)| self.verify_proof(key, trie_root, proofs, None, diff.from.as_ref()))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use vdf::{VDFParams, WesolowskiVDFParams};
 
     use super::*;
@@ -194,58 +200,109 @@ mod tests {
     type TestHasher = sha2::Sha256;
     type Trie = trie::Trie<TestHasher>;
 
-    #[test]
-    fn success_create_witness_from_payload() {
-        let sk = SecretKey::random();
-        let proposer_pk = sk.public_key();
+    const CODE: u8 = 0;
+    const FROM_WEIGHT: u32 = 100;
+    const TO_WEIGHT: u32 = 200;
+    const PROPOSER_WEIGHT: u32 = 100;
 
-        let mut mpt = Trie::empty();
+    const HEIGHT: u64 = 2;
 
-        let key = proposer_pk.to_hash::<TestHasher>().to_bytes();
+    const VDF_PARAMS: WesolowskiVDFParams = WesolowskiVDFParams(1024);
+    const VDF_DIFFICULTY: u64 = 1;
+
+    fn setup() -> (Proposal, Witness, Block, Block, Multihash) {
+        let from_sk = SecretKey::random();
+        let from_pk = from_sk.public_key();
+        let from_pk_bytes = from_pk.to_hash::<TestHasher>().to_bytes();
+
+        let proposer_sk = SecretKey::random();
+        let proposer_pk = proposer_sk.public_key();
+        let proposer_pk_bytes = proposer_pk.to_hash::<TestHasher>().to_bytes();
 
         let from = resident::Record {
-            weight: 100,
+            weight: FROM_WEIGHT,
             data: vec![1, 2, 3],
         };
 
         let to = resident::Record {
-            weight: 200,
+            weight: TO_WEIGHT,
             data: vec![4, 5, 6],
         };
 
-        mpt.update(&key, from.to_vec(), None);
-        let root_hash = mpt.commit();
+        let proposer_record = resident::Record {
+            weight: PROPOSER_WEIGHT,
+            data: vec![7, 8, 9],
+        };
 
-        let mut diff = BTreeMap::new();
-        diff.insert(
-            key,
-            Diff {
-                from: Some(from),
-                to,
-            },
-        );
+        let mut trie = Trie::empty();
+        trie.update(&from_pk_bytes, from.to_vec(), None);
+        trie.update(&proposer_pk_bytes, proposer_record.to_vec(), None);
+        let root_hash = trie.commit();
+
+        let diff = Diff {
+            from: Some(from),
+            to,
+        };
+
+        let mut diffs = BTreeMap::new();
+        diffs.insert(from_pk_bytes, diff);
+
+        let parent = setup_block(BTreeSet::new(), HEIGHT);
+        let parent_hash = parent.hash::<TestHasher>();
+
+        let parent_checkpoint = setup_block(BTreeSet::new(), HEIGHT - 1);
+        let parent_checkpoint_hash = parent_checkpoint.hash::<TestHasher>();
 
         let prop = Proposal {
-            code: 0,
-            parent: root_hash,
-            parent_checkpoint: root_hash,
-            diffs: diff,
-            total_weight_diff: 100,
+            code: CODE,
+            parent: parent_hash,
+            parent_checkpoint: parent_checkpoint_hash,
+            diffs,
+            total_weight_diff: TO_WEIGHT as i32 - FROM_WEIGHT as i32,
             proposer_pk,
             proposer_data: None,
-            proposer_weight: 100,
+            proposer_weight: PROPOSER_WEIGHT,
             hash_cache: OnceLock::new(),
         };
 
-        let vdf = WesolowskiVDFParams(2048).new();
-        let vdf_difficulty = 0;
+        let vdf = VDF_PARAMS.new();
 
         let witness = prop
-            .generate_witness(&sk, &vdf, vdf_difficulty, &mpt)
+            .generate_witness(&proposer_sk, &trie, &vdf, VDF_DIFFICULTY)
             .expect("Witness generation should succeed");
 
-        let is_valid = prop.verify::<TestHasher>(&witness, &root_hash, &vdf, vdf_difficulty);
+        (prop, witness, parent, parent_checkpoint, root_hash)
+    }
 
-        assert!(is_valid, "Witness should be valid");
+    fn setup_block(proposals: BTreeSet<Multihash>, height: u64) -> Block {
+        let proposer_sk = SecretKey::random();
+        let proposer_pk = proposer_sk.public_key();
+
+        Block {
+            proposals,
+            parent: Multihash::default(),
+            parent_checkpoint: Multihash::default(),
+            height,
+            proposer_pk,
+            proposer_data: None,
+            proposer_weight: PROPOSER_WEIGHT,
+            hash_cache: OnceLock::new(),
+        }
+    }
+
+    #[test]
+    fn success_verify() {
+        let (prop, witness, parent, parent_checkpoint, root_hash) = setup();
+
+        let vdf = VDF_PARAMS.new();
+
+        assert!(prop.verify::<TestHasher>(
+            &witness,
+            &parent,
+            &parent_checkpoint,
+            root_hash,
+            &vdf,
+            VDF_DIFFICULTY
+        ));
     }
 }
