@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use libp2p::{gossipsub::Event, PeerId, Swarm};
+use libp2p::{
+    gossipsub::{Event, MessageAcceptance, MessageId},
+    PeerId, Swarm,
+};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::network::behaviour::Behaviour;
@@ -16,6 +19,12 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("{0}")]
     Network(#[from] network::Error),
+}
+
+pub struct Message {
+    pub id: MessageId,
+    pub propagation_source: PeerId,
+    pub data: Vec<u8>,
 }
 
 pub enum Gossipsub {
@@ -39,7 +48,7 @@ impl Gossipsub {
         }
     }
 
-    pub async fn subscribe(&self, topic: u8) -> Result<mpsc::Receiver<Vec<u8>>> {
+    pub async fn subscribe(&self, topic: u8) -> Result<mpsc::Receiver<Message>> {
         match self {
             Gossipsub::Network(gossipsub) => gossipsub.subscribe(topic).await.map_err(Error::from),
         }
@@ -57,6 +66,21 @@ impl Gossipsub {
         match self {
             Gossipsub::Network(gossipsub) => {
                 gossipsub.publish(topic, data).await.map_err(Error::from)
+            }
+        }
+    }
+
+    pub async fn report_validation_result(
+        &self,
+        msg_id: &MessageId,
+        propagation_source: &PeerId,
+        acceptance: MessageAcceptance,
+    ) {
+        match self {
+            Gossipsub::Network(gossipsub) => {
+                gossipsub
+                    .report_validation_result(msg_id, propagation_source, acceptance)
+                    .await;
             }
         }
     }

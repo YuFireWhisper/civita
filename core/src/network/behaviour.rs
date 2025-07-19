@@ -55,6 +55,7 @@ impl Behaviour {
 
     fn create_gossipsub_config() -> Result<gossipsub::Config> {
         gossipsub::ConfigBuilder::default()
+            .validate_messages()
             .build()
             .map_err(Error::from)
     }

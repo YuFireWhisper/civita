@@ -2,12 +2,17 @@ use std::{collections::HashSet, sync::Arc};
 
 use dashmap::DashMap;
 use libp2p::{
-    gossipsub::{Event, IdentTopic, PublishError, SubscriptionError, TopicHash},
+    gossipsub::{
+        Event, IdentTopic, MessageAcceptance, MessageId, PublishError, SubscriptionError, TopicHash,
+    },
     PeerId, Swarm,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::{crypto::Multihash, network::behaviour::Behaviour};
+use crate::{
+    crypto::Multihash,
+    network::{behaviour::Behaviour, gossipsub::Message},
+};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -30,7 +35,7 @@ pub struct Config {
 pub struct Gossipsub {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     local_peer_id: PeerId,
-    subscribed: DashMap<TopicHash, mpsc::Sender<Vec<u8>>>,
+    subscribed: DashMap<TopicHash, mpsc::Sender<Message>>,
     subscribed_peer: DashMap<TopicHash, HashSet<Multihash>>,
     waiting_subscription: DashMap<TopicHash, oneshot::Sender<()>>,
     config: Config,
@@ -76,9 +81,19 @@ impl Gossipsub {
                 }
             }
 
-            Event::Message { message, .. } => {
+            Event::Message {
+                message,
+                message_id,
+                propagation_source,
+            } => {
                 if let Some(tx) = self.subscribed.get(&message.topic) {
-                    if let Err(e) = tx.send(message.data).await {
+                    let msg = Message {
+                        id: message_id,
+                        propagation_source,
+                        data: message.data,
+                    };
+
+                    if let Err(e) = tx.send(msg).await {
                         log::warn!("Failed to send message to subscriber: {e}");
                     }
                 }
@@ -90,7 +105,7 @@ impl Gossipsub {
         Ok(())
     }
 
-    pub async fn subscribe(&self, topic: u8) -> Result<mpsc::Receiver<Vec<u8>>> {
+    pub async fn subscribe(&self, topic: u8) -> Result<mpsc::Receiver<Message>> {
         let topic = IdentTopic::new(topic.to_string());
 
         self.swarm
@@ -161,5 +176,19 @@ impl Gossipsub {
             .publish(topic, data)?;
 
         Ok(())
+    }
+
+    pub async fn report_validation_result(
+        &self,
+        msg_id: &MessageId,
+        propagation_source: &PeerId,
+        acceptance: MessageAcceptance,
+    ) {
+        self.swarm
+            .lock()
+            .await
+            .behaviour_mut()
+            .gossipsub_mut()
+            .report_message_validation_result(msg_id, propagation_source, acceptance);
     }
 }
