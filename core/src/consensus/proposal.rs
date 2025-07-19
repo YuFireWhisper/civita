@@ -160,115 +160,153 @@ impl Witness {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use std::collections::BTreeSet;
-//
-//     use vdf::{VDFParams, WesolowskiVDFParams};
-//
-//     use super::*;
-//
-//     type TestHasher = sha2::Sha256;
-//     type Trie = trie::Trie<TestHasher>;
-//
-//     const CODE: u8 = 0;
-//     const FROM_WEIGHT: u32 = 100;
-//     const TO_WEIGHT: u32 = 200;
-//     const PROPOSER_WEIGHT: u32 = 100;
-//
-//     const HEIGHT: u64 = 2;
-//
-//     const VDF_PARAMS: WesolowskiVDFParams = WesolowskiVDFParams(1024);
-//     const VDF_DIFFICULTY: u64 = 1;
-//
-//     fn setup() -> (Proposal, Witness, Block, Block, Multihash) {
-//         let from_sk = SecretKey::random();
-//         let from_pk = from_sk.public_key();
-//         let from_pk_bytes = from_pk.to_hash::<TestHasher>().to_bytes();
-//
-//         let proposer_sk = SecretKey::random();
-//         let proposer_pk = proposer_sk.public_key();
-//         let proposer_pk_bytes = proposer_pk.to_hash::<TestHasher>().to_bytes();
-//
-//         let from = resident::Record {
-//             weight: FROM_WEIGHT,
-//             data: vec![1, 2, 3],
-//         };
-//
-//         let to = resident::Record {
-//             weight: TO_WEIGHT,
-//             data: vec![4, 5, 6],
-//         };
-//
-//         let proposer_record = resident::Record {
-//             weight: PROPOSER_WEIGHT,
-//             data: vec![7, 8, 9],
-//         };
-//
-//         let mut trie = Trie::empty();
-//         trie.update(&from_pk_bytes, from.to_vec(), None);
-//         trie.update(&proposer_pk_bytes, proposer_record.to_vec(), None);
-//         let root_hash = trie.commit();
-//
-//         let diff = Diff {
-//             from: Some(from),
-//             to,
-//         };
-//
-//         let mut diffs = BTreeMap::new();
-//         diffs.insert(from_pk_bytes, diff);
-//
-//         let parent = setup_block(BTreeSet::new(), HEIGHT);
-//         let parent_hash = parent.hash::<TestHasher>();
-//
-//         let parent_checkpoint = setup_block(BTreeSet::new(), HEIGHT - 1);
-//         let parent_checkpoint_hash = parent_checkpoint.hash::<TestHasher>();
-//
-//         let prop = Proposal {
-//             code: CODE,
-//             parent: parent_hash,
-//             parent_checkpoint: parent_checkpoint_hash,
-//             diffs,
-//             total_weight_diff: TO_WEIGHT as i32 - FROM_WEIGHT as i32,
-//             proposer_pk,
-//             proposer_data: None,
-//             proposer_weight: PROPOSER_WEIGHT,
-//             hash_cache: OnceLock::new(),
-//         };
-//
-//         let vdf = VDF_PARAMS.new();
-//
-//         let witness = prop
-//             .generate_witness(&proposer_sk, &trie, &vdf, VDF_DIFFICULTY)
-//             .expect("Witness generation should succeed");
-//
-//         (prop, witness, parent, parent_checkpoint, root_hash)
-//     }
-//
-//     fn setup_block(proposals: BTreeSet<Multihash>, height: u64) -> Block {
-//         let proposer_sk = SecretKey::random();
-//         let proposer_pk = proposer_sk.public_key();
-//
-//         Block {
-//             proposals,
-//             parent: Multihash::default(),
-//             parent_checkpoint: Multihash::default(),
-//             height,
-//             proposer_pk,
-//             proposer_weight: PROPOSER_WEIGHT,
-//             hash_cache: OnceLock::new(),
-//         }
-//     }
-//
-//     #[test]
-//     fn success_verify() {
-//         let (prop, witness, _, _, root_hash) = setup();
-//
-//         let vdf = VDF_PARAMS.new();
-//
-//         assert!(prop.verify_signature::<TestHasher>(&witness));
-//         assert!(prop.verify_vdf::<TestHasher>(&witness, &vdf, VDF_DIFFICULTY));
-//         assert!(prop.verify_proposer_weight::<TestHasher>(&witness, root_hash));
-//         assert!(prop.verify_diffs(&witness, root_hash));
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use vdf::{VDFParams, WesolowskiVDFParams};
+
+    use crate::consensus::block::{self, Block};
+
+    use super::*;
+
+    type TestHasher = sha2::Sha256;
+    type Trie = trie::Trie<TestHasher>;
+
+    const CODE: u8 = 0;
+    const FROM_WEIGHT: u32 = 100;
+    const TO_WEIGHT: u32 = 200;
+    const PROPOSER_WEIGHT: u32 = 100;
+
+    const HEIGHT: u64 = 2;
+
+    const VDF_PARAMS: WesolowskiVDFParams = WesolowskiVDFParams(1024);
+    const VDF_DIFFICULTY: u64 = 1;
+
+    fn setup() -> (Proposal, Witness, Multihash) {
+        let from_sk = SecretKey::random();
+        let from_pk = from_sk.public_key();
+        let from_pk_bytes = from_pk.to_hash::<TestHasher>().to_bytes();
+
+        let proposer_sk = SecretKey::random();
+        let proposer_pk = proposer_sk.public_key();
+        let proposer_pk_bytes = proposer_pk.to_hash::<TestHasher>().to_bytes();
+
+        let from = resident::Record {
+            weight: FROM_WEIGHT,
+            data: vec![1, 2, 3],
+        };
+
+        let to = resident::Record {
+            weight: TO_WEIGHT,
+            data: vec![4, 5, 6],
+        };
+
+        let proposer_record = resident::Record {
+            weight: PROPOSER_WEIGHT,
+            data: vec![7, 8, 9],
+        };
+
+        let mut trie = Trie::empty();
+
+        trie.update(&from_pk_bytes, from.to_vec(), None);
+        trie.update(&proposer_pk_bytes, proposer_record.to_vec(), None);
+
+        let root_hash = trie.commit();
+
+        let diff = Diff {
+            from: Some(from),
+            to,
+        };
+
+        let mut diffs = BTreeMap::new();
+        diffs.insert(from_pk_bytes, diff);
+
+        let prop = Proposal {
+            code: CODE,
+            parent: Multihash::default(),
+            parent_checkpoint: Multihash::default(),
+            diffs,
+            total_weight_diff: TO_WEIGHT as i32 - FROM_WEIGHT as i32,
+            proposer_pk,
+            proposer_data: None,
+            proposer_weight: PROPOSER_WEIGHT,
+            hash_cache: OnceLock::new(),
+        };
+
+        let vdf = VDF_PARAMS.new();
+
+        let witness = prop
+            .generate_witness(&proposer_sk, &trie, &vdf, VDF_DIFFICULTY)
+            .expect("Witness generation should succeed");
+
+        (prop, witness, root_hash)
+    }
+
+    fn random_signature() -> Signature {
+        let sk = SecretKey::random();
+        let msg = vec![0; 32];
+        sk.sign(&msg)
+    }
+
+    #[test]
+    fn veirfy_signature() {
+        let (prop, witness, _) = setup();
+
+        let invalid_winess = Witness {
+            sig: random_signature(),
+            ..witness.clone()
+        };
+
+        assert!(prop.verify_signature::<TestHasher>(&witness));
+        assert!(!prop.verify_signature::<TestHasher>(&invalid_winess));
+    }
+
+    #[test]
+    fn verify_vdf() {
+        let (prop, witness, _) = setup();
+
+        let vdf = VDF_PARAMS.new();
+
+        let invalid_witness = Witness {
+            vdf_proof: vec![0; 32], // Invalid proof
+            ..witness.clone()
+        };
+
+        assert!(prop.verify_vdf::<TestHasher>(&witness, &vdf, VDF_DIFFICULTY));
+        assert!(!prop.verify_vdf::<TestHasher>(&invalid_witness, &vdf, VDF_DIFFICULTY));
+    }
+
+    #[test]
+    fn verify_proposer_weight() {
+        let (prop, witness, root_hash) = setup();
+
+        assert!(prop.verify_proposer_weight::<TestHasher>(&witness, root_hash));
+
+        let invalid_witness = Witness {
+            sig: witness.sig.clone(),
+            proofs: witness.proofs.clone(),
+            vdf_proof: witness.vdf_proof.clone(),
+        };
+
+        let invalid_prop = Proposal {
+            proposer_weight: PROPOSER_WEIGHT + 1,
+            ..prop.clone()
+        };
+
+        assert!(!invalid_prop.verify_proposer_weight::<TestHasher>(&invalid_witness, root_hash));
+    }
+
+    #[test]
+    fn verify_diffs() {
+        let (prop, witness, root_hash) = setup();
+
+        let invalid_witness = Witness {
+            proofs: HashMap::new(), // No proofs
+            ..witness.clone()
+        };
+
+        assert!(prop.verify_diffs(&witness, root_hash));
+        assert!(!prop.verify_diffs(&invalid_witness, root_hash));
+    }
+}
