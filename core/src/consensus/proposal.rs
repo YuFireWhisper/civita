@@ -162,11 +162,7 @@ impl Witness {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use vdf::{VDFParams, WesolowskiVDFParams};
-
-    use crate::consensus::block::{self, Block};
 
     use super::*;
 
@@ -177,8 +173,6 @@ mod tests {
     const FROM_WEIGHT: u32 = 100;
     const TO_WEIGHT: u32 = 200;
     const PROPOSER_WEIGHT: u32 = 100;
-
-    const HEIGHT: u64 = 2;
 
     const VDF_PARAMS: WesolowskiVDFParams = WesolowskiVDFParams(1024);
     const VDF_DIFFICULTY: u64 = 1;
