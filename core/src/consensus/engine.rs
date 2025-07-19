@@ -1,13 +1,9 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    ops::Deref,
-    sync::{Arc, OnceLock},
-};
+use std::sync::Arc;
 
 use civita_serialize::Serialize;
 use dashmap::DashMap;
 use derivative::Derivative;
-use libp2p::{request_response::Message, PeerId};
+use libp2p::{gossipsub::MessageAcceptance, request_response::Message, PeerId};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use vdf::{WesolowskiVDF, VDF};
 
@@ -71,7 +67,6 @@ pub struct EngineBuilder<H: Hasher> {
     req_resp: Option<Arc<RequestResponse>>,
     validation_channel: Option<Mutex<ValidationChannel>>,
     block_tree: Option<RwLock<Tree<H>>>,
-    mpt: Option<RwLock<Trie<H>>>,
     sk: Option<SecretKey>,
     vdf: Option<WesolowskiVDF>,
     vdf_difficulty: Option<u64>,
@@ -86,7 +81,6 @@ pub struct Engine<H: Hasher> {
     waiting_blocks: DashMap<Multihash, Vec<Block>>,
     validation_channel: Mutex<ValidationChannel>,
     block_tree: RwLock<Tree<H>>,
-    mpt: RwLock<Trie<H>>,
     sk: SecretKey,
     vdf: WesolowskiVDF,
     vdf_difficulty: u64,
@@ -185,11 +179,6 @@ impl<H: Hasher> EngineBuilder<H> {
         self
     }
 
-    pub fn with_mpt(mut self, mpt: Trie<H>) -> Self {
-        self.mpt = Some(RwLock::new(mpt));
-        self
-    }
-
     pub fn with_vdf(mut self, vdf: WesolowskiVDF, difficulty: u64) -> Self {
         self.vdf = Some(vdf);
         self.vdf_difficulty = Some(difficulty);
@@ -209,7 +198,6 @@ impl<H: Hasher> EngineBuilder<H> {
         let waiting_blocks = DashMap::new();
         let validation_channel = self.validation_channel?;
         let block_tree = self.block_tree?;
-        let mpt = self.mpt?;
         let sk = self.sk?;
         let vdf = self.vdf?;
         let vdf_difficulty = self.vdf_difficulty?;
@@ -225,7 +213,6 @@ impl<H: Hasher> EngineBuilder<H> {
             waiting_blocks,
             validation_channel,
             block_tree,
-            mpt,
             sk,
             vdf,
             vdf_difficulty,
@@ -242,7 +229,7 @@ impl<H: Hasher> Engine<H> {
     pub async fn propose(&self, prop: Proposal) -> Result<()> {
         let witness = prop.generate_witness(
             &self.sk,
-            self.mpt.read().await.deref(),
+            self.block_tree.read().await.get_leaf_trie(),
             &self.vdf,
             self.vdf_difficulty,
         )?;
@@ -273,47 +260,11 @@ impl<H: Hasher> Engine<H> {
 
         loop {
             tokio::select! {
-                Some(bytes) = prop_rx.recv() => {
-                    let mut bytes = bytes.as_slice();
-
-                    let Ok(prop) = Proposal::from_reader(&mut bytes) else {
-                        log::error!("Failed to deserialize proposal");
-                        continue;
-                    };
-
-                    let Ok(witness) = proposal::Witness::from_reader(&mut bytes) else {
-                        log::error!("Failed to deserialize proposal witness");
-                        continue;
-                    };
-
-                    if let Err(e) = self.on_recv_proposal(prop, witness).await {
-                        log::error!("Failed to handle proposal: {e}");
-                    }
+                Some(msg) = prop_rx.recv() => {
+                    self.on_recv_proposal(msg).await;
                 }
-                Some(bytes) = block_rx.recv() => {
-                    let mut bytes = bytes.as_slice();
-
-                    let Ok(block) = Block::from_reader(&mut bytes) else {
-                        log::error!("Failed to deserialize block");
-                        continue;
-                    };
-
-                    let Ok(witness) = block::Witness::from_reader(&mut bytes) else {
-                        log::error!("Failed to deserialize block witness");
-                        continue;
-                    };
-
-                    match self.on_recv_block(block, witness).await {
-                        Ok(true) => {
-                            self.start_vdf_mining().await;
-                        }
-                        Ok(false) => {
-                            continue;
-                        }
-                        Err(e) => {
-                            log::error!("Failed to handle block: {e}");
-                        }
-                    }
+                Some(msg) = block_rx.recv() => {
+                    self.on_recv_block(msg).await;
                 }
                 Some(msg) = req_resp.recv() => {
                     if let Message::Request { request, channel, .. } = msg {
@@ -350,107 +301,161 @@ impl<H: Hasher> Engine<H> {
         }
     }
 
-    async fn on_recv_proposal(&self, prop: Proposal, witness: proposal::Witness) -> Result<()> {
+    async fn on_recv_proposal(&self, msg: gossipsub::Message) {
+        let acceptance = self.verify_proposal(msg.data.as_ref()).await;
+
+        self.gossipsub
+            .report_validation_result(&msg.id, &msg.propagation_source, acceptance)
+            .await;
+    }
+
+    async fn verify_proposal(&self, bytes: &[u8]) -> MessageAcceptance {
+        let Ok(prop) = Proposal::from_slice(bytes) else {
+            return MessageAcceptance::Reject;
+        };
+
+        let Ok(witness) = proposal::Witness::from_slice(bytes) else {
+            return MessageAcceptance::Reject;
+        };
+
+        self.verify_proposal_with_deserialized(prop, witness).await
+    }
+
+    async fn verify_proposal_with_deserialized(
+        &self,
+        prop: Proposal,
+        witness: proposal::Witness,
+    ) -> MessageAcceptance {
         let hash = prop.hash::<H>();
 
         if self.props.validated.contains_key(&hash) {
-            return Ok(());
+            return MessageAcceptance::Accept;
+        }
+
+        if !prop.verify_signature::<H>(&witness) {
+            return MessageAcceptance::Reject;
+        }
+
+        if !prop.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
+            return MessageAcceptance::Reject;
         }
 
         let tree = self.block_tree.read().await;
-        let Some(node) = tree.get_node(&prop.parent) else {
+
+        if prop.parent_checkpoint != tree.checkpoint_hash() {
+            return MessageAcceptance::Ignore;
+        }
+
+        let Some(parent_node) = tree.get_node(&prop.parent) else {
             self.props
                 .waiting_parent
                 .entry(prop.parent)
                 .or_default()
                 .push((prop, witness));
-            return Ok(());
+            return MessageAcceptance::Ignore;
         };
 
-        let parent = &node.block;
-        let trie_root = node.trie.root_hash();
+        let parent = &parent_node.block;
 
-        if let Some(prop) = self
-            .verify_proposal(prop, &witness, parent, trie_root)
-            .await
-        {
-            self.props.validated.insert(hash, (prop, witness));
+        if parent.height <= tree.checkpoint().height {
+            return MessageAcceptance::Reject;
         }
 
-        Ok(())
-    }
+        if !prop.verify_proposer_weight::<H>(&witness, parent_node.trie.root_hash()) {
+            return MessageAcceptance::Reject;
+        }
 
-    async fn verify_proposal(
-        &self,
-        prop: Proposal,
-        witness: &proposal::Witness,
-        parent: &Block,
-        trie_root: Multihash,
-    ) -> Option<Proposal> {
-        if !prop.verify::<H>(
-            witness,
-            parent,
-            self.block_tree.read().await.checkpoint(),
-            trie_root,
-            &self.vdf,
-            self.vdf_difficulty,
-        ) {
-            return None;
+        if !prop.verify_diffs(&witness, parent_node.trie.root_hash()) {
+            return MessageAcceptance::Reject;
         }
 
         let mut channel = self.validation_channel.lock().await;
-        channel.send_and_recv(prop).await.ok().flatten()
+
+        if let Some(prop) = channel.send_and_recv(prop).await.ok().flatten() {
+            self.props.validated.insert(hash, (prop, witness));
+            return MessageAcceptance::Accept;
+        }
+
+        MessageAcceptance::Reject
     }
 
-    async fn on_recv_block(&self, block: Block, witness: block::Witness) -> Result<bool> {
-        if !block.verify::<H>(
-            &witness,
-            self.block_tree.read().await.checkpoint(),
-            &self.vdf,
-            self.vdf_difficulty,
-        ) {
-            return Ok(false);
+    async fn on_recv_block(&self, msg: gossipsub::Message) {
+        let acceptance = self.verify_block(msg.data.as_ref()).await;
+
+        if matches!(acceptance, MessageAcceptance::Accept) {
+            self.start_vdf_mining().await;
         }
 
-        let hash = block.hash::<H>();
+        self.gossipsub
+            .report_validation_result(&msg.id, &msg.propagation_source, acceptance)
+            .await;
+    }
 
-        let tree = self.block_tree.read().await;
-        let Some(parent) = tree.get_block(&block.parent) else {
-            let mut bs = self
-                .waiting_blocks
-                .remove(&hash)
-                .map(|(_, bs)| bs)
-                .unwrap_or_default();
-            let p = block.parent;
-            bs.push(block);
-            self.waiting_blocks.insert(p, bs);
-            return Ok(false);
+    async fn verify_block(&self, msg: &[u8]) -> MessageAcceptance {
+        let Ok(block) = Block::from_slice(msg) else {
+            return MessageAcceptance::Reject;
         };
 
-        if parent.height != block.height.wrapping_add(1) {
-            return Ok(false);
+        let Ok(witness) = block::Witness::from_slice(msg) else {
+            return MessageAcceptance::Reject;
+        };
+
+        if !block.verify_signature::<H>(&witness) {
+            return MessageAcceptance::Reject;
         }
 
-        let mut bs = self
-            .waiting_blocks
-            .remove(&hash)
-            .map(|(_, bs)| bs)
-            .unwrap_or_default();
-        bs.push(block);
+        if !block.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
+            return MessageAcceptance::Reject;
+        }
 
-        for block in bs.into_iter().rev() {
-            if !self.try_update_block(block).await {
-                return Ok(false);
+        let tree = self.block_tree.read().await;
+
+        let checkpoint = tree.checkpoint();
+
+        if block.parent_checkpoint != checkpoint.hash::<H>() {
+            return MessageAcceptance::Ignore;
+        }
+
+        let Some(parent_node) = tree.get_node(&block.parent) else {
+            self.waiting_blocks
+                .entry(block.parent)
+                .or_default()
+                .push(block);
+            return MessageAcceptance::Ignore;
+        };
+
+        if block.height != parent_node.block.height.wrapping_add(1) {
+            return MessageAcceptance::Reject;
+        }
+
+        if block.height <= checkpoint.height {
+            return MessageAcceptance::Reject;
+        }
+
+        if !block.verify_proposer_weight::<H>(&witness, parent_node.trie.root_hash()) {
+            return MessageAcceptance::Reject;
+        }
+
+        let block_hash = block.hash::<H>();
+        let acceptance = self.try_update_block(block).await;
+
+        if !matches!(acceptance, MessageAcceptance::Accept) {
+            return acceptance;
+        }
+
+        if let Some(blocks) = self.waiting_blocks.remove(&block_hash) {
+            for block in blocks.1.into_iter().rev() {
+                let _ = self.try_update_block(block).await;
             }
         }
 
-        let leaf_hash = self.block_tree.read().await.get_leaf_hash();
-        self.props.validated.retain(|_, v| v.0.parent == leaf_hash);
+        let leaf = tree.get_leaf_hash();
+        self.props.validated.retain(|_, v| v.0.parent == leaf);
 
-        Ok(true)
+        MessageAcceptance::Accept
     }
 
-    async fn try_update_block(&self, block: Block) -> bool {
+    async fn try_update_block(&self, block: Block) -> MessageAcceptance {
         let pk_hash = block.proposer_pk.to_hash::<H>();
         let peer = PeerId::from_multihash(pk_hash).expect("PeerId should be valid");
 
@@ -461,62 +466,73 @@ impl<H: Hasher> Engine<H> {
             .get_trie(&block.parent)
             .cloned()
         else {
-            return false;
+            return MessageAcceptance::Ignore;
         };
 
-        let Some((props, trie)) = self
-            .collect_proposals(peer, &block, &block.proposals, trie)
+        let (acceptance, trie_opt) = self.collect_proposals(peer, &block.proposals, trie).await;
+
+        if !matches!(acceptance, MessageAcceptance::Accept) {
+            return acceptance;
+        }
+
+        let Some((trie, total_weight_diff)) = trie_opt else {
+            unreachable!("If acceptance is Accept, trie should be Some");
+        };
+
+        if self
+            .block_tree
+            .write()
             .await
-        else {
-            return false;
-        };
-
-        self.block_tree.write().await.update(block, &props, trie)
+            .update(block, trie, total_weight_diff)
+        {
+            MessageAcceptance::Accept
+        } else {
+            MessageAcceptance::Ignore
+        }
     }
 
     async fn collect_proposals<'a, I>(
         &self,
         peer: PeerId,
-        parent: &Block,
         hashes: I,
         mut trie: Trie<H>,
-    ) -> Option<(HashMap<Multihash, Proposal>, Trie<H>)>
+    ) -> (MessageAcceptance, Option<(Trie<H>, i32)>)
     where
         I: IntoIterator<Item = &'a Multihash>,
     {
-        let trie_root = trie.root_hash();
-
-        let mut props = HashMap::new();
+        let mut total_weight_diff = 0;
 
         for hash in hashes {
             if let Some((_, pair)) = self.props.validated.remove(hash) {
-                props.insert(*hash, pair.0);
+                total_weight_diff += pair.0.total_weight_diff;
                 continue;
             }
 
-            let Some(((prop, witness), checked)) = self.take_or_fetch_proposal(peer, hash).await
-            else {
-                continue;
+            let Some(bytes) = self.fetch_proposal(peer, hash).await else {
+                return (MessageAcceptance::Ignore, None);
             };
 
-            if checked {
-                props.insert(*hash, prop);
-                continue;
+            let acceptance = self.verify_proposal(&bytes).await;
+
+            if !matches!(acceptance, MessageAcceptance::Accept) {
+                return (acceptance, None);
             }
 
-            let prop = self
-                .verify_proposal(prop, &witness, parent, trie_root)
-                .await?;
-
-            let proofs = Some(&witness.proofs);
+            let entry = self
+                .props
+                .validated
+                .get(hash)
+                .expect("Proposal should be validated");
+            let prop = &entry.value().0;
+            let proofs = Some(&entry.value().1.proofs);
 
             for (key, diff) in prop.diffs.iter() {
                 if !trie.update(key, diff.to.to_vec(), proofs) {
-                    return None;
+                    return (MessageAcceptance::Reject, None);
                 }
             }
 
-            props.insert(*hash, prop);
+            total_weight_diff += prop.total_weight_diff;
         }
 
         trie.commit();
@@ -524,63 +540,34 @@ impl<H: Hasher> Engine<H> {
         let own_pk_bytes = self.sk.public_key().to_hash::<H>().to_bytes();
         trie.reduce_one(&own_pk_bytes);
 
-        Some((props, trie))
+        (MessageAcceptance::Accept, Some((trie, total_weight_diff)))
     }
 
-    async fn take_or_fetch_proposal(
-        &self,
-        peer: PeerId,
-        hash: &Multihash,
-    ) -> Option<((Proposal, proposal::Witness), bool)> {
-        if let Some((_, pair)) = self.props.validated.remove(hash) {
-            return Some((pair, true));
-        }
-
-        let bytes = self
-            .req_resp
+    async fn fetch_proposal(&self, peer: PeerId, hash: &Multihash) -> Option<Vec<u8>> {
+        self.req_resp
             .send_reqeust_and_wait(peer, hash.to_bytes(), TIMEOUT)
             .await
-            .ok()?;
-
-        let prop = Proposal::from_slice(&bytes).ok()?;
-        let witness = proposal::Witness::from_slice(&bytes).ok()?;
-
-        Some(((prop, witness), false))
+            .ok()
     }
 
     async fn on_vdf_solved(&self, proof: Vec<u8>) -> Result<()> {
         let tree = self.block_tree.read().await;
-        let leaf = tree.get_leaf();
 
-        let parent = leaf.hash();
-        let parent_checkpoint = tree.checkpoint_hash();
-        let height = leaf.block.height.wrapping_add(1);
-        let props = self
-            .props
-            .validated
-            .iter()
-            .map(|v| *v.key())
-            .collect::<BTreeSet<_>>();
-        let proposer_pk = self.sk.public_key();
-        let proposer_weight = self
-            .mpt
-            .read()
-            .await
-            .get(&proposer_pk.to_hash::<H>().to_bytes())
+        let proposer_weight = tree
+            .get_leaf_trie()
+            .get(&self.sk.public_key().to_hash::<H>().to_bytes())
             .map_or(0, |v| resident::Record::from_slice(&v).unwrap().weight);
 
-        let block = Block {
-            parent,
-            parent_checkpoint,
-            height,
-            proposals: props,
-            proposer_pk,
-            proposer_weight,
-            hash_cache: OnceLock::new(),
-        };
+        let block = block::Builder::new()
+            .with_parent_block::<H>(tree.get_leaf())
+            .with_checkpoint::<H>(tree.checkpoint())
+            .with_proposals(self.props.validated.iter().map(|v| *v.key()))
+            .with_proposer_pk(self.sk.public_key())
+            .with_proposer_weight(proposer_weight)
+            .build();
 
         let witness = block
-            .generate_witness(&self.sk, &leaf.trie, proof)
+            .generate_witness(&self.sk, tree.get_leaf_trie(), proof)
             .expect("Failed to generate block witness");
 
         let bytes = (block, witness).to_vec();
