@@ -33,7 +33,7 @@ pub struct Block {
     pub proposer_pk: PublicKey,
     pub proposer_weight: u32,
     #[serialize(skip)]
-    pub(crate) hash_cache: OnceLock<Multihash>,
+    hash_cache: OnceLock<Multihash>,
 }
 
 #[derive(Clone)]
