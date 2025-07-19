@@ -9,7 +9,7 @@ use derivative::Derivative;
 use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
-    block::Block,
+    consensus::block::Block,
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     resident,
     utils::trie::{self, ProofResult, Trie},

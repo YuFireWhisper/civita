@@ -12,14 +12,16 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
-    block::{self, tree::Tree, Block},
+    consensus::{
+        block::{self, tree::Tree, Block},
+        proposal::{self, Proposal},
+    },
     crypto::{Hasher, Multihash, SecretKey},
     network::{
         gossipsub,
         request_response::{self, RequestResponse},
         Gossipsub, Transport,
     },
-    proposal::{self, Proposal},
     resident,
     utils::{
         bi_channel::{self, BiChannel},
@@ -164,6 +166,7 @@ impl VdfExecutor {
     }
 }
 
+#[allow(dead_code)]
 impl<H: Hasher> EngineBuilder<H> {
     pub fn with_transport(mut self, transport: Arc<Transport>) -> Self {
         self.gossipsub = Some(transport.gossipsub());
@@ -235,6 +238,7 @@ impl<H: Hasher> EngineBuilder<H> {
 }
 
 impl<H: Hasher> Engine<H> {
+    #[allow(dead_code)]
     pub async fn propose(&self, prop: Proposal) -> Result<()> {
         let witness = prop.generate_witness(
             &self.sk,
@@ -255,6 +259,7 @@ impl<H: Hasher> Engine<H> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn run(&mut self) -> Result<()> {
         let mut prop_rx = self.gossipsub.subscribe(self.proposal_topic).await?;
         let mut block_rx = self.gossipsub.subscribe(self.block_topic).await?;

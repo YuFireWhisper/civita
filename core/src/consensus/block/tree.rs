@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    block::Block,
+    consensus::{block::Block, proposal::Proposal},
     crypto::{Hasher, Multihash},
-    proposal::Proposal,
     utils::trie::Trie,
 };
 
