@@ -285,39 +285,6 @@ impl<H: Hasher> BlockNode<H> {
         (trie, weight)
     }
 
-    pub fn convert_to_valid_unchecked(&mut self) {
-        let parent_trie_root = {
-            self.parent
-                .as_ref()
-                .and_then(|parent| parent.read().trie.as_ref().map(|trie| trie.root_hash()))
-                .expect("Parent should have a valid trie")
-        };
-
-        let block = self.block.as_ref().expect("Block should be set");
-
-        let mut trie = Trie::from_root(parent_trie_root);
-        let mut weight = block.proposer_weight;
-
-        self.proposals.values().flatten().for_each(|node| {
-            let node_read = node.read();
-            let iter = node_read
-                .proposal
-                .as_ref()
-                .unwrap()
-                .diffs
-                .iter()
-                .map(|(k, v)| (k.as_slice(), v.to.clone()));
-            trie.update_many(iter, Some(&node_read.proofs));
-            weight += node_read.proposal.as_ref().unwrap().proposer_weight;
-        });
-
-        let _ = trie.commit();
-
-        self.state = State::Valid;
-        self.trie = Some(trie);
-        self.weight = weight;
-    }
-
     pub fn hash(&self) -> Option<Multihash> {
         self.block.as_ref().map(|b| b.hash::<H>())
     }
@@ -348,11 +315,6 @@ impl<H: Hasher> Builder<H> {
         self
     }
 
-    pub fn with_proofs(mut self, proofs: HashMap<Multihash, Vec<u8>>) -> Self {
-        self.proofs = proofs;
-        self
-    }
-
     pub fn with_parent(mut self, parent: Arc<ParkingRwLock<BlockNode<H>>>) -> Self {
         self.parent = Some(parent);
         self
@@ -365,16 +327,6 @@ impl<H: Hasher> Builder<H> {
     {
         self.proposals
             .extend(proposals.into_iter().map(|(k, v)| (k, v.into())));
-        self
-    }
-
-    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    pub fn with_is_genesis(mut self, is_genesis: bool) -> Self {
-        self.is_genesis = is_genesis;
         self
     }
 
