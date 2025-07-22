@@ -15,8 +15,8 @@ use crate::{
         },
         proposal::Proposal,
     },
-    crypto::{Hasher, Multihash},
-    utils::trie::Weight,
+    crypto::{Hasher, Multihash, PublicKey},
+    utils::trie::{Trie, Weight},
 };
 
 mod block_node;
@@ -60,6 +60,16 @@ pub struct Storage<H> {
 pub struct Tree<H> {
     storage: Storage<H>,
     threshold: f64,
+}
+
+impl State {
+    pub fn is_valid(&self) -> bool {
+        matches!(self, State::Valid)
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        matches!(self, State::Invalid)
+    }
 }
 
 impl Metadata {
@@ -391,6 +401,63 @@ impl<H: Hasher> Tree<H> {
 
         result
     }
+
+    pub fn create_and_update_block(
+        &self,
+        proposer_pk: PublicKey,
+    ) -> (Block, HashMap<Multihash, Vec<u8>>) {
+        let tip_hash = {
+            self.storage
+                .tips
+                .read()
+                .values()
+                .last()
+                .cloned()
+                .expect("There must be at least one tip")
+        };
+
+        let tip_node = self
+            .storage
+            .blocks
+            .read()
+            .get(&tip_hash)
+            .cloned()
+            .expect("Tip must exist");
+
+        let (node, proofs) =
+            BlockNode::generate(tip_node.clone(), proposer_pk).expect("Failed to generate block");
+        let block = node.block.as_ref().expect("Block must be set").clone();
+        let hash = node.hash().unwrap();
+        let node = Arc::new(ParkingRwLock::new(node));
+
+        tip_node.write().children_blocks.insert(hash, node.clone());
+        node.read().proposals.values().flatten().for_each(|prop| {
+            prop.write().child_blocks.insert(hash, node.clone());
+        });
+
+        self.storage.blocks.write().insert(hash, node.clone());
+        self.update_tips(hash, node.read().weight);
+        self.check_and_create_checkpoint(hash, node.read().weight);
+
+        (block, proofs)
+    }
+
+    pub fn tip_hash(&self) -> Option<Multihash> {
+        self.storage.tips.read().values().last().cloned()
+    }
+
+    pub fn tip_trie(&self) -> Trie<H> {
+        self.tip_hash()
+            .and_then(|hash| {
+                self.storage
+                    .blocks
+                    .read()
+                    .get(&hash)
+                    .map(|node| node.read().trie.clone())
+            })
+            .flatten()
+            .expect("Tip must have a trie")
+    }
 }
 
 #[cfg(test)]
@@ -475,7 +542,8 @@ mod tests {
                 .with_diff(key.to_vec(), diff)
                 .with_proposer_pk(self.public_key.clone())
                 .with_proposer_weight(0)
-                .build();
+                .build()
+                .expect("Failed to create proposal");
 
             let trie = Trie::<TestHasher>::from_root(parent);
             let proofs = proposal.generate_proofs(&trie);
@@ -515,6 +583,7 @@ mod tests {
                 .with_proposer_weight(0)
                 .with_code(0)
                 .build()
+                .expect("Failed to create missing parent proposal")
         }
 
         fn create_missing_parent_block(&self, height: u64) -> Block {
@@ -709,7 +778,8 @@ mod tests {
                     .with_diff(key.as_bytes().to_vec(), diff)
                     .with_proposer_pk(public_key)
                     .with_proposer_weight(50)
-                    .build();
+                    .build()
+                    .expect("Failed to create proposal");
 
                 let trie = Trie::<TestHasher>::from_root(genesis_hash);
                 let proofs = proposal.generate_proofs(&trie);
