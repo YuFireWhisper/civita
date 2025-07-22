@@ -1,14 +1,18 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use libp2p::{gossipsub::MessageId, PeerId};
 use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
     consensus::block::{
+        self,
         tree::{proposal_node::ProposalNode, Metadata, ProcessResult, State},
         Block,
     },
-    crypto::{Hasher, Multihash},
+    crypto::{Hasher, Multihash, PublicKey},
     utils::trie::{Trie, Weight},
 };
 
@@ -66,6 +70,65 @@ impl<H: Hasher> BlockNode<H> {
         }
     }
 
+    pub fn generate(
+        parent: Arc<ParkingRwLock<BlockNode<H>>>,
+        proposer_pk: PublicKey,
+    ) -> Option<(Self, HashMap<Multihash, Vec<u8>>)> {
+        let parent_read = parent.read();
+        let parent_block = parent_read.block.as_ref()?;
+        let parent_trie = parent_read.trie.as_ref()?;
+
+        let props = parent_read.collect_valid_children_proposals();
+        let (proposer_weight, proofs) = {
+            let key = proposer_pk.to_hash::<H>().to_bytes();
+            let mut proofs = HashMap::new();
+            parent_trie.prove(&key, &mut proofs);
+            (parent_trie.get(&key)?.weight, proofs)
+        };
+
+        let block = block::Builder::new()
+            .with_parent_block::<H>(parent_block)
+            .with_proposals(props.keys().cloned())
+            .with_proposer_pk(proposer_pk)
+            .with_proposer_weight(proposer_weight)
+            .build();
+
+        let (new_trie, new_weight) =
+            Self::calc_new_trie_and_weight(props.values(), proposer_weight, parent_trie);
+
+        drop(parent_read);
+
+        Some((
+            Self {
+                block: Some(block),
+                state: State::Valid,
+                trie: Some(new_trie),
+                weight: new_weight,
+                proofs: HashMap::new(),
+                parent: Some(parent),
+                children_blocks: HashMap::new(),
+                children_proposals: HashMap::new(),
+                proposals: props
+                    .into_iter()
+                    .map(|(hash, node)| (hash, Some(node)))
+                    .collect(),
+                metadata: None,
+                is_genesis: false,
+            },
+            proofs,
+        ))
+    }
+
+    pub fn collect_valid_children_proposals(
+        &self,
+    ) -> BTreeMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>> {
+        self.children_proposals
+            .values()
+            .filter(|node| node.read().state == State::Valid)
+            .map(|node| (node.read().hash().unwrap(), node.clone()))
+            .collect()
+    }
+
     pub fn set_block_data(
         &mut self,
         block: Block,
@@ -104,66 +167,41 @@ impl<H: Hasher> BlockNode<H> {
             State::Pending => {}
         }
 
+        if self.check_proposals_state()? {
+            let mut result = ProcessResult::new();
+            self.invalidate_descendants(&mut result);
+            return Some(result);
+        }
+
+        let parent = self.parent.as_ref()?;
+        let parent_read = parent.read();
+        let parent_trie = parent_read.trie.as_ref()?;
+
+        debug_assert!(
+            !parent_read.state.is_invalid(),
+            "If parent is invalid, proposals will not be valid either"
+        );
+
         let block = self.block.as_ref()?;
 
-        let mut is_invalid = false;
-        for prop in self.proposals.values().flatten() {
-            match prop.read().state {
-                State::Invalid => {
-                    is_invalid = true;
-                    break;
-                }
-                State::Pending => return None,
-                State::Valid => {}
-            }
-        }
-
-        if is_invalid {
+        if !block.verify_proposer_weight_with_proofs::<H>(&self.proofs, parent_trie.root_hash()) {
+            drop(parent_read);
             let mut result = ProcessResult::new();
             self.invalidate_descendants(&mut result);
             return Some(result);
         }
 
-        let parent_trie_root = {
-            let parent = self.parent.as_ref()?;
-            let parent_read = parent.read();
+        let (new_trie, new_weight) = Self::calc_new_trie_and_weight(
+            self.proposals.values().flatten(),
+            block.proposer_weight,
+            parent_trie,
+        );
 
-            debug_assert!(
-                parent_read.state != State::Invalid,
-                "If parent is invalid, proposals will not be valid either"
-            );
-
-            parent_read.trie.as_ref()?.root_hash()
-        };
-
-        if !block.verify_proposer_weight_with_proofs::<H>(&self.proofs, parent_trie_root) {
-            println!("Block proposer weight verification failed",);
-            let mut result = ProcessResult::new();
-            self.invalidate_descendants(&mut result);
-            return Some(result);
-        }
-
-        let mut trie = Trie::from_root(parent_trie_root);
-        let mut weight = block.proposer_weight;
-
-        self.proposals.values().flatten().for_each(|node| {
-            let node_read = node.read();
-            let iter = node_read
-                .proposal
-                .as_ref()
-                .unwrap()
-                .diffs
-                .iter()
-                .map(|(k, v)| (k.as_slice(), v.to.clone()));
-            trie.update_many(iter, Some(&node_read.proofs));
-            weight += node_read.proposal.as_ref().unwrap().proposer_weight;
-        });
-
-        let _ = trie.commit();
+        drop(parent_read);
 
         self.state = State::Valid;
-        self.trie = Some(trie);
-        self.weight = weight;
+        self.trie = Some(new_trie);
+        self.weight = new_weight;
 
         let mut result = ProcessResult::new();
 
@@ -186,5 +224,80 @@ impl<H: Hasher> BlockNode<H> {
         });
 
         Some(result)
+    }
+
+    fn check_proposals_state(&self) -> Option<bool> {
+        self.proposals
+            .values()
+            .flatten()
+            .try_fold(true, |acc, prop| match prop.read().state {
+                State::Invalid => Some(false),
+                State::Pending => None,
+                State::Valid => Some(acc),
+            })
+    }
+
+    fn calc_new_trie_and_weight<'a, I>(
+        proposals: I,
+        base_weight: Weight,
+        parent_trie: &Trie<H>,
+    ) -> (Trie<H>, Weight)
+    where
+        I: IntoIterator<Item = &'a Arc<ParkingRwLock<ProposalNode<H>>>>,
+    {
+        let mut trie = parent_trie.clone();
+        let mut weight = base_weight;
+
+        proposals.into_iter().for_each(|node| {
+            let node_read = node.read();
+            let iter = node_read
+                .proposal
+                .as_ref()
+                .unwrap()
+                .diffs
+                .iter()
+                .map(|(k, v)| (k.as_slice(), v.to.clone()));
+            trie.update_many(iter, Some(&node_read.proofs));
+            weight += node_read.proposal.as_ref().unwrap().proposer_weight;
+        });
+
+        (trie, weight)
+    }
+
+    pub fn convert_to_valid_unchecked(&mut self) {
+        let parent_trie_root = {
+            self.parent
+                .as_ref()
+                .and_then(|parent| parent.read().trie.as_ref().map(|trie| trie.root_hash()))
+                .expect("Parent should have a valid trie")
+        };
+
+        let block = self.block.as_ref().expect("Block should be set");
+
+        let mut trie = Trie::from_root(parent_trie_root);
+        let mut weight = block.proposer_weight;
+
+        self.proposals.values().flatten().for_each(|node| {
+            let node_read = node.read();
+            let iter = node_read
+                .proposal
+                .as_ref()
+                .unwrap()
+                .diffs
+                .iter()
+                .map(|(k, v)| (k.as_slice(), v.to.clone()));
+            trie.update_many(iter, Some(&node_read.proofs));
+            weight += node_read.proposal.as_ref().unwrap().proposer_weight;
+        });
+
+        let _ = trie.commit();
+
+        self.state = State::Valid;
+        self.trie = Some(trie);
+        self.weight = weight;
+    }
+
+    pub fn hash(&self) -> Option<Multihash> {
+        self.block.as_ref().map(|b| b.hash::<H>())
     }
 }
