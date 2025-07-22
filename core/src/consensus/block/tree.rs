@@ -55,13 +55,12 @@ pub struct Storage<H> {
     tips: ParkingRwLock<BTreeMap<Weight, Multihash>>,
 
     checkpoints: ParkingRwLock<Vec<Multihash>>,
-
-    genesis_hash: Option<Multihash>,
 }
 
 pub struct Tree<H> {
     storage: Storage<H>,
     threshold: f64,
+    pk: PublicKey,
 }
 
 impl State {
@@ -120,28 +119,28 @@ impl<H: Hasher> Storage<H> {
             proposals: ParkingRwLock::new(HashMap::new()),
             tips: ParkingRwLock::new(tips),
             checkpoints: ParkingRwLock::new(checkpoints),
-            genesis_hash: Some(genesis_hash),
         }
     }
 }
 
 impl<H: Hasher> Tree<H> {
     #[allow(dead_code)]
-    pub fn empty(threshold: f64) -> Self {
+    pub fn empty(pk: PublicKey, threshold: f64) -> Self {
         Self {
             storage: Storage::default(),
+            pk,
             threshold,
         }
     }
 
-    pub fn with_genesis(genesis_block: Block, threshold: f64) -> Self {
+    pub fn with_genesis(genesis_block: Block, pk: PublicKey, threshold: f64) -> Self {
         Self {
             storage: Storage::with_genesis(genesis_block),
+            pk,
             threshold,
         }
     }
 
-    #[allow(dead_code)]
     pub fn update_block(
         &self,
         block: Block,
@@ -324,7 +323,6 @@ impl<H: Hasher> Tree<H> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn update_proposal(
         &self,
         proposal: Proposal,
@@ -383,7 +381,6 @@ impl<H: Hasher> Tree<H> {
         proposal.write().parent_block = parent_block;
     }
 
-    #[allow(dead_code)]
     pub fn update_proposal_client_validation(
         &self,
         proposal_hash: Multihash,
@@ -400,35 +397,71 @@ impl<H: Hasher> Tree<H> {
         result
     }
 
+    pub fn update_proposal_unchecked(&self, proposal: Proposal) {
+        let hash = proposal.hash::<H>();
+        let parent_hash = proposal.parent;
+
+        let mut props = self.storage.proposals.write();
+        let prop = props.entry(hash).or_insert_with(|| {
+            Arc::new(ParkingRwLock::new(ProposalNode::new_missing(Arc::new(
+                ParkingRwLock::new(BlockNode::new_missing()),
+            ))))
+        });
+
+        self.add_proposal_to_parent(parent_hash, hash, prop.clone());
+        prop.write().set_proposal(proposal);
+    }
+
+    pub fn tip_trie(&self) -> Trie<H> {
+        self.tip_node()
+            .read()
+            .trie
+            .as_ref()
+            .cloned()
+            .expect("Tip node must have a trie")
+    }
+
+    fn tip_node(&self) -> Arc<ParkingRwLock<BlockNode<H>>> {
+        self.storage
+            .blocks
+            .read()
+            .get(&self.tip_hash())
+            .cloned()
+            .expect("Tip must exist")
+    }
+
+    pub fn tip_hash(&self) -> Multihash {
+        self.storage
+            .tips
+            .read()
+            .values()
+            .last()
+            .cloned()
+            .expect("There must be at least one tip")
+    }
+
     pub fn create_and_update_block(
         &self,
-        proposer_pk: PublicKey,
+        parent: Multihash,
     ) -> (Block, HashMap<Multihash, Vec<u8>>) {
-        let tip_hash = {
-            self.storage
-                .tips
-                .read()
-                .values()
-                .last()
-                .cloned()
-                .expect("There must be at least one tip")
-        };
-
-        let tip_node = self
+        let parent_node = self
             .storage
             .blocks
             .read()
-            .get(&tip_hash)
+            .get(&parent)
             .cloned()
-            .expect("Tip must exist");
+            .expect("Parent block must exist");
 
-        let (node, proofs) =
-            BlockNode::generate(tip_node.clone(), proposer_pk).expect("Failed to generate block");
+        let (node, proofs) = BlockNode::generate(parent_node.clone(), self.pk.clone())
+            .expect("Failed to generate block");
         let block = node.block.as_ref().expect("Block must be set").clone();
         let hash = node.hash().unwrap();
         let node = Arc::new(ParkingRwLock::new(node));
 
-        tip_node.write().children_blocks.insert(hash, node.clone());
+        parent_node
+            .write()
+            .children_blocks
+            .insert(hash, node.clone());
         node.read().proposals.values().flatten().for_each(|prop| {
             prop.write().child_blocks.insert(hash, node.clone());
         });
@@ -438,23 +471,6 @@ impl<H: Hasher> Tree<H> {
         self.check_and_create_checkpoint(hash, node.read().weight);
 
         (block, proofs)
-    }
-
-    pub fn tip_hash(&self) -> Option<Multihash> {
-        self.storage.tips.read().values().last().cloned()
-    }
-
-    pub fn tip_trie(&self) -> Trie<H> {
-        self.tip_hash()
-            .and_then(|hash| {
-                self.storage
-                    .blocks
-                    .read()
-                    .get(&hash)
-                    .map(|node| node.read().trie.clone())
-            })
-            .flatten()
-            .expect("Tip must have a trie")
     }
 }
 
@@ -491,7 +507,7 @@ mod tests {
             let public_key = secret_key.public_key();
             let genesis_block = Self::create_genesis_block(&public_key);
             let genesis_hash = genesis_block.hash::<TestHasher>();
-            let dag = Tree::with_genesis(genesis_block.clone(), THRESHOLD);
+            let dag = Tree::with_genesis(genesis_block.clone(), public_key.clone(), THRESHOLD);
 
             Self {
                 dag,
@@ -506,8 +522,8 @@ mod tests {
             let public_key = secret_key.public_key();
             let genesis_block = Self::create_genesis_block(&public_key);
             let genesis_hash = genesis_block.hash::<TestHasher>();
-            let dag = Tree::with_genesis(genesis_block.clone(), THRESHOLD);
-            let arc_dag = Tree::with_genesis(genesis_block.clone(), THRESHOLD);
+            let dag = Tree::with_genesis(genesis_block.clone(), public_key.clone(), THRESHOLD);
+            let arc_dag = Tree::with_genesis(genesis_block.clone(), public_key.clone(), THRESHOLD);
 
             Self {
                 dag,
@@ -605,16 +621,15 @@ mod tests {
     // DAG tests
     #[test]
     fn dag_empty_creation() {
-        let dag = Tree::<TestHasher>::empty(THRESHOLD);
+        let pk = SecretKey::random().public_key();
+        let dag = Tree::<TestHasher>::empty(pk, THRESHOLD);
         assert_eq!(dag.threshold, THRESHOLD);
-        assert!(dag.storage.genesis_hash.is_none());
     }
 
     #[test]
     fn dag_with_genesis() {
         let ctx = TestContext::new();
         assert_eq!(ctx.dag.threshold, THRESHOLD);
-        assert_eq!(ctx.dag.storage.genesis_hash, Some(ctx.genesis_hash));
     }
 
     #[tokio::test]
