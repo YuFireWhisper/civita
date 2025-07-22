@@ -67,7 +67,7 @@ impl Behaviour {
     fn create_req_resp() -> request_response::Behaviour<Codec<Vec<u8>, Vec<u8>>> {
         request_response::Behaviour::new(
             [(
-                StreamProtocol::new(env!("CARGO_PKG_NAME")),
+                StreamProtocol::new(concat!("/", env!("CARGO_PKG_NAME"))),
                 ProtocolSupport::Full,
             )],
             request_response::Config::default(),
