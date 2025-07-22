@@ -46,6 +46,7 @@ pub struct Witness {
     pub vdf_proof: Vec<u8>,
 }
 
+#[derive(Default)]
 pub struct Builder {
     parent: Option<Multihash>,
     height: Option<u64>,
@@ -124,13 +125,7 @@ impl Witness {
 
 impl Builder {
     pub fn new() -> Self {
-        Builder {
-            parent: None,
-            height: None,
-            proposals: BTreeSet::new(),
-            proposer_pk: None,
-            proposer_weight: None,
-        }
+        Self::default()
     }
 
     pub fn with_parent_block<H: Hasher>(mut self, parent: &Block) -> Self {
