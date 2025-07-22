@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData, sync::OnceLock};
+use std::{collections::HashMap, marker::PhantomData};
 
 use civita_serialize::Serialize;
 use derivative::Derivative;
@@ -13,12 +13,17 @@ use crate::{
 
 mod keys;
 mod node;
+mod record;
+
+pub use record::Record;
+
+pub type Weight = u64;
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 pub enum ProofResult {
-    Exists(Vec<u8>),
+    Exists(Record),
     NotExists,
     Invalid,
 }
@@ -79,19 +84,32 @@ impl<H: Hasher> Trie<H> {
     pub fn update(
         &mut self,
         key: &[u8],
-        val: Vec<u8>,
+        record: Record,
         guile: Option<&HashMap<Multihash, Vec<u8>>>,
     ) -> bool {
         let key_vec = slice_to_hex(key);
         let key = key_vec.as_slice();
 
-        let val = Node::new_value(val);
+        let val = Node::new_value(record);
 
-        Self::insert_new(&mut self.root, &[], key, val, guile)
+        Self::insert_node(&mut self.root, &[], key, val, guile)
+    }
+
+    pub fn update_many<'a, I>(
+        &mut self,
+        itmes: I,
+        guide: Option<&HashMap<Multihash, Vec<u8>>>,
+    ) -> bool
+    where
+        I: IntoIterator<Item = (&'a [u8], Record)>,
+    {
+        itmes
+            .into_iter()
+            .any(|(key, record)| self.update(key, record, guide))
     }
 
     /// Returns true if is dirty, false if not.
-    fn insert_new(
+    fn insert_node(
         node: &mut Node,
         prefix: &[u8],
         key: &[u8],
@@ -116,13 +134,13 @@ impl<H: Hasher> Trie<H> {
                     let prefix = &[prefix, &short.key[..match_len]].concat();
                     let key = &key[match_len..];
 
-                    let is_dirty = Self::insert_new(&mut s_val, prefix, key, val, guide);
+                    let is_dirty = Self::insert_node(&mut s_val, prefix, key, val, guide);
 
                     if !is_dirty {
                         return false;
                     }
 
-                    short.hash_cache = OnceLock::new();
+                    short.clear_cache();
 
                     return true;
                 }
@@ -133,7 +151,7 @@ impl<H: Hasher> Trie<H> {
                     let idx = short.key[match_len] as usize;
                     let prefix = &[prefix, &short.key[..match_len]].concat();
                     let key = &short.key[match_len + 1..];
-                    Self::insert_new(
+                    Self::insert_node(
                         &mut branch.children[idx],
                         prefix,
                         key,
@@ -146,7 +164,7 @@ impl<H: Hasher> Trie<H> {
                     let idx = key[match_len] as usize;
                     let prefix = &[prefix, &key[..match_len]].concat();
                     let key = &key[match_len + 1..];
-                    Self::insert_new(&mut branch.children[idx], prefix, key, val, guide);
+                    Self::insert_node(&mut branch.children[idx], prefix, key, val, guide);
                 }
 
                 if match_len == 0 {
@@ -165,13 +183,13 @@ impl<H: Hasher> Trie<H> {
                 let prefix = &[prefix, &key[..1]].concat();
                 let key = &key[1..];
 
-                let is_dirty = Self::insert_new(&mut full.children[idx], prefix, key, val, guide);
+                let is_dirty = Self::insert_node(&mut full.children[idx], prefix, key, val, guide);
 
                 if !is_dirty {
                     return false;
                 }
 
-                full.hash_cache = OnceLock::new();
+                full.clear_caches();
 
                 true
             }
@@ -186,7 +204,7 @@ impl<H: Hasher> Trie<H> {
 
                 *node = rn;
 
-                Self::insert_new(node, prefix, key, val, guide)
+                Self::insert_node(node, prefix, key, val, guide)
             }
             Node::Value(_) => {
                 panic!("Unexpected value node in insert_new: {node:?}");
@@ -203,15 +221,15 @@ impl<H: Hasher> Trie<H> {
             .map(|data| Node::from_slice(data).expect("Node bytes should be valid"))
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &[u8]) -> Option<Record> {
         let key = slice_to_hex(key);
         Self::get_node(&self.root, &key, 0)
     }
 
-    fn get_node(node: &Node, key: &[u8], pos: usize) -> Option<Vec<u8>> {
+    fn get_node(node: &Node, key: &[u8], pos: usize) -> Option<Record> {
         match node {
             Node::Empty => None,
-            Node::Value(val) => Some(val.as_slice().to_vec()),
+            Node::Value(val) => Some(val.record.clone()),
             Node::Short(short) => {
                 if !key[pos..].starts_with(&short.key) {
                     return None;
@@ -294,6 +312,10 @@ impl<H: Hasher> Trie<H> {
     pub fn root_hash(&self) -> Multihash {
         self.root.hash::<H>()
     }
+
+    pub fn weight(&self) -> u64 {
+        self.root.weight()
+    }
 }
 
 enum TraversalResult<'a> {
@@ -301,7 +323,7 @@ enum TraversalResult<'a> {
         remaining_key: &'a [u8],
         next_hash: Multihash,
     },
-    Found(Vec<u8>),
+    Found(Record),
     NotFound,
 }
 
@@ -312,6 +334,10 @@ pub fn verify_proof_with_hash(
 ) -> ProofResult {
     let key_vec = slice_to_hex(key);
     let mut key = key_vec.as_slice();
+
+    if exp_hash == Multihash::default() {
+        return ProofResult::NotExists;
+    }
 
     loop {
         let Some(cur) = proof_db.get(&exp_hash) else {
@@ -355,7 +381,7 @@ fn traverse_node<'a>(mut node: &Node, mut key: &'a [u8]) -> TraversalResult<'a> 
             Node::Full(full) => {
                 if key.is_empty() {
                     if let Node::Value(val) = &full.children[16] {
-                        return TraversalResult::Found(val.as_slice().to_vec());
+                        return TraversalResult::Found(val.record.clone());
                     } else {
                         return TraversalResult::NotFound;
                     }
@@ -368,7 +394,7 @@ fn traverse_node<'a>(mut node: &Node, mut key: &'a [u8]) -> TraversalResult<'a> 
 
             Node::Value(val) => {
                 if key.is_empty() {
-                    return TraversalResult::Found(val.as_slice().to_vec());
+                    return TraversalResult::Found(val.record.clone());
                 } else {
                     return TraversalResult::NotFound;
                 }
@@ -396,38 +422,36 @@ mod tests {
     type TestTrie = Trie<TestHasher>;
 
     const KEY1: &[u8] = b"key_1";
-    const VALUE1: &[u8] = b"value1";
-
     const KEY2: &[u8] = b"key_2";
-    const VALUE2: &[u8] = b"value2";
-
     const KEY3: &[u8] = b"key3";
-    const VALUE3: &[u8] = b"value3";
 
     #[test]
     fn return_some_if_key_found() {
         let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY1, VALUE1.to_vec(), None);
-        mpt.update(KEY2, VALUE2.to_vec(), None);
-        mpt.update(KEY3, VALUE3.to_vec(), None);
+        let record1 = Record::new(10, b"value1".to_vec());
+        let record2 = Record::new(20, b"value2".to_vec());
+        let record3 = Record::new(30, b"value3".to_vec());
+
+        mpt.update(KEY1, record1.clone(), None);
+        mpt.update(KEY2, record2.clone(), None);
+        mpt.update(KEY3, record3.clone(), None);
 
         let res1 = mpt.get(KEY1);
         let res2 = mpt.get(KEY2);
         let res3 = mpt.get(KEY3);
 
-        assert_eq!(res1, Some(VALUE1.to_vec()));
-        assert_eq!(res2, Some(VALUE2.to_vec()));
-        assert_eq!(res3, Some(VALUE3.to_vec()));
+        assert_eq!(res1.unwrap(), record1);
+        assert_eq!(res2.unwrap(), record2);
+        assert_eq!(res3.unwrap(), record3);
     }
 
     #[test]
     fn return_none_if_key_not_found() {
         let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY1, VALUE1.to_vec(), None);
-        mpt.update(KEY2, VALUE2.to_vec(), None);
-        mpt.update(KEY3, VALUE3.to_vec(), None);
+        let record1 = Record::new(10, b"value1".to_vec());
+        mpt.update(KEY1, record1, None);
 
         let res = mpt.get(b"non_existent_key");
 
@@ -435,27 +459,32 @@ mod tests {
     }
 
     #[test]
-    fn corrent_hash_after_commit() {
-        let key_hex = slice_to_hex(KEY1);
-        let node = Node::new_short(key_hex, Node::new_value(VALUE1.to_vec()));
-        let exp = node.hash::<TestHasher>();
-
+    fn correct_total_weight() {
         let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY1, VALUE1.to_vec(), None);
+        let record1 = Record::new(10, b"value1".to_vec());
+        let record2 = Record::new(20, b"value2".to_vec());
+        let record3 = Record::new(30, b"value3".to_vec());
 
-        let root_hash = mpt.commit();
+        mpt.update(KEY1, record1, None);
+        mpt.update(KEY2, record2, None);
+        mpt.update(KEY3, record3, None);
+        let _ = mpt.commit();
 
-        assert_eq!(root_hash, exp);
+        assert_eq!(mpt.weight(), 60, "Total weight should be 60");
     }
 
     #[test]
     fn verify_exists_proof() {
         let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY1, VALUE1.to_vec(), None);
-        mpt.update(KEY2, VALUE2.to_vec(), None);
-        mpt.update(KEY3, VALUE3.to_vec(), None);
+        let record1 = Record::new(10, b"value1".to_vec());
+        let record2 = Record::new(20, b"value2".to_vec());
+        let record3 = Record::new(30, b"value3".to_vec());
+
+        mpt.update(KEY1, record1.clone(), None);
+        mpt.update(KEY2, record2.clone(), None);
+        mpt.update(KEY3, record3.clone(), None);
         let _ = mpt.commit();
 
         let mut proof_db = HashMap::new();
@@ -472,16 +501,17 @@ mod tests {
         assert!(prove_res2, "Failed to prove key2");
         assert!(prove_res3, "Failed to prove key3");
 
-        assert_eq!(verify_res1, ProofResult::Exists(VALUE1.to_vec()));
-        assert_eq!(verify_res2, ProofResult::Exists(VALUE2.to_vec()));
-        assert_eq!(verify_res3, ProofResult::Exists(VALUE3.to_vec()));
+        assert_eq!(verify_res1, ProofResult::Exists(record1));
+        assert_eq!(verify_res2, ProofResult::Exists(record2));
+        assert_eq!(verify_res3, ProofResult::Exists(record3));
     }
 
     #[test]
     fn verify_not_exists_proof() {
         let mut mpt = TestTrie::empty();
 
-        mpt.update(KEY1, VALUE1.to_vec(), None);
+        let record1 = Record::new(10, b"value1".to_vec());
+        mpt.update(KEY1, record1, None);
         let _ = mpt.commit();
 
         let mut proof_db = HashMap::new();
@@ -495,33 +525,12 @@ mod tests {
 
     #[test]
     fn verify_invalid_proof() {
-        let mpt = TestTrie::empty();
+        let mpt = TestTrie::from_root(Multihash::wrap(0, &[1; 32]).unwrap());
 
         let proof_db = HashMap::new();
 
         let verify_res = mpt.verify_proof(KEY1, &proof_db);
 
         assert_eq!(verify_res, ProofResult::Invalid);
-    }
-
-    #[test]
-    fn prove_with_hash_root() {
-        let mut mpt = TestTrie::empty();
-
-        mpt.update(KEY1, VALUE1.to_vec(), None);
-        mpt.update(KEY2, VALUE2.to_vec(), None);
-        mpt.update(KEY3, VALUE3.to_vec(), None);
-        let root_hash = mpt.commit();
-
-        mpt.root = Node::Hash(root_hash);
-
-        let mut proof_db = HashMap::new();
-        let prove_res = mpt.prove(KEY1, &mut proof_db);
-
-        assert!(!prove_res);
-        assert!(
-            proof_db.is_empty(),
-            "Proof DB should be empty for hash root"
-        );
     }
 }

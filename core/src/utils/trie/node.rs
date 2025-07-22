@@ -5,7 +5,10 @@ use civita_serialize_derive::Serialize;
 
 use crate::{
     crypto::{Hasher, Multihash},
-    utils::trie::keys::{hex_to_vec, vec_to_hex},
+    utils::trie::{
+        keys::{hex_to_vec, vec_to_hex},
+        record::Record,
+    },
 };
 
 #[derive(Clone)]
@@ -16,7 +19,10 @@ use crate::{
 pub struct Full {
     pub children: Box<[Node; 17]>,
     #[serialize(skip)]
-    pub hash_cache: OnceLock<Multihash>,
+    hash_cache: OnceLock<Multihash>,
+
+    #[serialize(skip)]
+    weight_cache: OnceLock<u64>,
 }
 
 #[derive(Clone)]
@@ -28,7 +34,7 @@ pub struct Short {
     pub key: Vec<u8>, // Hex
     pub val: Box<Node>,
     #[serialize(skip)]
-    pub hash_cache: OnceLock<Multihash>,
+    hash_cache: OnceLock<Multihash>,
 }
 
 #[derive(Clone)]
@@ -36,7 +42,7 @@ pub struct Short {
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Value {
-    pub val: Vec<u8>,
+    pub record: Record,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -83,18 +89,31 @@ impl Full {
             });
 
         if changed {
-            self.hash_cache = OnceLock::new();
+            self.clear_caches();
         }
 
         changed
+    }
+
+    pub fn clear_caches(&mut self) {
+        self.hash_cache = OnceLock::new();
+        self.weight_cache = OnceLock::new();
+    }
+
+    pub fn weight(&self) -> u64 {
+        *self
+            .weight_cache
+            .get_or_init(|| self.children.iter().map(|child| child.weight()).sum())
     }
 }
 
 impl Short {
     pub fn new<T: Into<Box<Node>>>(key: Vec<u8>, val: T) -> Self {
+        let val = val.into();
+
         Short {
             key,
-            val: val.into(),
+            val,
             hash_cache: OnceLock::new(),
         }
     }
@@ -123,22 +142,36 @@ impl Short {
 
         changed
     }
+
+    pub fn weight(&self) -> u64 {
+        self.val.weight()
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.hash_cache = OnceLock::new();
+    }
 }
 
 impl Value {
-    pub fn new(val: Vec<u8>) -> Self {
-        Value {
-            val,
+    pub fn new(record: Record) -> Self {
+        Self {
+            record,
             hash_cache: OnceLock::new(),
         }
     }
 
     pub fn hash<H: Hasher>(&self) -> Multihash {
-        *self.hash_cache.get_or_init(|| H::hash(&self.val))
+        *self
+            .hash_cache
+            .get_or_init(|| H::hash(&self.record.to_vec()))
     }
 
-    pub fn as_slice(&self) -> &[u8] {
-        &self.val
+    pub fn weight(&self) -> u64 {
+        self.record.weight
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.hash_cache = OnceLock::new();
     }
 }
 
@@ -147,8 +180,8 @@ impl Node {
         Node::Short(Short::new(key, val.into()))
     }
 
-    pub fn new_value(val: Vec<u8>) -> Self {
-        Node::Value(Value::new(val))
+    pub fn new_value(record: Record) -> Self {
+        Node::Value(Value::new(record))
     }
 
     pub fn from_full(full: Full) -> Self {
@@ -192,9 +225,18 @@ impl Node {
         match (self, other) {
             (Node::Full(a), Node::Full(b)) => a.merge_with(b),
             (Node::Short(a), Node::Short(b)) => a.merge_with(b),
-            (Node::Value(a), Node::Value(b)) => a.val == b.val,
+            (Node::Value(a), Node::Value(b)) => a.record == b.record,
             (_, Node::Hash(_)) => false,
             _ => false,
+        }
+    }
+
+    pub fn weight(&self) -> u64 {
+        match self {
+            Node::Full(full) => full.weight(),
+            Node::Short(short) => short.val.weight(),
+            Node::Value(value) => value.weight(),
+            Node::Hash(_) | Node::Empty => 0,
         }
     }
 }
