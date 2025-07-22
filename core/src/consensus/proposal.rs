@@ -56,12 +56,12 @@ pub struct Witness {
 }
 
 pub struct Builder {
-    code: u8,
-    parent: Option<Multihash>,
-    diffs: BTreeMap<Vec<u8>, Diff>,
-    proposer_pk: Option<PublicKey>,
-    proposer_data: Option<Vec<u8>>,
-    proposer_weight: Option<Weight>,
+    pub code: u8,
+    pub parent: Option<Multihash>,
+    pub diffs: BTreeMap<Vec<u8>, Diff>,
+    pub proposer_pk: Option<PublicKey>,
+    pub proposer_data: Option<Vec<u8>>,
+    pub proposer_weight: Option<Weight>,
 }
 
 impl Diff {
@@ -121,16 +121,6 @@ impl Proposal {
         vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok()
     }
 
-    pub fn verify_proposer_weight<H: Hasher>(
-        &self,
-        witness: &Witness,
-        trie_root: Multihash,
-    ) -> bool {
-        let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        let proofs = &witness.proofs;
-        Self::verify_proof(&key, trie_root, proofs, Some(self.proposer_weight), None)
-    }
-
     pub fn verify_proposer_weight_with_proofs<H: Hasher>(
         &self,
         proofs: &HashMap<Multihash, Vec<u8>>,
@@ -138,12 +128,6 @@ impl Proposal {
     ) -> bool {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
         Self::verify_proof(&key, trie_root, proofs, Some(self.proposer_weight), None)
-    }
-
-    pub fn verify_diffs(&self, witness: &Witness, trie_root: Multihash) -> bool {
-        self.diffs.iter().all(|(key, diff)| {
-            Self::verify_proof(key, trie_root, &witness.proofs, None, diff.from.as_ref())
-        })
     }
 
     pub fn verify_diffs_with_proofs(
@@ -214,6 +198,11 @@ impl Builder {
         self
     }
 
+    pub fn with_diffs(mut self, diffs: BTreeMap<Vec<u8>, Diff>) -> Self {
+        self.diffs = diffs;
+        self
+    }
+
     pub fn with_proposer_pk(mut self, pk: PublicKey) -> Self {
         self.proposer_pk = Some(pk);
         self
@@ -224,17 +213,22 @@ impl Builder {
         self
     }
 
+    pub fn with_proposer_data_opt(mut self, data: Option<Vec<u8>>) -> Self {
+        self.proposer_data = data;
+        self
+    }
+
     pub fn with_proposer_weight(mut self, weight: Weight) -> Self {
         self.proposer_weight = Some(weight);
         self
     }
 
-    pub fn build(self) -> Proposal {
-        let parent = self.parent.expect("Parent hash must be set");
-        let proposer_pk = self.proposer_pk.expect("Proposer public key must be set");
-        let proposer_weight = self.proposer_weight.expect("Proposer weight must be set");
+    pub fn build(self) -> Option<Proposal> {
+        let parent = self.parent?;
+        let proposer_pk = self.proposer_pk?;
+        let proposer_weight = self.proposer_weight?;
 
-        Proposal {
+        Some(Proposal {
             code: self.code,
             parent,
             diffs: self.diffs,
@@ -242,7 +236,7 @@ impl Builder {
             proposer_data: self.proposer_data,
             proposer_weight,
             hash_cache: OnceLock::new(),
-        }
+        })
     }
 }
 
@@ -351,38 +345,5 @@ mod tests {
 
         assert!(prop.verify_vdf::<TestHasher>(&witness, &vdf, VDF_DIFFICULTY));
         assert!(!prop.verify_vdf::<TestHasher>(&invalid_witness, &vdf, VDF_DIFFICULTY));
-    }
-
-    #[test]
-    fn verify_proposer_weight() {
-        let (prop, witness, root_hash) = setup();
-
-        assert!(prop.verify_proposer_weight::<TestHasher>(&witness, root_hash));
-
-        let invalid_witness = Witness {
-            sig: witness.sig.clone(),
-            proofs: witness.proofs.clone(),
-            vdf_proof: witness.vdf_proof.clone(),
-        };
-
-        let invalid_prop = Proposal {
-            proposer_weight: PROPOSER_WEIGHT + 1,
-            ..prop.clone()
-        };
-
-        assert!(!invalid_prop.verify_proposer_weight::<TestHasher>(&invalid_witness, root_hash));
-    }
-
-    #[test]
-    fn verify_diffs() {
-        let (prop, witness, root_hash) = setup();
-
-        let invalid_witness = Witness {
-            proofs: HashMap::new(), // No proofs
-            ..witness.clone()
-        };
-
-        assert!(prop.verify_diffs(&witness, root_hash));
-        assert!(!prop.verify_diffs(&invalid_witness, root_hash));
     }
 }
