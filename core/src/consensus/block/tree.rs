@@ -34,6 +34,7 @@ pub enum State {
 }
 
 #[derive(Debug)]
+#[derive(Default)]
 pub struct ProcessResult {
     pub validated_msgs: Vec<(MessageId, PeerId)>,
     pub invalidated_msgs: Vec<(MessageId, PeerId)>,
@@ -77,10 +78,7 @@ impl Metadata {
 
 impl ProcessResult {
     pub fn new() -> Self {
-        Self {
-            validated_msgs: Vec::new(),
-            invalidated_msgs: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn add_validated(&mut self, msg_id: MessageId, source: PeerId) {
