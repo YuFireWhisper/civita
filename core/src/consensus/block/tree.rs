@@ -403,13 +403,12 @@ impl<H: Hasher> Tree<H> {
 
         let mut props = self.storage.proposals.write();
         let prop = props.entry(hash).or_insert_with(|| {
-            Arc::new(ParkingRwLock::new(ProposalNode::new_missing(Arc::new(
-                ParkingRwLock::new(BlockNode::new_missing()),
-            ))))
+            Arc::new(ParkingRwLock::new(ProposalNode::new_valid_uncheck(
+                proposal,
+            )))
         });
 
         self.add_proposal_to_parent(parent_hash, hash, prop.clone());
-        prop.write().set_proposal(proposal);
     }
 
     pub fn tip_trie(&self) -> Trie<H> {

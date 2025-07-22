@@ -12,7 +12,9 @@ use crate::{
     utils::trie::{self, ProofResult, Trie, Weight},
 };
 
-pub(crate) mod tree;
+pub mod tree;
+
+pub use tree::Tree;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -104,14 +106,8 @@ impl Block {
 
         match trie::verify_proof_with_hash(&key, proofs, trie_root) {
             ProofResult::Exists(record) => record.weight == self.proposer_weight,
-            ProofResult::NotExists => {
-                println!("Proposer weight is zero, but proposer public key exists in proofs");
-                self.proposer_weight == 0
-            }
-            ProofResult::Invalid => {
-                println!("Invalid proof for proposer public key");
-                false
-            }
+            ProofResult::NotExists => self.proposer_weight == 0,
+            ProofResult::Invalid => false,
         }
     }
 }

@@ -19,6 +19,7 @@ use crate::{
     },
     crypto::{Hasher, Multihash, SecretKey},
     network::{gossipsub, Gossipsub, Transport},
+    utils::trie::Record,
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -61,7 +62,6 @@ pub struct Engine<H: Hasher> {
     block_tree: Tree<H>,
 
     prop_validation_tx: mpsc::UnboundedSender<Proposal>,
-    prop_validation_rx: mpsc::UnboundedReceiver<(Multihash, bool)>,
 
     sk: SecretKey,
 
@@ -106,8 +106,8 @@ impl<H: Hasher> EngineBuilder<H> {
         self
     }
 
-    pub fn with_block_tree(mut self, tree: RwLock<Tree<H>>) -> Self {
-        self.block_tree = Some(tree);
+    pub fn with_block_tree(mut self, tree: Tree<H>) -> Self {
+        self.block_tree = Some(RwLock::new(tree));
         self
     }
 
@@ -122,7 +122,7 @@ impl<H: Hasher> EngineBuilder<H> {
         self
     }
 
-    pub fn build(self) -> Engine<H> {
+    pub fn build(self) -> Arc<Engine<H>> {
         let gossipsub = self.gossipsub.expect("Gossipsub must be set");
         let proposal_topic = self.proposal_topic.expect("Proposal topic must be set");
         let block_topic = self.block_topic.expect("Block topic must be set");
@@ -137,17 +137,29 @@ impl<H: Hasher> EngineBuilder<H> {
         let vdf = self.vdf.expect("VDF must be set");
         let vdf_difficulty = self.vdf_difficulty.expect("VDF difficulty must be set");
 
-        Engine {
+        let engine = Engine {
             gossipsub,
             proposal_topic,
             block_topic,
             block_tree: block_tree.into_inner(),
             prop_validation_tx,
-            prop_validation_rx,
             sk,
             vdf,
             vdf_difficulty,
-        }
+        };
+
+        let engine = Arc::new(engine);
+
+        tokio::spawn({
+            let engine = Arc::clone(&engine);
+            async move {
+                if let Err(e) = engine.run(prop_validation_rx).await {
+                    panic!("Engine run failed: {e}");
+                }
+            }
+        });
+
+        engine
     }
 }
 
@@ -172,7 +184,10 @@ impl<H: Hasher> Engine<H> {
     }
 
     #[allow(dead_code)]
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(
+        &self,
+        mut prop_validation_rx: mpsc::UnboundedReceiver<(Multihash, bool)>,
+    ) -> Result<()> {
         let mut prop_rx = self.gossipsub.subscribe(self.proposal_topic).await?;
         let mut block_rx = self.gossipsub.subscribe(self.block_topic).await?;
 
@@ -186,7 +201,7 @@ impl<H: Hasher> Engine<H> {
                 Some(msg) = block_rx.recv() => {
                     self.on_recv_block(msg).await;
                 }
-                Some((hash, accepted)) = self.prop_validation_rx.recv() => {
+                Some((hash, accepted)) = prop_validation_rx.recv() => {
                     self.on_recv_validation_result(hash, accepted);
                 }
                 result = vdf_task.as_mut().unwrap() => {
@@ -382,5 +397,14 @@ impl<H: Hasher> Engine<H> {
     fn on_recv_validation_result(&self, hash: Multihash, accepted: bool) {
         self.block_tree
             .update_proposal_client_validation(hash, accepted);
+    }
+
+    pub fn get_self_record(&self) -> Record {
+        let key = self.sk.public_key().to_hash::<H>().to_bytes();
+        self.block_tree.tip_trie().get(&key).unwrap_or_default()
+    }
+
+    pub fn tip_hash(&self) -> Multihash {
+        self.block_tree.tip_hash()
     }
 }
