@@ -122,7 +122,6 @@ impl<H: Hasher> Storage<H> {
 }
 
 impl<H: Hasher> Tree<H> {
-    #[allow(dead_code)]
     pub fn empty(pk: PublicKey, threshold: f64) -> Self {
         Self {
             storage: Storage::default(),
