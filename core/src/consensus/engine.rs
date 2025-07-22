@@ -206,6 +206,8 @@ impl<H: Hasher> Engine<H> {
                             if let Err(e) = self.gossipsub.publish(self.block_topic, bytes).await {
                                 log::error!("Failed to publish block: {e}");
                             }
+
+                            vdf_task = Some(self.start_vdf_task());
                         }
                         Err(e) => {
                             log::error!("VDF task failed: {e}");
