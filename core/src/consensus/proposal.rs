@@ -55,6 +55,7 @@ pub struct Witness {
     pub vdf_proof: Vec<u8>,
 }
 
+#[derive(Default)]
 pub struct Builder {
     pub code: u8,
     pub parent: Option<Multihash>,
@@ -173,14 +174,7 @@ impl Witness {
 
 impl Builder {
     pub fn new() -> Self {
-        Builder {
-            code: 0,
-            parent: None,
-            diffs: BTreeMap::new(),
-            proposer_pk: None,
-            proposer_data: None,
-            proposer_weight: None,
-        }
+        Self::default()
     }
 
     pub fn with_code(mut self, code: u8) -> Self {
