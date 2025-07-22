@@ -8,7 +8,7 @@ use civita_serialize_derive::Serialize;
 use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
-    crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
+    crypto::{Hasher, Multihash, PublicKey, Signature},
     utils::trie::{self, ProofResult, Trie, Weight},
 };
 
@@ -73,23 +73,6 @@ impl Block {
         *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
 
-    pub fn generate_witness<H: Hasher>(
-        &self,
-        sk: &SecretKey,
-        mpt: &Trie<H>,
-        vdf_proof: Vec<u8>,
-    ) -> Result<Witness> {
-        let hash = self.hash::<H>().to_bytes();
-
-        let sig = sk.sign(&hash);
-
-        let mut proofs = HashMap::new();
-        let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        assert!(mpt.prove(&key, &mut proofs), "Failed to generate proof");
-
-        Ok(Witness::new(sig, proofs, vdf_proof))
-    }
-
     pub fn generate_proofs<H: Hasher>(&self, trie: &Trie<H>) -> HashMap<Multihash, Vec<u8>> {
         let mut proofs = HashMap::new();
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
@@ -108,27 +91,8 @@ impl Block {
         vdf: &WesolowskiVDF,
         difficulty: u64,
     ) -> bool {
-        let c = self.generate_challenge::<H>();
-        vdf.verify(&c, difficulty, &witness.vdf_proof).is_ok()
-    }
-
-    fn generate_challenge<H: Hasher>(&self) -> Vec<u8> {
-        let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        H::hash(&[self.parent.to_bytes().as_slice(), &key].concat()).to_bytes()
-    }
-
-    pub fn verify_proposer_weight<H: Hasher>(
-        &self,
-        witness: &Witness,
-        trie_root: Multihash,
-    ) -> bool {
-        let key = self.proposer_pk.to_hash::<H>().to_bytes();
-
-        match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
-            ProofResult::Exists(record) => record.weight == self.proposer_weight,
-            ProofResult::NotExists => self.proposer_weight == 0,
-            ProofResult::Invalid => false,
-        }
+        let hash = self.hash::<H>().to_bytes();
+        vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok()
     }
 
     pub fn verify_proposer_weight_with_proofs<H: Hasher>(
