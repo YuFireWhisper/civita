@@ -186,7 +186,7 @@ impl<H: Hasher> BlockNode<H> {
             State::Pending => {}
         }
 
-        if self.check_proposals_state()? {
+        if !self.check_proposals_state()? {
             let mut result = ProcessResult::new();
             self.invalidate_descendants(&mut result);
             return Some(result);
@@ -248,12 +248,14 @@ impl<H: Hasher> BlockNode<H> {
     fn check_proposals_state(&self) -> Option<bool> {
         self.proposals
             .values()
-            .flatten()
-            .try_fold(true, |acc, prop| match prop.read().state {
-                State::Invalid => Some(false),
-                State::Pending => None,
-                State::Valid => Some(acc),
+            .try_fold(false, |is_pending, prop| {
+                match prop.as_ref()?.read().state {
+                    State::Invalid => None,
+                    State::Pending => Some(true),
+                    State::Valid => Some(is_pending),
+                }
             })
+            .map(|has_pending| !has_pending)
     }
 
     fn calc_new_trie_and_weight<'a, I>(
