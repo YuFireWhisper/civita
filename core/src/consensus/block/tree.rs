@@ -134,7 +134,7 @@ impl<H: Hasher> Tree<H> {
     }
 
     #[allow(dead_code)]
-    pub async fn update_block(
+    pub fn update_block(
         &self,
         block: Block,
         proofs: HashMap<Multihash, Vec<u8>>,
@@ -618,8 +618,7 @@ mod tests {
 
         let result = ctx
             .dag
-            .update_block(block, block_proofs, block_msg_id.clone(), block_peer_id)
-            .await;
+            .update_block(block, block_proofs, block_msg_id.clone(), block_peer_id);
 
         assert_eq!(result.validated_msgs.len(), 1);
         assert_eq!(result.validated_msgs[0].0, block_msg_id);
@@ -643,8 +642,7 @@ mod tests {
 
         let result = ctx
             .dag
-            .update_block(low_block, HashMap::new(), msg_id.clone(), peer_id)
-            .await;
+            .update_block(low_block, HashMap::new(), msg_id.clone(), peer_id);
 
         assert_eq!(result.invalidated_msgs.len(), 1);
         assert_eq!(result.invalidated_msgs[0].0, msg_id);
@@ -791,10 +789,7 @@ mod tests {
         let msg_id = TestContext::random_message_id();
         let peer_id = TestContext::random_peer_id();
 
-        let result = ctx
-            .dag
-            .update_block(block, HashMap::new(), msg_id, peer_id)
-            .await;
+        let result = ctx.dag.update_block(block, HashMap::new(), msg_id, peer_id);
 
         assert!(result.validated_msgs.is_empty());
     }
