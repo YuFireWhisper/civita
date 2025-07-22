@@ -34,6 +34,18 @@ impl<H: Hasher> ProposalNode<H> {
         }
     }
 
+    pub fn new_valid_uncheck(proposal: Proposal) -> Self {
+        Self {
+            proposal: Some(proposal),
+            proofs: HashMap::new(),
+            state: State::Valid,
+            parent_block: Arc::new(ParkingRwLock::new(BlockNode::new_missing())),
+            child_blocks: HashMap::new(),
+            client_validated: None,
+            metadata: None,
+        }
+    }
+
     pub fn try_validate(&mut self) -> Option<ProcessResult> {
         match self.state {
             State::Valid | State::Invalid => {
@@ -94,6 +106,10 @@ impl<H: Hasher> ProposalNode<H> {
         self.proposal = Some(proposal);
         self.proofs = proofs;
         self.metadata = Some(Metadata::new(msg_id, source));
+    }
+
+    pub fn set_proposal(&mut self, proposal: Proposal) {
+        self.proposal = Some(proposal);
     }
 
     pub fn set_client_validation(&mut self, is_valid: bool) -> Option<ProcessResult> {
