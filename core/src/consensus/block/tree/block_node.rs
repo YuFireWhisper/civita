@@ -111,7 +111,7 @@ impl<H: Hasher> BlockNode<H> {
             let key = proposer_pk.to_hash::<H>().to_bytes();
             let mut proofs = HashMap::new();
             parent_trie.prove(&key, &mut proofs);
-            (parent_trie.get(&key)?.weight, proofs)
+            (parent_trie.get(&key).map_or(0, |v| v.weight), proofs)
         };
 
         let block = block::Builder::new()
