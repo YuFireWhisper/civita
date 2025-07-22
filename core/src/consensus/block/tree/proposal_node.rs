@@ -108,10 +108,6 @@ impl<H: Hasher> ProposalNode<H> {
         self.metadata = Some(Metadata::new(msg_id, source));
     }
 
-    pub fn set_proposal(&mut self, proposal: Proposal) {
-        self.proposal = Some(proposal);
-    }
-
     pub fn set_client_validation(&mut self, is_valid: bool) -> Option<ProcessResult> {
         self.client_validated = Some(is_valid);
 
