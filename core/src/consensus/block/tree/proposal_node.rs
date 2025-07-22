@@ -107,4 +107,8 @@ impl<H: Hasher> ProposalNode<H> {
             self.try_validate()
         }
     }
+
+    pub fn hash(&self) -> Option<Multihash> {
+        self.proposal.as_ref().map(|p| p.hash::<H>())
+    }
 }
