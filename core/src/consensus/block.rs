@@ -9,8 +9,7 @@ use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
-    resident,
-    utils::trie::{self, ProofResult, Trie},
+    utils::trie::{self, ProofResult, Trie, Weight},
 };
 
 pub(crate) mod tree;
@@ -27,11 +26,10 @@ pub enum Error {}
 #[derive(Serialize)]
 pub struct Block {
     pub parent: Multihash,
-    pub parent_checkpoint: Multihash,
     pub height: u64,
     pub proposals: BTreeSet<Multihash>,
     pub proposer_pk: PublicKey,
-    pub proposer_weight: u32,
+    pub proposer_weight: Weight,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -48,24 +46,21 @@ pub struct Witness {
 
 pub struct Builder {
     parent: Option<Multihash>,
-    parent_checkpoint: Option<Multihash>,
     height: Option<u64>,
     proposals: BTreeSet<Multihash>,
     proposer_pk: Option<PublicKey>,
-    proposer_weight: Option<u32>,
+    proposer_weight: Option<Weight>,
 }
 
 impl Block {
     pub fn new(
         parent: Multihash,
-        parent_checkpoint: Multihash,
         height: u64,
         proposer_pk: PublicKey,
-        proposer_weight: u32,
+        proposer_weight: Weight,
     ) -> Self {
         Block {
             parent,
-            parent_checkpoint,
             height,
             proposals: BTreeSet::new(),
             proposer_pk,
@@ -93,6 +88,13 @@ impl Block {
         assert!(mpt.prove(&key, &mut proofs), "Failed to generate proof");
 
         Ok(Witness::new(sig, proofs, vdf_proof))
+    }
+
+    pub fn generate_proofs<H: Hasher>(&self, trie: &Trie<H>) -> HashMap<Multihash, Vec<u8>> {
+        let mut proofs = HashMap::new();
+        let key = self.proposer_pk.to_hash::<H>().to_bytes();
+        trie.prove(&key, &mut proofs);
+        proofs
     }
 
     pub fn verify_signature<H: Hasher>(&self, witness: &Witness) -> bool {
@@ -123,14 +125,29 @@ impl Block {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
 
         match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
-            ProofResult::Exists(resident_bytes) => {
-                resident::Record::from_slice(&resident_bytes)
-                    .expect("Bytes is from root hash, it should be valid")
-                    .weight
-                    == self.proposer_weight
-            }
+            ProofResult::Exists(record) => record.weight == self.proposer_weight,
             ProofResult::NotExists => self.proposer_weight == 0,
             ProofResult::Invalid => false,
+        }
+    }
+
+    pub fn verify_proposer_weight_with_proofs<H: Hasher>(
+        &self,
+        proofs: &HashMap<Multihash, Vec<u8>>,
+        trie_root: Multihash,
+    ) -> bool {
+        let key = self.proposer_pk.to_hash::<H>().to_bytes();
+
+        match trie::verify_proof_with_hash(&key, proofs, trie_root) {
+            ProofResult::Exists(record) => record.weight == self.proposer_weight,
+            ProofResult::NotExists => {
+                println!("Proposer weight is zero, but proposer public key exists in proofs");
+                self.proposer_weight == 0
+            }
+            ProofResult::Invalid => {
+                println!("Invalid proof for proposer public key");
+                false
+            }
         }
     }
 }
@@ -149,7 +166,6 @@ impl Builder {
     pub fn new() -> Self {
         Builder {
             parent: None,
-            parent_checkpoint: None,
             height: None,
             proposals: BTreeSet::new(),
             proposer_pk: None,
@@ -163,8 +179,13 @@ impl Builder {
         self
     }
 
-    pub fn with_checkpoint<H: Hasher>(mut self, checkpoint: &Block) -> Self {
-        self.parent_checkpoint = Some(checkpoint.hash::<H>());
+    pub fn with_parent_hash(mut self, parent: Multihash) -> Self {
+        self.parent = Some(parent);
+        self
+    }
+
+    pub fn with_height(mut self, height: u64) -> Self {
+        self.height = Some(height);
         self
     }
 
@@ -172,7 +193,7 @@ impl Builder {
     where
         I: IntoIterator<Item = Multihash>,
     {
-        self.proposals = proposals.into_iter().collect();
+        self.proposals.extend(proposals);
         self
     }
 
@@ -181,26 +202,17 @@ impl Builder {
         self
     }
 
-    pub fn with_proposer_weight(mut self, proposer_weight: u32) -> Self {
+    pub fn with_proposer_weight(mut self, proposer_weight: Weight) -> Self {
         self.proposer_weight = Some(proposer_weight);
         self
     }
 
     pub fn build(self) -> Block {
         let parent = self.parent.expect("Parent block must be set");
-        let parent_checkpoint = self
-            .parent_checkpoint
-            .expect("Parent checkpoint must be set");
         let height = self.height.expect("Height must be set");
         let proposer_pk = self.proposer_pk.expect("Proposer public key must be set");
         let proposer_weight = self.proposer_weight.expect("Proposer weight must be set");
 
-        Block::new(
-            parent,
-            parent_checkpoint,
-            height,
-            proposer_pk,
-            proposer_weight,
-        )
+        Block::new(parent, height, proposer_pk, proposer_weight)
     }
 }
