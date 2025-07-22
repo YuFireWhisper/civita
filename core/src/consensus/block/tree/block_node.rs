@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use derivative::Derivative;
 use libp2p::{gossipsub::MessageId, PeerId};
 use parking_lot::RwLock as ParkingRwLock;
 
@@ -27,6 +28,7 @@ pub struct BlockNode<H> {
     pub parent: Option<Arc<ParkingRwLock<BlockNode<H>>>>,
     pub children_blocks: HashMap<Multihash, Arc<ParkingRwLock<BlockNode<H>>>>,
     pub children_proposals: HashMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>>,
+    pub cumulative_weight: Weight,
 
     pub proposals: HashMap<Multihash, Option<Arc<ParkingRwLock<ProposalNode<H>>>>>,
 
@@ -34,18 +36,40 @@ pub struct BlockNode<H> {
     pub is_genesis: bool,
 }
 
+#[derive(Derivative)]
+#[derivative(Default(bound = ""))]
+pub struct Builder<H> {
+    block: Option<Block>,
+    state: State,
+
+    trie: Option<Trie<H>>,
+    weight: Weight,
+    proofs: HashMap<Multihash, Vec<u8>>,
+
+    parent: Option<Arc<ParkingRwLock<BlockNode<H>>>>,
+
+    proposals: HashMap<Multihash, Option<Arc<ParkingRwLock<ProposalNode<H>>>>>,
+
+    metadata: Option<Metadata>,
+    is_genesis: bool,
+}
+
 impl<H: Hasher> BlockNode<H> {
     pub fn new_missing() -> Self {
         Self {
             block: None,
             state: State::Pending,
+
             trie: None,
             weight: Weight::default(),
             proofs: HashMap::new(),
+
             parent: None,
             children_blocks: HashMap::new(),
             children_proposals: HashMap::new(),
             proposals: HashMap::new(),
+            cumulative_weight: Weight::default(),
+
             metadata: None,
             is_genesis: false,
         }
@@ -58,13 +82,17 @@ impl<H: Hasher> BlockNode<H> {
         Self {
             block: Some(genesis_block.clone()),
             state: State::Valid,
+
             trie: Some(genesis_trie),
             weight: genesis_block.proposer_weight,
             proofs: HashMap::new(),
+
             parent: None,
             children_blocks: HashMap::new(),
             children_proposals: HashMap::new(),
             proposals: HashMap::new(),
+            cumulative_weight: genesis_block.proposer_weight,
+
             metadata: None,
             is_genesis: true,
         }
@@ -98,25 +126,16 @@ impl<H: Hasher> BlockNode<H> {
 
         drop(parent_read);
 
-        Some((
-            Self {
-                block: Some(block),
-                state: State::Valid,
-                trie: Some(new_trie),
-                weight: new_weight,
-                proofs: HashMap::new(),
-                parent: Some(parent),
-                children_blocks: HashMap::new(),
-                children_proposals: HashMap::new(),
-                proposals: props
-                    .into_iter()
-                    .map(|(hash, node)| (hash, Some(node)))
-                    .collect(),
-                metadata: None,
-                is_genesis: false,
-            },
-            proofs,
-        ))
+        let node = Builder::new()
+            .with_block(block)
+            .with_state(State::Valid)
+            .with_trie(new_trie)
+            .with_weight(new_weight)
+            .with_parent(parent)
+            .with_proposals(props)
+            .build();
+
+        Some((node, proofs))
     }
 
     pub fn collect_valid_children_proposals(
@@ -299,5 +318,84 @@ impl<H: Hasher> BlockNode<H> {
 
     pub fn hash(&self) -> Option<Multihash> {
         self.block.as_ref().map(|b| b.hash::<H>())
+    }
+}
+
+impl<H: Hasher> Builder<H> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_block(mut self, block: Block) -> Self {
+        self.block = Some(block);
+        self
+    }
+
+    pub fn with_state(mut self, state: State) -> Self {
+        self.state = state;
+        self
+    }
+
+    pub fn with_trie(mut self, trie: Trie<H>) -> Self {
+        self.trie = Some(trie);
+        self
+    }
+
+    pub fn with_weight(mut self, weight: Weight) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    pub fn with_proofs(mut self, proofs: HashMap<Multihash, Vec<u8>>) -> Self {
+        self.proofs = proofs;
+        self
+    }
+
+    pub fn with_parent(mut self, parent: Arc<ParkingRwLock<BlockNode<H>>>) -> Self {
+        self.parent = Some(parent);
+        self
+    }
+
+    pub fn with_proposals<I, T>(mut self, proposals: I) -> Self
+    where
+        I: IntoIterator<Item = (Multihash, T)>,
+        T: Into<Option<Arc<ParkingRwLock<ProposalNode<H>>>>>,
+    {
+        self.proposals
+            .extend(proposals.into_iter().map(|(k, v)| (k, v.into())));
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_is_genesis(mut self, is_genesis: bool) -> Self {
+        self.is_genesis = is_genesis;
+        self
+    }
+
+    pub fn build(self) -> BlockNode<H> {
+        let cumulative_weight = self
+            .parent
+            .as_ref()
+            .map(|p| p.read().cumulative_weight)
+            .unwrap_or(self.weight);
+
+        BlockNode {
+            block: self.block,
+            state: self.state,
+            trie: self.trie,
+            weight: self.weight,
+            proofs: self.proofs,
+            parent: self.parent,
+            children_blocks: HashMap::new(),
+            children_proposals: HashMap::new(),
+            proposals: HashMap::new(),
+            cumulative_weight,
+            metadata: self.metadata,
+            is_genesis: self.is_genesis,
+        }
     }
 }

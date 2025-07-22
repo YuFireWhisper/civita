@@ -24,8 +24,10 @@ mod proposal_node;
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
+#[derive(Default)]
 #[derive(Eq, PartialEq)]
 pub enum State {
+    #[default]
     Pending,
     Valid,
     Invalid,
@@ -63,10 +65,6 @@ pub struct Tree<H> {
 }
 
 impl State {
-    pub fn is_valid(&self) -> bool {
-        matches!(self, State::Valid)
-    }
-
     pub fn is_invalid(&self) -> bool {
         matches!(self, State::Invalid)
     }
@@ -299,10 +297,10 @@ impl<H: Hasher> Tree<H> {
         None
     }
 
-    fn update_tips(&self, hash: Multihash, weight: Weight) {
+    fn update_tips(&self, hash: Multihash, cumulative_weight: Weight) {
         let mut tips = self.storage.tips.write();
-        tips.retain(|&w, _| w >= weight);
-        tips.insert(weight, hash);
+        tips.retain(|&w, _| w >= cumulative_weight);
+        tips.insert(cumulative_weight, hash);
     }
 
     fn check_and_create_checkpoint(&self, hash: Multihash, weight: Weight) {
