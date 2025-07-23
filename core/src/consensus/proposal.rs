@@ -122,23 +122,19 @@ impl Proposal {
         vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok()
     }
 
-    pub fn verify_proposer_weight_with_proofs<H: Hasher>(
+    pub fn verify_proposer_weight<H: Hasher>(
         &self,
-        proofs: &HashMap<Multihash, Vec<u8>>,
+        witness: &Witness,
         trie_root: Multihash,
     ) -> bool {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        Self::verify_proof(&key, trie_root, proofs, Some(self.proposer_weight), None)
-    }
-
-    pub fn verify_diffs_with_proofs(
-        &self,
-        proofs: &HashMap<Multihash, Vec<u8>>,
-        trie_root: Multihash,
-    ) -> bool {
-        self.diffs
-            .iter()
-            .all(|(key, diff)| Self::verify_proof(key, trie_root, proofs, None, diff.from.as_ref()))
+        Self::verify_proof(
+            &key,
+            trie_root,
+            &witness.proofs,
+            Some(self.proposer_weight),
+            None,
+        )
     }
 
     fn verify_proof(
@@ -159,6 +155,12 @@ impl Proposal {
             ProofResult::NotExists => exp_weight.unwrap_or(0) == 0 && exp_record.is_none(),
             ProofResult::Invalid => false,
         }
+    }
+
+    pub fn verify_diffs<H: Hasher>(&self, witness: &Witness, trie_root: Multihash) -> bool {
+        self.diffs.iter().all(|(key, diff)| {
+            Self::verify_proof(key, trie_root, &witness.proofs, None, diff.from.as_ref())
+        })
     }
 }
 

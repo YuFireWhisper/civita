@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -13,114 +13,104 @@ use crate::{
         tree::{proposal_node::ProposalNode, Metadata, ProcessResult, State},
         Block,
     },
-    crypto::{Hasher, Multihash, PublicKey},
+    crypto::{Hasher, Multihash, SecretKey},
     utils::trie::{Trie, Weight},
 };
 
+#[derive(Derivative)]
+#[derivative(Default(bound = ""))]
 pub struct BlockNode<H> {
-    pub block: Option<Block>,
     pub state: State,
 
+    pub block: Option<Block>,
+    pub witness: Option<block::Witness>,
+
+    pub proposals: HashMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>>,
+    valided_proposals: HashSet<Multihash>,
+
     pub trie: Option<Trie<H>>,
-    pub weight: Weight,
-    pub proofs: HashMap<Multihash, Vec<u8>>,
+    pub weight: Option<Weight>,
+    pub cumulative_weight: Option<Weight>,
 
     pub parent: Option<Arc<ParkingRwLock<BlockNode<H>>>>,
+
     pub children_blocks: HashMap<Multihash, Arc<ParkingRwLock<BlockNode<H>>>>,
     pub children_proposals: HashMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>>,
-    pub cumulative_weight: Weight,
-
-    pub proposals: HashMap<Multihash, Option<Arc<ParkingRwLock<ProposalNode<H>>>>>,
 
     pub metadata: Option<Metadata>,
+
     pub is_genesis: bool,
 }
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct Builder<H> {
-    block: Option<Block>,
     state: State,
 
+    block: Option<Block>,
+    witness: Option<block::Witness>,
+
     trie: Option<Trie<H>>,
-    weight: Weight,
-    proofs: HashMap<Multihash, Vec<u8>>,
+    weight: Option<Weight>,
+    cumulative_weight: Option<Weight>,
 
     parent: Option<Arc<ParkingRwLock<BlockNode<H>>>>,
 
-    proposals: HashMap<Multihash, Option<Arc<ParkingRwLock<ProposalNode<H>>>>>,
+    proposals: HashMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>>,
+    valided_proposals: HashSet<Multihash>,
 
     metadata: Option<Metadata>,
+
     is_genesis: bool,
 }
 
 impl<H: Hasher> BlockNode<H> {
     pub fn new_missing() -> Self {
-        Self {
-            block: None,
-            state: State::Pending,
-
-            trie: None,
-            weight: Weight::default(),
-            proofs: HashMap::new(),
-
-            parent: None,
-            children_blocks: HashMap::new(),
-            children_proposals: HashMap::new(),
-            proposals: HashMap::new(),
-            cumulative_weight: Weight::default(),
-
-            metadata: None,
-            is_genesis: false,
-        }
+        Self::default()
     }
 
-    pub fn new_genesis(genesis_block: Block) -> Self {
+    pub fn new_genesis() -> Self {
         let mut genesis_trie = Trie::empty();
         let _ = genesis_trie.commit();
 
         Self {
-            block: Some(genesis_block.clone()),
             state: State::Valid,
 
             trie: Some(genesis_trie),
-            weight: Weight::default(),
-            proofs: HashMap::new(),
+            weight: Some(0),
+            cumulative_weight: Some(0),
 
-            parent: None,
-            children_blocks: HashMap::new(),
-            children_proposals: HashMap::new(),
-            proposals: HashMap::new(),
-            cumulative_weight: genesis_block.proposer_weight,
-
-            metadata: None,
             is_genesis: true,
+
+            ..Default::default()
         }
     }
 
-    pub fn set_parent(&mut self, parent: Arc<ParkingRwLock<BlockNode<H>>>) -> bool {
-        if self.parent.is_some() {
-            return false;
-        }
-        self.cumulative_weight = parent.read().cumulative_weight;
-        self.parent = Some(parent);
-        true
-    }
-
-    pub fn generate(
+    pub fn generate_next(
         parent: Arc<ParkingRwLock<BlockNode<H>>>,
-        proposer_pk: PublicKey,
-    ) -> Option<(Self, HashMap<Multihash, Vec<u8>>)> {
+        sk: &SecretKey,
+        vdf_proof: Vec<u8>,
+    ) -> Self {
         let parent_read = parent.read();
-        let parent_block = parent_read.block.as_ref()?;
-        let parent_trie = parent_read.trie.as_ref()?;
+
+        assert!(parent_read.state.is_valid());
+
+        let parent_block = parent_read
+            .block
+            .as_ref()
+            .expect("Parent block must be valid");
+        let parent_trie = parent_read
+            .trie
+            .as_ref()
+            .expect("Parent trie must be valid");
 
         let props = parent_read.collect_valid_children_proposals();
-        let (proposer_weight, proofs) = {
+
+        let proposer_pk = sk.public_key();
+
+        let proposer_weight = {
             let key = proposer_pk.to_hash::<H>().to_bytes();
-            let mut proofs = HashMap::new();
-            parent_trie.prove(&key, &mut proofs);
-            (parent_trie.get(&key).map_or(0, |v| v.weight), proofs)
+            parent_trie.get(&key).map_or(0, |v| v.weight)
         };
 
         let block = block::Builder::new()
@@ -133,40 +123,135 @@ impl<H: Hasher> BlockNode<H> {
         let (new_trie, new_weight) =
             Self::calc_new_trie_and_weight(props.values(), proposer_weight, parent_trie);
 
-        drop(parent_read);
+        let sig = sk.sign(&block.hash::<H>().to_bytes());
+        let proofs = block.generate_proofs::<H>(parent_trie);
+        let witness = block::Witness::new(sig, proofs, vdf_proof);
 
-        let node = Builder::new()
-            .with_block(block)
+        Builder::new()
             .with_state(State::Valid)
+            .with_block_data(block, witness)
             .with_trie(new_trie)
             .with_weight(new_weight)
-            .with_parent(parent)
+            .with_cumulative_weight(parent_read.cumulative_weight.unwrap_or(0) + new_weight)
             .with_proposals(props)
-            .build();
-
-        Some((node, proofs))
+            .build()
     }
 
-    pub fn collect_valid_children_proposals(
+    pub fn set_parent(&mut self, parent: Arc<ParkingRwLock<BlockNode<H>>>) {
+        self.parent = Some(parent);
+    }
+
+    fn collect_valid_children_proposals(
         &self,
     ) -> BTreeMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>> {
         self.children_proposals
             .values()
-            .filter(|node| node.read().state == State::Valid)
+            .filter(|node| node.read().state.is_valid())
             .map(|node| (node.read().hash().unwrap(), node.clone()))
             .collect()
     }
 
-    pub fn set_block_data(
-        &mut self,
-        block: Block,
-        proofs: HashMap<Multihash, Vec<u8>>,
-        msg_id: MessageId,
-        source: PeerId,
-    ) {
+    pub fn set_block_data(&mut self, block: Block, witness: block::Witness) {
         self.block = Some(block);
-        self.proofs = proofs;
+        self.witness = Some(witness);
+    }
+
+    pub fn set_metadata(&mut self, msg_id: MessageId, source: PeerId) {
         self.metadata = Some(Metadata::new(msg_id, source));
+    }
+
+    pub fn on_proposal_validated(&mut self, hash: Multihash, result: &mut ProcessResult) {
+        if !self.block_contains(&hash) || !self.proposals.contains_key(&hash) {
+            return;
+        }
+
+        self.valided_proposals.insert(hash);
+
+        if let Some(r) = self.try_validate(false) {
+            result.merge(r);
+        }
+    }
+
+    fn block_contains(&self, hash: &Multihash) -> bool {
+        self.block
+            .as_ref()
+            .is_some_and(|b| b.proposals.contains(hash))
+    }
+
+    pub fn try_validate(&mut self, unchecked: bool) -> Option<ProcessResult> {
+        if !unchecked && !self.can_convert_to_valid() {
+            return None;
+        }
+
+        let parent = self.parent.as_ref()?;
+        let parent_read = parent.read();
+        let parent_trie = parent_read.trie.as_ref()?;
+        let parent_cumulative_weight = parent_read.cumulative_weight?;
+
+        debug_assert!(
+            !parent_read.state.is_invalid(),
+            "If parent is invalid, proposals will not be valid either"
+        );
+
+        let block = self.block.as_ref()?;
+        let witness = self.witness.as_ref()?;
+
+        if !unchecked && !block.verify_proposer_weight::<H>(witness, parent_trie.root_hash()) {
+            drop(parent_read);
+            let mut result = ProcessResult::new();
+            self.invalidate_descendants(&mut result);
+            return Some(result);
+        }
+
+        let (new_trie, new_weight) = Self::calc_new_trie_and_weight(
+            self.proposals.values(),
+            block.proposer_weight,
+            parent_trie,
+        );
+
+        drop(parent_read);
+
+        self.state = State::Valid;
+        self.trie = Some(new_trie);
+        self.weight = Some(new_weight);
+        self.cumulative_weight = Some(parent_cumulative_weight + new_weight);
+
+        let mut result = ProcessResult::new();
+
+        if let Some(metadata) = &self.metadata {
+            result.add_validated(metadata.msg_id.clone(), metadata.source);
+        }
+
+        self.children_blocks.values().for_each(|child| {
+            if let Some(r) = child.write().try_validate(false) {
+                result.merge(r);
+            }
+        });
+
+        self.children_proposals.values().for_each(|child| {
+            child.read().child_blocks.values().for_each(|block| {
+                if let Some(r) = block.write().try_validate(false) {
+                    result.merge(r);
+                }
+            });
+        });
+
+        Some(result)
+    }
+
+    fn can_convert_to_valid(&self) -> bool {
+        if self.state.is_valid() || self.state.is_invalid() {
+            // Alrady established
+            return false;
+        }
+
+        self.valided_proposals.len() == self.block.as_ref().map_or(0, |b| b.proposals.len())
+            && self
+                .parent
+                .as_ref()
+                .is_some_and(|p| p.read().state.is_valid())
+            && self.block.is_some()
+            && self.witness.is_some()
     }
 
     pub fn invalidate_descendants(&mut self, result: &mut ProcessResult) {
@@ -183,88 +268,8 @@ impl<H: Hasher> BlockNode<H> {
         self.children_proposals.values().for_each(|child| {
             child.write().invalidate_descendants(result);
         });
-    }
 
-    pub fn try_validate(&mut self) -> Option<ProcessResult> {
-        if self.is_genesis {
-            return None;
-        }
-
-        match self.state {
-            State::Valid | State::Invalid => return None,
-            State::Pending => {}
-        }
-
-        if !self.check_proposals_state()? {
-            let mut result = ProcessResult::new();
-            self.invalidate_descendants(&mut result);
-            return Some(result);
-        }
-
-        let parent = self.parent.as_ref()?;
-        let parent_read = parent.read();
-        let parent_trie = parent_read.trie.as_ref()?;
-
-        debug_assert!(
-            !parent_read.state.is_invalid(),
-            "If parent is invalid, proposals will not be valid either"
-        );
-
-        let block = self.block.as_ref()?;
-
-        if !block.verify_proposer_weight_with_proofs::<H>(&self.proofs, parent_trie.root_hash()) {
-            drop(parent_read);
-            let mut result = ProcessResult::new();
-            self.invalidate_descendants(&mut result);
-            return Some(result);
-        }
-
-        let (new_trie, new_weight) = Self::calc_new_trie_and_weight(
-            self.proposals.values().flatten(),
-            block.proposer_weight,
-            parent_trie,
-        );
-
-        drop(parent_read);
-
-        self.state = State::Valid;
-        self.trie = Some(new_trie);
-        self.weight = new_weight;
-
-        let mut result = ProcessResult::new();
-
-        if let Some(metadata) = &self.metadata {
-            result.add_validated(metadata.msg_id.clone(), metadata.source);
-        }
-
-        self.children_blocks.values().for_each(|child| {
-            if let Some(r) = child.write().try_validate() {
-                result.merge(r);
-            }
-        });
-
-        self.children_proposals.values().for_each(|child| {
-            child.read().child_blocks.values().for_each(|block| {
-                if let Some(r) = block.write().try_validate() {
-                    result.merge(r);
-                }
-            });
-        });
-
-        Some(result)
-    }
-
-    fn check_proposals_state(&self) -> Option<bool> {
-        self.proposals
-            .values()
-            .try_fold(false, |is_pending, prop| {
-                match prop.as_ref()?.read().state {
-                    State::Invalid => None,
-                    State::Pending => Some(true),
-                    State::Valid => Some(is_pending),
-                }
-            })
-            .map(|has_pending| !has_pending)
+        self.proposals.clear();
     }
 
     fn calc_new_trie_and_weight<'a, I>(
@@ -287,7 +292,7 @@ impl<H: Hasher> BlockNode<H> {
                 .diffs
                 .iter()
                 .map(|(k, v)| (k.as_slice(), v.to.clone()));
-            trie.update_many(iter, Some(&node_read.proofs));
+            trie.update_many(iter, Some(node_read.proofs().unwrap()));
             weight += node_read.proposal.as_ref().unwrap().proposer_weight;
         });
 
@@ -295,11 +300,23 @@ impl<H: Hasher> BlockNode<H> {
     }
 
     pub fn hash(&self) -> Option<Multihash> {
+        if self.is_genesis {
+            return Some(Multihash::default());
+        }
+
         self.block.as_ref().map(|b| b.hash::<H>())
     }
 
     pub fn height(&self) -> Option<u64> {
         self.block.as_ref().map(|b| b.height)
+    }
+
+    pub fn trie_root_hash(&self) -> Option<Multihash> {
+        self.trie.as_ref().map(|t| t.root_hash())
+    }
+
+    pub fn is_missing(&self) -> bool {
+        self.block.is_none() && self.witness.is_none()
     }
 }
 
@@ -308,13 +325,14 @@ impl<H: Hasher> Builder<H> {
         Self::default()
     }
 
-    pub fn with_block(mut self, block: Block) -> Self {
-        self.block = Some(block);
+    pub fn with_state(mut self, state: State) -> Self {
+        self.state = state;
         self
     }
 
-    pub fn with_state(mut self, state: State) -> Self {
-        self.state = state;
+    pub fn with_block_data(mut self, block: Block, witness: block::Witness) -> Self {
+        self.block = Some(block);
+        self.witness = Some(witness);
         self
     }
 
@@ -324,44 +342,49 @@ impl<H: Hasher> Builder<H> {
     }
 
     pub fn with_weight(mut self, weight: Weight) -> Self {
-        self.weight = weight;
+        self.weight = Some(weight);
         self
     }
 
-    pub fn with_parent(mut self, parent: Arc<ParkingRwLock<BlockNode<H>>>) -> Self {
-        self.parent = Some(parent);
+    pub fn with_cumulative_weight(mut self, cumulative_weight: Weight) -> Self {
+        self.cumulative_weight = Some(cumulative_weight);
         self
     }
 
-    pub fn with_proposals<I, T>(mut self, proposals: I) -> Self
+    pub fn with_proposals<I>(mut self, proposals: I) -> Self
     where
-        I: IntoIterator<Item = (Multihash, T)>,
-        T: Into<Option<Arc<ParkingRwLock<ProposalNode<H>>>>>,
+        I: IntoIterator<Item = (Multihash, Arc<ParkingRwLock<ProposalNode<H>>>)>,
     {
-        self.proposals
-            .extend(proposals.into_iter().map(|(k, v)| (k, v.into())));
+        proposals.into_iter().for_each(|(hash, proposal)| {
+            if proposal.read().state.is_valid() {
+                self.valided_proposals.insert(hash);
+            }
+            self.proposals.insert(hash, proposal);
+        });
         self
     }
 
     pub fn build(self) -> BlockNode<H> {
-        let cumulative_weight = self
-            .parent
-            .as_ref()
-            .map(|p| p.read().cumulative_weight)
-            .unwrap_or(self.weight);
-
         BlockNode {
-            block: self.block,
             state: self.state,
+
+            block: self.block,
+            witness: self.witness,
+
             trie: self.trie,
             weight: self.weight,
-            proofs: self.proofs,
+            cumulative_weight: self.cumulative_weight,
+
             parent: self.parent,
+
             children_blocks: HashMap::new(),
             children_proposals: HashMap::new(),
-            proposals: HashMap::new(),
-            cumulative_weight,
+
+            proposals: self.proposals,
+            valided_proposals: self.valided_proposals,
+
             metadata: self.metadata,
+
             is_genesis: self.is_genesis,
         }
     }

@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use dashmap::DashMap;
 use derivative::Derivative;
@@ -11,12 +8,13 @@ use parking_lot::RwLock as ParkingRwLock;
 use crate::{
     consensus::{
         block::{
+            self,
             tree::{block_node::BlockNode, proposal_node::ProposalNode},
             Block,
         },
-        proposal::Proposal,
+        proposal::{self, Proposal},
     },
-    crypto::{Hasher, Multihash, PublicKey},
+    crypto::{Hasher, Multihash, SecretKey},
     utils::trie::{Trie, Weight},
 };
 
@@ -60,12 +58,20 @@ pub struct Storage<H> {
 pub struct Tree<H> {
     storage: Storage<H>,
     threshold: f64,
-    pk: PublicKey,
+    sk: SecretKey,
 }
 
 impl State {
+    pub fn is_valid(&self) -> bool {
+        matches!(self, State::Valid)
+    }
+
     pub fn is_invalid(&self) -> bool {
         matches!(self, State::Invalid)
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, State::Pending)
     }
 }
 
@@ -99,15 +105,17 @@ impl<H: Hasher> Storage<H> {
         Self::default()
     }
 
-    pub fn with_genesis(genesis_block: Block) -> Self {
-        let genesis_hash = genesis_block.hash::<H>();
-        let genesis_node = Arc::new(ParkingRwLock::new(BlockNode::new_genesis(genesis_block)));
+    pub fn with_genesis() -> Self {
+        let genesis_node = Arc::new(ParkingRwLock::new(BlockNode::new_genesis()));
+        let genesis_hash = genesis_node.read().hash().unwrap();
 
         let blocks = DashMap::new();
         blocks.insert(genesis_hash, genesis_node.clone());
 
         let mut tips = BTreeMap::new();
-        tips.insert(genesis_node.read().weight, genesis_hash);
+        let genesis_weight = genesis_node.read().weight.unwrap();
+
+        tips.insert(genesis_weight, genesis_hash);
 
         let checkpoints = vec![genesis_hash];
 
@@ -121,18 +129,18 @@ impl<H: Hasher> Storage<H> {
 }
 
 impl<H: Hasher> Tree<H> {
-    pub fn empty(pk: PublicKey, threshold: f64) -> Self {
+    pub fn empty(sk: SecretKey, threshold: f64) -> Self {
         Self {
             storage: Storage::default(),
-            pk,
+            sk,
             threshold,
         }
     }
 
-    pub fn with_genesis(genesis_block: Block, pk: PublicKey, threshold: f64) -> Self {
+    pub fn with_genesis(sk: SecretKey, threshold: f64) -> Self {
         Self {
-            storage: Storage::with_genesis(genesis_block),
-            pk,
+            storage: Storage::with_genesis(),
+            sk,
             threshold,
         }
     }
@@ -140,7 +148,7 @@ impl<H: Hasher> Tree<H> {
     pub fn update_block(
         &self,
         block: Block,
-        proofs: HashMap<Multihash, Vec<u8>>,
+        witness: block::Witness,
         msg_id: MessageId,
         source: PeerId,
     ) -> ProcessResult {
@@ -155,23 +163,29 @@ impl<H: Hasher> Tree<H> {
 
         let node = self.get_or_insert_missing_block(hash);
 
+        if node.read().is_missing() {
+            node.write().set_block_data(block, witness);
+            node.write().set_metadata(msg_id.clone(), source);
+        }
+
         if !self.add_block_to_parent(parent_hash, hash, node.clone()) {
-            result.add_invalidated(msg_id, source);
             node.write().invalidate_descendants(&mut result);
             return result;
         }
 
-        if !block
-            .proposals
+        let proposal_hashes = node
+            .read()
+            .block
+            .as_ref()
+            .map_or(vec![], |b| b.proposals.iter().cloned().collect());
+
+        if !proposal_hashes
             .iter()
-            .all(|child| self.add_block_to_proposal(hash, *child, node.clone()))
+            .all(|h| self.add_block_to_proposal(*h, hash, node.clone(), &mut result))
         {
-            result.add_invalidated(msg_id, source);
             node.write().invalidate_descendants(&mut result);
             return result;
         }
-
-        node.write().set_block_data(block, proofs, msg_id, source);
 
         if let Some(r) = self.try_validate_block(node) {
             result.merge(r);
@@ -226,6 +240,7 @@ impl<H: Hasher> Tree<H> {
         block.write().set_parent(parent_node.clone());
 
         let parent_read = parent_node.read();
+
         !parent_read.state.is_invalid()
     }
 
@@ -234,6 +249,7 @@ impl<H: Hasher> Tree<H> {
         prop_hash: Multihash,
         block_hash: Multihash,
         block: Arc<ParkingRwLock<BlockNode<H>>>,
+        result: &mut ProcessResult,
     ) -> bool {
         let prop_node = self.get_or_insert_missing_proposal(prop_hash);
 
@@ -243,15 +259,22 @@ impl<H: Hasher> Tree<H> {
             .entry(block_hash)
             .or_insert_with(|| block.clone());
 
-        let is_not_invalid = prop_node.read().state != State::Invalid;
+        let prop_state = prop_node.read().state;
 
-        block
-            .write()
-            .proposals
-            .entry(prop_hash)
-            .or_insert_with(|| Some(prop_node));
+        {
+            let mut block_write = block.write();
 
-        is_not_invalid
+            block_write
+                .proposals
+                .entry(prop_hash)
+                .or_insert_with(|| prop_node);
+
+            if prop_state.is_valid() {
+                block_write.on_proposal_validated(prop_hash, result);
+            }
+        }
+
+        !prop_state.is_invalid()
     }
 
     fn get_or_insert_missing_proposal(
@@ -268,11 +291,12 @@ impl<H: Hasher> Tree<H> {
     fn try_validate_block(&self, block: Arc<ParkingRwLock<BlockNode<H>>>) -> Option<ProcessResult> {
         let mut node = block.write();
 
-        if let Some(result) = node.try_validate() {
+        if let Some(result) = node.try_validate(false) {
             if node.state == State::Valid {
                 let block_hash = node.block.as_ref().unwrap().hash::<H>();
-                self.update_tips(block_hash, node.weight);
-                self.check_and_create_checkpoint(block_hash, node.weight);
+                let weight = node.weight.unwrap();
+                self.update_tips(block_hash, weight);
+                self.check_and_create_checkpoint(block_hash, weight);
             }
 
             return Some(result);
@@ -310,7 +334,7 @@ impl<H: Hasher> Tree<H> {
     pub fn update_proposal(
         &self,
         proposal: Proposal,
-        proofs: HashMap<Multihash, Vec<u8>>,
+        witness: proposal::Witness,
         msg_id: MessageId,
         source: PeerId,
     ) -> ProcessResult {
@@ -328,8 +352,8 @@ impl<H: Hasher> Tree<H> {
         self.add_proposal_to_parent(parent_hash, hash, node.clone());
 
         let mut node_write = node.write();
-
-        node_write.set_proposal_data(proposal, proofs, msg_id, source);
+        node_write.set_proposal_data(proposal, witness);
+        node_write.set_metadata(msg_id, source);
 
         if let Some(r) = node_write.try_validate() {
             result.merge(r);
@@ -375,13 +399,12 @@ impl<H: Hasher> Tree<H> {
         self.storage.proposals.get(&hash).map(|n| n.clone())
     }
 
-    pub fn update_proposal_unchecked(&self, proposal: Proposal) {
+    pub fn update_proposal_unchecked(&self, proposal: Proposal, witness: proposal::Witness) {
         let hash = proposal.hash::<H>();
         let parent_hash = proposal.parent;
 
-        let node = Arc::new(ParkingRwLock::new(ProposalNode::new_valid_uncheck(
-            proposal,
-        )));
+        let node = ProposalNode::new_valid_uncheck(proposal, witness);
+        let node = Arc::new(ParkingRwLock::new(node));
 
         self.add_proposal_to_parent(parent_hash, hash, node.clone());
 
@@ -418,28 +441,29 @@ impl<H: Hasher> Tree<H> {
     pub fn create_and_update_block(
         &self,
         parent: Multihash,
-    ) -> (Block, HashMap<Multihash, Vec<u8>>) {
+        vdf_proof: Vec<u8>,
+    ) -> (Block, block::Witness) {
         let parent_node = self.get_block(parent).expect("Parent block must exist");
 
-        let (node, proofs) = BlockNode::generate(parent_node.clone(), self.pk.clone())
-            .expect("Failed to generate block");
+        let node = BlockNode::generate_next(parent_node.clone(), &self.sk, vdf_proof);
+
         let block = node.block.as_ref().expect("Block must be set").clone();
         let hash = node.hash().unwrap();
+        let witenss = node.witness.as_ref().expect("Witness must be set").clone();
+        let weight = node.weight.expect("Weight must be set");
+
         let node = Arc::new(ParkingRwLock::new(node));
 
         parent_node
             .write()
             .children_blocks
             .insert(hash, node.clone());
-        node.read().proposals.values().flatten().for_each(|prop| {
-            prop.write().child_blocks.insert(hash, node.clone());
-        });
 
         self.storage.blocks.insert(hash, node.clone());
-        self.update_tips(hash, node.read().weight);
-        self.check_and_create_checkpoint(hash, node.read().weight);
+        self.update_tips(hash, weight);
+        self.check_and_create_checkpoint(hash, weight);
 
-        (block, proofs)
+        (block, witenss)
     }
 
     fn get_block(&self, hash: Multihash) -> Option<Arc<ParkingRwLock<BlockNode<H>>>> {
@@ -451,399 +475,228 @@ impl<H: Hasher> Tree<H> {
 mod tests {
     use super::*;
     use crate::{
-        consensus::{
-            block::{self, Block},
-            proposal::{self, Diff, Proposal},
-        },
-        crypto::{Multihash, PublicKey, SecretKey},
-        utils::trie::{Record, Trie},
+        consensus::{block, proposal},
+        crypto::SecretKey,
     };
     use libp2p::{gossipsub::MessageId, PeerId};
     use std::collections::HashMap;
+    use vdf::{VDFParams, VDF};
 
     type TestHasher = sha2::Sha256;
 
     const THRESHOLD: f64 = 0.5;
-    const TEST_KEY: &[u8] = b"test_key";
-    const TEST_VALUE: &[u8] = b"test_value";
+    const VDF_PARAMS: vdf::WesolowskiVDFParams = vdf::WesolowskiVDFParams(1024);
+    const VDF_DIFFICULTY: u64 = 1;
+    const MESSAGE_ID_BYTES: &[u8] = b"test_message_id";
 
-    struct TestContext {
-        dag: Tree<TestHasher>,
-        arc_dag: Option<Arc<Tree<TestHasher>>>,
-        genesis_hash: Multihash,
-        public_key: PublicKey,
-    }
-
-    impl TestContext {
-        fn new() -> Self {
-            let secret_key = SecretKey::random();
-            let public_key = secret_key.public_key();
-            let genesis_block = Self::create_genesis_block(&public_key);
-            let genesis_hash = genesis_block.hash::<TestHasher>();
-            let dag = Tree::with_genesis(genesis_block.clone(), public_key.clone(), THRESHOLD);
-
-            Self {
-                dag,
-                arc_dag: None,
-                genesis_hash,
-                public_key,
-            }
-        }
-
-        pub fn new_arc() -> Self {
-            let secret_key = SecretKey::random();
-            let public_key = secret_key.public_key();
-            let genesis_block = Self::create_genesis_block(&public_key);
-            let genesis_hash = genesis_block.hash::<TestHasher>();
-            let dag = Tree::with_genesis(genesis_block.clone(), public_key.clone(), THRESHOLD);
-            let arc_dag = Tree::with_genesis(genesis_block.clone(), public_key.clone(), THRESHOLD);
-
-            Self {
-                dag,
-                arc_dag: Some(Arc::new(arc_dag)),
-                genesis_hash,
-                public_key,
-            }
-        }
-
-        fn create_genesis_block(pk: &PublicKey) -> Block {
-            block::Builder::new()
-                .with_parent_hash(Multihash::default())
-                .with_height(0)
-                .with_proposer_pk(pk.clone())
-                .with_proposer_weight(0)
-                .build()
-        }
-
-        fn create_test_proposal(
-            &self,
-            parent: Multihash,
-            key: &[u8],
-            value: &[u8],
-        ) -> (Proposal, HashMap<Multihash, Vec<u8>>) {
-            let record = Record::new(0, value.to_vec());
-            let diff = Diff::new(None, record.clone());
-
-            let proposal = proposal::Builder::new()
-                .with_parent(parent)
-                .with_diff(key.to_vec(), diff)
-                .with_proposer_pk(self.public_key.clone())
-                .with_proposer_weight(0)
-                .build()
-                .expect("Failed to create proposal");
-
-            let trie = Trie::<TestHasher>::from_root(parent);
-            let proofs = proposal.generate_proofs(&trie);
-
-            (proposal, proofs)
-        }
-
-        fn create_test_block(
-            &self,
-            parent: Multihash,
-            height: u64,
-            proposals: Vec<Multihash>,
-        ) -> (Block, HashMap<Multihash, Vec<u8>>) {
-            let block = block::Builder::new()
-                .with_parent_hash(parent)
-                .with_height(height)
-                .with_proposals(proposals)
-                .with_proposer_pk(self.public_key.clone())
-                .with_proposer_weight(0)
-                .build();
-
-            let parent_node = self.dag.storage.blocks.get(&parent).unwrap();
-            let parent_read = parent_node.read();
-            let parent_trie = parent_read.trie.as_ref().unwrap();
-
-            let proofs = block.generate_proofs(parent_trie);
-
-            (block, proofs)
-        }
-
-        fn create_missing_parent_proposal(&self) -> Proposal {
-            proposal::Builder::new()
-                .with_parent(Multihash::wrap(0, &[1; 32]).unwrap())
-                .with_proposer_pk(self.public_key.clone())
-                .with_proposer_weight(0)
-                .with_code(0)
-                .build()
-                .expect("Failed to create missing parent proposal")
-        }
-
-        fn create_missing_parent_block(&self, height: u64) -> Block {
-            block::Builder::new()
-                .with_parent_hash(Multihash::wrap(0, &[1; 32]).unwrap())
-                .with_height(height)
-                .with_proposer_pk(self.public_key.clone())
-                .with_proposer_weight(0)
-                .build()
-        }
-
-        fn random_message_id() -> MessageId {
-            MessageId::new(&rand::random::<[u8; 32]>())
-        }
-
-        fn random_peer_id() -> PeerId {
-            PeerId::random()
-        }
-    }
-
-    // DAG tests
-    #[test]
-    fn dag_empty_creation() {
-        let pk = SecretKey::random().public_key();
-        let dag = Tree::<TestHasher>::empty(pk, THRESHOLD);
-        assert_eq!(dag.threshold, THRESHOLD);
+    fn create_tree() -> Tree<TestHasher> {
+        let sk = SecretKey::random();
+        Tree::with_genesis(sk, THRESHOLD)
     }
 
     #[test]
-    fn dag_with_genesis() {
-        let ctx = TestContext::new();
-        assert_eq!(ctx.dag.threshold, THRESHOLD);
-    }
+    fn update_proposal() {
+        let tree = create_tree();
 
-    #[tokio::test]
-    async fn update_proposal_success() {
-        let ctx = TestContext::new();
-        let (proposal, proofs) = ctx.create_test_proposal(ctx.genesis_hash, TEST_KEY, TEST_VALUE);
-        let msg_id = TestContext::random_message_id();
-        let peer_id = TestContext::random_peer_id();
+        let prop = proposal::Builder::new()
+            .with_code(0)
+            .with_parent(tree.tip_hash())
+            .with_proposer_pk(tree.sk.public_key())
+            .with_proposer_weight(0)
+            .build()
+            .expect("Failed to build proposal");
 
-        let result = ctx
-            .dag
-            .update_proposal(proposal.clone(), proofs, msg_id.clone(), peer_id);
+        let vdf = VDF_PARAMS.new();
+        let witness = prop
+            .generate_witness(&tree.sk, &tree.tip_trie(), &vdf, VDF_DIFFICULTY)
+            .expect("Failed to generate witness");
+
+        let msg_id = MessageId::new(MESSAGE_ID_BYTES);
+        let source = PeerId::random();
+
+        let hash = prop.hash::<TestHasher>();
+
+        let result = tree.update_proposal(prop, witness, msg_id, source);
 
         assert!(result.validated_msgs.is_empty());
         assert!(result.invalidated_msgs.is_empty());
-
-        let proposal_hash = proposal.hash::<TestHasher>();
-        let result = ctx
-            .dag
-            .update_proposal_client_validation(proposal_hash, true);
-
-        assert_eq!(result.validated_msgs.len(), 1);
-        assert_eq!(result.validated_msgs[0].0, msg_id);
-        assert_eq!(result.validated_msgs[0].1, peer_id);
+        assert!(tree
+            .storage
+            .proposals
+            .get(&hash)
+            .is_some_and(|n| { n.read().state.is_pending() }));
     }
 
-    #[tokio::test]
-    async fn update_proposal_client_invalid() {
-        let ctx = TestContext::new();
-        let (proposal, proofs) = ctx.create_test_proposal(ctx.genesis_hash, TEST_KEY, TEST_VALUE);
-        let msg_id = TestContext::random_message_id();
-        let peer_id = TestContext::random_peer_id();
+    #[test]
+    fn valid_when_proposal_completed() {
+        let tree = create_tree();
 
-        let _result = ctx
-            .dag
-            .update_proposal(proposal.clone(), proofs, msg_id.clone(), peer_id);
+        let prop = proposal::Builder::new()
+            .with_code(0)
+            .with_parent(tree.tip_hash())
+            .with_proposer_pk(tree.sk.public_key())
+            .with_proposer_weight(0)
+            .build()
+            .expect("Failed to build proposal");
 
-        let proposal_hash = proposal.hash::<TestHasher>();
-        let result = ctx
-            .dag
-            .update_proposal_client_validation(proposal_hash, false);
+        let vdf = VDF_PARAMS.new();
+        let witness = prop
+            .generate_witness(&tree.sk, &tree.tip_trie(), &vdf, VDF_DIFFICULTY)
+            .expect("Failed to generate witness");
 
-        assert_eq!(result.invalidated_msgs.len(), 1);
-        assert_eq!(result.invalidated_msgs[0].0, msg_id);
-        assert_eq!(result.invalidated_msgs[0].1, peer_id);
+        let msg_id = MessageId::new(MESSAGE_ID_BYTES);
+        let source = PeerId::random();
+
+        let hash = prop.hash::<TestHasher>();
+
+        tree.update_proposal(prop, witness, msg_id.clone(), source);
+        let res = tree.update_proposal_client_validation(hash, true);
+
+        assert_eq!(res.validated_msgs.len(), 1);
+        assert_eq!(res.validated_msgs[0], (msg_id, source));
+        assert!(res.invalidated_msgs.is_empty());
+        assert!(tree
+            .storage
+            .proposals
+            .get(&hash)
+            .is_some_and(|n| { n.read().state.is_valid() }));
     }
 
-    #[tokio::test]
-    async fn update_block_success() {
-        let ctx = TestContext::new();
+    #[test]
+    fn invalid_when_client_validation_fails() {
+        let tree = create_tree();
 
-        // First create and validate a proposal
-        let (proposal, prop_proofs) =
-            ctx.create_test_proposal(ctx.genesis_hash, TEST_KEY, TEST_VALUE);
-        let proposal_hash = proposal.hash::<TestHasher>();
-        let prop_msg_id = TestContext::random_message_id();
-        let prop_peer_id = TestContext::random_peer_id();
+        let prop = proposal::Builder::new()
+            .with_code(0)
+            .with_parent(tree.tip_hash())
+            .with_proposer_pk(tree.sk.public_key())
+            .with_proposer_weight(0)
+            .build()
+            .expect("Failed to build proposal");
 
-        ctx.dag
-            .update_proposal(proposal, prop_proofs, prop_msg_id, prop_peer_id);
-        ctx.dag
-            .update_proposal_client_validation(proposal_hash, true);
+        let vdf = VDF_PARAMS.new();
+        let witness = prop
+            .generate_witness(&tree.sk, &tree.tip_trie(), &vdf, VDF_DIFFICULTY)
+            .expect("Failed to generate witness");
 
-        // Now create a block that includes the proposal
-        let (block, block_proofs) = ctx.create_test_block(ctx.genesis_hash, 1, vec![proposal_hash]);
-        let block_msg_id = TestContext::random_message_id();
-        let block_peer_id = TestContext::random_peer_id();
+        let msg_id = MessageId::new(MESSAGE_ID_BYTES);
+        let source = PeerId::random();
 
-        let result = ctx
-            .dag
-            .update_block(block, block_proofs, block_msg_id.clone(), block_peer_id);
+        let hash = prop.hash::<TestHasher>();
 
-        assert_eq!(result.validated_msgs.len(), 1);
-        assert_eq!(result.validated_msgs[0].0, block_msg_id);
-        assert_eq!(result.validated_msgs[0].1, block_peer_id);
+        tree.update_proposal(prop, witness, msg_id.clone(), source);
+        let res = tree.update_proposal_client_validation(hash, false);
+
+        assert!(res.validated_msgs.is_empty());
+        assert_eq!(res.invalidated_msgs.len(), 1);
+        assert_eq!(res.invalidated_msgs[0], (msg_id, source));
+        assert!(tree
+            .storage
+            .proposals
+            .get(&hash)
+            .is_some_and(|n| { n.read().state.is_invalid() }));
     }
 
-    #[tokio::test]
-    async fn update_block_below_checkpoint() {
-        let ctx = TestContext::new();
+    #[test]
+    fn update_block() {
+        let tree = create_tree();
 
-        // Create a block with height lower than checkpoint
-        let low_block = block::Builder::new()
-            .with_parent_hash(ctx.genesis_hash)
-            .with_height(0) // Same as genesis, should be below checkpoint
-            .with_proposer_pk(ctx.public_key)
-            .with_proposer_weight(50)
+        let prop = proposal::Builder::new()
+            .with_code(0)
+            .with_parent(tree.tip_hash())
+            .with_proposer_pk(tree.sk.public_key())
+            .with_proposer_weight(0)
+            .build()
+            .expect("Failed to build proposal");
+
+        let vdf = VDF_PARAMS.new();
+        let witness = prop
+            .generate_witness(&tree.sk, &tree.tip_trie(), &vdf, VDF_DIFFICULTY)
+            .expect("Failed to generate witness");
+
+        let msg_id = MessageId::new(MESSAGE_ID_BYTES);
+        let source = PeerId::random();
+
+        let hash = prop.hash::<TestHasher>();
+        tree.update_proposal(prop, witness, msg_id.clone(), source);
+        tree.update_proposal_client_validation(hash, true);
+
+        let block = block::Builder::new()
+            .with_parent_hash(tree.tip_hash())
+            .with_height(1)
+            .with_proposals([hash])
+            .with_proposer_pk(tree.sk.public_key())
+            .with_proposer_weight(0)
             .build();
 
-        let msg_id = TestContext::random_message_id();
-        let peer_id = TestContext::random_peer_id();
+        let block_hash = block.hash::<TestHasher>();
 
-        let result = ctx
-            .dag
-            .update_block(low_block, HashMap::new(), msg_id.clone(), peer_id);
+        let sig = tree.sk.sign(&block_hash.to_bytes());
+        let proofs = block.generate_proofs(&tree.tip_trie());
+        let vdf = VDF_PARAMS.new();
+        let vdf_proof = vdf
+            .solve(&block_hash.to_bytes(), VDF_DIFFICULTY)
+            .expect("Failed to solve VDF");
 
-        assert_eq!(result.invalidated_msgs.len(), 1);
-        assert_eq!(result.invalidated_msgs[0].0, msg_id);
-        assert_eq!(result.invalidated_msgs[0].1, peer_id);
+        let witness = block::Witness::new(sig, proofs, vdf_proof);
+
+        // All info is set, so the block should be valid
+        let result = tree.update_block(block, witness, msg_id.clone(), source);
+
+        assert_eq!(result.validated_msgs.len(), 1);
+        assert_eq!(result.validated_msgs[0], (msg_id, source));
+        assert!(result.invalidated_msgs.is_empty());
     }
 
     #[test]
-    fn block_node_invalidate_descendants() {
-        let msg_id = TestContext::random_message_id();
-        let peer_id = TestContext::random_peer_id();
+    fn invalid_if_block_ref_proposal_is_invalid() {
+        let tree = create_tree();
 
-        let mut node = BlockNode::<TestHasher>::new_missing();
-        node.metadata = Some(Metadata::new(msg_id.clone(), peer_id));
-        node.state = State::Valid;
+        let prop = proposal::Builder::new()
+            .with_code(0)
+            .with_parent(tree.tip_hash())
+            .with_proposer_pk(tree.sk.public_key())
+            .with_proposer_weight(0)
+            .build()
+            .expect("Failed to build proposal");
 
-        let mut result = ProcessResult::new();
-        node.invalidate_descendants(&mut result);
+        let vdf = VDF_PARAMS.new();
+        let witness = prop
+            .generate_witness(&tree.sk, &tree.tip_trie(), &vdf, VDF_DIFFICULTY)
+            .expect("Failed to generate witness");
 
-        assert_eq!(node.state, State::Invalid);
-        assert_eq!(result.invalidated_msgs.len(), 1);
-        assert_eq!(result.invalidated_msgs[0].0, msg_id);
-        assert_eq!(result.invalidated_msgs[0].1, peer_id);
-    }
+        let msg_id = MessageId::new(MESSAGE_ID_BYTES);
+        let source = PeerId::random();
 
-    #[test]
-    fn proposal_node_invalidate_descendants() {
-        let msg_id = TestContext::random_message_id();
-        let peer_id = TestContext::random_peer_id();
+        let hash = prop.hash::<TestHasher>();
+        tree.update_proposal(prop, witness, msg_id.clone(), source);
+        tree.update_proposal_client_validation(hash, false);
 
-        let mut node = ProposalNode::<TestHasher>::new_missing();
-        node.metadata = Some(Metadata::new(msg_id.clone(), peer_id));
-        node.state = State::Valid;
+        let block = block::Builder::new()
+            .with_parent_hash(tree.tip_hash())
+            .with_height(1)
+            .with_proposals([hash])
+            .with_proposer_pk(tree.sk.public_key())
+            .with_proposer_weight(0)
+            .build();
 
-        let mut result = ProcessResult::new();
-        node.invalidate_descendants(&mut result);
+        let block_hash = block.hash::<TestHasher>();
 
-        assert_eq!(node.state, State::Invalid);
-        assert_eq!(result.invalidated_msgs.len(), 1);
-        assert_eq!(result.invalidated_msgs[0].0, msg_id);
-        assert_eq!(result.invalidated_msgs[0].1, peer_id);
-    }
+        let vdf = VDF_PARAMS.new();
+        let vdf_proof = vdf
+            .solve(&block_hash.to_bytes(), VDF_DIFFICULTY)
+            .expect("Failed to solve VDF");
 
-    #[tokio::test]
-    async fn concurrent_proposal_updates() {
-        let ctx = TestContext::new_arc();
-        let mut handles = vec![];
+        let witness = block::Witness::new(
+            tree.sk.sign(&block_hash.to_bytes()),
+            HashMap::new(),
+            vdf_proof,
+        );
 
-        let dag = ctx.arc_dag.as_ref().unwrap().clone();
-
-        for i in 0..10 {
-            let dag = dag.clone();
-            let genesis_hash = ctx.genesis_hash;
-            let public_key = ctx.public_key.clone();
-
-            let handle = tokio::spawn(async move {
-                let key = format!("key_{i}");
-                let value = format!("value_{i}");
-                let record = Record::new(0, value.as_bytes().to_vec());
-                let diff = Diff::new(None, record);
-
-                let proposal = proposal::Builder::new()
-                    .with_parent(genesis_hash)
-                    .with_diff(key.as_bytes().to_vec(), diff)
-                    .with_proposer_pk(public_key)
-                    .with_proposer_weight(50)
-                    .build()
-                    .expect("Failed to create proposal");
-
-                let trie = Trie::<TestHasher>::from_root(genesis_hash);
-                let proofs = proposal.generate_proofs(&trie);
-
-                let msg_id = MessageId::new(format!("msg_{i}").as_bytes());
-                let peer_id = PeerId::random();
-
-                dag.update_proposal(proposal, proofs, msg_id, peer_id)
-            });
-            handles.push(handle);
-        }
-
-        let results: Vec<_> = futures::future::join_all(handles).await;
-
-        for result in results {
-            assert!(result.is_ok());
-        }
-    }
-
-    #[test]
-    fn state_transitions() {
-        // Test all state variants
-        assert_eq!(State::Pending, State::Pending);
-        assert_eq!(State::Valid, State::Valid);
-        assert_eq!(State::Invalid, State::Invalid);
-
-        assert_ne!(State::Pending, State::Valid);
-        assert_ne!(State::Valid, State::Invalid);
-        assert_ne!(State::Pending, State::Invalid);
-    }
-
-    #[test]
-    fn checkpoint_creation_logic() {
-        let ctx = TestContext::new();
-
-        // Access the checkpoint height method through testing
-        let checkpoint_height = ctx.dag.checkpoint_height();
-        assert_eq!(checkpoint_height, 0); // Genesis height
-
-        let block_height = ctx.dag.block_height(&ctx.genesis_hash);
-        assert_eq!(block_height, Some(0));
-    }
-
-    #[test]
-    fn update_tips_logic() {
-        let ctx = TestContext::new();
-        let new_weight = 200;
-        let new_hash = Multihash::default();
-
-        // Test the internal update_tips logic
-        ctx.dag.update_tips(new_hash, new_weight);
-
-        let tips = ctx.dag.storage.tips.read();
-        assert!(tips.contains_key(&new_weight));
-        assert_eq!(tips.get(&new_weight), Some(&new_hash));
-    }
-
-    #[test]
-    fn proposal_validation_missing_parent() {
-        let ctx = TestContext::new();
-        let proposal = ctx.create_missing_parent_proposal();
-        let msg_id = TestContext::random_message_id();
-        let peer_id = TestContext::random_peer_id();
-
-        let result = ctx
-            .dag
-            .update_proposal(proposal, HashMap::new(), msg_id.clone(), peer_id);
-
-        // Should not be validated due to missing/invalid parent
-        assert!(result.validated_msgs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn block_validation_missing_parent() {
-        let ctx = TestContext::new();
-        let block = ctx.create_missing_parent_block(1);
-        let msg_id = TestContext::random_message_id();
-        let peer_id = TestContext::random_peer_id();
-
-        let result = ctx.dag.update_block(block, HashMap::new(), msg_id, peer_id);
+        let result = tree.update_block(block, witness, msg_id.clone(), source);
 
         assert!(result.validated_msgs.is_empty());
+        assert_eq!(result.invalidated_msgs.len(), 1);
+        assert_eq!(result.invalidated_msgs[0], (msg_id, source));
     }
 }

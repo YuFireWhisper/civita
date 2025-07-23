@@ -59,13 +59,14 @@ impl Block {
     pub fn new(
         parent: Multihash,
         height: u64,
+        proposals: BTreeSet<Multihash>,
         proposer_pk: PublicKey,
         proposer_weight: Weight,
     ) -> Self {
         Block {
             parent,
             height,
-            proposals: BTreeSet::new(),
+            proposals,
             proposer_pk,
             proposer_weight,
             hash_cache: OnceLock::new(),
@@ -96,6 +97,20 @@ impl Block {
     ) -> bool {
         let hash = self.hash::<H>().to_bytes();
         vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok()
+    }
+
+    pub fn verify_proposer_weight<H: Hasher>(
+        &self,
+        witness: &Witness,
+        trie_root: Multihash,
+    ) -> bool {
+        let key = self.proposer_pk.to_hash::<H>().to_bytes();
+
+        match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
+            ProofResult::Exists(record) => record.weight == self.proposer_weight,
+            ProofResult::NotExists => self.proposer_weight == 0,
+            ProofResult::Invalid => false,
+        }
     }
 
     pub fn verify_proposer_weight_with_proofs<H: Hasher>(
@@ -165,9 +180,10 @@ impl Builder {
     pub fn build(self) -> Block {
         let parent = self.parent.expect("Parent block must be set");
         let height = self.height.expect("Height must be set");
+        let proposals = self.proposals;
         let proposer_pk = self.proposer_pk.expect("Proposer public key must be set");
         let proposer_weight = self.proposer_weight.expect("Proposer weight must be set");
 
-        Block::new(parent, height, proposer_pk, proposer_weight)
+        Block::new(parent, height, proposals, proposer_pk, proposer_weight)
     }
 }

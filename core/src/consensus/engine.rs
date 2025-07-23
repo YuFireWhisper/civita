@@ -178,7 +178,7 @@ impl<H: Hasher> Engine<H> {
         witness.to_writer(&mut bytes);
 
         self.gossipsub.publish(self.proposal_topic, bytes).await?;
-        self.block_tree.update_proposal_unchecked(prop);
+        self.block_tree.update_proposal_unchecked(prop, witness);
 
         Ok(())
     }
@@ -207,12 +207,10 @@ impl<H: Hasher> Engine<H> {
                 result = vdf_task.as_mut().unwrap() => {
                     match result {
                         Ok((tip, vdf_proof)) => {
-                            let (block, proofs) = self.block_tree.create_and_update_block(
+                            let (block, witness) = self.block_tree.create_and_update_block(
                                 tip,
+                                vdf_proof,
                             );
-
-                            let sig = self.sk.sign(&tip.to_bytes());
-                            let witness = block::Witness::new(sig, proofs, vdf_proof);
 
                             let mut bytes = Vec::new();
                             block.to_writer(&mut bytes);
@@ -313,7 +311,7 @@ impl<H: Hasher> Engine<H> {
 
         let res = self
             .block_tree
-            .update_proposal(prop, witness.proofs, msg_id, source);
+            .update_proposal(prop, witness, msg_id, source);
 
         let mut ress = Vec::with_capacity(res.validated_msgs.len() + res.invalidated_msgs.len());
 
@@ -377,9 +375,7 @@ impl<H: Hasher> Engine<H> {
             return vec![(msg_id, source, MessageAcceptance::Reject)];
         }
 
-        let res = self
-            .block_tree
-            .update_block(block, witness.proofs, msg_id, source);
+        let res = self.block_tree.update_block(block, witness, msg_id, source);
 
         let mut ress = Vec::with_capacity(res.validated_msgs.len() + res.invalidated_msgs.len());
 
