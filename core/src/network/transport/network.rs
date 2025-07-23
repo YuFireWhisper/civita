@@ -17,7 +17,7 @@ use crate::{
     network::{
         behaviour::{self, Behaviour},
         gossipsub::{self, Gossipsub},
-        request_response, storage, Storage,
+        request_response,
     },
 };
 
@@ -32,7 +32,6 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct Transport {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     gossipsub: Arc<Gossipsub>,
-    storage: Arc<Storage>,
     req_resp: Arc<request_response::RequestResponse>,
     local_peer_id: PeerId,
     listen_addr: Multiaddr,
@@ -61,13 +60,6 @@ impl Transport {
 
         let swarm = Arc::new(Mutex::new(swarm));
 
-        let storage = storage::NetworkConfig {
-            wait_for_kad_result_timeout: config.wait_for_kad_result_timeout,
-            ..Default::default()
-        };
-        let storage = storage::Storage::new_network(swarm.clone(), storage);
-        let storage = Arc::new(storage);
-
         let gossipsub_config = gossipsub::NetworkConfig {
             timeout: config.wait_for_gossipsub_peer_timeout,
             channel_size: config.channel_capacity,
@@ -81,7 +73,6 @@ impl Transport {
         let transport = Self {
             swarm,
             gossipsub,
-            storage,
             req_resp,
             local_peer_id: peer_id,
             listen_addr,
@@ -120,7 +111,6 @@ impl Transport {
     async fn receive(&self) {
         let swarm = self.swarm.clone();
         let gossipsub = self.gossipsub.clone();
-        let storage = self.storage.clone();
         let req_resp = self.req_resp.clone();
         let receive_interval = self.config.receive_interval;
 
@@ -134,13 +124,13 @@ impl Transport {
                                     log::error!("Error handling gossipsub event: {e:?}");
                                 }
                             },
-                            behaviour::Event::Kad(event) => {
-                                storage.handle_event(*event);
-                            },
                             behaviour::Event::RequestResponse(event) => {
                                 if let Err(e) = req_resp.handle_event_network(*event).await {
                                     log::error!("Error handling request response event: {e:?}");
                                 }
+                            },
+                            behaviour::Event::Kad(_) => {
+                                // Do nothing
                             },
                         }
                     },
@@ -190,10 +180,6 @@ impl Transport {
 
     pub fn gossipsub(&self) -> Arc<Gossipsub> {
         self.gossipsub.clone()
-    }
-
-    pub fn storage(&self) -> Arc<Storage> {
-        self.storage.clone()
     }
 
     pub fn request_response(&self) -> Arc<request_response::RequestResponse> {
