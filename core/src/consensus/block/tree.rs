@@ -51,7 +51,7 @@ pub struct Metadata {
 pub struct Storage<H> {
     blocks: DashMap<Multihash, Arc<ParkingRwLock<BlockNode<H>>>>,
     proposals: DashMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>>,
-    tips: ParkingRwLock<BTreeMap<Weight, Multihash>>,
+    tips: ParkingRwLock<BTreeMap<(Weight, u64), Multihash>>,
     checkpoints: ParkingRwLock<Vec<Multihash>>,
 }
 
@@ -115,7 +115,7 @@ impl<H: Hasher> Storage<H> {
         let mut tips = BTreeMap::new();
         let genesis_weight = genesis_node.read().weight.unwrap();
 
-        tips.insert(genesis_weight, genesis_hash);
+        tips.insert((genesis_weight, 0), genesis_hash);
 
         let checkpoints = vec![genesis_hash];
 
@@ -295,7 +295,8 @@ impl<H: Hasher> Tree<H> {
             if node.state == State::Valid {
                 let block_hash = node.block.as_ref().unwrap().hash::<H>();
                 let weight = node.weight.unwrap();
-                self.update_tips(block_hash, weight);
+                let height = node.height().unwrap();
+                self.update_tips(block_hash, weight, height);
                 self.check_and_create_checkpoint(block_hash, weight);
             }
 
@@ -305,10 +306,10 @@ impl<H: Hasher> Tree<H> {
         None
     }
 
-    fn update_tips(&self, hash: Multihash, cumulative_weight: Weight) {
+    fn update_tips(&self, hash: Multihash, cumulative_weight: Weight, height: u64) {
         let mut tips = self.storage.tips.write();
-        tips.retain(|&w, _| w >= cumulative_weight);
-        tips.insert(cumulative_weight, hash);
+        tips.retain(|&w, _| w >= (cumulative_weight, height));
+        tips.insert((cumulative_weight, height), hash);
     }
 
     fn check_and_create_checkpoint(&self, hash: Multihash, weight: Weight) {
@@ -451,6 +452,7 @@ impl<H: Hasher> Tree<H> {
         let hash = node.hash().unwrap();
         let witenss = node.witness.as_ref().expect("Witness must be set").clone();
         let weight = node.weight.expect("Weight must be set");
+        let node_height = node.height().expect("Height must be set");
 
         let node = Arc::new(ParkingRwLock::new(node));
 
@@ -460,7 +462,7 @@ impl<H: Hasher> Tree<H> {
             .insert(hash, node.clone());
 
         self.storage.blocks.insert(hash, node.clone());
-        self.update_tips(hash, weight);
+        self.update_tips(hash, weight, node_height);
         self.check_and_create_checkpoint(hash, weight);
 
         (block, witenss)
