@@ -65,13 +65,9 @@ impl Behaviour {
     }
 
     fn create_req_resp() -> request_response::Behaviour<Codec<Vec<u8>, Vec<u8>>> {
-        request_response::Behaviour::new(
-            [(
-                StreamProtocol::new(concat!("/", env!("CARGO_PKG_NAME"))),
-                ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        )
+        let protocol_name = concat!("/", env!("CARGO_PKG_NAME"));
+        let protocol = (StreamProtocol::new(protocol_name), ProtocolSupport::Full);
+        request_response::Behaviour::new([protocol], request_response::Config::default())
     }
 
     pub fn gossipsub(&self) -> &gossipsub::Behaviour {
