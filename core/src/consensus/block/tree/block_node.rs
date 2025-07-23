@@ -95,10 +95,8 @@ impl<H: Hasher> BlockNode<H> {
 
         assert!(parent_read.state.is_valid());
 
-        let parent_block = parent_read
-            .block
-            .as_ref()
-            .expect("Parent block must be valid");
+        let parent_hash = parent_read.hash().expect("Parent block must be valid");
+        let parent_height = parent_read.height().expect("Parent block must have height");
         let parent_trie = parent_read
             .trie
             .as_ref()
@@ -114,7 +112,8 @@ impl<H: Hasher> BlockNode<H> {
         };
 
         let block = block::Builder::new()
-            .with_parent_block::<H>(parent_block)
+            .with_parent_hash(parent_hash)
+            .with_height(parent_height.wrapping_add(1))
             .with_proposals(props.keys().cloned())
             .with_proposer_pk(proposer_pk)
             .with_proposer_weight(proposer_weight)
@@ -308,6 +307,10 @@ impl<H: Hasher> BlockNode<H> {
     }
 
     pub fn height(&self) -> Option<u64> {
+        if self.is_genesis {
+            return Some(0);
+        }
+
         self.block.as_ref().map(|b| b.height)
     }
 
