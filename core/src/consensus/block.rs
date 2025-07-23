@@ -95,8 +95,20 @@ impl Block {
         vdf: &WesolowskiVDF,
         difficulty: u64,
     ) -> bool {
-        let hash = self.hash::<H>().to_bytes();
-        vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok()
+        let challenge_bytes = [
+            self.parent.to_bytes(),
+            self.proposer_pk.to_hash::<H>().to_bytes(),
+        ]
+        .concat();
+
+        let hash = H::hash(&challenge_bytes).to_bytes();
+
+        // The veirfy function will panic if the proof is invalid. (I don't know why, but it is the
+        // case).
+        //
+        // If we have time, we should implement own VDF Library, which will not panic on
+        std::panic::catch_unwind(|| vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok())
+            .unwrap_or(false)
     }
 
     pub fn verify_proposer_weight<H: Hasher>(

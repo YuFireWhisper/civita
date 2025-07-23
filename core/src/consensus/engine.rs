@@ -235,12 +235,16 @@ impl<H: Hasher> Engine<H> {
     fn start_vdf_task(&self) -> JoinHandle<(Multihash, Vec<u8>)> {
         let tip = self.block_tree.tip_hash();
 
+        let pk_bytes = self.sk.public_key().to_hash::<H>().to_bytes();
+        let challenge_bytes = [pk_bytes, tip.to_bytes()].concat();
+        let challenge = H::hash(&challenge_bytes).to_bytes();
+
         let vdf = self.vdf.clone();
         let difficulty = self.vdf_difficulty;
         tokio::spawn(async move {
             (
                 tip,
-                vdf.solve(&tip.to_bytes(), difficulty)
+                vdf.solve(&challenge, difficulty)
                     .expect("Failed to solve VDF"),
             )
         })
