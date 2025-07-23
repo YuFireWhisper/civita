@@ -22,12 +22,12 @@ pub struct ProposalNode<H> {
 }
 
 impl<H: Hasher> ProposalNode<H> {
-    pub fn new_missing(parent_block: Arc<ParkingRwLock<BlockNode<H>>>) -> Self {
+    pub fn new_missing() -> Self {
         Self {
             proposal: None,
             proofs: HashMap::new(),
             state: State::Pending,
-            parent_block,
+            parent_block: Arc::new(ParkingRwLock::new(BlockNode::new_missing())),
             child_blocks: HashMap::new(),
             client_validated: None,
             metadata: None,

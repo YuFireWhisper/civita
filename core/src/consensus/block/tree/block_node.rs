@@ -84,7 +84,7 @@ impl<H: Hasher> BlockNode<H> {
             state: State::Valid,
 
             trie: Some(genesis_trie),
-            weight: genesis_block.proposer_weight,
+            weight: Weight::default(),
             proofs: HashMap::new(),
 
             parent: None,
@@ -96,6 +96,15 @@ impl<H: Hasher> BlockNode<H> {
             metadata: None,
             is_genesis: true,
         }
+    }
+
+    pub fn set_parent(&mut self, parent: Arc<ParkingRwLock<BlockNode<H>>>) -> bool {
+        if self.parent.is_some() {
+            return false;
+        }
+        self.cumulative_weight = parent.read().cumulative_weight;
+        self.parent = Some(parent);
+        true
     }
 
     pub fn generate(
@@ -287,6 +296,10 @@ impl<H: Hasher> BlockNode<H> {
 
     pub fn hash(&self) -> Option<Multihash> {
         self.block.as_ref().map(|b| b.hash::<H>())
+    }
+
+    pub fn height(&self) -> Option<u64> {
+        self.block.as_ref().map(|b| b.height)
     }
 }
 

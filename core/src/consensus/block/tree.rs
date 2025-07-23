@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use dashmap::DashMap;
 use derivative::Derivative;
 use libp2p::{gossipsub::MessageId, PeerId};
 use parking_lot::RwLock as ParkingRwLock;
@@ -50,11 +51,9 @@ pub struct Metadata {
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct Storage<H> {
-    blocks: ParkingRwLock<HashMap<Multihash, Arc<ParkingRwLock<BlockNode<H>>>>>,
-    proposals: ParkingRwLock<HashMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>>>,
-
+    blocks: DashMap<Multihash, Arc<ParkingRwLock<BlockNode<H>>>>,
+    proposals: DashMap<Multihash, Arc<ParkingRwLock<ProposalNode<H>>>>,
     tips: ParkingRwLock<BTreeMap<Weight, Multihash>>,
-
     checkpoints: ParkingRwLock<Vec<Multihash>>,
 }
 
@@ -104,7 +103,7 @@ impl<H: Hasher> Storage<H> {
         let genesis_hash = genesis_block.hash::<H>();
         let genesis_node = Arc::new(ParkingRwLock::new(BlockNode::new_genesis(genesis_block)));
 
-        let mut blocks = HashMap::new();
+        let blocks = DashMap::new();
         blocks.insert(genesis_hash, genesis_node.clone());
 
         let mut tips = BTreeMap::new();
@@ -113,8 +112,8 @@ impl<H: Hasher> Storage<H> {
         let checkpoints = vec![genesis_hash];
 
         Self {
-            blocks: ParkingRwLock::new(blocks),
-            proposals: ParkingRwLock::new(HashMap::new()),
+            blocks,
+            proposals: DashMap::default(),
             tips: ParkingRwLock::new(tips),
             checkpoints: ParkingRwLock::new(checkpoints),
         }
@@ -154,13 +153,7 @@ impl<H: Hasher> Tree<H> {
             return result;
         }
 
-        let node = {
-            let mut blocks = self.storage.blocks.write();
-            blocks
-                .entry(hash)
-                .or_insert_with(|| Arc::new(ParkingRwLock::new(BlockNode::new_missing())))
-                .clone()
-        };
+        let node = self.get_or_insert_missing_block(hash);
 
         if !self.add_block_to_parent(parent_hash, hash, node.clone()) {
             result.add_invalidated(msg_id, source);
@@ -180,7 +173,7 @@ impl<H: Hasher> Tree<H> {
 
         node.write().set_block_data(block, proofs, msg_id, source);
 
-        if let Some(r) = self.try_validate_block(node.clone()) {
+        if let Some(r) = self.try_validate_block(node) {
             result.merge(r);
         }
 
@@ -197,22 +190,23 @@ impl<H: Hasher> Tree<H> {
             .checkpoints
             .read()
             .last()
-            .and_then(|hash| {
-                self.storage
-                    .blocks
-                    .read()
-                    .get(hash)
-                    .map(|node| node.read().block.as_ref().map_or(0, |b| b.height))
-            })
+            .and_then(|hash| self.block_height(hash))
             .unwrap_or(0)
     }
 
     fn block_height(&self, block_hash: &Multihash) -> Option<u64> {
         self.storage
             .blocks
-            .read()
             .get(block_hash)
-            .and_then(|node| node.read().block.as_ref().map(|b| b.height))
+            .and_then(|node| node.read().height())
+    }
+
+    fn get_or_insert_missing_block(&self, hash: Multihash) -> Arc<ParkingRwLock<BlockNode<H>>> {
+        self.storage
+            .blocks
+            .entry(hash)
+            .or_insert_with(|| Arc::new(ParkingRwLock::new(BlockNode::new_missing())))
+            .clone()
     }
 
     fn add_block_to_parent(
@@ -221,13 +215,7 @@ impl<H: Hasher> Tree<H> {
         block_hash: Multihash,
         block: Arc<ParkingRwLock<BlockNode<H>>>,
     ) -> bool {
-        let parent_node = self
-            .storage
-            .blocks
-            .write()
-            .entry(parent_hash)
-            .or_insert_with(|| Arc::new(ParkingRwLock::new(BlockNode::new_missing())))
-            .clone();
+        let parent_node = self.get_or_insert_missing_block(parent_hash);
 
         parent_node
             .write()
@@ -235,11 +223,10 @@ impl<H: Hasher> Tree<H> {
             .entry(block_hash)
             .or_insert_with(|| block.clone());
 
-        let is_not_invalid = parent_node.read().state != State::Invalid;
+        block.write().set_parent(parent_node.clone());
 
-        block.write().parent = Some(parent_node.clone());
-
-        is_not_invalid
+        let parent_read = parent_node.read();
+        !parent_read.state.is_invalid()
     }
 
     fn add_block_to_proposal(
@@ -248,17 +235,7 @@ impl<H: Hasher> Tree<H> {
         block_hash: Multihash,
         block: Arc<ParkingRwLock<BlockNode<H>>>,
     ) -> bool {
-        let prop_node = self
-            .storage
-            .proposals
-            .read()
-            .get(&prop_hash)
-            .cloned()
-            .unwrap_or_else(|| {
-                Arc::new(ParkingRwLock::new(ProposalNode::new_missing(Arc::new(
-                    ParkingRwLock::new(BlockNode::new_missing()),
-                ))))
-            });
+        let prop_node = self.get_or_insert_missing_proposal(prop_hash);
 
         prop_node
             .write()
@@ -275,6 +252,17 @@ impl<H: Hasher> Tree<H> {
             .or_insert_with(|| Some(prop_node));
 
         is_not_invalid
+    }
+
+    fn get_or_insert_missing_proposal(
+        &self,
+        hash: Multihash,
+    ) -> Arc<ParkingRwLock<ProposalNode<H>>> {
+        self.storage
+            .proposals
+            .entry(hash)
+            .or_insert_with(|| Arc::new(ParkingRwLock::new(ProposalNode::new_missing())))
+            .clone()
     }
 
     fn try_validate_block(&self, block: Arc<ParkingRwLock<BlockNode<H>>>) -> Option<ProcessResult> {
@@ -304,7 +292,6 @@ impl<H: Hasher> Tree<H> {
             * self.storage.checkpoints.read().last().map_or(0.0, |h| {
                 self.storage
                     .blocks
-                    .read()
                     .get(h)
                     .and_then(|node| node.read().trie.as_ref().map(|trie| trie.weight() as f64))
                     .unwrap_or(0.0)
@@ -336,19 +323,15 @@ impl<H: Hasher> Tree<H> {
             return result;
         }
 
-        let mut props = self.storage.proposals.write();
-        let prop = props.entry(hash).or_insert_with(|| {
-            Arc::new(ParkingRwLock::new(ProposalNode::new_missing(Arc::new(
-                ParkingRwLock::new(BlockNode::new_missing()),
-            ))))
-        });
+        let node = self.get_or_insert_missing_proposal(hash);
 
-        self.add_proposal_to_parent(parent_hash, hash, prop.clone());
+        self.add_proposal_to_parent(parent_hash, hash, node.clone());
 
-        prop.write()
-            .set_proposal_data(proposal, proofs, msg_id, source);
+        let mut node_write = node.write();
 
-        if let Some(r) = prop.write().try_validate() {
+        node_write.set_proposal_data(proposal, proofs, msg_id, source);
+
+        if let Some(r) = node_write.try_validate() {
             result.merge(r);
         }
 
@@ -361,21 +344,15 @@ impl<H: Hasher> Tree<H> {
         proposal_hash: Multihash,
         proposal: Arc<ParkingRwLock<ProposalNode<H>>>,
     ) {
-        let parent_block = self
-            .storage
-            .blocks
-            .write()
-            .entry(parent_hash)
-            .or_insert_with(|| Arc::new(ParkingRwLock::new(BlockNode::new_missing())))
-            .clone();
+        let parent_node = self.get_or_insert_missing_block(parent_hash);
 
-        parent_block
+        parent_node
             .write()
             .children_proposals
             .entry(proposal_hash)
             .or_insert_with(|| proposal.clone());
 
-        proposal.write().parent_block = parent_block;
+        proposal.write().parent_block = parent_node;
     }
 
     pub fn update_proposal_client_validation(
@@ -385,8 +362,8 @@ impl<H: Hasher> Tree<H> {
     ) -> ProcessResult {
         let mut result = ProcessResult::new();
 
-        if let Some(proposal_node) = self.storage.proposals.read().get(&proposal_hash).cloned() {
-            if let Some(r) = proposal_node.write().set_client_validation(is_valid) {
+        if let Some(node) = self.get_proposal_node(proposal_hash) {
+            if let Some(r) = node.write().set_client_validation(is_valid) {
                 result.merge(r);
             }
         }
@@ -394,18 +371,21 @@ impl<H: Hasher> Tree<H> {
         result
     }
 
+    fn get_proposal_node(&self, hash: Multihash) -> Option<Arc<ParkingRwLock<ProposalNode<H>>>> {
+        self.storage.proposals.get(&hash).map(|n| n.clone())
+    }
+
     pub fn update_proposal_unchecked(&self, proposal: Proposal) {
         let hash = proposal.hash::<H>();
         let parent_hash = proposal.parent;
 
-        let mut props = self.storage.proposals.write();
-        let prop = props.entry(hash).or_insert_with(|| {
-            Arc::new(ParkingRwLock::new(ProposalNode::new_valid_uncheck(
-                proposal,
-            )))
-        });
+        let node = Arc::new(ParkingRwLock::new(ProposalNode::new_valid_uncheck(
+            proposal,
+        )));
 
-        self.add_proposal_to_parent(parent_hash, hash, prop.clone());
+        self.add_proposal_to_parent(parent_hash, hash, node.clone());
+
+        self.storage.proposals.insert(hash, node);
     }
 
     pub fn tip_trie(&self) -> Trie<H> {
@@ -420,10 +400,9 @@ impl<H: Hasher> Tree<H> {
     fn tip_node(&self) -> Arc<ParkingRwLock<BlockNode<H>>> {
         self.storage
             .blocks
-            .read()
             .get(&self.tip_hash())
-            .cloned()
-            .expect("Tip must exist")
+            .map(|n| n.clone())
+            .expect("There must be at least one tip node")
     }
 
     pub fn tip_hash(&self) -> Multihash {
@@ -440,13 +419,7 @@ impl<H: Hasher> Tree<H> {
         &self,
         parent: Multihash,
     ) -> (Block, HashMap<Multihash, Vec<u8>>) {
-        let parent_node = self
-            .storage
-            .blocks
-            .read()
-            .get(&parent)
-            .cloned()
-            .expect("Parent block must exist");
+        let parent_node = self.get_block(parent).expect("Parent block must exist");
 
         let (node, proofs) = BlockNode::generate(parent_node.clone(), self.pk.clone())
             .expect("Failed to generate block");
@@ -462,11 +435,15 @@ impl<H: Hasher> Tree<H> {
             prop.write().child_blocks.insert(hash, node.clone());
         });
 
-        self.storage.blocks.write().insert(hash, node.clone());
+        self.storage.blocks.insert(hash, node.clone());
         self.update_tips(hash, node.read().weight);
         self.check_and_create_checkpoint(hash, node.read().weight);
 
         (block, proofs)
+    }
+
+    fn get_block(&self, hash: Multihash) -> Option<Arc<ParkingRwLock<BlockNode<H>>>> {
+        self.storage.blocks.get(&hash).map(|n| n.clone())
     }
 }
 
@@ -575,11 +552,9 @@ mod tests {
                 .with_proposer_weight(0)
                 .build();
 
-            let blocks = self.dag.storage.blocks.read();
-            let parent_node = blocks.get(&parent).unwrap().read();
-            let parent_trie = parent_node.trie.as_ref().unwrap();
-
-            println!("parent_trie root: {:?}", parent_trie.root_hash());
+            let parent_node = self.dag.storage.blocks.get(&parent).unwrap();
+            let parent_read = parent_node.read();
+            let parent_trie = parent_read.trie.as_ref().unwrap();
 
             let proofs = block.generate_proofs(parent_trie);
 
@@ -747,11 +722,10 @@ mod tests {
 
     #[test]
     fn proposal_node_invalidate_descendants() {
-        let parent_block = Arc::new(ParkingRwLock::new(BlockNode::<TestHasher>::new_missing()));
         let msg_id = TestContext::random_message_id();
         let peer_id = TestContext::random_peer_id();
 
-        let mut node = ProposalNode::new_missing(parent_block);
+        let mut node = ProposalNode::<TestHasher>::new_missing();
         node.metadata = Some(Metadata::new(msg_id.clone(), peer_id));
         node.state = State::Valid;
 
