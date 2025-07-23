@@ -6,10 +6,8 @@ use civita_core::{
         block,
         proposal::{self, Diff},
     },
-    crypto::SecretKey,
     utils::trie::Record,
 };
-use libp2p::multihash::Multihash;
 use tokio::sync::mpsc;
 use vdf::VDFParams;
 
@@ -38,13 +36,13 @@ async fn basic_operations() {
         let (proposal_tx, mut proposal_rx) = mpsc::unbounded_channel();
         let (validation_tx, validation_rx) = mpsc::unbounded_channel();
 
-        let pk = transport.secret_key().public_key();
+        let sk = transport.secret_key().clone();
 
         let engine = civita_core::consensus::engine::EngineBuilder::<Hasher>::new()
             .with_transport(Arc::new(transport))
             .with_topics(PROPOSAL_TOPIC, BLOCK_TOPIC)
             .with_prop_validation_channel(proposal_tx, validation_rx)
-            .with_block_tree(block::Tree::with_genesis(genesis_block(), pk, THRESHOLD))
+            .with_block_tree(block::Tree::with_genesis(sk, THRESHOLD))
             .with_vdf(vdf::WesolowskiVDFParams(VDF_PARAMS).new(), VDF_DIFFICULTY)
             .build();
 
@@ -83,13 +81,4 @@ async fn basic_operations() {
     let record = engines[4].get_self_record();
 
     assert_eq!(record.weight, 10, "Record weight should be 10");
-}
-
-fn genesis_block() -> block::Block {
-    block::Builder::new()
-        .with_parent_hash(Multihash::default())
-        .with_height(0)
-        .with_proposer_pk(SecretKey::random().public_key())
-        .with_proposer_weight(0)
-        .build()
 }
