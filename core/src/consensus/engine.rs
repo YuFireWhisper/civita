@@ -34,6 +34,22 @@ pub enum Error {
     Proposal(#[from] proposal::Error),
 }
 
+pub struct Engine<H: Hasher> {
+    gossipsub: Arc<Gossipsub>,
+
+    proposal_topic: u8,
+    block_topic: u8,
+
+    block_tree: Tree<H>,
+
+    prop_validation_tx: mpsc::UnboundedSender<Proposal>,
+
+    sk: SecretKey,
+
+    vdf: WesolowskiVDF,
+    vdf_difficulty: u64,
+}
+
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct EngineBuilder<H: Hasher> {
@@ -51,116 +67,6 @@ pub struct EngineBuilder<H: Hasher> {
 
     vdf: Option<WesolowskiVDF>,
     vdf_difficulty: Option<u64>,
-}
-
-pub struct Engine<H: Hasher> {
-    gossipsub: Arc<Gossipsub>,
-
-    proposal_topic: u8,
-    block_topic: u8,
-
-    block_tree: Tree<H>,
-
-    prop_validation_tx: mpsc::UnboundedSender<Proposal>,
-
-    sk: SecretKey,
-
-    vdf: WesolowskiVDF,
-    vdf_difficulty: u64,
-}
-
-impl<H: Hasher> EngineBuilder<H> {
-    pub fn new() -> Self {
-        Self {
-            gossipsub: None,
-            proposal_topic: None,
-            block_topic: None,
-            prop_validation_tx: None,
-            prop_validation_rx: None,
-            block_tree: None,
-            sk: None,
-            vdf: None,
-            vdf_difficulty: None,
-        }
-    }
-
-    pub fn with_transport(mut self, transport: Arc<Transport>) -> Self {
-        self.gossipsub = Some(transport.gossipsub());
-        self.sk = Some(transport.secret_key().clone());
-        self
-    }
-
-    pub fn with_topics(mut self, proposal_topic: u8, block_topic: u8) -> Self {
-        self.proposal_topic = Some(proposal_topic);
-        self.block_topic = Some(block_topic);
-        self
-    }
-
-    pub fn with_prop_validation_channel(
-        mut self,
-        tx: mpsc::UnboundedSender<Proposal>,
-        rx: mpsc::UnboundedReceiver<(Multihash, bool)>,
-    ) -> Self {
-        self.prop_validation_tx = Some(tx);
-        self.prop_validation_rx = Some(rx);
-        self
-    }
-
-    pub fn with_block_tree(mut self, tree: Tree<H>) -> Self {
-        self.block_tree = Some(RwLock::new(tree));
-        self
-    }
-
-    pub fn with_sk(mut self, sk: SecretKey) -> Self {
-        self.sk = Some(sk);
-        self
-    }
-
-    pub fn with_vdf(mut self, vdf: WesolowskiVDF, difficulty: u64) -> Self {
-        self.vdf = Some(vdf);
-        self.vdf_difficulty = Some(difficulty);
-        self
-    }
-
-    pub fn build(self) -> Arc<Engine<H>> {
-        let gossipsub = self.gossipsub.expect("Gossipsub must be set");
-        let proposal_topic = self.proposal_topic.expect("Proposal topic must be set");
-        let block_topic = self.block_topic.expect("Block topic must be set");
-        let prop_validation_tx = self
-            .prop_validation_tx
-            .expect("Prop validation tx must be set");
-        let prop_validation_rx = self
-            .prop_validation_rx
-            .expect("Prop validation rx must be set");
-        let block_tree = self.block_tree.expect("Block tree must be set");
-        let sk = self.sk.expect("Secret key must be set");
-        let vdf = self.vdf.expect("VDF must be set");
-        let vdf_difficulty = self.vdf_difficulty.expect("VDF difficulty must be set");
-
-        let engine = Engine {
-            gossipsub,
-            proposal_topic,
-            block_topic,
-            block_tree: block_tree.into_inner(),
-            prop_validation_tx,
-            sk,
-            vdf,
-            vdf_difficulty,
-        };
-
-        let engine = Arc::new(engine);
-
-        tokio::spawn({
-            let engine = Arc::clone(&engine);
-            async move {
-                if let Err(e) = engine.run(prop_validation_rx).await {
-                    panic!("Engine run failed: {e}");
-                }
-            }
-        });
-
-        engine
-    }
 }
 
 impl<H: Hasher> Engine<H> {
@@ -410,5 +316,99 @@ impl<H: Hasher> Engine<H> {
 
     pub fn tip_hash(&self) -> Multihash {
         self.block_tree.tip_hash()
+    }
+}
+
+impl<H: Hasher> EngineBuilder<H> {
+    pub fn new() -> Self {
+        Self {
+            gossipsub: None,
+            proposal_topic: None,
+            block_topic: None,
+            prop_validation_tx: None,
+            prop_validation_rx: None,
+            block_tree: None,
+            sk: None,
+            vdf: None,
+            vdf_difficulty: None,
+        }
+    }
+
+    pub fn with_transport(mut self, transport: Arc<Transport>) -> Self {
+        self.gossipsub = Some(transport.gossipsub());
+        self.sk = Some(transport.secret_key().clone());
+        self
+    }
+
+    pub fn with_topics(mut self, proposal_topic: u8, block_topic: u8) -> Self {
+        self.proposal_topic = Some(proposal_topic);
+        self.block_topic = Some(block_topic);
+        self
+    }
+
+    pub fn with_prop_validation_channel(
+        mut self,
+        tx: mpsc::UnboundedSender<Proposal>,
+        rx: mpsc::UnboundedReceiver<(Multihash, bool)>,
+    ) -> Self {
+        self.prop_validation_tx = Some(tx);
+        self.prop_validation_rx = Some(rx);
+        self
+    }
+
+    pub fn with_block_tree(mut self, tree: Tree<H>) -> Self {
+        self.block_tree = Some(RwLock::new(tree));
+        self
+    }
+
+    pub fn with_sk(mut self, sk: SecretKey) -> Self {
+        self.sk = Some(sk);
+        self
+    }
+
+    pub fn with_vdf(mut self, vdf: WesolowskiVDF, difficulty: u64) -> Self {
+        self.vdf = Some(vdf);
+        self.vdf_difficulty = Some(difficulty);
+        self
+    }
+
+    pub fn build(self) -> Arc<Engine<H>> {
+        let gossipsub = self.gossipsub.expect("Gossipsub must be set");
+        let proposal_topic = self.proposal_topic.expect("Proposal topic must be set");
+        let block_topic = self.block_topic.expect("Block topic must be set");
+        let prop_validation_tx = self
+            .prop_validation_tx
+            .expect("Prop validation tx must be set");
+        let prop_validation_rx = self
+            .prop_validation_rx
+            .expect("Prop validation rx must be set");
+        let block_tree = self.block_tree.expect("Block tree must be set");
+        let sk = self.sk.expect("Secret key must be set");
+        let vdf = self.vdf.expect("VDF must be set");
+        let vdf_difficulty = self.vdf_difficulty.expect("VDF difficulty must be set");
+
+        let engine = Engine {
+            gossipsub,
+            proposal_topic,
+            block_topic,
+            block_tree: block_tree.into_inner(),
+            prop_validation_tx,
+            sk,
+            vdf,
+            vdf_difficulty,
+        };
+
+        let engine = Arc::new(engine);
+
+        tokio::spawn({
+            let engine = Arc::clone(&engine);
+            async move {
+                if let Err(e) = engine.run(prop_validation_rx).await {
+                    panic!("Engine run failed: {e}");
+                }
+            }
+        });
+
+        engine
     }
 }
