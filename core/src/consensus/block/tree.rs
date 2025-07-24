@@ -255,7 +255,7 @@ impl<H: Hasher> Tree<H> {
 
         prop_node
             .write()
-            .child_blocks
+            .children_blocks
             .entry(block_hash)
             .or_insert_with(|| block.clone());
 
@@ -340,7 +340,7 @@ impl<H: Hasher> Tree<H> {
         source: PeerId,
     ) -> ProcessResult {
         let hash = proposal.hash::<H>();
-        let parent_hash = proposal.parent;
+        let parent_hash = proposal.parent_hash;
         let mut result = ProcessResult::new();
 
         if self.is_below_checkpoint(&hash) {
@@ -350,7 +350,17 @@ impl<H: Hasher> Tree<H> {
 
         let node = self.get_or_insert_missing_proposal(hash);
 
-        self.add_proposal_to_parent(parent_hash, hash, node.clone());
+        self.add_proposal_to_parent_block(parent_hash, hash, node.clone());
+
+        if !proposal
+            .depeendncies
+            .iter()
+            .all(|dep| self.add_proposal_to_parent_proposal(*dep, hash, node.clone(), &mut result))
+        {
+            result.add_invalidated(msg_id, source);
+            node.write().invalidate_descendants(&mut result);
+            return result;
+        }
 
         let mut node_write = node.write();
         node_write.set_proposal_data(proposal, witness);
@@ -363,7 +373,7 @@ impl<H: Hasher> Tree<H> {
         result
     }
 
-    fn add_proposal_to_parent(
+    fn add_proposal_to_parent_block(
         &self,
         parent_hash: Multihash,
         proposal_hash: Multihash,
@@ -378,6 +388,40 @@ impl<H: Hasher> Tree<H> {
             .or_insert_with(|| proposal.clone());
 
         proposal.write().parent_block = parent_node;
+    }
+
+    fn add_proposal_to_parent_proposal(
+        &self,
+        parent_hash: Multihash,
+        proposal_hash: Multihash,
+        proposal: Arc<ParkingRwLock<ProposalNode<H>>>,
+        result: &mut ProcessResult,
+    ) -> bool {
+        let parent_node = self.get_or_insert_missing_proposal(parent_hash);
+
+        parent_node
+            .write()
+            .children_proposals
+            .entry(proposal_hash)
+            .or_insert_with(|| proposal.clone());
+
+        proposal
+            .write()
+            .parent_proposals
+            .entry(parent_hash)
+            .or_insert_with(|| parent_node.clone());
+
+        {
+            let mut proposal_write = proposal.write();
+
+            if proposal_write.state.is_valid() {
+                proposal_write.on_parent_proposal_validated(parent_hash, result);
+            }
+        }
+
+        let parent_state = parent_node.read().state;
+
+        !parent_state.is_invalid()
     }
 
     pub fn update_proposal_client_validation(
@@ -402,12 +446,15 @@ impl<H: Hasher> Tree<H> {
 
     pub fn update_proposal_unchecked(&self, proposal: Proposal, witness: proposal::Witness) {
         let hash = proposal.hash::<H>();
-        let parent_hash = proposal.parent;
+        let parent_hash = proposal.parent_hash;
 
-        let node = ProposalNode::new_valid_uncheck(proposal, witness);
+        let weight = proposal
+            .verify_proposer_weight::<H>(&witness, self.tip_trie().root_hash())
+            .expect("Proposal must have a valid proposer weight");
+        let node = ProposalNode::new_valid_uncheck(proposal, witness, weight);
         let node = Arc::new(ParkingRwLock::new(node));
 
-        self.add_proposal_to_parent(parent_hash, hash, node.clone());
+        self.add_proposal_to_parent_block(parent_hash, hash, node.clone());
 
         self.storage.proposals.insert(hash, node);
     }
@@ -506,10 +553,8 @@ mod tests {
         let tree = create_tree();
 
         let prop = proposal::Builder::new()
-            .with_code(0)
-            .with_parent(tree.tip_hash())
+            .with_parent_hash(tree.tip_hash())
             .with_proposer_pk(tree.sk.public_key())
-            .with_proposer_weight(0)
             .build()
             .expect("Failed to build proposal");
 
@@ -539,10 +584,8 @@ mod tests {
         let tree = create_tree();
 
         let prop = proposal::Builder::new()
-            .with_code(0)
-            .with_parent(tree.tip_hash())
+            .with_parent_hash(tree.tip_hash())
             .with_proposer_pk(tree.sk.public_key())
-            .with_proposer_weight(0)
             .build()
             .expect("Failed to build proposal");
 
@@ -574,10 +617,8 @@ mod tests {
         let tree = create_tree();
 
         let prop = proposal::Builder::new()
-            .with_code(0)
-            .with_parent(tree.tip_hash())
+            .with_parent_hash(tree.tip_hash())
             .with_proposer_pk(tree.sk.public_key())
-            .with_proposer_weight(0)
             .build()
             .expect("Failed to build proposal");
 
@@ -609,10 +650,8 @@ mod tests {
         let tree = create_tree();
 
         let prop = proposal::Builder::new()
-            .with_code(0)
-            .with_parent(tree.tip_hash())
+            .with_parent_hash(tree.tip_hash())
             .with_proposer_pk(tree.sk.public_key())
-            .with_proposer_weight(0)
             .build()
             .expect("Failed to build proposal");
 
@@ -660,10 +699,8 @@ mod tests {
         let tree = create_tree();
 
         let prop = proposal::Builder::new()
-            .with_code(0)
-            .with_parent(tree.tip_hash())
+            .with_parent_hash(tree.tip_hash())
             .with_proposer_pk(tree.sk.public_key())
-            .with_proposer_weight(0)
             .build()
             .expect("Failed to build proposal");
 

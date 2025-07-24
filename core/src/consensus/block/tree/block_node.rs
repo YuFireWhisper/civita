@@ -228,7 +228,7 @@ impl<H: Hasher> BlockNode<H> {
         });
 
         self.children_proposals.values().for_each(|child| {
-            child.read().child_blocks.values().for_each(|block| {
+            child.read().children_blocks.values().for_each(|block| {
                 if let Some(r) = block.write().try_validate(false) {
                     result.merge(r);
                 }
@@ -284,15 +284,12 @@ impl<H: Hasher> BlockNode<H> {
 
         proposals.into_iter().for_each(|node| {
             let node_read = node.read();
-            let iter = node_read
-                .proposal
-                .as_ref()
-                .unwrap()
-                .diffs
-                .iter()
-                .map(|(k, v)| (k.as_slice(), v.to.clone()));
-            trie.update_many(iter, Some(node_read.proofs().unwrap()));
-            weight += node_read.proposal.as_ref().unwrap().proposer_weight;
+            let proposal = node_read.proposal.as_ref().unwrap();
+            let witness = node_read.witness.as_ref().unwrap();
+            let p_weight = node_read.proposer_weight.unwrap();
+
+            proposal.apply_operations(&mut trie, witness);
+            weight += p_weight;
         });
 
         (trie, weight)

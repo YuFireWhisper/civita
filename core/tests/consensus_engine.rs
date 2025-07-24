@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use civita_core::{
     self,
-    consensus::{
-        block,
-        proposal::{self, Diff},
-    },
+    consensus::{block, proposal},
     utils::trie::Record,
 };
 use tokio::sync::mpsc;
@@ -24,7 +21,6 @@ async fn basic_operations() {
     const PROPOSAL_TOPIC: u8 = 0;
     const BLOCK_TOPIC: u8 = 1;
     const THRESHOLD: f64 = 0.67;
-    const CODE: u8 = 0;
 
     let transports = common::transport::create_transports(NUM).await;
 
@@ -57,15 +53,10 @@ async fn basic_operations() {
         engines.push(engine);
     });
 
-    let key = target_sk.public_key().to_hash::<Hasher>().to_bytes();
-    let diff = Diff::new(None, Record::new(10, vec![]));
-
     let proposal = proposal::Builder::new()
-        .with_code(CODE)
-        .with_parent(engines[4].tip_hash())
-        .with_diff(key, diff)
+        .with_parent_hash(engines[4].tip_hash())
+        .with_operation_clcu::<Hasher>(&target_sk, None, Record::new(10, vec![]))
         .with_proposer_pk(target_sk.public_key())
-        .with_proposer_weight(0)
         .build()
         .expect("Failed to build proposal");
 

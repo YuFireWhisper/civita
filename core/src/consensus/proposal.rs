@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::OnceLock,
 };
 
@@ -21,12 +21,12 @@ pub enum Error {}
 
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Default)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Diff {
+pub struct Operation {
     pub from: Option<Record>,
     pub to: Record,
+    pub sig: Signature,
 }
 
 #[derive(Clone)]
@@ -35,12 +35,11 @@ pub struct Diff {
 #[derivative(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Proposal {
-    pub code: u8,
-    pub parent: Multihash,
-    pub diffs: BTreeMap<Vec<u8>, Diff>,
+    pub parent_hash: Multihash,
+    pub depeendncies: HashSet<Multihash>,
+    pub operations: BTreeMap<PublicKey, Operation>,
     pub proposer_pk: PublicKey,
-    pub proposer_data: Option<Vec<u8>>,
-    pub proposer_weight: Weight,
+    pub metadata: Option<Vec<u8>>,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -57,17 +56,31 @@ pub struct Witness {
 
 #[derive(Default)]
 pub struct Builder {
-    pub code: u8,
-    pub parent: Option<Multihash>,
-    pub diffs: BTreeMap<Vec<u8>, Diff>,
+    pub parent_hash: Option<Multihash>,
+    pub dependencies: HashSet<Multihash>,
+    pub operations: BTreeMap<PublicKey, Operation>,
     pub proposer_pk: Option<PublicKey>,
-    pub proposer_data: Option<Vec<u8>>,
-    pub proposer_weight: Option<Weight>,
+    pub metadata: Option<Vec<u8>>,
 }
 
-impl Diff {
-    pub fn new(from: Option<Record>, to: Record) -> Self {
-        Diff { from, to }
+impl Operation {
+    pub fn new(from: Option<Record>, to: Record, sig: Signature) -> Self {
+        Operation { from, to, sig }
+    }
+
+    pub fn new_clcu<H: Hasher>(sk: &SecretKey, from: Option<Record>, to: Record) -> Self {
+        let mut data = Vec::new();
+        from.to_writer(&mut data);
+        to.to_writer(&mut data);
+        let sig = sk.sign(&H::hash(&data).to_bytes());
+        Operation { from, to, sig }
+    }
+
+    pub fn to_sign_data<H: Hasher>(&self) -> Multihash {
+        let mut data = Vec::new();
+        self.from.to_writer(&mut data);
+        self.to.to_writer(&mut data);
+        H::hash(&data)
     }
 }
 
@@ -97,11 +110,12 @@ impl Proposal {
     pub fn generate_proofs<H: Hasher>(&self, trie: &Trie<H>) -> HashMap<Multihash, Vec<u8>> {
         let mut proofs = HashMap::new();
 
-        self.diffs
+        self.operations
             .keys()
-            .chain(std::iter::once(&self.proposer_pk.to_hash::<H>().to_bytes()))
+            .chain(std::iter::once(&self.proposer_pk))
             .for_each(|key| {
-                trie.prove(key, &mut proofs);
+                let key = key.to_hash::<H>().to_bytes();
+                trie.prove(&key, &mut proofs);
             });
 
         proofs
@@ -126,41 +140,33 @@ impl Proposal {
         &self,
         witness: &Witness,
         trie_root: Multihash,
-    ) -> bool {
+    ) -> Option<Weight> {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
-        Self::verify_proof(
-            &key,
-            trie_root,
-            &witness.proofs,
-            Some(self.proposer_weight),
-            None,
-        )
-    }
 
-    fn verify_proof(
-        key: &[u8],
-        trie_root: Multihash,
-        proofs: &HashMap<Multihash, Vec<u8>>,
-        exp_weight: Option<Weight>,
-        exp_record: Option<&Record>,
-    ) -> bool {
-        match trie::verify_proof_with_hash(key, proofs, trie_root) {
-            ProofResult::Exists(record) => {
-                if let Some(exp_record) = exp_record {
-                    record == *exp_record
-                } else {
-                    record.weight == exp_weight.unwrap_or(0)
-                }
-            }
-            ProofResult::NotExists => exp_weight.unwrap_or(0) == 0 && exp_record.is_none(),
-            ProofResult::Invalid => false,
+        match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
+            ProofResult::Exists(record) => Some(record.weight),
+            ProofResult::NotExists => Some(0),
+            ProofResult::Invalid => None,
         }
     }
 
-    pub fn verify_diffs<H: Hasher>(&self, witness: &Witness, trie_root: Multihash) -> bool {
-        self.diffs.iter().all(|(key, diff)| {
-            Self::verify_proof(key, trie_root, &witness.proofs, None, diff.from.as_ref())
+    pub fn verify_operations<H: Hasher>(&self, witness: &Witness, trie_root: Multihash) -> bool {
+        self.operations.iter().all(|(key, op)| {
+            let key = key.to_hash::<H>().to_bytes();
+            match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
+                ProofResult::Exists(record) => op.from.as_ref().is_some_and(|from| from == &record),
+                ProofResult::NotExists => op.from.is_none(),
+                ProofResult::Invalid => false,
+            }
         })
+    }
+
+    pub fn apply_operations<H: Hasher>(&self, trie: &mut Trie<H>, witness: &Witness) -> bool {
+        let iter = self
+            .operations
+            .iter()
+            .map(|(k, v)| (k.to_hash::<H>().to_bytes(), v.to.clone()));
+        trie.update_many(iter, Some(&witness.proofs))
     }
 }
 
@@ -179,23 +185,52 @@ impl Builder {
         Self::default()
     }
 
-    pub fn with_code(mut self, code: u8) -> Self {
-        self.code = code;
+    pub fn with_parent_hash(mut self, parent: Multihash) -> Self {
+        self.parent_hash = Some(parent);
         self
     }
 
-    pub fn with_parent(mut self, parent: Multihash) -> Self {
-        self.parent = Some(parent);
+    pub fn with_dependencie(mut self, dep: Multihash) -> Self {
+        self.dependencies.insert(dep);
         self
     }
 
-    pub fn with_diff(mut self, key: Vec<u8>, diff: Diff) -> Self {
-        self.diffs.insert(key, diff);
+    pub fn with_dependencies<I>(mut self, deps: I) -> Self
+    where
+        I: IntoIterator<Item = Multihash>,
+    {
+        self.dependencies.extend(deps);
         self
     }
 
-    pub fn with_diffs(mut self, diffs: BTreeMap<Vec<u8>, Diff>) -> Self {
-        self.diffs = diffs;
+    pub fn with_operation(
+        mut self,
+        pk: PublicKey,
+        from: Option<Record>,
+        to: Record,
+        sig: Signature,
+    ) -> Self {
+        let operation = Operation::new(from, to, sig);
+        self.operations.insert(pk, operation);
+        self
+    }
+
+    pub fn with_operation_clcu<H: Hasher>(
+        mut self,
+        sk: &SecretKey,
+        from: Option<Record>,
+        to: Record,
+    ) -> Self {
+        let operation = Operation::new_clcu::<H>(sk, from, to);
+        self.operations.insert(sk.public_key(), operation);
+        self
+    }
+
+    pub fn with_operations<I>(mut self, ops: I) -> Self
+    where
+        I: IntoIterator<Item = (PublicKey, Operation)>,
+    {
+        self.operations.extend(ops);
         self
     }
 
@@ -204,33 +239,21 @@ impl Builder {
         self
     }
 
-    pub fn with_proposer_data(mut self, data: Vec<u8>) -> Self {
-        self.proposer_data = Some(data);
-        self
-    }
-
-    pub fn with_proposer_data_opt(mut self, data: Option<Vec<u8>>) -> Self {
-        self.proposer_data = data;
-        self
-    }
-
-    pub fn with_proposer_weight(mut self, weight: Weight) -> Self {
-        self.proposer_weight = Some(weight);
+    pub fn with_metadata(mut self, metadata: Vec<u8>) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 
     pub fn build(self) -> Option<Proposal> {
-        let parent = self.parent?;
+        let parent_hash = self.parent_hash?;
         let proposer_pk = self.proposer_pk?;
-        let proposer_weight = self.proposer_weight?;
 
         Some(Proposal {
-            code: self.code,
-            parent,
-            diffs: self.diffs,
+            parent_hash,
+            depeendncies: self.dependencies,
+            operations: self.operations,
             proposer_pk,
-            proposer_data: self.proposer_data,
-            proposer_weight,
+            metadata: self.metadata,
             hash_cache: OnceLock::new(),
         })
     }
@@ -245,68 +268,30 @@ mod tests {
     type TestHasher = sha2::Sha256;
     type Trie = trie::Trie<TestHasher>;
 
-    const CODE: u8 = 0;
-    const FROM_WEIGHT: Weight = 100;
     const TO_WEIGHT: Weight = 200;
-    const PROPOSER_WEIGHT: Weight = 100;
-
     const VDF_PARAMS: WesolowskiVDFParams = WesolowskiVDFParams(1024);
     const VDF_DIFFICULTY: u64 = 1;
 
-    fn setup() -> (Proposal, Witness, Multihash) {
-        let from_sk = SecretKey::random();
-        let from_pk = from_sk.public_key();
-        let from_pk_bytes = from_pk.to_hash::<TestHasher>().to_bytes();
+    fn setup() -> (Proposal, Witness) {
+        let sk = SecretKey::random();
+        let pk = sk.public_key();
 
-        let proposer_sk = SecretKey::random();
-        let proposer_pk = proposer_sk.public_key();
-        let proposer_pk_bytes = proposer_pk.to_hash::<TestHasher>().to_bytes();
+        let to_record = Record::new(TO_WEIGHT, vec![4, 5, 6]);
 
-        let from = Record {
-            weight: FROM_WEIGHT,
-            data: vec![1, 2, 3],
-        };
-
-        let to = Record {
-            weight: TO_WEIGHT,
-            data: vec![4, 5, 6],
-        };
-
-        let proposer_record = Record {
-            weight: PROPOSER_WEIGHT,
-            data: vec![7, 8, 9],
-        };
-
-        let mut trie = Trie::empty();
-        trie.update(&from_pk_bytes, from.clone(), None);
-        trie.update(&proposer_pk_bytes, proposer_record, None);
-        let root_hash = trie.commit();
-
-        let diff = Diff {
-            from: Some(from),
-            to,
-        };
-
-        let mut diffs = BTreeMap::new();
-        diffs.insert(from_pk_bytes, diff);
-
-        let prop = Proposal {
-            code: CODE,
-            parent: Multihash::default(),
-            diffs,
-            proposer_pk,
-            proposer_data: None,
-            proposer_weight: PROPOSER_WEIGHT,
-            hash_cache: OnceLock::new(),
-        };
+        let proposer = Builder::new()
+            .with_parent_hash(Multihash::default())
+            .with_operation_clcu::<TestHasher>(&sk, None, to_record.clone())
+            .with_proposer_pk(pk.clone())
+            .build()
+            .expect("Proposal should be valid");
 
         let vdf = VDF_PARAMS.new();
 
-        let witness = prop
-            .generate_witness(&proposer_sk, &trie, &vdf, VDF_DIFFICULTY)
-            .expect("Witness generation should succeed");
+        let witness = proposer
+            .generate_witness::<TestHasher>(&sk, &Trie::empty(), &vdf, VDF_DIFFICULTY)
+            .expect("Witness should be generated successfully");
 
-        (prop, witness, root_hash)
+        (proposer, witness)
     }
 
     fn random_signature() -> Signature {
@@ -317,7 +302,7 @@ mod tests {
 
     #[test]
     fn veirfy_signature() {
-        let (prop, witness, _) = setup();
+        let (prop, witness) = setup();
 
         let invalid_winess = Witness {
             sig: random_signature(),
@@ -330,7 +315,7 @@ mod tests {
 
     #[test]
     fn verify_vdf() {
-        let (prop, witness, _) = setup();
+        let (prop, witness) = setup();
 
         let vdf = VDF_PARAMS.new();
 
