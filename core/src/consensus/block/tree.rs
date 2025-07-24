@@ -19,6 +19,7 @@ use crate::{
 };
 
 mod block_node;
+pub mod dag;
 mod proposal_node;
 
 #[derive(Clone, Copy)]
