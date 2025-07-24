@@ -95,17 +95,18 @@ impl<H: Hasher> Trie<H> {
         Self::insert_node(&mut self.root, &[], key, val, guile)
     }
 
-    pub fn update_many<'a, I>(
+    pub fn update_many<'a, I, T>(
         &mut self,
         itmes: I,
         guide: Option<&HashMap<Multihash, Vec<u8>>>,
     ) -> bool
     where
-        I: IntoIterator<Item = (&'a [u8], Record)>,
+        I: IntoIterator<Item = (T, Record)>,
+        T: AsRef<[u8]> + 'a,
     {
         itmes
             .into_iter()
-            .any(|(key, record)| self.update(key, record, guide))
+            .any(|(key, record)| self.update(key.as_ref(), record, guide))
     }
 
     /// Returns true if is dirty, false if not.
