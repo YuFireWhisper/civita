@@ -82,28 +82,34 @@ impl<N: Node> Dag<N> {
         Self::default()
     }
 
-    pub fn update(&mut self, node: N) -> ValidationResult<N> {
+    pub fn update(&mut self, mut node: N) -> ValidationResult<N> {
         let id = node.id();
-        let parent_ids = node.parent_ids();
+        let new_parent_ids = node.parent_ids();
 
-        if self.would_create_cycle(&id, &parent_ids) {
+        let old_parent_ids = self
+            .nodes
+            .get(&id)
+            .map(|n| n.read().parent_ids())
+            .unwrap_or_default();
+
+        if self.would_create_cycle(&id, &new_parent_ids) {
             return ValidationResult::with_cycle_detected();
         }
 
-        self.update_relationships(&id, &parent_ids);
+        self.update_relationships(&id, &old_parent_ids, &new_parent_ids);
 
-        let initial_state = if parent_ids.iter().any(|pid| {
+        let is_any_parent_invalid = new_parent_ids.iter().any(|pid| {
             self.nodes
                 .get(pid)
-                .map(|n| n.read().state().is_invalid())
-                .unwrap_or(false)
-        }) {
+                .is_none_or(|n| n.read().state().is_invalid())
+        });
+
+        let initial_state = if is_any_parent_invalid {
             State::Invalid
         } else {
             State::Pending
         };
 
-        let mut node = node;
         node.set_state(initial_state);
         let node_arc = Arc::new(ParkingRwLock::new(node));
         self.nodes.insert(id.clone(), node_arc);
@@ -119,12 +125,9 @@ impl<N: Node> Dag<N> {
     }
 
     fn would_create_cycle(&self, node_id: &N::Id, parent_ids: &[N::Id]) -> bool {
-        for parent_id in parent_ids {
-            if self.has_path_to(parent_id, node_id) {
-                return true;
-            }
-        }
-        false
+        parent_ids
+            .iter()
+            .any(|parent_id| self.has_path_to(node_id, parent_id))
     }
 
     fn has_path_to(&self, from: &N::Id, to: &N::Id) -> bool {
@@ -132,36 +135,42 @@ impl<N: Node> Dag<N> {
             return true;
         }
 
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        queue.push_back(from.clone());
+        let mut queue = VecDeque::from([from.clone()]);
+        let mut visited = HashSet::from([from.clone()]);
 
-        while let Some(current) = queue.pop_front() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-
-            if let Some(children) = self.children.get(&current) {
-                for child in children {
-                    if child == to {
+        while let Some(current_id) = queue.pop_front() {
+            if let Some(children) = self.children.get(&current_id) {
+                for child_id in children {
+                    if child_id == to {
                         return true;
                     }
-                    queue.push_back(child.clone());
+                    if visited.insert(child_id.clone()) {
+                        queue.push_back(child_id.clone());
+                    }
                 }
             }
         }
-
         false
     }
 
-    fn update_relationships(&mut self, node_id: &N::Id, parent_ids: &[N::Id]) {
-        for children_set in self.children.values_mut() {
-            children_set.remove(node_id);
+    fn update_relationships(
+        &mut self,
+        node_id: &N::Id,
+        old_parents: &[N::Id],
+        new_parents: &[N::Id],
+    ) {
+        let old_parents_set: HashSet<_> = old_parents.iter().collect();
+        let new_parents_set: HashSet<_> = new_parents.iter().collect();
+
+        for parent_id in old_parents_set.difference(&new_parents_set) {
+            if let Some(children_set) = self.children.get_mut(parent_id) {
+                children_set.remove(node_id);
+            }
         }
 
-        for parent_id in parent_ids {
+        for parent_id in new_parents_set.difference(&old_parents_set) {
             self.children
-                .entry(parent_id.clone())
+                .entry((*parent_id).clone())
                 .or_default()
                 .insert(node_id.clone());
         }
@@ -169,32 +178,32 @@ impl<N: Node> Dag<N> {
 
     fn validate_from(&self, start_id: &N::Id) -> ValidationResult<N> {
         let mut result = ValidationResult::new();
-        let mut queue = VecDeque::new();
-        queue.push_back(start_id.clone());
+        let mut queue = VecDeque::from([start_id.clone()]);
+        let mut queued = HashSet::from([start_id.clone()]);
 
         while let Some(id) = queue.pop_front() {
             let Some(node_arc) = self.nodes.get(&id) else {
                 continue;
             };
 
-            let current_state = node_arc.read().state();
-            if !current_state.is_pending() {
+            let node_guard = node_arc.read();
+
+            if !node_guard.state().is_pending() {
                 continue;
             }
 
-            let parent_ids = node_arc.read().parent_ids();
-            let all_parents_valid = parent_ids.iter().all(|pid| {
+            let all_parents_valid = node_guard.parent_ids().iter().all(|pid| {
                 self.nodes
                     .get(pid)
-                    .map(|n| n.read().state().is_valid())
-                    .unwrap_or(false)
+                    .is_some_and(|n| n.read().state().is_valid())
             });
 
             if !all_parents_valid {
                 continue;
             }
 
-            let validation_result = node_arc.read().validate();
+            let validation_result = node_guard.validate();
+            drop(node_guard);
 
             match validation_result {
                 State::Valid => {
@@ -203,20 +212,20 @@ impl<N: Node> Dag<N> {
 
                     if let Some(children) = self.children.get(&id) {
                         for child_id in children {
-                            queue.push_back(child_id.clone());
+                            if queued.insert(child_id.clone()) {
+                                queue.push_back(child_id.clone());
+                            }
                         }
                     }
                 }
                 State::Invalid => {
                     node_arc.write().set_state(State::Invalid);
                     result.add_invalidated(id.clone());
-
                     self.invalidate_descendants(&id, &mut result);
                 }
                 State::Pending => {}
             }
         }
-
         result
     }
 
@@ -226,25 +235,24 @@ impl<N: Node> Dag<N> {
 
         if let Some(children) = self.children.get(start_id) {
             for child_id in children {
-                queue.push_back(child_id.clone());
+                if visited.insert(child_id.clone()) {
+                    queue.push_back(child_id.clone());
+                }
             }
         }
 
         while let Some(id) = queue.pop_front() {
-            if !visited.insert(id.clone()) {
-                continue;
-            }
-
             if let Some(node_arc) = self.nodes.get(&id) {
-                let current_state = node_arc.read().state();
-                if !current_state.is_invalid() {
+                if !node_arc.read().state().is_invalid() {
                     node_arc.write().set_state(State::Invalid);
                     result.add_invalidated(id.clone());
                 }
 
                 if let Some(children) = self.children.get(&id) {
                     for child_id in children {
-                        queue.push_back(child_id.clone());
+                        if visited.insert(child_id.clone()) {
+                            queue.push_back(child_id.clone());
+                        }
                     }
                 }
             }
@@ -266,7 +274,7 @@ impl<N: Node> Dag<N> {
     }
 
     pub fn get_node(&self, id: &N::Id) -> Option<Arc<ParkingRwLock<N>>> {
-        self.nodes.get(id).map(|entry| entry.clone())
+        self.nodes.get(id).map(|entry| entry.value().clone())
     }
 
     pub fn contains_node(&self, id: &N::Id) -> bool {
@@ -278,33 +286,25 @@ impl<N: Node> Dag<N> {
     }
 
     pub fn topological_sort(&self) -> Result<Vec<N::Id>, ValidationResult<N>> {
-        let mut in_degree: HashMap<N::Id, usize> = HashMap::new();
-        let mut all_nodes: HashSet<N::Id> = HashSet::new();
-
-        for entry in self.nodes.iter() {
-            let id = entry.key().clone();
-            all_nodes.insert(id.clone());
-            in_degree.entry(id).or_insert(0);
-        }
+        let mut in_degree: HashMap<N::Id, usize> =
+            self.nodes.iter().map(|e| (e.key().clone(), 0)).collect();
 
         for children_set in self.children.values() {
             for child_id in children_set {
-                *in_degree.entry(child_id.clone()).or_insert(0) += 1;
+                if let Some(degree) = in_degree.get_mut(child_id) {
+                    *degree += 1;
+                }
             }
         }
 
-        let mut queue = VecDeque::new();
-        let mut result = Vec::new();
+        let mut queue: VecDeque<_> = in_degree
+            .iter()
+            .filter_map(|(id, &degree)| (degree == 0).then_some(id.clone()))
+            .collect();
 
-        for (node_id, &degree) in &in_degree {
-            if degree == 0 {
-                queue.push_back(node_id.clone());
-            }
-        }
+        let mut result = Vec::with_capacity(self.nodes.len());
 
         while let Some(node_id) = queue.pop_front() {
-            result.push(node_id.clone());
-
             if let Some(children) = self.children.get(&node_id) {
                 for child_id in children {
                     if let Some(degree) = in_degree.get_mut(child_id) {
@@ -315,9 +315,10 @@ impl<N: Node> Dag<N> {
                     }
                 }
             }
+            result.push(node_id);
         }
 
-        if result.len() == all_nodes.len() {
+        if result.len() == self.nodes.len() {
             Ok(result)
         } else {
             Err(ValidationResult::with_cycle_detected())
