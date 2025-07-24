@@ -38,7 +38,7 @@ async fn basic_operations() {
 
         let sk = transport.secret_key().clone();
 
-        let engine = civita_core::consensus::engine::EngineBuilder::<Hasher>::new()
+        let engine = civita_core::consensus::engine::Builder::<Hasher>::new()
             .with_transport(Arc::new(transport))
             .with_topics(PROPOSAL_TOPIC, BLOCK_TOPIC)
             .with_prop_validation_channel(proposal_tx, validation_rx)

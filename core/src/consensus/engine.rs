@@ -52,7 +52,7 @@ pub struct Engine<H: Hasher> {
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
-pub struct EngineBuilder<H: Hasher> {
+pub struct Builder<H: Hasher> {
     gossipsub: Option<Arc<Gossipsub>>,
 
     proposal_topic: Option<u8>,
@@ -319,7 +319,7 @@ impl<H: Hasher> Engine<H> {
     }
 }
 
-impl<H: Hasher> EngineBuilder<H> {
+impl<H: Hasher> Builder<H> {
     pub fn new() -> Self {
         Self {
             gossipsub: None,
