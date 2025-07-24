@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
     sync::Arc,
 };
@@ -7,12 +7,6 @@ use std::{
 use dashmap::DashMap;
 use derivative::Derivative;
 use parking_lot::RwLock as ParkingRwLock;
-use petgraph::{
-    algo::{is_cyclic_directed, toposort},
-    graph::{DiGraph, NodeIndex},
-    visit::EdgeRef,
-    Direction,
-};
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
@@ -27,9 +21,9 @@ pub trait Node: Sized {
     type Id: Clone + Hash + Eq;
 
     fn id(&self) -> Self::Id;
-    fn validate(&self, nodes: Arc<DashMap<Self::Id, Arc<ParkingRwLock<Self>>>>) -> State;
+    fn validate(&self) -> State;
     fn set_state(&mut self, state: State);
-    fn parent_ids(&self) -> Option<Vec<Self::Id>>;
+    fn parent_ids(&self) -> Vec<Self::Id>;
     fn state(&self) -> State;
 }
 
@@ -45,8 +39,7 @@ pub struct ValidationResult<N: Node> {
 #[derivative(Default(bound = ""))]
 pub struct Dag<N: Node> {
     nodes: Arc<DashMap<N::Id, Arc<ParkingRwLock<N>>>>,
-    graph: DiGraph<N::Id, ()>,
-    id_to_index: HashMap<N::Id, NodeIndex>,
+    children: HashMap<N::Id, HashSet<N::Id>>,
 }
 
 impl State {
@@ -68,16 +61,11 @@ impl<N: Node> ValidationResult<N> {
         Self::default()
     }
 
-    pub fn with_invalidated(id: N::Id) -> Self {
-        let mut result = Self::new();
-        result.add_invalidated(id);
-        result
-    }
-
     pub fn with_cycle_detected() -> Self {
-        let mut result = Self::new();
-        result.cycle_detected = true;
-        result
+        Self {
+            cycle_detected: true,
+            ..Default::default()
+        }
     }
 
     pub fn add_validated(&mut self, id: N::Id) {
@@ -96,202 +84,185 @@ impl<N: Node> Dag<N> {
 
     pub fn update(&mut self, node: N) -> ValidationResult<N> {
         let id = node.id();
-        let node_arc = Arc::new(ParkingRwLock::new(node));
+        let parent_ids = node.parent_ids();
 
-        let node_index = self.get_or_create_node_index(id.clone());
+        if self.would_create_cycle(&id, &parent_ids) {
+            return ValidationResult::with_cycle_detected();
+        }
 
-        let parent_ids = {
-            let node_read = node_arc.read();
-            node_read.parent_ids()
+        self.update_relationships(&id, &parent_ids);
+
+        let initial_state = if parent_ids.iter().any(|pid| {
+            self.nodes
+                .get(pid)
+                .map(|n| n.read().state().is_invalid())
+                .unwrap_or(false)
+        }) {
+            State::Invalid
+        } else {
+            State::Pending
         };
 
-        if let Some(parent_ids) = parent_ids {
-            self.remove_incoming_edges(node_index);
-
-            for parent_id in &parent_ids {
-                let parent_index = self.get_or_create_node_index(parent_id.clone());
-                self.graph.add_edge(parent_index, node_index, ());
-            }
-
-            if is_cyclic_directed(&self.graph) {
-                self.remove_incoming_edges(node_index);
-                return ValidationResult::with_cycle_detected();
-            }
-
-            let has_invalid_parent = parent_ids.iter().any(|parent_id| {
-                self.nodes
-                    .get(parent_id)
-                    .map(|parent_node| parent_node.read().state().is_invalid())
-                    .unwrap_or(true) // If parent doesn't exist, consider it invalid
-            });
-
-            if has_invalid_parent {
-                node_arc.write().set_state(State::Invalid);
-                self.nodes.insert(id.clone(), node_arc);
-                return ValidationResult::with_invalidated(id);
-            }
-        } else {
-            self.remove_incoming_edges(node_index);
-        }
-
+        let mut node = node;
+        node.set_state(initial_state);
+        let node_arc = Arc::new(ParkingRwLock::new(node));
         self.nodes.insert(id.clone(), node_arc);
 
-        self.try_validate_from(id)
+        if initial_state.is_invalid() {
+            let mut result = ValidationResult::new();
+            result.add_invalidated(id.clone());
+            self.invalidate_descendants(&id, &mut result);
+            return result;
+        }
+
+        self.validate_from(&id)
     }
 
-    fn get_or_create_node_index(&mut self, id: N::Id) -> NodeIndex {
-        if let Some(&index) = self.id_to_index.get(&id) {
-            index
-        } else {
-            let index = self.graph.add_node(id.clone());
-            self.id_to_index.insert(id, index);
-            index
+    fn would_create_cycle(&self, node_id: &N::Id, parent_ids: &[N::Id]) -> bool {
+        for parent_id in parent_ids {
+            if self.has_path_to(parent_id, node_id) {
+                return true;
+            }
         }
+        false
     }
 
-    fn remove_incoming_edges(&mut self, node_index: NodeIndex) {
-        let edges_to_remove: Vec<_> = self
-            .graph
-            .edges_directed(node_index, Direction::Incoming)
-            .map(|edge| edge.id())
-            .collect();
-
-        for edge_id in edges_to_remove {
-            self.graph.remove_edge(edge_id);
-        }
-    }
-
-    fn try_validate_from(&self, start: N::Id) -> ValidationResult<N> {
-        if !self.id_to_index.contains_key(&start) {
-            return ValidationResult::new();
+    fn has_path_to(&self, from: &N::Id, to: &N::Id) -> bool {
+        if from == to {
+            return true;
         }
 
-        // Check if node exists and is pending
-        let should_validate = self
-            .nodes
-            .get(&start)
-            .map(|node| node.read().state().is_pending())
-            .unwrap_or(false);
-
-        if !should_validate {
-            return ValidationResult::new();
-        }
-
-        let mut result = ValidationResult::new();
-
-        let mut queue = vec![start];
         let mut visited = HashSet::new();
-        let mut is_invalid = false;
+        let mut queue = VecDeque::new();
+        queue.push_back(from.clone());
 
-        while let Some(id) = queue.pop() {
-            if visited.contains(&id) {
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current.clone()) {
                 continue;
             }
 
-            visited.insert(id.clone());
+            if let Some(children) = self.children.get(&current) {
+                for child in children {
+                    if child == to {
+                        return true;
+                    }
+                    queue.push_back(child.clone());
+                }
+            }
+        }
 
+        false
+    }
+
+    fn update_relationships(&mut self, node_id: &N::Id, parent_ids: &[N::Id]) {
+        for children_set in self.children.values_mut() {
+            children_set.remove(node_id);
+        }
+
+        for parent_id in parent_ids {
+            self.children
+                .entry(parent_id.clone())
+                .or_default()
+                .insert(node_id.clone());
+        }
+    }
+
+    fn validate_from(&self, start_id: &N::Id) -> ValidationResult<N> {
+        let mut result = ValidationResult::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(start_id.clone());
+
+        while let Some(id) = queue.pop_front() {
             let Some(node_arc) = self.nodes.get(&id) else {
                 continue;
             };
 
-            if is_invalid {
-                node_arc.write().set_state(State::Invalid);
-                result.add_invalidated(id.clone());
-
-                if let Some(&node_index) = self.id_to_index.get(&id) {
-                    for child_index in self.graph.neighbors(node_index) {
-                        if let Some(child_id) = self.graph.node_weight(child_index) {
-                            queue.push(child_id.clone());
-                        }
-                    }
-                }
+            let current_state = node_arc.read().state();
+            if !current_state.is_pending() {
                 continue;
             }
 
-            let validation_state = {
-                let node_read = node_arc.read();
-                node_read.validate(self.nodes.clone())
-            };
+            let parent_ids = node_arc.read().parent_ids();
+            let all_parents_valid = parent_ids.iter().all(|pid| {
+                self.nodes
+                    .get(pid)
+                    .map(|n| n.read().state().is_valid())
+                    .unwrap_or(false)
+            });
 
-            match validation_state {
+            if !all_parents_valid {
+                continue;
+            }
+
+            let validation_result = node_arc.read().validate();
+
+            match validation_result {
                 State::Valid => {
                     node_arc.write().set_state(State::Valid);
                     result.add_validated(id.clone());
 
-                    if let Some(&node_index) = self.id_to_index.get(&id) {
-                        for child_index in self.graph.neighbors(node_index) {
-                            if let Some(child_id) = self.graph.node_weight(child_index) {
-                                queue.push(child_id.clone());
-                            }
+                    if let Some(children) = self.children.get(&id) {
+                        for child_id in children {
+                            queue.push_back(child_id.clone());
                         }
                     }
                 }
                 State::Invalid => {
                     node_arc.write().set_state(State::Invalid);
                     result.add_invalidated(id.clone());
-                    is_invalid = true;
 
-                    if let Some(&node_index) = self.id_to_index.get(&id) {
-                        for child_index in self.graph.neighbors(node_index) {
-                            if let Some(child_id) = self.graph.node_weight(child_index) {
-                                queue.push(child_id.clone());
-                            }
-                        }
-                    }
+                    self.invalidate_descendants(&id, &mut result);
                 }
-                State::Pending => continue,
+                State::Pending => {}
             }
         }
 
         result
     }
 
+    fn invalidate_descendants(&self, start_id: &N::Id, result: &mut ValidationResult<N>) {
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+
+        if let Some(children) = self.children.get(start_id) {
+            for child_id in children {
+                queue.push_back(child_id.clone());
+            }
+        }
+
+        while let Some(id) = queue.pop_front() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+
+            if let Some(node_arc) = self.nodes.get(&id) {
+                let current_state = node_arc.read().state();
+                if !current_state.is_invalid() {
+                    node_arc.write().set_state(State::Invalid);
+                    result.add_invalidated(id.clone());
+                }
+
+                if let Some(children) = self.children.get(&id) {
+                    for child_id in children {
+                        queue.push_back(child_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
     pub fn get_parents(&self, id: &N::Id) -> Vec<N::Id> {
-        self.id_to_index
+        self.nodes
             .get(id)
-            .map(|&node_index| {
-                self.graph
-                    .neighbors_directed(node_index, Direction::Incoming)
-                    .filter_map(|parent_index| self.graph.node_weight(parent_index))
-                    .cloned()
-                    .collect()
-            })
+            .map(|node| node.read().parent_ids())
             .unwrap_or_default()
     }
 
     pub fn get_children(&self, id: &N::Id) -> Vec<N::Id> {
-        self.id_to_index
+        self.children
             .get(id)
-            .map(|&node_index| {
-                self.graph
-                    .neighbors_directed(node_index, Direction::Outgoing)
-                    .filter_map(|child_index| self.graph.node_weight(child_index))
-                    .cloned()
-                    .collect()
-            })
+            .map(|children| children.iter().cloned().collect())
             .unwrap_or_default()
-    }
-
-    pub fn has_path(&self, from: &N::Id, to: &N::Id) -> bool {
-        let Some(&from_index) = self.id_to_index.get(from) else {
-            return false;
-        };
-        let Some(&to_index) = self.id_to_index.get(to) else {
-            return false;
-        };
-
-        petgraph::algo::has_path_connecting(&self.graph, from_index, to_index, None)
-    }
-
-    pub fn topological_sort(&self) -> Result<Vec<N::Id>, ValidationResult<N>> {
-        match toposort(&self.graph, None) {
-            Ok(order) => Ok(order
-                .into_iter()
-                .filter_map(|index| self.graph.node_weight(index))
-                .cloned()
-                .collect()),
-            Err(_) => Err(ValidationResult::with_cycle_detected()),
-        }
     }
 
     pub fn get_node(&self, id: &N::Id) -> Option<Arc<ParkingRwLock<N>>> {
@@ -304,5 +275,52 @@ impl<N: Node> Dag<N> {
 
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    pub fn topological_sort(&self) -> Result<Vec<N::Id>, ValidationResult<N>> {
+        let mut in_degree: HashMap<N::Id, usize> = HashMap::new();
+        let mut all_nodes: HashSet<N::Id> = HashSet::new();
+
+        for entry in self.nodes.iter() {
+            let id = entry.key().clone();
+            all_nodes.insert(id.clone());
+            in_degree.entry(id).or_insert(0);
+        }
+
+        for children_set in self.children.values() {
+            for child_id in children_set {
+                *in_degree.entry(child_id.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut queue = VecDeque::new();
+        let mut result = Vec::new();
+
+        for (node_id, &degree) in &in_degree {
+            if degree == 0 {
+                queue.push_back(node_id.clone());
+            }
+        }
+
+        while let Some(node_id) = queue.pop_front() {
+            result.push(node_id.clone());
+
+            if let Some(children) = self.children.get(&node_id) {
+                for child_id in children {
+                    if let Some(degree) = in_degree.get_mut(child_id) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            queue.push_back(child_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if result.len() == all_nodes.len() {
+            Ok(result)
+        } else {
+            Err(ValidationResult::with_cycle_detected())
+        }
     }
 }
