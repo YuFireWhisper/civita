@@ -207,17 +207,21 @@ impl<H: Hasher> Engine<H> {
                 result = vdf_task.as_mut().unwrap() => {
                     match result {
                         Ok((tip, vdf_proof)) => {
-                            let (block, witness) = self.block_tree.create_and_update_block(
-                                tip,
-                                vdf_proof,
-                            );
+                            if !self.block_tree.is_block_proposal_empty(&tip) {
+                                let (block, witness) = self.block_tree.create_and_update_block(
+                                    tip,
+                                    vdf_proof,
+                                );
 
-                            let mut bytes = Vec::new();
-                            block.to_writer(&mut bytes);
-                            witness.to_writer(&mut bytes);
+                                let mut bytes = Vec::new();
+                                block.to_writer(&mut bytes);
+                                witness.to_writer(&mut bytes);
 
-                            if let Err(e) = self.gossipsub.publish(self.block_topic, bytes).await {
-                                log::error!("Failed to publish block: {e}");
+                                if let Err(e) = self.gossipsub.publish(self.block_topic, bytes).await {
+                                    log::error!("Failed to publish block: {e}");
+                                }
+
+                                log::debug!("Block created and published with proposals");
                             }
 
                             vdf_task = Some(self.start_vdf_task());

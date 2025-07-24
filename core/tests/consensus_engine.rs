@@ -60,8 +60,6 @@ async fn basic_operations() {
     let key = target_sk.public_key().to_hash::<Hasher>().to_bytes();
     let diff = Diff::new(None, Record::new(10, vec![]));
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
     let proposal = proposal::Builder::new()
         .with_code(CODE)
         .with_parent(engines[4].tip_hash())
@@ -76,7 +74,7 @@ async fn basic_operations() {
         .await
         .expect("Failed to propose");
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let record = engines[4].get_self_record();
 

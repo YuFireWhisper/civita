@@ -444,7 +444,7 @@ impl<H: Hasher> Tree<H> {
         parent: Multihash,
         vdf_proof: Vec<u8>,
     ) -> (Block, block::Witness) {
-        let parent_node = self.get_block(parent).expect("Parent block must exist");
+        let parent_node = self.get_block(&parent).expect("Parent block must exist");
 
         let node = BlockNode::generate_next(parent_node.clone(), &self.sk, vdf_proof);
 
@@ -468,8 +468,13 @@ impl<H: Hasher> Tree<H> {
         (block, witenss)
     }
 
-    fn get_block(&self, hash: Multihash) -> Option<Arc<ParkingRwLock<BlockNode<H>>>> {
-        self.storage.blocks.get(&hash).map(|n| n.clone())
+    fn get_block(&self, hash: &Multihash) -> Option<Arc<ParkingRwLock<BlockNode<H>>>> {
+        self.storage.blocks.get(hash).map(|n| n.clone())
+    }
+
+    pub fn is_block_proposal_empty(&self, block_hash: &Multihash) -> bool {
+        self.get_block(block_hash)
+            .is_none_or(|node| node.read().children_proposals.is_empty())
     }
 }
 
