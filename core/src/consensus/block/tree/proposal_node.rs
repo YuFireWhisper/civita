@@ -101,7 +101,7 @@ impl<H: Hasher> ProposalNode<H> {
             || self
                 .proposal
                 .as_ref()
-                .is_some_and(|p| p.depeendncies.contains(hash))
+                .is_some_and(|p| p.dependencies.contains(hash))
     }
 
     pub fn try_validate(&mut self) -> Option<ProcessResult> {
@@ -148,7 +148,7 @@ impl<H: Hasher> ProposalNode<H> {
             && self
                 .proposal
                 .as_ref()
-                .is_some_and(|p| p.depeendncies.len() == self.validated_parent_proposals.len())
+                .is_some_and(|p| p.dependencies.len() == self.validated_parent_proposals.len())
             && self.witness.is_some()
             && self.client_validated.is_some()
             && self.parent_block.read().state.is_valid()

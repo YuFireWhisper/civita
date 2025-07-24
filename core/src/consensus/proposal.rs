@@ -36,7 +36,7 @@ pub struct Operation {
 #[derive(Serialize)]
 pub struct Proposal {
     pub parent_hash: Multihash,
-    pub depeendncies: HashSet<Multihash>,
+    pub dependencies: HashSet<Multihash>,
     pub operations: BTreeMap<PublicKey, Operation>,
     pub proposer_pk: PublicKey,
     pub metadata: Option<Vec<u8>>,
@@ -250,7 +250,7 @@ impl Builder {
 
         Some(Proposal {
             parent_hash,
-            depeendncies: self.dependencies,
+            dependencies: self.dependencies,
             operations: self.operations,
             proposer_pk,
             metadata: self.metadata,

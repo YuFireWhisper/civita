@@ -353,7 +353,7 @@ impl<H: Hasher> Tree<H> {
         self.add_proposal_to_parent_block(parent_hash, hash, node.clone());
 
         if !proposal
-            .depeendncies
+            .dependencies
             .iter()
             .all(|dep| self.add_proposal_to_parent_proposal(*dep, hash, node.clone(), &mut result))
         {
