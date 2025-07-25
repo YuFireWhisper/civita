@@ -169,63 +169,66 @@ impl<N: Node> Dag<N> {
         let _guard = self.lock.read().unwrap();
 
         let start = *self.index.get(id)?;
-        let mut visited = vec![false; self.entries.len()];
 
+        let n = self.entries.len();
+
+        let mut visited = vec![false; n];
         let mut queue = VecDeque::new();
+        let mut nodes = Vec::new();
+
         visited[start] = true;
         queue.push_back(start);
 
-        let mut subnodes = Vec::new();
-
         while let Some(u) = queue.pop_front() {
-            subnodes.push(u);
-            for &c in &self.entries[u].children {
-                if !visited[c] {
-                    visited[c] = true;
-                    queue.push_back(c);
+            if self.entries[u].valid {
+                nodes.push(u);
+                for &c in &self.entries[u].children {
+                    if !visited[c] {
+                        visited[c] = true;
+                        queue.push_back(c);
+                    }
                 }
             }
         }
 
-        let mut indeg = HashMap::new();
-        let mut adj = HashMap::new();
-        for &u in &subnodes {
-            indeg.insert(u, 0usize);
+        if nodes.is_empty() {
+            return Some(Vec::new());
         }
-        for &u in &subnodes {
+
+        let mut indeg = vec![0usize; n];
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+        for &u in &nodes {
             for &c in &self.entries[u].children {
-                if indeg.contains_key(&c) {
-                    *indeg.get_mut(&c).unwrap() += 1;
-                    adj.entry(u).or_insert_with(Vec::new).push(c);
+                if self.entries[c].valid {
+                    indeg[c] += 1;
+                    adj[u].push(c);
                 }
             }
         }
 
         let mut levels = Vec::new();
-        let mut zero: Vec<_> = indeg
-            .iter()
-            .filter_map(|(&k, &v)| if v == 0 { Some(k) } else { None })
-            .collect();
+        let mut zero: Vec<usize> = nodes.iter().copied().filter(|&u| indeg[u] == 0).collect();
+
         while !zero.is_empty() {
             levels.push(
                 zero.iter()
-                    .map(|&i| self.entries[i].node.id().clone())
+                    .map(|&u| self.entries[u].node.id().clone())
                     .collect(),
             );
-            let mut next = Vec::new();
+
+            let mut next_zero = Vec::new();
             for &u in &zero {
-                if let Some(children) = adj.get(&u) {
-                    for &c in children {
-                        let d = indeg.get_mut(&c).unwrap();
-                        *d -= 1;
-                        if *d == 0 {
-                            next.push(c);
-                        }
+                for &c in &adj[u] {
+                    indeg[c] -= 1;
+                    if indeg[c] == 0 {
+                        next_zero.push(c);
                     }
                 }
             }
-            zero = next;
+            zero = next_zero;
         }
+
         Some(levels)
     }
 }
