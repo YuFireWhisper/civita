@@ -1,23 +1,19 @@
 use std::hint::black_box;
 
-use civita_core::consensus::block::tree::dag::{Dag, Node, State};
+use civita_core::consensus::block::tree::dag::{Dag, Node};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 #[derive(Clone)]
 #[derive(Debug)]
 struct TestNode {
     id: u32,
-    state: State,
-    parent_ids: Vec<u32>,
     validation_complexity: usize,
 }
 
 impl TestNode {
-    fn new(id: u32, parent_ids: Vec<u32>) -> Self {
+    fn new(id: u32) -> Self {
         Self {
             id,
-            state: State::Pending,
-            parent_ids,
             validation_complexity: 1,
         }
     }
@@ -35,25 +31,13 @@ impl Node for TestNode {
         self.id
     }
 
-    fn validate(&self) -> State {
-        State::Valid
-    }
-
-    fn set_state(&mut self, state: State) {
-        self.state = state;
-    }
-
-    fn parent_ids(&self) -> Vec<Self::Id> {
-        self.parent_ids.clone()
-    }
-
-    fn state(&self) -> State {
-        self.state
+    fn validate(&self) -> bool {
+        true
     }
 }
 
 fn bench_dag_update_single_node(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_update_single");
+    let mut group = c.benchmark_group("dag.upsert_single");
 
     for complexity in [1, 10, 100, 1000] {
         group.bench_with_input(
@@ -62,8 +46,8 @@ fn bench_dag_update_single_node(c: &mut Criterion) {
             |b, &complexity| {
                 b.iter(|| {
                     let mut dag = Dag::new();
-                    let node = TestNode::new(1, vec![]).with_complexity(complexity);
-                    black_box(dag.update(node))
+                    let node = TestNode::new(1).with_complexity(complexity);
+                    black_box(dag.upsert(node, vec![]));
                 })
             },
         );
@@ -83,9 +67,9 @@ fn bench_dag_linear_chain(c: &mut Criterion) {
                     let mut dag = Dag::new();
 
                     for i in 1..=chain_length {
+                        let node = TestNode::new(i);
                         let parent_ids = vec![if i == 1 { 0 } else { i - 1 }];
-                        let node = TestNode::new(i, parent_ids);
-                        black_box(dag.update(node));
+                        black_box(dag.upsert(node, parent_ids));
                     }
                 })
             },
@@ -105,12 +89,12 @@ fn bench_dag_fan_out(c: &mut Criterion) {
                 b.iter(|| {
                     let mut dag = Dag::new();
 
-                    let root = TestNode::new(0, vec![]);
-                    dag.update(root);
+                    let root = TestNode::new(0);
+                    dag.upsert(root, vec![]);
 
                     for i in 1..=fan_out_size {
-                        let node = TestNode::new(i, vec![0]);
-                        black_box(dag.update(node));
+                        let node = TestNode::new(i);
+                        black_box(dag.upsert(node, vec![0]));
                     }
                 })
             },
@@ -131,13 +115,13 @@ fn bench_dag_fan_in(c: &mut Criterion) {
                     let mut dag = Dag::new();
 
                     for i in 0..fan_in_size {
-                        let node = TestNode::new(i, vec![0]);
-                        dag.update(node);
+                        let node = TestNode::new(i);
+                        dag.upsert(node, vec![0]);
                     }
 
+                    let child = TestNode::new(fan_in_size);
                     let parent_ids: Vec<u32> = (0..fan_in_size).collect();
-                    let child = TestNode::new(fan_in_size, parent_ids);
-                    black_box(dag.update(child));
+                    black_box(dag.upsert(child, parent_ids));
                 })
             },
         );
@@ -158,9 +142,9 @@ fn bench_dag_complex_structure(c: &mut Criterion) {
                 let mut current_layer_nodes = Vec::new();
 
                 for _ in 0..nodes_per_layer {
-                    let node = TestNode::new(node_id, vec![]);
+                    let node = TestNode::new(node_id);
                     current_layer_nodes.push(node_id);
-                    dag.update(node);
+                    dag.upsert(node, vec![]);
                     node_id += 1;
                 }
 
@@ -168,6 +152,9 @@ fn bench_dag_complex_structure(c: &mut Criterion) {
                     let mut next_layer_nodes = Vec::new();
 
                     for _ in 0..nodes_per_layer {
+                        let node = TestNode::new(node_id);
+                        next_layer_nodes.push(node_id);
+
                         let num_parents = (current_layer_nodes.len() / 2).max(1);
                         let parent_ids: Vec<u32> = current_layer_nodes
                             .iter()
@@ -175,9 +162,7 @@ fn bench_dag_complex_structure(c: &mut Criterion) {
                             .cloned()
                             .collect();
 
-                        let node = TestNode::new(node_id, parent_ids);
-                        next_layer_nodes.push(node_id);
-                        black_box(dag.update(node));
+                        black_box(dag.upsert(node, parent_ids));
                         node_id += 1;
                     }
 
@@ -199,53 +184,19 @@ fn bench_dag_node_updates(c: &mut Criterion) {
             |b, &dag_size| {
                 let mut dag = Dag::new();
                 for i in 1..=dag_size {
+                    let node = TestNode::new(i);
                     let parent_ids = vec![if i == 1 { 0 } else { i - 1 }];
-                    let node = TestNode::new(i, parent_ids);
-                    dag.update(node);
+                    dag.upsert(node, parent_ids);
                 }
 
                 b.iter(|| {
                     let middle_id = dag_size / 2;
-                    let updated_node =
-                        TestNode::new(middle_id, vec![middle_id - 1]).with_complexity(10);
-                    black_box(dag.update(updated_node))
+                    let updated_node = TestNode::new(middle_id).with_complexity(10);
+                    black_box(dag.upsert(updated_node, vec![middle_id - 1]));
                 })
             },
         );
     }
-    group.finish();
-}
-
-fn bench_dag_queries(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_queries");
-
-    let dag_size = 1000u32;
-    let mut dag = Dag::new();
-
-    for i in 1..=dag_size {
-        let parent_ids = vec![if i == 1 { 0 } else { i - 1 }];
-        let node = TestNode::new(i, parent_ids);
-        dag.update(node);
-    }
-
-    group.bench_function("get_parents", |b| {
-        b.iter(|| {
-            let middle_id = dag_size / 2;
-            black_box(dag.get_parents(&middle_id))
-        })
-    });
-
-    group.bench_function("get_children", |b| {
-        b.iter(|| {
-            let middle_id = dag_size / 2;
-            black_box(dag.get_children(&middle_id))
-        })
-    });
-
-    group.bench_function("topological_sort", |b| {
-        b.iter(|| black_box(dag.topological_sort()))
-    });
-
     group.finish();
 }
 
@@ -261,7 +212,7 @@ fn bench_dag_memory_usage(c: &mut Criterion) {
                     let mut dag = Dag::new();
 
                     let mut current_level = vec![0u32];
-                    dag.update(TestNode::new(0, vec![]));
+                    dag.upsert(TestNode::new(0), vec![]);
                     let mut next_id = 1;
 
                     while next_id < dag_size {
@@ -273,8 +224,8 @@ fn bench_dag_memory_usage(c: &mut Criterion) {
                                     break;
                                 }
 
-                                let node = TestNode::new(next_id, vec![parent_id]);
-                                dag.update(node);
+                                let node = TestNode::new(next_id);
+                                dag.upsert(node, vec![parent_id]);
                                 next_level.push(next_id);
                                 next_id += 1;
                             }
@@ -304,12 +255,12 @@ fn bench_dag_error_handling(c: &mut Criterion) {
         b.iter(|| {
             let mut dag = Dag::new();
 
-            dag.update(TestNode::new(1, vec![]));
-            dag.update(TestNode::new(2, vec![1]));
-            dag.update(TestNode::new(3, vec![2]));
+            dag.upsert(TestNode::new(1), vec![]);
+            dag.upsert(TestNode::new(2), vec![1]);
+            dag.upsert(TestNode::new(3), vec![2]);
 
-            let cyclic_node = TestNode::new(1, vec![3]);
-            black_box(dag.update(cyclic_node))
+            let cyclic_node = TestNode::new(1);
+            black_box(dag.upsert(cyclic_node, vec![3]))
         })
     });
 
@@ -324,7 +275,6 @@ criterion_group!(
     bench_dag_fan_in,
     bench_dag_complex_structure,
     bench_dag_node_updates,
-    bench_dag_queries,
     bench_dag_memory_usage,
     bench_dag_error_handling,
 );
