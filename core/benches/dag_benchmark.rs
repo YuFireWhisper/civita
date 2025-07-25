@@ -34,6 +34,8 @@ impl Node for TestNode {
     fn validate(&self) -> bool {
         true
     }
+
+    fn on_child_valid(&self, _child: &Self) {}
 }
 
 fn bench_dag_update_single_node(c: &mut Criterion) {

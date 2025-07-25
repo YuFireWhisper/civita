@@ -12,6 +12,7 @@ pub trait Node {
 
     fn id(&self) -> Self::Id;
     fn validate(&self) -> bool;
+    fn on_child_valid(&self, child: &Self);
 }
 
 #[derive(Derivative)]
@@ -144,10 +145,15 @@ impl<N: Node> Dag<N> {
                 let children: Vec<usize> = self.entries[u].children.clone();
 
                 for &c in &children {
-                    self.entries[c].pending -= 1;
-                    if self.entries[c].pending == 0 {
-                        stack.push(c);
+                    {
+                        let mut pend = self.entries[c].pending;
+                        pend -= 1;
+                        if pend == 0 {
+                            stack.push(c);
+                        }
                     }
+
+                    self.entries[c].node.on_child_valid(&self.entries[u].node);
                 }
             } else {
                 result.add_invalidated(self.entries[u].node.id().clone());
