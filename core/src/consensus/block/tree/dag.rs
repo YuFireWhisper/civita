@@ -12,7 +12,7 @@ pub trait Node {
 
     fn id(&self) -> Self::Id;
     fn validate(&self) -> bool;
-    fn on_child_valid(&self, child: &Self);
+    fn on_parent_valid(&self, child: &Self);
 }
 
 #[derive(Derivative)]
@@ -153,7 +153,7 @@ impl<N: Node> Dag<N> {
                         }
                     }
 
-                    self.entries[c].node.on_child_valid(&self.entries[u].node);
+                    self.entries[c].node.on_parent_valid(&self.entries[u].node);
                 }
             } else {
                 result.add_invalidated(self.entries[u].node.id().clone());
