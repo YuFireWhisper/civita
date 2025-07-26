@@ -1,26 +1,26 @@
 use std::hint::black_box;
 
-use civita_core::consensus::block::tree::dag::{Dag, Node};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
-#[derive(Clone)]
-#[derive(Debug)]
+use civita_core::consensus::block::tree::dag::*;
+
+const SIZES: [usize; 3] = [100, 500, 1000];
+
 struct TestNode {
     id: u32,
-    validation_complexity: usize,
+    valid: bool,
+    parent_constraint: Option<Box<dyn Fn(u32) -> bool + Send + Sync>>,
 }
 
 impl TestNode {
-    fn new(id: u32) -> Self {
+    fn new(id: u32, valid: bool) -> Self {
         Self {
             id,
-            validation_complexity: 1,
+            valid,
+            parent_constraint: None,
         }
-    }
-
-    fn with_complexity(mut self, complexity: usize) -> Self {
-        self.validation_complexity = complexity;
-        self
     }
 }
 
@@ -32,255 +32,591 @@ impl Node for TestNode {
     }
 
     fn validate(&self) -> bool {
-        true
+        self.valid
     }
 
-    fn on_parent_valid(&self, _child: &Self) -> bool {
-        true
+    fn on_parent_valid(&self, parent: &Self) -> bool {
+        match &self.parent_constraint {
+            Some(constraint) => constraint(parent.id()),
+            None => true,
+        }
     }
 }
 
-fn bench_dag_update_single_node(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag.upsert_single");
-
-    for complexity in [1, 10, 100, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("complexity", complexity),
-            &complexity,
-            |b, &complexity| {
-                b.iter(|| {
-                    let mut dag = Dag::new();
-                    let node = TestNode::new(1).with_complexity(complexity);
-                    black_box(dag.upsert(node, vec![]));
-                })
-            },
-        );
-    }
-    group.finish();
+// 拓撲結構生成器
+struct TopologyGenerator {
+    rng: StdRng,
 }
 
-fn bench_dag_linear_chain(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_linear_chain");
-
-    for chain_length in [10, 50, 100, 500, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("length", chain_length),
-            &chain_length,
-            |b, &chain_length| {
-                b.iter(|| {
-                    let mut dag = Dag::new();
-
-                    for i in 1..=chain_length {
-                        let node = TestNode::new(i);
-                        let parent_ids = vec![if i == 1 { 0 } else { i - 1 }];
-                        black_box(dag.upsert(node, parent_ids));
-                    }
-                })
-            },
-        );
+impl TopologyGenerator {
+    fn new(seed: u64) -> Self {
+        Self {
+            rng: StdRng::seed_from_u64(seed),
+        }
     }
-    group.finish();
-}
 
-fn bench_dag_fan_out(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_fan_out");
+    // 線性鏈: 0 -> 1 -> 2 -> ... -> n-1
+    fn linear_chain(&mut self, size: usize, valid_ratio: f32) -> Vec<(TestNode, Vec<u32>)> {
+        let mut nodes = Vec::new();
 
-    for fan_out_size in [10, 50, 100, 500] {
-        group.bench_with_input(
-            BenchmarkId::new("fan_out", fan_out_size),
-            &fan_out_size,
-            |b, &fan_out_size| {
-                b.iter(|| {
-                    let mut dag = Dag::new();
+        for i in 0..size {
+            let valid = self.rng.random::<f32>() < valid_ratio;
+            let node = TestNode::new(i as u32, valid);
+            let parents = if i == 0 { vec![] } else { vec![(i - 1) as u32] };
+            nodes.push((node, parents));
+        }
 
-                    let root = TestNode::new(0);
-                    dag.upsert(root, vec![]);
-
-                    for i in 1..=fan_out_size {
-                        let node = TestNode::new(i);
-                        black_box(dag.upsert(node, vec![0]));
-                    }
-                })
-            },
-        );
+        nodes
     }
-    group.finish();
-}
 
-fn bench_dag_fan_in(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_fan_in");
+    // 扇出: 一個根節點連接到所有其他節點
+    fn fan_out(&mut self, size: usize, valid_ratio: f32) -> Vec<(TestNode, Vec<u32>)> {
+        let mut nodes = Vec::new();
 
-    for fan_in_size in [10, 50, 100, 500] {
-        group.bench_with_input(
-            BenchmarkId::new("fan_in", fan_in_size),
-            &fan_in_size,
-            |b, &fan_in_size| {
-                b.iter(|| {
-                    let mut dag = Dag::new();
+        for i in 0..size {
+            let valid = self.rng.random::<f32>() < valid_ratio;
+            let node = TestNode::new(i as u32, valid);
+            let parents = if i == 0 { vec![] } else { vec![0] };
+            nodes.push((node, parents));
+        }
 
-                    for i in 0..fan_in_size {
-                        let node = TestNode::new(i);
-                        dag.upsert(node, vec![0]);
-                    }
-
-                    let child = TestNode::new(fan_in_size);
-                    let parent_ids: Vec<u32> = (0..fan_in_size).collect();
-                    black_box(dag.upsert(child, parent_ids));
-                })
-            },
-        );
+        nodes
     }
-    group.finish();
-}
 
-fn bench_dag_complex_structure(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_complex_structure");
+    // 扇入: 所有節點都連接到最後一個節點
+    fn fan_in(&mut self, size: usize, valid_ratio: f32) -> Vec<(TestNode, Vec<u32>)> {
+        let mut nodes = Vec::new();
 
-    for layers in [3, 5, 7, 10] {
-        group.bench_with_input(BenchmarkId::new("layers", layers), &layers, |b, &layers| {
-            b.iter(|| {
-                let mut dag = Dag::new();
-                let nodes_per_layer = 10;
-                let mut node_id = 0u32;
+        for i in 0..size {
+            let valid = self.rng.random::<f32>() < valid_ratio;
+            let node = TestNode::new(i as u32, valid);
+            let parents = if i == size - 1 {
+                (0..i).map(|x| x as u32).collect()
+            } else {
+                vec![]
+            };
+            nodes.push((node, parents));
+        }
 
-                let mut current_layer_nodes = Vec::new();
+        nodes
+    }
 
-                for _ in 0..nodes_per_layer {
-                    let node = TestNode::new(node_id);
-                    current_layer_nodes.push(node_id);
-                    dag.upsert(node, vec![]);
-                    node_id += 1;
+    // 平衡樹
+    fn balanced_tree(&mut self, size: usize, valid_ratio: f32) -> Vec<(TestNode, Vec<u32>)> {
+        let mut nodes = Vec::new();
+
+        for i in 0..size {
+            let valid = self.rng.random::<f32>() < valid_ratio;
+            let node = TestNode::new(i as u32, valid);
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![((i - 1) / 2) as u32]
+            };
+            nodes.push((node, parents));
+        }
+
+        nodes
+    }
+
+    // 複雜網狀結構
+    fn complex_graph(
+        &mut self,
+        size: usize,
+        valid_ratio: f32,
+        density: f32,
+    ) -> Vec<(TestNode, Vec<u32>)> {
+        let mut nodes = Vec::new();
+
+        for i in 0..size {
+            let valid = self.rng.random::<f32>() < valid_ratio;
+            let node = TestNode::new(i as u32, valid);
+
+            let mut parents = Vec::new();
+            for j in 0..i {
+                if self.rng.random::<f32>() < density {
+                    parents.push(j as u32);
                 }
+            }
 
-                for _ in 1..layers {
-                    let mut next_layer_nodes = Vec::new();
+            nodes.push((node, parents));
+        }
 
-                    for _ in 0..nodes_per_layer {
-                        let node = TestNode::new(node_id);
-                        next_layer_nodes.push(node_id);
+        nodes
+    }
 
-                        let num_parents = (current_layer_nodes.len() / 2).max(1);
-                        let parent_ids: Vec<u32> = current_layer_nodes
-                            .iter()
-                            .take(num_parents)
-                            .cloned()
-                            .collect();
+    // 帶循環的結構（會被DAG拒絕）
+    fn with_cycles(&mut self, size: usize, valid_ratio: f32) -> Vec<(TestNode, Vec<u32>)> {
+        let mut nodes = self.linear_chain(size, valid_ratio);
 
-                        black_box(dag.upsert(node, parent_ids));
-                        node_id += 1;
-                    }
+        // 添加一些循環
+        if size > 2 {
+            // 讓最後一個節點指向第一個節點
+            nodes.last_mut().unwrap().1.push(0);
 
-                    current_layer_nodes = next_layer_nodes;
+            // 添加一些隨機循環
+            for _ in 0..(size / 10) {
+                let from = self.rng.random_range(0..size);
+                let to = self.rng.random_range(0..from.max(1));
+                nodes[from].1.push(to as u32);
+            }
+        }
+
+        nodes
+    }
+
+    // 孤立子圖
+    fn isolated_subgraphs(
+        &mut self,
+        size: usize,
+        valid_ratio: f32,
+        num_components: usize,
+    ) -> Vec<(TestNode, Vec<u32>)> {
+        let mut nodes = Vec::new();
+        let component_size = size / num_components;
+
+        for comp in 0..num_components {
+            let start = comp * component_size;
+            let end = if comp == num_components - 1 {
+                size
+            } else {
+                (comp + 1) * component_size
+            };
+
+            for i in start..end {
+                let valid = self.rng.random::<f32>() < valid_ratio;
+                let node = TestNode::new(i as u32, valid);
+                let parents = if i == start {
+                    vec![]
+                } else {
+                    vec![(i - 1) as u32]
+                };
+                nodes.push((node, parents));
+            }
+        }
+
+        nodes
+    }
+}
+
+// 插入模式
+#[derive(Clone, Copy)]
+enum InsertionPattern {
+    Sequential,
+    Reverse,
+    Random,
+    Batch,
+}
+
+fn apply_insertion_pattern(
+    nodes: Vec<(TestNode, Vec<u32>)>,
+    pattern: InsertionPattern,
+    rng: &mut StdRng,
+) -> Vec<(TestNode, Vec<u32>)> {
+    match pattern {
+        InsertionPattern::Sequential => nodes,
+        InsertionPattern::Reverse => {
+            let mut reversed = nodes;
+            reversed.reverse();
+            reversed
+        }
+        InsertionPattern::Random => {
+            let mut shuffled = nodes;
+            for i in (1..shuffled.len()).rev() {
+                let j = rng.random_range(0..=i);
+                shuffled.swap(i, j);
+            }
+            shuffled
+        }
+        InsertionPattern::Batch => {
+            let mut batched = nodes;
+            let batch_size = (batched.len() / 4).max(1);
+
+            for chunk in batched.chunks_mut(batch_size) {
+                for i in (1..chunk.len()).rev() {
+                    let j = rng.random_range(0..=i);
+                    chunk.swap(i, j);
                 }
-            })
+            }
+            batched
+        }
+    }
+}
+
+fn generate_phantom_waiting_scenario(size: usize, valid_ratio: f32) -> Vec<(TestNode, Vec<u32>)> {
+    let mut nodes = Vec::new();
+
+    for i in 1..size {
+        let valid = rand::rng().random::<f32>() < valid_ratio;
+        let node = TestNode::new(i as u32, valid);
+        let parents = vec![0];
+        nodes.push((node, parents));
+    }
+
+    let root = TestNode::new(0, true);
+    nodes.push((root, vec![]));
+
+    nodes
+}
+
+// 基準測試函數
+fn benchmark_upsert_sequential(c: &mut Criterion) {
+    let mut group = c.benchmark_group("upsert_sequential");
+
+    for &size in &SIZES {
+        group.bench_with_input(BenchmarkId::new("linear_chain", size), &size, |b, &size| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    gen.linear_chain(size, 1.0)
+                },
+                |nodes| {
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        black_box(dag.upsert(node, parents));
+                    }
+                    dag
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_with_input(BenchmarkId::new("fan_in", size), &size, |b, &size| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    gen.fan_in(size, 1.0)
+                },
+                |nodes| {
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        black_box(dag.upsert(node, parents));
+                    }
+                    dag
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_with_input(BenchmarkId::new("fan_out", size), &size, |b, &size| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    gen.fan_out(size, 1.0)
+                },
+                |nodes| {
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        black_box(dag.upsert(node, parents));
+                    }
+                    dag
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("complex_graph", size),
+            &size,
+            |b, &size| {
+                b.iter_batched(
+                    || {
+                        let mut gen = TopologyGenerator::new(42);
+                        gen.complex_graph(size, 1.0, 0.1)
+                    },
+                    |nodes| {
+                        let mut dag = Dag::new();
+                        for (node, parents) in nodes {
+                            black_box(dag.upsert(node, parents));
+                        }
+                        dag
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn benchmark_upsert_patterns(c: &mut Criterion) {
+    let mut group = c.benchmark_group("upsert_insertion_patterns");
+    let size = 1000;
+
+    for &pattern in &[
+        InsertionPattern::Sequential,
+        InsertionPattern::Reverse,
+        InsertionPattern::Random,
+        InsertionPattern::Batch,
+    ] {
+        let pattern_name = match pattern {
+            InsertionPattern::Sequential => "sequential",
+            InsertionPattern::Reverse => "reverse",
+            InsertionPattern::Random => "random",
+            InsertionPattern::Batch => "batch",
+        };
+
+        group.bench_with_input(
+            BenchmarkId::new(pattern_name, size),
+            &pattern,
+            |b, &pattern| {
+                b.iter_batched(
+                    || {
+                        let mut gen = TopologyGenerator::new(42);
+                        let mut rng = StdRng::seed_from_u64(42);
+                        let nodes = gen.balanced_tree(size, 1.0);
+                        apply_insertion_pattern(nodes, pattern, &mut rng)
+                    },
+                    |nodes| {
+                        let mut dag = Dag::new();
+                        for (node, parents) in nodes {
+                            black_box(dag.upsert(node, parents));
+                        }
+                        dag
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn benchmark_upsert_validity_ratios(c: &mut Criterion) {
+    let mut group = c.benchmark_group("upsert_validity_ratios");
+    let size = 1000;
+
+    for &ratio in &[1.0, 0.5, 0.1] {
+        let ratio_name = match ratio {
+            1.0 => "all_valid",
+            0.5 => "half_valid",
+            0.1 => "sparse_valid",
+            _ => "other",
+        };
+
+        group.bench_with_input(BenchmarkId::new(ratio_name, size), &ratio, |b, &ratio| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    gen.balanced_tree(size, ratio)
+                },
+                |nodes| {
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        black_box(dag.upsert(node, parents));
+                    }
+                    dag
+                },
+                criterion::BatchSize::SmallInput,
+            );
         });
     }
+
     group.finish();
 }
 
-fn bench_dag_node_updates(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_node_updates");
+fn benchmark_upsert_special_cases(c: &mut Criterion) {
+    let mut group = c.benchmark_group("upsert_special_cases");
+    let size = 1000;
 
-    for dag_size in [100, 500, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("size", dag_size),
-            &dag_size,
-            |b, &dag_size| {
+    // 循環檢測
+    group.bench_with_input(BenchmarkId::new("with_cycles", size), &size, |b, &size| {
+        b.iter_batched(
+            || {
+                let mut gen = TopologyGenerator::new(42);
+                gen.with_cycles(size, 1.0)
+            },
+            |nodes| {
                 let mut dag = Dag::new();
-                for i in 1..=dag_size {
-                    let node = TestNode::new(i);
-                    let parent_ids = vec![if i == 1 { 0 } else { i - 1 }];
-                    dag.upsert(node, parent_ids);
+                for (node, parents) in nodes {
+                    black_box(dag.upsert(node, parents));
                 }
-
-                b.iter(|| {
-                    let middle_id = dag_size / 2;
-                    let updated_node = TestNode::new(middle_id).with_complexity(10);
-                    black_box(dag.upsert(updated_node, vec![middle_id - 1]));
-                })
+                dag
             },
+            criterion::BatchSize::SmallInput,
         );
-    }
-    group.finish();
-}
-
-fn bench_dag_memory_usage(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_memory");
-
-    for dag_size in [1000, 5000, 10000] {
-        group.bench_with_input(
-            BenchmarkId::new("size", dag_size),
-            &dag_size,
-            |b, &dag_size| {
-                b.iter(|| {
-                    let mut dag = Dag::new();
-
-                    let mut current_level = vec![0u32];
-                    dag.upsert(TestNode::new(0), vec![]);
-                    let mut next_id = 1;
-
-                    while next_id < dag_size {
-                        let mut next_level = Vec::new();
-
-                        for &parent_id in &current_level {
-                            for _ in 0..2 {
-                                if next_id >= dag_size {
-                                    break;
-                                }
-
-                                let node = TestNode::new(next_id);
-                                dag.upsert(node, vec![parent_id]);
-                                next_level.push(next_id);
-                                next_id += 1;
-                            }
-                            if next_id >= dag_size {
-                                break;
-                            }
-                        }
-
-                        current_level = next_level;
-                        if current_level.is_empty() {
-                            break;
-                        }
-                    }
-
-                    black_box(dag)
-                })
-            },
-        );
-    }
-    group.finish();
-}
-
-fn bench_dag_error_handling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("dag_error_handling");
-
-    group.bench_function("cycle_detection", |b| {
-        b.iter(|| {
-            let mut dag = Dag::new();
-
-            dag.upsert(TestNode::new(1), vec![]);
-            dag.upsert(TestNode::new(2), vec![1]);
-            dag.upsert(TestNode::new(3), vec![2]);
-
-            let cyclic_node = TestNode::new(1);
-            black_box(dag.upsert(cyclic_node, vec![3]))
-        })
     });
+
+    // 孤立子圖
+    group.bench_with_input(
+        BenchmarkId::new("isolated_subgraphs", size),
+        &size,
+        |b, &size| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    gen.isolated_subgraphs(size, 1.0, 5)
+                },
+                |nodes| {
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        black_box(dag.upsert(node, parents));
+                    }
+                    dag
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        },
+    );
+
+    // Phantom waiting場景
+    group.bench_with_input(
+        BenchmarkId::new("phantom_waiting", size),
+        &size,
+        |b, &size| {
+            b.iter_batched(
+                || generate_phantom_waiting_scenario(size, 1.0),
+                |nodes| {
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        black_box(dag.upsert(node, parents));
+                    }
+                    dag
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        },
+    );
+
+    group.finish();
+}
+
+fn benchmark_sorted_levels(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sorted_levels");
+
+    for &size in &SIZES {
+        // 線性鏈
+        group.bench_with_input(BenchmarkId::new("linear_chain", size), &size, |b, &size| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    let nodes = gen.linear_chain(size, 1.0);
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        dag.upsert(node, parents);
+                    }
+                    dag
+                },
+                |dag| {
+                    black_box(dag.sorted_levels(&0));
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        // 扇出
+        group.bench_with_input(BenchmarkId::new("fan_out", size), &size, |b, &size| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    let nodes = gen.fan_out(size, 1.0);
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        dag.upsert(node, parents);
+                    }
+                    dag
+                },
+                |dag| {
+                    black_box(dag.sorted_levels(&0));
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        // 平衡樹
+        group.bench_with_input(
+            BenchmarkId::new("balanced_tree", size),
+            &size,
+            |b, &size| {
+                b.iter_batched(
+                    || {
+                        let mut gen = TopologyGenerator::new(42);
+                        let nodes = gen.balanced_tree(size, 1.0);
+                        let mut dag = Dag::new();
+                        for (node, parents) in nodes {
+                            dag.upsert(node, parents);
+                        }
+                        dag
+                    },
+                    |dag| {
+                        black_box(dag.sorted_levels(&0));
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+
+        // 複雜網狀
+        group.bench_with_input(
+            BenchmarkId::new("complex_graph", size),
+            &size,
+            |b, &size| {
+                b.iter_batched(
+                    || {
+                        let mut gen = TopologyGenerator::new(42);
+                        let nodes = gen.complex_graph(size, 1.0, 0.1);
+                        let mut dag = Dag::new();
+                        for (node, parents) in nodes {
+                            dag.upsert(node, parents);
+                        }
+                        dag
+                    },
+                    |dag| {
+                        black_box(dag.sorted_levels(&0));
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn benchmark_sorted_levels_validity_ratios(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sorted_levels_validity");
+    let size = 1000;
+
+    for &ratio in &[1.0, 0.5, 0.1] {
+        let ratio_name = match ratio {
+            1.0 => "all_valid",
+            0.5 => "half_valid",
+            0.1 => "sparse_valid",
+            _ => "other",
+        };
+
+        group.bench_with_input(BenchmarkId::new(ratio_name, size), &ratio, |b, &ratio| {
+            b.iter_batched(
+                || {
+                    let mut gen = TopologyGenerator::new(42);
+                    let nodes = gen.balanced_tree(size, ratio);
+                    let mut dag = Dag::new();
+                    for (node, parents) in nodes {
+                        dag.upsert(node, parents);
+                    }
+                    dag
+                },
+                |dag| {
+                    black_box(dag.sorted_levels(&0));
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
 
     group.finish();
 }
 
 criterion_group!(
     benches,
-    bench_dag_update_single_node,
-    bench_dag_linear_chain,
-    bench_dag_fan_out,
-    bench_dag_fan_in,
-    bench_dag_complex_structure,
-    bench_dag_node_updates,
-    bench_dag_memory_usage,
-    bench_dag_error_handling,
+    benchmark_upsert_sequential,
+    benchmark_upsert_patterns,
+    benchmark_upsert_validity_ratios,
+    benchmark_upsert_special_cases,
+    benchmark_sorted_levels,
+    benchmark_sorted_levels_validity_ratios
 );
 
 criterion_main!(benches);
