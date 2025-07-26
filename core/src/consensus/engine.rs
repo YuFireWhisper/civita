@@ -1,25 +1,21 @@
 use std::sync::Arc;
 
 use civita_serialize::Serialize;
-use derivative::Derivative;
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
     PeerId,
 };
-use tokio::{
-    sync::{mpsc, RwLock},
-    task::JoinHandle,
-};
-use vdf::{WesolowskiVDF, VDF};
+use tokio::task::JoinHandle;
+use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
     consensus::{
         block::{self, tree::Tree, Block},
-        proposal::{self, Proposal},
+        proposal::{self, Operation, Proposal},
     },
-    crypto::{Hasher, Multihash, SecretKey},
+    crypto::{Hasher, Multihash, PublicKey, SecretKey},
     network::{gossipsub, Gossipsub, Transport},
-    utils::trie::Record,
+    utils::trie::{Record, Trie},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -34,43 +30,60 @@ pub enum Error {
     Proposal(#[from] proposal::Error),
 }
 
-pub struct Engine<H: Hasher> {
-    gossipsub: Arc<Gossipsub>,
+pub trait Validator {
+    fn validate_proposal<'a, I>(
+        &self,
+        opt_iter: I,
+        propoer_pk: &PublicKey,
+        metadata: Option<&[u8]>,
+    ) -> bool
+    where
+        I: IntoIterator<Item = &'a Operation>;
+}
 
+#[derive(Clone, Copy)]
+pub struct Config {
+    pub proposal_topic: u8,
+    pub block_topic: u8,
+    pub vdf_params: u16,
+    pub vdf_difficulty: u64,
+}
+
+pub struct Engine<H: Hasher, V> {
+    gossipsub: Arc<Gossipsub>,
     proposal_topic: u8,
     block_topic: u8,
-
     block_tree: Tree<H>,
-
-    prop_validation_tx: mpsc::UnboundedSender<Proposal>,
-
     sk: SecretKey,
-
     vdf: WesolowskiVDF,
     vdf_difficulty: u64,
+    validator: V,
 }
 
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
-pub struct Builder<H: Hasher> {
-    gossipsub: Option<Arc<Gossipsub>>,
+impl<H: Hasher, V: Validator> Engine<H, V> {
+    pub fn new(
+        transport: Arc<Transport>,
+        block_tree: Tree<H>,
+        validator: V,
+        config: Config,
+    ) -> Self {
+        let gossipsub = transport.gossipsub();
+        let sk = transport.secret_key().clone();
+        let vdf = WesolowskiVDFParams(config.vdf_params).new();
+        let vdf_difficulty = config.vdf_difficulty;
 
-    proposal_topic: Option<u8>,
-    block_topic: Option<u8>,
+        Self {
+            gossipsub,
+            proposal_topic: config.proposal_topic,
+            block_topic: config.block_topic,
+            block_tree,
+            sk,
+            vdf,
+            vdf_difficulty,
+            validator,
+        }
+    }
 
-    prop_validation_tx: Option<mpsc::UnboundedSender<Proposal>>,
-    prop_validation_rx: Option<mpsc::UnboundedReceiver<(Multihash, bool)>>,
-
-    block_tree: Option<RwLock<Tree<H>>>,
-
-    sk: Option<SecretKey>,
-
-    vdf: Option<WesolowskiVDF>,
-    vdf_difficulty: Option<u64>,
-}
-
-impl<H: Hasher> Engine<H> {
-    #[allow(dead_code)]
     pub async fn propose(&self, prop: Proposal) -> Result<()> {
         let witness = prop.generate_witness(
             &self.sk,
@@ -83,17 +96,13 @@ impl<H: Hasher> Engine<H> {
         prop.to_writer(&mut bytes);
         witness.to_writer(&mut bytes);
 
+        self.block_tree.update_proposal(prop, witness, None);
         self.gossipsub.publish(self.proposal_topic, bytes).await?;
-        self.block_tree.update_proposal_unchecked(prop, witness);
 
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn run(
-        &self,
-        mut prop_validation_rx: mpsc::UnboundedReceiver<(Multihash, bool)>,
-    ) -> Result<()> {
+    pub async fn run(&self) -> Result<()> {
         let mut prop_rx = self.gossipsub.subscribe(self.proposal_topic).await?;
         let mut block_rx = self.gossipsub.subscribe(self.block_topic).await?;
 
@@ -107,27 +116,20 @@ impl<H: Hasher> Engine<H> {
                 Some(msg) = block_rx.recv() => {
                     self.on_recv_block(msg).await;
                 }
-                Some((hash, accepted)) = prop_validation_rx.recv() => {
-                    self.on_recv_validation_result(hash, accepted);
-                }
                 result = vdf_task.as_mut().unwrap() => {
                     match result {
                         Ok((tip, vdf_proof)) => {
-                            if !self.block_tree.is_block_proposal_empty(&tip) {
-                                let (block, witness) = self.block_tree.create_and_update_block(
-                                    tip,
-                                    vdf_proof,
-                                );
-
-                                let mut bytes = Vec::new();
-                                block.to_writer(&mut bytes);
-                                witness.to_writer(&mut bytes);
+                            if let Some(pair) = self.block_tree.create_and_update_block(
+                                tip,
+                                vdf_proof,
+                            ) {
+                                let bytes = pair.to_vec();
 
                                 if let Err(e) = self.gossipsub.publish(self.block_topic, bytes).await {
                                     log::error!("Failed to publish block: {e}");
                                 }
 
-                                log::debug!("Block created and published with proposals");
+                                log::debug!("Block created and published");
                             }
 
                             vdf_task = Some(self.start_vdf_task());
@@ -185,27 +187,13 @@ impl<H: Hasher> Engine<H> {
             return;
         };
 
-        let this_msg_id = msg.id.clone();
         let res = self.verify_proposal(prop.clone(), witness, msg.id, msg.propagation_source);
 
-        let mut is_invalid = false;
         for (id, source, acceptance) in res {
-            if id == this_msg_id && matches!(acceptance, MessageAcceptance::Reject) {
-                is_invalid = true;
-            }
-
             self.gossipsub
                 .report_validation_result(&id, &source, acceptance)
                 .await;
         }
-
-        if is_invalid {
-            return;
-        }
-
-        self.prop_validation_tx
-            .send(prop)
-            .expect("Failed to send proposal for validation");
     }
 
     fn verify_proposal(
@@ -223,9 +211,17 @@ impl<H: Hasher> Engine<H> {
             return vec![(msg_id, source, MessageAcceptance::Reject)];
         }
 
+        if !self.validator.validate_proposal(
+            prop.operations.values(),
+            &prop.proposer_pk,
+            prop.metadata.as_deref(),
+        ) {
+            return vec![(msg_id, source, MessageAcceptance::Reject)];
+        }
+
         let res = self
             .block_tree
-            .update_proposal(prop, witness, msg_id, source);
+            .update_proposal(prop, witness, Some((msg_id, source)));
 
         let mut ress = Vec::with_capacity(res.validated_msgs.len() + res.invalidated_msgs.len());
 
@@ -289,7 +285,9 @@ impl<H: Hasher> Engine<H> {
             return vec![(msg_id, source, MessageAcceptance::Reject)];
         }
 
-        let res = self.block_tree.update_block(block, witness, msg_id, source);
+        let res = self
+            .block_tree
+            .update_block(block, witness, Some((msg_id, source)));
 
         let mut ress = Vec::with_capacity(res.validated_msgs.len() + res.invalidated_msgs.len());
 
@@ -304,11 +302,6 @@ impl<H: Hasher> Engine<H> {
         ress
     }
 
-    fn on_recv_validation_result(&self, hash: Multihash, accepted: bool) {
-        self.block_tree
-            .update_proposal_client_validation(hash, accepted);
-    }
-
     pub fn get_self_record(&self) -> Record {
         let key = self.sk.public_key().to_hash::<H>().to_bytes();
         self.block_tree.tip_trie().get(&key).unwrap_or_default()
@@ -317,98 +310,8 @@ impl<H: Hasher> Engine<H> {
     pub fn tip_hash(&self) -> Multihash {
         self.block_tree.tip_hash()
     }
-}
 
-impl<H: Hasher> Builder<H> {
-    pub fn new() -> Self {
-        Self {
-            gossipsub: None,
-            proposal_topic: None,
-            block_topic: None,
-            prop_validation_tx: None,
-            prop_validation_rx: None,
-            block_tree: None,
-            sk: None,
-            vdf: None,
-            vdf_difficulty: None,
-        }
-    }
-
-    pub fn with_transport(mut self, transport: Arc<Transport>) -> Self {
-        self.gossipsub = Some(transport.gossipsub());
-        self.sk = Some(transport.secret_key().clone());
-        self
-    }
-
-    pub fn with_topics(mut self, proposal_topic: u8, block_topic: u8) -> Self {
-        self.proposal_topic = Some(proposal_topic);
-        self.block_topic = Some(block_topic);
-        self
-    }
-
-    pub fn with_prop_validation_channel(
-        mut self,
-        tx: mpsc::UnboundedSender<Proposal>,
-        rx: mpsc::UnboundedReceiver<(Multihash, bool)>,
-    ) -> Self {
-        self.prop_validation_tx = Some(tx);
-        self.prop_validation_rx = Some(rx);
-        self
-    }
-
-    pub fn with_block_tree(mut self, tree: Tree<H>) -> Self {
-        self.block_tree = Some(RwLock::new(tree));
-        self
-    }
-
-    pub fn with_sk(mut self, sk: SecretKey) -> Self {
-        self.sk = Some(sk);
-        self
-    }
-
-    pub fn with_vdf(mut self, vdf: WesolowskiVDF, difficulty: u64) -> Self {
-        self.vdf = Some(vdf);
-        self.vdf_difficulty = Some(difficulty);
-        self
-    }
-
-    pub fn build(self) -> Arc<Engine<H>> {
-        let gossipsub = self.gossipsub.expect("Gossipsub must be set");
-        let proposal_topic = self.proposal_topic.expect("Proposal topic must be set");
-        let block_topic = self.block_topic.expect("Block topic must be set");
-        let prop_validation_tx = self
-            .prop_validation_tx
-            .expect("Prop validation tx must be set");
-        let prop_validation_rx = self
-            .prop_validation_rx
-            .expect("Prop validation rx must be set");
-        let block_tree = self.block_tree.expect("Block tree must be set");
-        let sk = self.sk.expect("Secret key must be set");
-        let vdf = self.vdf.expect("VDF must be set");
-        let vdf_difficulty = self.vdf_difficulty.expect("VDF difficulty must be set");
-
-        let engine = Engine {
-            gossipsub,
-            proposal_topic,
-            block_topic,
-            block_tree: block_tree.into_inner(),
-            prop_validation_tx,
-            sk,
-            vdf,
-            vdf_difficulty,
-        };
-
-        let engine = Arc::new(engine);
-
-        tokio::spawn({
-            let engine = Arc::clone(&engine);
-            async move {
-                if let Err(e) = engine.run(prop_validation_rx).await {
-                    panic!("Engine run failed: {e}");
-                }
-            }
-        });
-
-        engine
+    pub fn tip_trie(&self) -> Trie<H> {
+        self.block_tree.tip_trie()
     }
 }

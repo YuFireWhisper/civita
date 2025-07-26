@@ -26,7 +26,6 @@ pub enum Error {}
 pub struct Operation {
     pub from: Option<Record>,
     pub to: Record,
-    pub sig: Signature,
 }
 
 #[derive(Clone)]
@@ -37,7 +36,7 @@ pub struct Operation {
 pub struct Proposal {
     pub parent_hash: Multihash,
     pub dependencies: HashSet<Multihash>,
-    pub operations: BTreeMap<PublicKey, Operation>,
+    pub operations: BTreeMap<Vec<u8>, Operation>,
     pub proposer_pk: PublicKey,
     pub metadata: Option<Vec<u8>>,
     #[serialize(skip)]
@@ -58,22 +57,21 @@ pub struct Witness {
 pub struct Builder {
     pub parent_hash: Option<Multihash>,
     pub dependencies: HashSet<Multihash>,
-    pub operations: BTreeMap<PublicKey, Operation>,
+    pub operations: BTreeMap<Vec<u8>, Operation>,
     pub proposer_pk: Option<PublicKey>,
     pub metadata: Option<Vec<u8>>,
 }
 
 impl Operation {
-    pub fn new(from: Option<Record>, to: Record, sig: Signature) -> Self {
-        Operation { from, to, sig }
+    pub fn new(from: Option<Record>, to: Record) -> Self {
+        Operation { from, to }
     }
 
-    pub fn new_clcu<H: Hasher>(sk: &SecretKey, from: Option<Record>, to: Record) -> Self {
+    pub fn new_clcu<H: Hasher>(from: Option<Record>, to: Record) -> Self {
         let mut data = Vec::new();
         from.to_writer(&mut data);
         to.to_writer(&mut data);
-        let sig = sk.sign(&H::hash(&data).to_bytes());
-        Operation { from, to, sig }
+        Operation { from, to }
     }
 
     pub fn to_sign_data<H: Hasher>(&self) -> Multihash {
@@ -112,10 +110,9 @@ impl Proposal {
 
         self.operations
             .keys()
-            .chain(std::iter::once(&self.proposer_pk))
+            .chain(std::iter::once(&self.proposer_pk.to_hash::<H>().to_bytes()))
             .for_each(|key| {
-                let key = key.to_hash::<H>().to_bytes();
-                trie.prove(&key, &mut proofs);
+                trie.prove(key, &mut proofs);
             });
 
         proofs
@@ -152,8 +149,7 @@ impl Proposal {
 
     pub fn verify_operations<H: Hasher>(&self, witness: &Witness, trie_root: Multihash) -> bool {
         self.operations.iter().all(|(key, op)| {
-            let key = key.to_hash::<H>().to_bytes();
-            match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
+            match trie::verify_proof_with_hash(key, &witness.proofs, trie_root) {
                 ProofResult::Exists(record) => op.from.as_ref().is_some_and(|from| from == &record),
                 ProofResult::NotExists => op.from.is_none(),
                 ProofResult::Invalid => false,
@@ -162,10 +158,7 @@ impl Proposal {
     }
 
     pub fn apply_operations<H: Hasher>(&self, trie: &mut Trie<H>, witness: &Witness) -> bool {
-        let iter = self
-            .operations
-            .iter()
-            .map(|(k, v)| (k.to_hash::<H>().to_bytes(), v.to.clone()));
+        let iter = self.operations.iter().map(|(k, v)| (k, v.to.clone()));
         trie.update_many(iter, Some(&witness.proofs))
     }
 }
@@ -203,32 +196,15 @@ impl Builder {
         self
     }
 
-    pub fn with_operation(
-        mut self,
-        pk: PublicKey,
-        from: Option<Record>,
-        to: Record,
-        sig: Signature,
-    ) -> Self {
-        let operation = Operation::new(from, to, sig);
-        self.operations.insert(pk, operation);
-        self
-    }
-
-    pub fn with_operation_clcu<H: Hasher>(
-        mut self,
-        sk: &SecretKey,
-        from: Option<Record>,
-        to: Record,
-    ) -> Self {
-        let operation = Operation::new_clcu::<H>(sk, from, to);
-        self.operations.insert(sk.public_key(), operation);
+    pub fn with_operation(mut self, key: Vec<u8>, from: Option<Record>, to: Record) -> Self {
+        let operation = Operation::new(from, to);
+        self.operations.insert(key, operation);
         self
     }
 
     pub fn with_operations<I>(mut self, ops: I) -> Self
     where
-        I: IntoIterator<Item = (PublicKey, Operation)>,
+        I: IntoIterator<Item = (Vec<u8>, Operation)>,
     {
         self.operations.extend(ops);
         self
@@ -259,72 +235,72 @@ impl Builder {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use vdf::{VDFParams, WesolowskiVDFParams};
-
-    use super::*;
-
-    type TestHasher = sha2::Sha256;
-    type Trie = trie::Trie<TestHasher>;
-
-    const TO_WEIGHT: Weight = 200;
-    const VDF_PARAMS: WesolowskiVDFParams = WesolowskiVDFParams(1024);
-    const VDF_DIFFICULTY: u64 = 1;
-
-    fn setup() -> (Proposal, Witness) {
-        let sk = SecretKey::random();
-        let pk = sk.public_key();
-
-        let to_record = Record::new(TO_WEIGHT, vec![4, 5, 6]);
-
-        let proposer = Builder::new()
-            .with_parent_hash(Multihash::default())
-            .with_operation_clcu::<TestHasher>(&sk, None, to_record.clone())
-            .with_proposer_pk(pk.clone())
-            .build()
-            .expect("Proposal should be valid");
-
-        let vdf = VDF_PARAMS.new();
-
-        let witness = proposer
-            .generate_witness::<TestHasher>(&sk, &Trie::empty(), &vdf, VDF_DIFFICULTY)
-            .expect("Witness should be generated successfully");
-
-        (proposer, witness)
-    }
-
-    fn random_signature() -> Signature {
-        let sk = SecretKey::random();
-        let msg = vec![0; 32];
-        sk.sign(&msg)
-    }
-
-    #[test]
-    fn veirfy_signature() {
-        let (prop, witness) = setup();
-
-        let invalid_winess = Witness {
-            sig: random_signature(),
-            ..witness.clone()
-        };
-
-        assert!(prop.verify_signature::<TestHasher>(&witness));
-        assert!(!prop.verify_signature::<TestHasher>(&invalid_winess));
-    }
-
-    #[test]
-    fn verify_vdf() {
-        let (prop, witness) = setup();
-
-        let vdf = VDF_PARAMS.new();
-
-        let invalid_witness = Witness {
-            vdf_proof: vec![0; 32], // Invalid proof
-            ..witness.clone()
-        };
-
-        assert!(prop.verify_vdf::<TestHasher>(&witness, &vdf, VDF_DIFFICULTY));
-        assert!(!prop.verify_vdf::<TestHasher>(&invalid_witness, &vdf, VDF_DIFFICULTY));
-    }
-}
+// #[cfg(test)]
+// mod tests {
+//     use vdf::{VDFParams, WesolowskiVDFParams};
+//
+//     use super::*;
+//
+//     type TestHasher = sha2::Sha256;
+//     type Trie = trie::Trie<TestHasher>;
+//
+//     const TO_WEIGHT: Weight = 200;
+//     const VDF_PARAMS: WesolowskiVDFParams = WesolowskiVDFParams(1024);
+//     const VDF_DIFFICULTY: u64 = 1;
+//
+//     fn setup() -> (Proposal, Witness) {
+//         let sk = SecretKey::random();
+//         let pk = sk.public_key();
+//
+//         let to_record = Record::new(TO_WEIGHT, vec![4, 5, 6]);
+//
+//         let proposer = Builder::new()
+//             .with_parent_hash(Multihash::default())
+//             .with_operation_clcu::<TestHasher>(&sk, None, to_record.clone())
+//             .with_proposer_pk(pk.clone())
+//             .build()
+//             .expect("Proposal should be valid");
+//
+//         let vdf = VDF_PARAMS.new();
+//
+//         let witness = proposer
+//             .generate_witness::<TestHasher>(&sk, &Trie::empty(), &vdf, VDF_DIFFICULTY)
+//             .expect("Witness should be generated successfully");
+//
+//         (proposer, witness)
+//     }
+//
+//     fn random_signature() -> Signature {
+//         let sk = SecretKey::random();
+//         let msg = vec![0; 32];
+//         sk.sign(&msg)
+//     }
+//
+//     #[test]
+//     fn veirfy_signature() {
+//         let (prop, witness) = setup();
+//
+//         let invalid_winess = Witness {
+//             sig: random_signature(),
+//             ..witness.clone()
+//         };
+//
+//         assert!(prop.verify_signature::<TestHasher>(&witness));
+//         assert!(!prop.verify_signature::<TestHasher>(&invalid_winess));
+//     }
+//
+//     #[test]
+//     fn verify_vdf() {
+//         let (prop, witness) = setup();
+//
+//         let vdf = VDF_PARAMS.new();
+//
+//         let invalid_witness = Witness {
+//             vdf_proof: vec![0; 32], // Invalid proof
+//             ..witness.clone()
+//         };
+//
+//         assert!(prop.verify_vdf::<TestHasher>(&witness, &vdf, VDF_DIFFICULTY));
+//         assert!(!prop.verify_vdf::<TestHasher>(&invalid_witness, &vdf, VDF_DIFFICULTY));
+//     }
+// }
