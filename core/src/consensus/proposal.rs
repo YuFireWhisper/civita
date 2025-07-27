@@ -130,7 +130,8 @@ impl Proposal {
         difficulty: u64,
     ) -> bool {
         let hash = self.hash::<H>().to_bytes();
-        vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok()
+        std::panic::catch_unwind(|| vdf.verify(&hash, difficulty, &witness.vdf_proof).is_ok())
+            .unwrap_or(false)
     }
 
     pub fn verify_proposer_weight<H: Hasher>(
