@@ -28,6 +28,7 @@ mod node;
 pub struct ProcessResult {
     pub validated_msgs: Vec<(MessageId, PeerId)>,
     pub invalidated_msgs: Vec<(MessageId, PeerId)>,
+    pub phantoms: Vec<Multihash>,
 }
 
 pub struct Tree<H: Hasher> {
@@ -51,25 +52,39 @@ impl ProcessResult {
         self.invalidated_msgs.push((msg_id, source));
     }
 
+    pub fn add_phantom(&mut self, id: Multihash) {
+        self.phantoms.push(id);
+    }
+
     pub fn from_validation_result<N: Node>(
         result: &ValidationResult<N>,
         metadatas: &DashMap<N::Id, (MessageId, PeerId)>,
     ) -> Self {
         let mut process_result = Self::new();
-
-        for id in &result.validated {
-            if let Some((_, (msg_id, source))) = metadatas.remove(id) {
-                process_result.add_validated(msg_id, source);
-            }
-        }
-
-        for id in &result.invalidated {
-            if let Some((_, (msg_id, source))) = metadatas.remove(id) {
-                process_result.add_invalidated(msg_id, source);
-            }
-        }
-
+        process_result.merge_from_validation_result(result, metadatas);
         process_result
+    }
+
+    pub fn merge_from_validation_result<N: Node>(
+        &mut self,
+        result: &ValidationResult<N>,
+        metadatas: &DashMap<N::Id, (MessageId, PeerId)>,
+    ) {
+        result
+            .validated
+            .iter()
+            .filter_map(|id| metadatas.remove(id))
+            .for_each(|(_, (msg_id, source))| {
+                self.add_validated(msg_id, source);
+            });
+
+        result
+            .invalidated
+            .iter()
+            .filter_map(|id| metadatas.remove(id))
+            .for_each(|(_, (msg_id, source))| {
+                self.add_invalidated(msg_id, source);
+            });
     }
 }
 
@@ -124,12 +139,13 @@ impl<H: Hasher> Tree<H> {
         witness: block::Witness,
         metadata: Option<(MessageId, PeerId)>,
     ) -> ProcessResult {
+        let mut result = ProcessResult::new();
+
         if self.dag.read().contains(&block.hash::<H>()) {
-            return ProcessResult::new();
+            return result;
         }
 
         if block.height <= self.checkpoint_height() {
-            let mut result = ProcessResult::new();
             if let Some((msg_id, source)) = metadata {
                 result.add_invalidated(msg_id, source);
             }
@@ -143,7 +159,14 @@ impl<H: Hasher> Tree<H> {
 
         let mut parent_ids = Vec::with_capacity(block.proposals.len() + 1);
         parent_ids.push(block.parent);
-        parent_ids.extend(block.proposals.iter().cloned());
+
+        block.proposals.iter().for_each(|p| {
+            parent_ids.push(*p);
+
+            if !self.dag.read().contains(p) {
+                result.add_phantom(*p);
+            }
+        });
 
         let node =
             UnifiedNode::new_block(block, witness, self.tip.clone(), self.checkpoint.clone());
@@ -153,7 +176,9 @@ impl<H: Hasher> Tree<H> {
             dag_write.upsert(node, parent_ids)
         };
 
-        ProcessResult::from_validation_result(&dag_result, &self.metadatas)
+        result.merge_from_validation_result(&dag_result, &self.metadatas);
+
+        result
     }
 
     fn checkpoint_height(&self) -> u64 {
