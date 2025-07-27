@@ -1,5 +1,6 @@
 use std::sync::{atomic::AtomicU64, Arc};
 
+use derivative::Derivative;
 use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
@@ -19,6 +20,8 @@ pub use proposal_node::ProposalNode;
 
 type AtomicWeight = AtomicU64;
 
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
 pub enum UnifiedNode<H> {
     Block(BlockNode<H>),
     Proposal(ProposalNode),
