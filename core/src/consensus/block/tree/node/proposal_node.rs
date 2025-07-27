@@ -63,3 +63,13 @@ impl ProposalNode {
         true
     }
 }
+
+impl Clone for ProposalNode {
+    fn clone(&self) -> Self {
+        Self {
+            proposal: self.proposal.clone(),
+            witness: self.witness.clone(),
+            proposer_weight: AtomicU64::new(self.proposer_weight.load(Ordering::Relaxed)),
+        }
+    }
+}

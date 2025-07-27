@@ -91,10 +91,10 @@ impl<H: Hasher> BlockNode<H> {
 
         let tip = self.tip.read();
 
-        if tip.0 < weight || tip.1 < cumulative_weight || tip.2 > id {
+        if tip.0 < cumulative_weight || tip.1 < self.block.height || tip.2 > id {
             drop(tip);
             let mut tip = self.tip.write();
-            *tip = (weight, cumulative_weight, id);
+            *tip = (cumulative_weight, self.block.height, id);
         }
 
         let checkpoint = self.checkpoint.read();
@@ -114,5 +114,19 @@ impl<H: Hasher> BlockNode<H> {
 
     pub fn trie_root_hash(&self) -> Multihash {
         self.trie.read().root_hash()
+    }
+}
+
+impl<H> Clone for BlockNode<H> {
+    fn clone(&self) -> Self {
+        Self {
+            block: self.block.clone(),
+            witness: self.witness.clone(),
+            trie: ParkingRwLock::new(self.trie.read().clone()),
+            weight: AtomicWeight::new(self.weight.load(Ordering::Relaxed)),
+            cumulative_weight: AtomicWeight::new(self.cumulative_weight.load(Ordering::Relaxed)),
+            tip: Arc::clone(&self.tip),
+            checkpoint: Arc::clone(&self.checkpoint),
+        }
     }
 }
