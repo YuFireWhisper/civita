@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use libp2p::{gossipsub::MessageId, PeerId};
+use libp2p::PeerId;
 use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
@@ -26,8 +26,8 @@ mod node;
 #[derive(Debug)]
 #[derive(Default)]
 pub struct ProcessResult {
-    pub validated_msgs: Vec<(MessageId, PeerId)>,
-    pub invalidated_msgs: Vec<(MessageId, PeerId)>,
+    pub validated: Vec<PeerId>,
+    pub invalidated: Vec<PeerId>,
     pub phantoms: Vec<Multihash>,
 }
 
@@ -36,7 +36,7 @@ pub struct Tree<H: Hasher> {
     dag: ParkingRwLock<Dag<UnifiedNode<H>>>,
     tip: Arc<ParkingRwLock<(Weight, u64, Multihash)>>,
     checkpoint: Arc<ParkingRwLock<(Weight, Multihash)>>,
-    metadatas: DashMap<Multihash, (MessageId, PeerId)>,
+    sources: DashMap<Multihash, PeerId>,
 }
 
 impl ProcessResult {
@@ -44,12 +44,12 @@ impl ProcessResult {
         Self::default()
     }
 
-    pub fn add_validated(&mut self, msg_id: MessageId, source: PeerId) {
-        self.validated_msgs.push((msg_id, source));
+    pub fn add_validated(&mut self, source: PeerId) {
+        self.validated.push(source);
     }
 
-    pub fn add_invalidated(&mut self, msg_id: MessageId, source: PeerId) {
-        self.invalidated_msgs.push((msg_id, source));
+    pub fn add_invalidated(&mut self, source: PeerId) {
+        self.invalidated.push(source);
     }
 
     pub fn add_phantom(&mut self, id: Multihash) {
@@ -58,7 +58,7 @@ impl ProcessResult {
 
     pub fn from_validation_result<N: Node>(
         result: &ValidationResult<N>,
-        metadatas: &DashMap<N::Id, (MessageId, PeerId)>,
+        metadatas: &DashMap<N::Id, PeerId>,
     ) -> Self {
         let mut process_result = Self::new();
         process_result.merge_from_validation_result(result, metadatas);
@@ -68,22 +68,22 @@ impl ProcessResult {
     pub fn merge_from_validation_result<N: Node>(
         &mut self,
         result: &ValidationResult<N>,
-        metadatas: &DashMap<N::Id, (MessageId, PeerId)>,
+        metadatas: &DashMap<N::Id, PeerId>,
     ) {
         result
             .validated
             .iter()
             .filter_map(|id| metadatas.remove(id))
-            .for_each(|(_, (msg_id, source))| {
-                self.add_validated(msg_id, source);
+            .for_each(|(_, source)| {
+                self.add_validated(source);
             });
 
         result
             .invalidated
             .iter()
             .filter_map(|id| metadatas.remove(id))
-            .for_each(|(_, (msg_id, source))| {
-                self.add_invalidated(msg_id, source);
+            .for_each(|(_, source)| {
+                self.add_invalidated(source);
             });
     }
 }
@@ -114,7 +114,7 @@ impl<H: Hasher> Tree<H> {
             dag: ParkingRwLock::new(Dag::with_root(root_node)),
             tip,
             checkpoint,
-            metadatas: DashMap::new(),
+            sources: DashMap::new(),
         }
     }
 
@@ -129,7 +129,7 @@ impl<H: Hasher> Tree<H> {
             dag,
             tip,
             checkpoint,
-            metadatas: DashMap::new(),
+            sources: DashMap::new(),
         }
     }
 
@@ -137,25 +137,22 @@ impl<H: Hasher> Tree<H> {
         &self,
         block: Block,
         witness: block::Witness,
-        metadata: Option<(MessageId, PeerId)>,
+        source: PeerId,
     ) -> ProcessResult {
+        let hash = block.hash::<H>();
+
         let mut result = ProcessResult::new();
 
-        if self.dag.read().contains(&block.hash::<H>()) {
+        if self.dag.read().contains(&hash) {
             return result;
         }
 
         if block.height <= self.checkpoint_height() {
-            if let Some((msg_id, source)) = metadata {
-                result.add_invalidated(msg_id, source);
-            }
+            result.add_invalidated(source);
             return result;
         }
 
-        if let Some((msg_id, source)) = metadata {
-            let hash = block.hash::<H>();
-            self.metadatas.insert(hash, (msg_id, source));
-        }
+        self.sources.insert(hash, source);
 
         let mut parent_ids = Vec::with_capacity(block.proposals.len() + 1);
         parent_ids.push(block.parent);
@@ -176,7 +173,7 @@ impl<H: Hasher> Tree<H> {
             dag_write.upsert(node, parent_ids)
         };
 
-        result.merge_from_validation_result(&dag_result, &self.metadatas);
+        result.merge_from_validation_result(&dag_result, &self.sources);
 
         result
     }
@@ -197,34 +194,32 @@ impl<H: Hasher> Tree<H> {
         &self,
         proposal: Proposal,
         witness: proposal::Witness,
-        metadata: Option<(MessageId, PeerId)>,
+        source: PeerId,
     ) -> ProcessResult {
-        if self.dag.read().contains(&proposal.hash::<H>()) {
-            return ProcessResult::new();
+        let hash = proposal.hash::<H>();
+
+        let mut result = ProcessResult::new();
+
+        if self.dag.read().contains(&hash) {
+            return result;
         }
 
         if self
             .block_height(&proposal.parent_hash)
             .is_some_and(|height| height < self.checkpoint_height())
         {
-            let mut result = ProcessResult::new();
-            if let Some((msg_id, source)) = metadata {
-                result.add_invalidated(msg_id, source);
-            }
+            result.add_invalidated(source);
             return result;
         }
 
-        if let Some((msg_id, source)) = metadata {
-            let hash = proposal.hash::<H>();
-            self.metadatas.insert(hash, (msg_id, source));
-        }
+        self.sources.insert(hash, source);
 
         let parent_hash = proposal.parent_hash;
         let node = UnifiedNode::new_proposal(proposal, witness);
 
         let result = self.dag.write().upsert(node, vec![parent_hash]);
 
-        ProcessResult::from_validation_result(&result, &self.metadatas)
+        ProcessResult::from_validation_result(&result, &self.sources)
     }
 
     fn block_height(&self, hash: &Multihash) -> Option<u64> {
@@ -284,7 +279,11 @@ impl<H: Hasher> Tree<H> {
 
         drop(dag_read);
 
-        self.update_block(block.clone(), witness.clone(), None);
+        self.update_block(
+            block.clone(),
+            witness.clone(),
+            PeerId::from_multihash(self.sk.public_key().to_hash::<H>()).unwrap(),
+        );
 
         Some((block, witness))
     }
@@ -309,14 +308,13 @@ mod tests {
         consensus::{block, proposal},
         crypto::SecretKey,
     };
-    use libp2p::{gossipsub::MessageId, PeerId};
+    use libp2p::PeerId;
     use vdf::VDFParams;
 
     type TestHasher = sha2::Sha256;
 
     const VDF_PARAMS: vdf::WesolowskiVDFParams = vdf::WesolowskiVDFParams(1024);
     const VDF_DIFFICULTY: u64 = 1;
-    const MESSAGE_ID_BYTES: &[u8] = b"test_message_id";
 
     #[test]
     fn update_proposal() {
@@ -338,14 +336,13 @@ mod tests {
 
         let witness = proposal::Witness::new(sig, proofs, vdf_proof);
 
-        let msg_id = MessageId::new(MESSAGE_ID_BYTES);
         let source = PeerId::random();
 
-        let result = tree.update_proposal(prop, witness, Some((msg_id.clone(), source)));
+        let result = tree.update_proposal(prop, witness, source);
 
-        assert_eq!(result.validated_msgs.len(), 1);
-        assert_eq!(result.validated_msgs[0], (msg_id, source));
-        assert!(result.invalidated_msgs.is_empty());
+        assert_eq!(result.validated.len(), 1);
+        assert_eq!(result.validated[0], source);
+        assert!(result.invalidated.is_empty());
     }
 
     #[test]
@@ -367,7 +364,7 @@ mod tests {
 
         let hash = prop.hash::<TestHasher>();
 
-        tree.update_proposal(prop.clone(), witness, None);
+        tree.update_proposal(prop.clone(), witness, PeerId::random());
 
         let block = block::Builder::new()
             .with_parent_hash(tree.tip_hash())
@@ -385,13 +382,12 @@ mod tests {
 
         let witness = block::Witness::new(sig, proofs, vdf_proof);
 
-        let msg_id = MessageId::new(MESSAGE_ID_BYTES);
         let source = PeerId::random();
 
-        let result = tree.update_block(block, witness, Some((msg_id.clone(), source)));
+        let result = tree.update_block(block, witness, source);
 
-        assert_eq!(result.validated_msgs.len(), 1);
-        assert_eq!(result.validated_msgs[0], (msg_id, source));
-        assert!(result.invalidated_msgs.is_empty());
+        assert_eq!(result.validated.len(), 1);
+        assert_eq!(result.validated[0], source);
+        assert!(result.invalidated.is_empty());
     }
 }

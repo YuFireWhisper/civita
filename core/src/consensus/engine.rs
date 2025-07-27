@@ -1,11 +1,7 @@
 use std::sync::Arc;
 
 use civita_serialize::Serialize;
-use libp2p::{
-    gossipsub::{MessageAcceptance, MessageId},
-    request_response::Message,
-    PeerId,
-};
+use libp2p::{request_response::Message, PeerId};
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
@@ -20,7 +16,6 @@ use crate::{
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
-type Metadata = (MessageId, PeerId);
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -103,7 +98,8 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         prop.to_writer(&mut bytes);
         witness.to_writer(&mut bytes);
 
-        self.block_tree.update_proposal(prop, witness, None);
+        let source = self.transport.local_peer_id();
+        self.block_tree.update_proposal(prop, witness, source);
         self.gossipsub.publish(self.proposal_topic, bytes).await?;
 
         Ok(())
@@ -173,60 +169,32 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
     }
 
     async fn on_recv_proposal(&self, msg: gossipsub::Message) {
+        let source = msg.propagation_source;
+
         let mut data = msg.data.as_slice();
 
         let Ok(prop) = Proposal::from_reader(&mut data) else {
-            self.gossipsub
-                .report_validation_result(
-                    &msg.id,
-                    &msg.propagation_source,
-                    MessageAcceptance::Reject,
-                )
-                .await;
+            self.disconnect_peer(source).await;
             return;
         };
 
         let Ok(witness) = proposal::Witness::from_reader(&mut data) else {
-            self.gossipsub
-                .report_validation_result(
-                    &msg.id,
-                    &msg.propagation_source,
-                    MessageAcceptance::Reject,
-                )
-                .await;
+            self.disconnect_peer(source).await;
             return;
         };
 
-        let metadata = Some((msg.id, msg.propagation_source));
-        let res = self.verify_proposal(prop.clone(), witness, metadata).await;
-
-        for (id, source, acceptance) in res {
-            self.gossipsub
-                .report_validation_result(&id, &source, acceptance)
-                .await;
-        }
+        self.verify_proposal(prop.clone(), witness, source).await;
     }
 
-    async fn verify_proposal(
-        &self,
-        prop: Proposal,
-        witness: proposal::Witness,
-        metadata: Option<Metadata>,
-    ) -> Vec<(MessageId, PeerId, MessageAcceptance)> {
-        let mut result = Vec::new();
-
+    async fn verify_proposal(&self, prop: Proposal, witness: proposal::Witness, source: PeerId) {
         if !prop.verify_signature::<H>(&witness) {
-            if let Some((msg_id, source)) = metadata {
-                result.push((msg_id, source, MessageAcceptance::Reject));
-            }
-            return result;
+            self.disconnect_peer(source).await;
+            return;
         }
 
         if !prop.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
-            if let Some((msg_id, source)) = metadata {
-                result.push((msg_id, source, MessageAcceptance::Reject));
-            }
-            return result;
+            self.disconnect_peer(source).await;
+            return;
         }
 
         if !self.validator.validate_proposal(
@@ -234,100 +202,62 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
             &prop.proposer_pk,
             prop.metadata.as_deref(),
         ) {
-            if let Some((msg_id, source)) = metadata {
-                result.push((msg_id, source, MessageAcceptance::Reject));
-            }
-            return result;
+            self.disconnect_peer(source).await;
+            return;
         }
 
-        let res = self
-            .block_tree
-            .update_proposal(prop, witness, metadata.clone());
+        let res = self.block_tree.update_proposal(prop, witness, source);
 
-        let mut ress = Vec::with_capacity(res.validated_msgs.len() + res.invalidated_msgs.len());
-
-        res.validated_msgs.into_iter().for_each(|(id, source)| {
-            ress.push((id, source, MessageAcceptance::Accept));
-        });
-
-        res.invalidated_msgs.into_iter().for_each(|(id, source)| {
-            ress.push((id, source, MessageAcceptance::Reject));
-        });
-
-        if !res.phantoms.is_empty() {
-            if let Some((_, source)) = metadata {
-                let bytes = res.phantoms.to_vec();
-                self.request_response.send_request(source, bytes).await;
-            }
+        for source in res.invalidated {
+            self.disconnect_peer(source).await;
         }
+    }
 
-        ress
+    async fn disconnect_peer(&self, source: PeerId) {
+        if let Err(e) = self.transport.disconnect(source).await {
+            log::error!("Failed to disconnect peer: {e}");
+        }
     }
 
     async fn on_recv_block(&self, msg: gossipsub::Message) {
+        let source = msg.propagation_source;
+
         let mut data = msg.data.as_slice();
 
         let Ok(block) = Block::from_reader(&mut data) else {
-            self.gossipsub
-                .report_validation_result(
-                    &msg.id,
-                    &msg.propagation_source,
-                    MessageAcceptance::Reject,
-                )
-                .await;
+            self.disconnect_peer(source).await;
             return;
         };
 
         let Ok(witness) = block::Witness::from_reader(&mut data) else {
-            self.gossipsub
-                .report_validation_result(
-                    &msg.id,
-                    &msg.propagation_source,
-                    MessageAcceptance::Reject,
-                )
-                .await;
+            self.disconnect_peer(source).await;
             return;
         };
 
-        let res = self.verify_block(block, witness, msg.id, msg.propagation_source);
-
-        for (id, source, acceptance) in res {
-            self.gossipsub
-                .report_validation_result(&id, &source, acceptance)
-                .await;
-        }
+        self.verify_block(block, witness, source).await;
     }
 
-    fn verify_block(
-        &self,
-        block: Block,
-        witness: block::Witness,
-        msg_id: MessageId,
-        source: PeerId,
-    ) -> Vec<(MessageId, PeerId, MessageAcceptance)> {
+    async fn verify_block(&self, block: Block, witness: block::Witness, source: PeerId) {
         if !block.verify_signature::<H>(&witness) {
-            return vec![(msg_id, source, MessageAcceptance::Reject)];
+            self.disconnect_peer(source).await;
+            return;
         }
 
         if !block.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
-            return vec![(msg_id, source, MessageAcceptance::Reject)];
+            self.disconnect_peer(source).await;
+            return;
         }
 
-        let res = self
-            .block_tree
-            .update_block(block, witness, Some((msg_id, source)));
+        let res = self.block_tree.update_block(block, witness, source);
 
-        let mut ress = Vec::with_capacity(res.validated_msgs.len() + res.invalidated_msgs.len());
+        for source in res.invalidated {
+            self.disconnect_peer(source).await;
+        }
 
-        res.validated_msgs.into_iter().for_each(|(id, source)| {
-            ress.push((id, source, MessageAcceptance::Accept));
-        });
-
-        res.invalidated_msgs.into_iter().for_each(|(id, source)| {
-            ress.push((id, source, MessageAcceptance::Reject));
-        });
-
-        ress
+        if !res.phantoms.is_empty() {
+            let bytes = res.phantoms.to_vec();
+            self.request_response.send_request(source, bytes).await;
+        }
     }
 
     async fn on_recv_reqeust_response(&self, source: PeerId, msg: Message<Vec<u8>, Vec<u8>>) {
@@ -354,20 +284,12 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
                         .unwrap_or_default();
 
                 if props.is_empty() {
-                    if let Err(e) = self.transport.disconnect(source).await {
-                        log::error!("Failed to disconnect peer: {e}");
-                    }
+                    self.disconnect_peer(source).await;
                     return;
                 }
 
                 for (prop, witness) in props {
-                    let res = self.verify_proposal(prop, witness, None).await;
-
-                    for (id, source, acceptance) in res {
-                        self.gossipsub
-                            .report_validation_result(&id, &source, acceptance)
-                            .await;
-                    }
+                    self.verify_proposal(prop, witness, source).await;
                 }
             }
         }

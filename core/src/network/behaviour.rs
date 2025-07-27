@@ -12,9 +12,6 @@ use libp2p::{
 pub enum Error {
     #[error("{0}")]
     Gossipsub(String),
-
-    #[error("{0}")]
-    GossipsubConfigBuilder(#[from] gossipsub::ConfigBuilderError),
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -48,16 +45,13 @@ impl Behaviour {
     }
 
     fn create_gossipsub(key: Keypair) -> Result<gossipsub::Behaviour> {
-        let config = Self::create_gossipsub_config()?;
+        let config = Self::create_gossipsub_config();
         let behaviour = gossipsub::Behaviour::new(MessageAuthenticity::Signed(key), config)?;
         Ok(behaviour)
     }
 
-    fn create_gossipsub_config() -> Result<gossipsub::Config> {
-        gossipsub::ConfigBuilder::default()
-            .validate_messages()
-            .build()
-            .map_err(Error::from)
+    fn create_gossipsub_config() -> gossipsub::Config {
+        gossipsub::Config::default()
     }
 
     fn create_kad(peer_id: PeerId) -> kad::Behaviour<MemoryStore> {
