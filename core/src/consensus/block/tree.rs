@@ -230,15 +230,9 @@ impl<H: Hasher> Tree<H> {
         parent: Multihash,
         vdf_proof: Vec<u8>,
     ) -> Option<(Block, block::Witness)> {
-        let ids = self
-            .dag
-            .read()
-            .sorted_levels(&parent)?
-            .into_iter()
-            .filter_map(|mut ns| ns.pop())
-            .collect::<Vec<_>>();
+        let prop_ids = self.dag.read().get_leaf_nodes(&parent)?;
 
-        if ids.is_empty() {
+        if prop_ids.is_empty() {
             return None;
         }
 
@@ -254,7 +248,7 @@ impl<H: Hasher> Tree<H> {
             .with_parent_block::<H>(&parent_node.block)
             .with_proposer_pk(self.sk.public_key())
             .with_proposer_weight(weight)
-            .with_proposals(ids.clone())
+            .with_proposals(prop_ids)
             .build();
 
         let block_hash = block.hash::<H>();

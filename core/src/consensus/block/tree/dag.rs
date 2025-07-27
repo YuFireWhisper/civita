@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet},
     fmt::Debug,
     hash::Hash,
 };
@@ -340,82 +340,6 @@ impl<N: Node> Dag<N> {
             });
     }
 
-    pub fn sorted_levels(&self, id: &N::Id) -> Option<Vec<Vec<N::Id>>> {
-        let start = *self.index.get(id)?;
-
-        let valid_nodes = self.collect_valid_descendants(start);
-        if valid_nodes.is_empty() {
-            return Some(Vec::new());
-        }
-
-        self.topological_sort(&valid_nodes)
-    }
-
-    fn collect_valid_descendants(&self, start: usize) -> Vec<usize> {
-        let mut visited = vec![false; self.entries.len()];
-        let mut queue = VecDeque::new();
-        let mut nodes = Vec::new();
-
-        visited[start] = true;
-        queue.push_back(start);
-
-        while let Some(u) = queue.pop_front() {
-            if self.entries[u].valid {
-                if u != start {
-                    nodes.push(u);
-                }
-
-                for &child in &self.entries[u].children {
-                    if !visited[child] {
-                        visited[child] = true;
-                        queue.push_back(child);
-                    }
-                }
-            }
-        }
-
-        nodes
-    }
-
-    fn topological_sort(&self, nodes: &[usize]) -> Option<Vec<Vec<N::Id>>> {
-        let n = self.entries.len();
-        let mut indeg = vec![0usize; n];
-        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-        for &u in nodes {
-            for &child in &self.entries[u].children {
-                if self.entries[child].valid {
-                    indeg[child] += 1;
-                    adj[u].push(child);
-                }
-            }
-        }
-
-        let mut levels = Vec::new();
-        let mut zero: Vec<usize> = nodes.iter().copied().filter(|&u| indeg[u] == 0).collect();
-
-        while !zero.is_empty() {
-            levels.push(
-                zero.iter()
-                    .map(|&u| self.entries[u].node.id().clone())
-                    .collect(),
-            );
-
-            let mut next_zero = Vec::new();
-            for &u in &zero {
-                for &child in &adj[u] {
-                    indeg[child] -= 1;
-                    if indeg[child] == 0 {
-                        next_zero.push(child);
-                    }
-                }
-            }
-            zero = next_zero;
-        }
-
-        Some(levels)
-    }
-
     pub fn get_node(&self, id: &N::Id) -> Option<&N> {
         self.index
             .get(id)
@@ -424,6 +348,39 @@ impl<N: Node> Dag<N> {
 
     pub fn contains(&self, id: &N::Id) -> bool {
         self.index.contains_key(id)
+    }
+
+    pub fn get_leaf_nodes(&self, root_id: &N::Id) -> Option<Vec<N::Id>> {
+        let start = *self.index.get(root_id)?;
+
+        if !self.entries[start].valid {
+            return Some(Vec::new());
+        }
+
+        let mut leaf_nodes = Vec::new();
+        let mut stack = vec![start];
+        let mut visited = HashSet::new();
+
+        while let Some(current_idx) = stack.pop() {
+            visited.insert(current_idx);
+
+            let mut is_leaf = true;
+
+            self.entries[current_idx]
+                .children
+                .iter()
+                .filter(|&&cidx| self.entries[cidx].valid && !visited.contains(&cidx))
+                .for_each(|&cidx| {
+                    is_leaf = false;
+                    stack.push(cidx);
+                });
+
+            if is_leaf && current_idx != start {
+                leaf_nodes.push(self.entries[current_idx].node.id().clone());
+            }
+        }
+
+        Some(leaf_nodes)
     }
 }
 
@@ -706,68 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn sorted_levels_empty_dag() {
-        let dag = Dag::<TestNode>::new();
-        let res = dag.sorted_levels(&ROOT_NODE_ID);
-        assert!(res.is_none());
-    }
-
-    #[test]
-    fn sorted_levels_single_node() {
-        let dag = create_basic_dag();
-
-        let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
-
-        assert!(levels.is_empty())
-    }
-
-    #[test]
-    fn sorted_levels_linear_chain() {
-        let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![1]);
-
-        let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
-
-        assert_eq!(levels.len(), 2);
-        assert_eq!(levels[0], vec![1]);
-        assert_eq!(levels[1], vec![2]);
-    }
-
-    #[test]
-    fn sorted_levels_parallel_branches() {
-        let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(3), vec![1, 2]);
-
-        let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
-
-        assert_eq!(levels.len(), 2);
-        assert_eq!(levels[0], vec![1, 2]);
-        assert_eq!(levels[1], vec![3]);
-    }
-
-    #[test]
-    fn sorted_levels_with_invalid_nodes() {
-        let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new_invalid(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
-
-        let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
-
-        assert_eq!(levels.len(), 1);
-        assert_eq!(levels[0], vec![2]);
-    }
-
-    #[test]
-    fn sorted_levels_nonexistent_start() {
-        let dag = create_basic_dag();
-        let res = dag.sorted_levels(&999);
-        assert!(res.is_none());
-    }
-
-    #[test]
     fn get_existing_node() {
         let dag = create_basic_dag();
         let node = dag.get_node(&ROOT_NODE_ID);
@@ -781,24 +676,6 @@ mod tests {
         let dag = create_basic_dag();
         let node = dag.get_node(&999);
         assert!(node.is_none());
-    }
-
-    #[test]
-    fn complex_dag_operations() {
-        let mut dag = create_basic_dag();
-
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(3), vec![1]);
-        dag.upsert(TestNode::new(4), vec![2]);
-        dag.upsert(TestNode::new(5), vec![3, 4]);
-
-        let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
-
-        assert_eq!(levels.len(), 3);
-        assert_eq!(levels[0], vec![1, 2]);
-        assert_eq!(levels[1], vec![3, 4]);
-        assert_eq!(levels[2], vec![5]);
     }
 
     #[test]
@@ -825,5 +702,57 @@ mod tests {
         let mut dag = Dag::new();
         let res = dag.upsert(TestNode::new(1), vec![]);
         assert_validation_result(&res, &[1], &[]);
+    }
+
+    #[test]
+    fn get_leaf_nodes_empty_dag() {
+        let dag = Dag::<TestNode>::new();
+        let res = dag.get_leaf_nodes(&ROOT_NODE_ID);
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn get_leaf_nodes_single_root() {
+        let dag = create_basic_dag();
+        let res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
+        assert!(res.is_empty());
+    }
+
+    #[test]
+    fn get_leaf_nodes_linear_chain() {
+        let mut dag = create_basic_dag();
+        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
+        dag.upsert(TestNode::new(2), vec![1]);
+        dag.upsert(TestNode::new(3), vec![2]);
+
+        let res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
+
+        assert_eq!(res, vec![3]);
+    }
+
+    #[test]
+    fn get_leaf_nodes_multiple_branches() {
+        let mut dag = create_basic_dag();
+        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
+        dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
+        dag.upsert(TestNode::new(3), vec![1]);
+        dag.upsert(TestNode::new(4), vec![2]);
+
+        let mut res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
+        res.sort();
+
+        assert_eq!(res, vec![3, 4]);
+    }
+
+    #[test]
+    fn get_leaf_nodes_with_invalid_nodes() {
+        let mut dag = create_basic_dag();
+        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
+        dag.upsert(TestNode::new_invalid(2), vec![1]);
+        dag.upsert(TestNode::new(3), vec![1]);
+
+        let res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
+
+        assert_eq!(res, vec![3]);
     }
 }
