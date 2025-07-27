@@ -22,6 +22,8 @@ pub struct ValidationResult<N: Node> {
     pub invalidated: Vec<N::Id>,
 }
 
+#[derive(Derivative)]
+#[derivative(Clone(bound = "N: Clone"))]
 struct Entry<N: Node> {
     node: N,
     valid: bool,
@@ -32,6 +34,7 @@ struct Entry<N: Node> {
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
+#[derivative(Clone(bound = "N: Clone"))]
 pub struct Dag<N: Node> {
     index: HashMap<N::Id, usize>,
     entries: Vec<Entry<N>>,
@@ -358,7 +361,10 @@ impl<N: Node> Dag<N> {
 
         while let Some(u) = queue.pop_front() {
             if self.entries[u].valid {
-                nodes.push(u);
+                if u != start {
+                    nodes.push(u);
+                }
+
                 for &child in &self.entries[u].children {
                     if !visited[child] {
                         visited[child] = true;
@@ -415,6 +421,10 @@ impl<N: Node> Dag<N> {
             .get(id)
             .and_then(|&idx| self.entries.get(idx).map(|e| &e.node))
     }
+
+    pub fn contains(&self, id: &N::Id) -> bool {
+        self.index.contains_key(id)
+    }
 }
 
 #[cfg(test)]
@@ -426,13 +436,9 @@ mod tests {
     const INVALID_NODE_ID: u32 = 2;
     const ROOT_NODE_ID: u32 = 0;
 
-    #[derive(Clone)]
-    #[derive(Derivative)]
-    #[derivative(Debug)]
     struct TestNode {
         id: u32,
         should_validate: bool,
-        #[derivative(Debug = "ignore")]
         parent_validation_logic: Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
     }
 
