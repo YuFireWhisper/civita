@@ -96,8 +96,8 @@ impl Block {
         difficulty: u64,
     ) -> bool {
         let challenge_bytes = [
-            self.parent.to_bytes(),
             self.proposer_pk.to_hash::<H>().to_bytes(),
+            self.parent.to_bytes(),
         ]
         .concat();
 
