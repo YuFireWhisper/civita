@@ -103,12 +103,31 @@ impl<H: Hasher> Tree<H> {
         }
     }
 
+    pub fn from_other(sk: SecretKey, other: &Self) -> Self {
+        let tip = Arc::clone(&other.tip);
+        let checkpoint = Arc::clone(&other.checkpoint);
+
+        let dag = ParkingRwLock::new(other.dag.read().clone());
+
+        Self {
+            sk,
+            dag,
+            tip,
+            checkpoint,
+            metadatas: DashMap::new(),
+        }
+    }
+
     pub fn update_block(
         &self,
         block: Block,
         witness: block::Witness,
         metadata: Option<(MessageId, PeerId)>,
     ) -> ProcessResult {
+        if self.dag.read().contains(&block.hash::<H>()) {
+            return ProcessResult::new();
+        }
+
         if block.height <= self.checkpoint_height() {
             let mut result = ProcessResult::new();
             if let Some((msg_id, source)) = metadata {
@@ -129,15 +148,10 @@ impl<H: Hasher> Tree<H> {
         let node =
             UnifiedNode::new_block(block, witness, self.tip.clone(), self.checkpoint.clone());
 
-        println!("a");
         let dag_result = {
             let mut dag_write = self.dag.write();
-
-            println!("b");
-
             dag_write.upsert(node, parent_ids)
         };
-        println!("c");
 
         ProcessResult::from_validation_result(&dag_result, &self.metadatas)
     }
@@ -160,6 +174,10 @@ impl<H: Hasher> Tree<H> {
         witness: proposal::Witness,
         metadata: Option<(MessageId, PeerId)>,
     ) -> ProcessResult {
+        if self.dag.read().contains(&proposal.hash::<H>()) {
+            return ProcessResult::new();
+        }
+
         if self
             .block_height(&proposal.parent_hash)
             .is_some_and(|height| height < self.checkpoint_height())
@@ -244,6 +262,8 @@ impl<H: Hasher> Tree<H> {
         let sig = self.sk.sign(&block_hash.to_bytes());
         let proofs = block.generate_proofs(&parent_node.trie.read());
         let witness = block::Witness::new(sig, proofs, vdf_proof);
+
+        drop(dag_read);
 
         self.update_block(block.clone(), witness.clone(), None);
 
