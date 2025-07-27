@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use libp2p::{request_response, Swarm};
+use libp2p::{request_response, PeerId, Swarm};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::network::behaviour::Behaviour;
@@ -24,7 +24,7 @@ pub enum Error {
 pub enum RequestResponse {
     Network {
         network: network::RequestResponse,
-        rx: Mutex<mpsc::Receiver<Message>>,
+        rx: Mutex<mpsc::Receiver<(PeerId, Message)>>,
     },
 }
 
@@ -75,7 +75,7 @@ impl RequestResponse {
         }
     }
 
-    pub async fn recv(&self) -> Option<Message> {
+    pub async fn recv(&self) -> Option<(PeerId, Message)> {
         match self {
             Self::Network { rx, .. } => rx.lock().await.recv().await,
         }

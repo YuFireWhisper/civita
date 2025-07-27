@@ -40,13 +40,13 @@ enum ReqeustResult {
 
 pub struct RequestResponse {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::Sender<(PeerId, Message)>,
 
     waiting_resp: DashMap<OutboundRequestId, oneshot::Sender<ReqeustResult>>,
 }
 
 impl RequestResponse {
-    pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>, tx: mpsc::Sender<Message>) -> Self {
+    pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>, tx: mpsc::Sender<(PeerId, Message)>) -> Self {
         Self {
             swarm,
             tx,
@@ -56,9 +56,9 @@ impl RequestResponse {
 
     pub async fn handle_event(&self, event: Event) -> Result<()> {
         match event {
-            Event::Message { message, .. } => match message {
+            Event::Message { message, peer, .. } => match message {
                 Message::Request { .. } => {
-                    self.tx.send(message).await?;
+                    self.tx.send((peer, message)).await?;
                 }
                 Message::Response {
                     response,

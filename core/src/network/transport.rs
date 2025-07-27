@@ -44,6 +44,14 @@ impl Transport {
         }
     }
 
+    pub async fn disconnect(&self, peer_id: PeerId) -> Result<()> {
+        match self {
+            Transport::Network(transport) => {
+                transport.disconnect(peer_id).await.map_err(Error::from)
+            }
+        }
+    }
+
     pub fn local_peer_id(&self) -> PeerId {
         match self {
             Transport::Network(transport) => transport.local_peer_id(),

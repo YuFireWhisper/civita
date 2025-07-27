@@ -288,6 +288,18 @@ impl<H: Hasher> Tree<H> {
 
         Some((block, witness))
     }
+
+    pub fn get_proposals<I>(&self, ids: I) -> Vec<(Proposal, proposal::Witness)>
+    where
+        I: IntoIterator<Item = Multihash>,
+    {
+        let dag_read = self.dag.read();
+        ids.into_iter()
+            .filter_map(|id| dag_read.get_node(&id))
+            .filter_map(|node| node.as_proposal())
+            .map(|prop_node| (prop_node.proposal.clone(), prop_node.witness.clone()))
+            .collect()
+    }
 }
 
 #[cfg(test)]

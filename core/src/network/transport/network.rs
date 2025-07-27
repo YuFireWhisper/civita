@@ -185,6 +185,13 @@ impl Transport {
     pub fn request_response(&self) -> Arc<request_response::RequestResponse> {
         self.req_resp.clone()
     }
+
+    pub async fn disconnect(&self, peer_id: PeerId) -> Result<()> {
+        let mut swarm = self.swarm().await?;
+        swarm.behaviour_mut().kad_mut().remove_peer(&peer_id);
+        let _ = swarm.disconnect_peer_id(peer_id);
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Transport {

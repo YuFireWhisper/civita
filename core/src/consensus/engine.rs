@@ -3,6 +3,7 @@ use std::sync::Arc;
 use civita_serialize::Serialize;
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
+    request_response::Message,
     PeerId,
 };
 use tokio::task::JoinHandle;
@@ -14,11 +15,12 @@ use crate::{
         proposal::{self, Operation, Proposal},
     },
     crypto::{Hasher, Multihash, PublicKey, SecretKey},
-    network::{gossipsub, Gossipsub, Transport},
+    network::{gossipsub, request_response::RequestResponse, Gossipsub, Transport},
     utils::trie::{Record, Trie},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
+type Metadata = (MessageId, PeerId);
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -50,7 +52,9 @@ pub struct Config {
 }
 
 pub struct Engine<H: Hasher, V> {
+    transport: Arc<Transport>,
     gossipsub: Arc<Gossipsub>,
+    request_response: Arc<RequestResponse>,
     proposal_topic: u8,
     block_topic: u8,
     block_tree: Tree<H>,
@@ -68,12 +72,15 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         config: Config,
     ) -> Self {
         let gossipsub = transport.gossipsub();
+        let request_response = transport.request_response();
         let sk = transport.secret_key().clone();
         let vdf = WesolowskiVDFParams(config.vdf_params).new();
         let vdf_difficulty = config.vdf_difficulty;
 
         Self {
+            transport,
             gossipsub,
+            request_response,
             proposal_topic: config.proposal_topic,
             block_topic: config.block_topic,
             block_tree,
@@ -115,6 +122,9 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
                 }
                 Some(msg) = block_rx.recv() => {
                     self.on_recv_block(msg).await;
+                }
+                Some((source, msg)) = self.request_response.recv() => {
+                    self.on_recv_reqeust_response(source, msg).await;
                 }
                 result = vdf_task.as_mut().unwrap() => {
                     match result {
@@ -187,7 +197,8 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
             return;
         };
 
-        let res = self.verify_proposal(prop.clone(), witness, msg.id, msg.propagation_source);
+        let metadata = Some((msg.id, msg.propagation_source));
+        let res = self.verify_proposal(prop.clone(), witness, metadata).await;
 
         for (id, source, acceptance) in res {
             self.gossipsub
@@ -196,19 +207,26 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         }
     }
 
-    fn verify_proposal(
+    async fn verify_proposal(
         &self,
         prop: Proposal,
         witness: proposal::Witness,
-        msg_id: MessageId,
-        source: PeerId,
+        metadata: Option<Metadata>,
     ) -> Vec<(MessageId, PeerId, MessageAcceptance)> {
+        let mut result = Vec::new();
+
         if !prop.verify_signature::<H>(&witness) {
-            return vec![(msg_id, source, MessageAcceptance::Reject)];
+            if let Some((msg_id, source)) = metadata {
+                result.push((msg_id, source, MessageAcceptance::Reject));
+            }
+            return result;
         }
 
         if !prop.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
-            return vec![(msg_id, source, MessageAcceptance::Reject)];
+            if let Some((msg_id, source)) = metadata {
+                result.push((msg_id, source, MessageAcceptance::Reject));
+            }
+            return result;
         }
 
         if !self.validator.validate_proposal(
@@ -216,12 +234,15 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
             &prop.proposer_pk,
             prop.metadata.as_deref(),
         ) {
-            return vec![(msg_id, source, MessageAcceptance::Reject)];
+            if let Some((msg_id, source)) = metadata {
+                result.push((msg_id, source, MessageAcceptance::Reject));
+            }
+            return result;
         }
 
         let res = self
             .block_tree
-            .update_proposal(prop, witness, Some((msg_id, source)));
+            .update_proposal(prop, witness, metadata.clone());
 
         let mut ress = Vec::with_capacity(res.validated_msgs.len() + res.invalidated_msgs.len());
 
@@ -232,6 +253,13 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         res.invalidated_msgs.into_iter().for_each(|(id, source)| {
             ress.push((id, source, MessageAcceptance::Reject));
         });
+
+        if !res.phantoms.is_empty() {
+            if let Some((_, source)) = metadata {
+                let bytes = res.phantoms.to_vec();
+                self.request_response.send_request(source, bytes).await;
+            }
+        }
 
         ress
     }
@@ -300,6 +328,49 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         });
 
         ress
+    }
+
+    async fn on_recv_reqeust_response(&self, source: PeerId, msg: Message<Vec<u8>, Vec<u8>>) {
+        match msg {
+            Message::Request {
+                request, channel, ..
+            } => {
+                let hashes =
+                    Vec::<Multihash>::from_reader(&mut request.as_slice()).unwrap_or_default();
+
+                if hashes.is_empty() {
+                    return;
+                }
+
+                let bytes = self.block_tree.get_proposals(hashes).to_vec();
+
+                if let Err(e) = self.request_response.send_response(channel, bytes).await {
+                    log::error!("Failed to send response: {e}");
+                }
+            }
+            Message::Response { response, .. } => {
+                let props =
+                    Vec::<(Proposal, proposal::Witness)>::from_reader(&mut response.as_slice())
+                        .unwrap_or_default();
+
+                if props.is_empty() {
+                    if let Err(e) = self.transport.disconnect(source).await {
+                        log::error!("Failed to disconnect peer: {e}");
+                    }
+                    return;
+                }
+
+                for (prop, witness) in props {
+                    let res = self.verify_proposal(prop, witness, None).await;
+
+                    for (id, source, acceptance) in res {
+                        self.gossipsub
+                            .report_validation_result(&id, &source, acceptance)
+                            .await;
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_self_record(&self) -> Record {
