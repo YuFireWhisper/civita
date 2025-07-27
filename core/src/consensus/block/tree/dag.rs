@@ -715,10 +715,10 @@ mod tests {
     #[test]
     fn sorted_levels_single_node() {
         let dag = create_basic_dag();
+
         let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
 
-        assert_eq!(levels.len(), 1);
-        assert_eq!(levels[0], vec![ROOT_NODE_ID]);
+        assert!(levels.is_empty())
     }
 
     #[test]
@@ -729,10 +729,9 @@ mod tests {
 
         let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
 
-        assert_eq!(levels.len(), 3);
-        assert_eq!(levels[0], vec![ROOT_NODE_ID]);
-        assert_eq!(levels[1], vec![1]);
-        assert_eq!(levels[2], vec![2]);
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0], vec![1]);
+        assert_eq!(levels[1], vec![2]);
     }
 
     #[test]
@@ -744,12 +743,9 @@ mod tests {
 
         let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
 
-        assert_eq!(levels.len(), 3);
-        assert_eq!(levels[0], vec![ROOT_NODE_ID]);
-        assert_eq!(levels[1].len(), 2);
-        assert!(levels[1].contains(&1));
-        assert!(levels[1].contains(&2));
-        assert_eq!(levels[2], vec![3]);
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0], vec![1, 2]);
+        assert_eq!(levels[1], vec![3]);
     }
 
     #[test]
@@ -760,9 +756,8 @@ mod tests {
 
         let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
 
-        assert_eq!(levels.len(), 2);
-        assert_eq!(levels[0], vec![ROOT_NODE_ID]);
-        assert_eq!(levels[1], vec![2]);
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0], vec![2]);
     }
 
     #[test]
@@ -800,11 +795,10 @@ mod tests {
 
         let levels = dag.sorted_levels(&ROOT_NODE_ID).unwrap();
 
-        assert_eq!(levels.len(), 4);
-        assert_eq!(levels[0], vec![ROOT_NODE_ID]);
-        assert_eq!(levels[1].len(), 2);
-        assert_eq!(levels[2].len(), 2);
-        assert_eq!(levels[3], vec![5]);
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[0], vec![1, 2]);
+        assert_eq!(levels[1], vec![3, 4]);
+        assert_eq!(levels[2], vec![5]);
     }
 
     #[test]
