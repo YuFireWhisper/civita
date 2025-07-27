@@ -59,16 +59,24 @@ async fn basic_operations() {
     };
 
     for transport in transports.into_iter() {
-        let sk = transport.secret_key().clone();
+        let tree = block::Tree::empty(target_sk.clone());
 
+        let sk = transport.secret_key().clone();
         let engine = Engine::<Hasher, TestValidator>::new(
             Arc::new(transport),
-            block::Tree::empty(sk),
+            block::Tree::from_other(sk, &tree),
             TestValidator::new(true),
             engine_config,
         );
 
-        engine.run().await.expect("Failed to run engine");
+        let engine = Arc::new(engine);
+
+        tokio::spawn({
+            let engine = Arc::clone(&engine);
+            async move {
+                engine.run().await.expect("Failed to run engine");
+            }
+        });
 
         engines.push(engine);
     }
@@ -86,14 +94,21 @@ async fn basic_operations() {
         .await
         .expect("Failed to propose");
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let is_valid = engines.iter().all(|engine| {
-        engine
-            .tip_trie()
-            .get(&key)
-            .is_some_and(|record| record.weight == 10)
-    });
+    let is_valid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if engines.iter().all(|engine| {
+                engine
+                    .tip_trie()
+                    .get(&key)
+                    .is_some_and(|record| record.weight == 10)
+            }) {
+                break true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
 
     assert!(is_valid, "All engines should have the same record");
 }
