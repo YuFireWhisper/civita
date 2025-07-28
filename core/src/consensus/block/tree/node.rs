@@ -7,7 +7,7 @@ use crate::{
     consensus::{
         block::{
             self,
-            tree::{dag::Node, State},
+            tree::{dag::Node, Mode, State},
             Block,
         },
         proposal::{self, Proposal},
@@ -35,8 +35,9 @@ impl<H: Hasher> UnifiedNode<H> {
         block: Block,
         witness: block::Witness,
         state: Arc<ParkingRwLock<State>>,
+        mode: Arc<Mode>,
     ) -> Self {
-        UnifiedNode::Block(BlockNode::new(block, witness, state))
+        UnifiedNode::Block(BlockNode::new(block, witness, state, mode))
     }
 
     pub fn new_proposal(proposal: Proposal, witness: proposal::Witness) -> Self {

@@ -43,11 +43,17 @@ struct State {
     checkpoint_hash: Multihash,
 }
 
+pub enum Mode {
+    Archive,
+    Normal(Vec<Vec<u8>>),
+}
+
 pub struct Tree<H: Hasher> {
     sk: SecretKey,
     dag: ParkingRwLock<Dag<UnifiedNode<H>>>,
     state: Arc<ParkingRwLock<State>>,
     sources: DashMap<Multihash, PeerId>,
+    mode: Arc<Mode>,
 }
 
 impl ProcessResult {
@@ -124,7 +130,7 @@ impl State {
 }
 
 impl<H: Hasher> Tree<H> {
-    pub fn empty(sk: SecretKey) -> Self {
+    pub fn empty(sk: SecretKey, mode: Mode) -> Self {
         let root_block = block::Builder::new()
             .with_parent_hash(Multihash::default())
             .with_height(0)
@@ -147,13 +153,16 @@ impl<H: Hasher> Tree<H> {
         let proofs = root_block.generate_proofs(&Trie::<H>::empty());
         let witness = block::Witness::new(sig, proofs, vec![]);
 
-        let root_node = UnifiedNode::new_block(root_block, witness, state.clone());
+        let mode = Arc::new(mode);
+
+        let root_node = UnifiedNode::new_block(root_block, witness, state.clone(), mode.clone());
 
         Self {
             sk,
             dag: ParkingRwLock::new(Dag::with_root(root_node)),
             state,
             sources: DashMap::new(),
+            mode,
         }
     }
 
@@ -166,6 +175,7 @@ impl<H: Hasher> Tree<H> {
             dag,
             state,
             sources: DashMap::new(),
+            mode: other.mode.clone(),
         }
     }
 
@@ -201,7 +211,7 @@ impl<H: Hasher> Tree<H> {
             }
         });
 
-        let node = UnifiedNode::new_block(block, witness, self.state.clone());
+        let node = UnifiedNode::new_block(block, witness, self.state.clone(), self.mode.clone());
 
         let dag_result = {
             let mut dag_write = self.dag.write();
@@ -355,7 +365,7 @@ mod tests {
     fn update_proposal() {
         let sk = SecretKey::random();
         let pk = sk.public_key();
-        let tree = Tree::<TestHasher>::empty(sk.clone());
+        let tree = Tree::<TestHasher>::empty(sk.clone(), Mode::Archive);
 
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())
@@ -384,7 +394,7 @@ mod tests {
     fn update_block() {
         let sk = SecretKey::random();
         let pk = sk.public_key();
-        let tree = Tree::<TestHasher>::empty(sk);
+        let tree = Tree::<TestHasher>::empty(sk, Mode::Archive);
 
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())

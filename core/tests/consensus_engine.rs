@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use civita_core::{
     self,
-    consensus::{block, engine::Validator, proposal, Engine},
+    consensus::{
+        block::{self, tree::Mode},
+        engine::Validator,
+        proposal, Engine,
+    },
     utils::trie::Record,
 };
 
@@ -59,7 +63,7 @@ async fn basic_operations() {
     };
 
     for transport in transports.into_iter() {
-        let tree = block::Tree::empty(target_sk.clone());
+        let tree = block::Tree::empty(target_sk.clone(), Mode::Archive);
 
         let sk = transport.secret_key().clone();
         let engine = Engine::<Hasher, TestValidator>::new(
