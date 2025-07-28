@@ -48,36 +48,80 @@ impl<H: Hasher> Trie<H> {
         }
     }
 
-    pub fn from_root_with_guide(root_hash: Multihash, guide: HashMap<Multihash, Vec<u8>>) -> Self {
-        let mut trie = Self {
-            root: Node::Hash(root_hash),
-            _marker: PhantomData,
-        };
-
-        Self::expand_node_from_guide(&mut trie.root, &guide);
-
-        trie
+    pub fn expand<'a, I, T>(&mut self, keys: I, guide: &HashMap<Multihash, Vec<u8>>) -> bool
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<[u8]> + 'a,
+    {
+        keys.into_iter()
+            .all(|key| self.expand_single_key(key.as_ref(), guide))
     }
 
-    fn expand_node_from_guide(node: &mut Node, guide: &HashMap<Multihash, Vec<u8>>) {
+    fn expand_single_key(&mut self, key: &[u8], guide: &HashMap<Multihash, Vec<u8>>) -> bool {
+        let key_nibble = slice_to_hex(key);
+        let mut key_path = key_nibble.as_slice();
+        let mut current_node = &mut self.root;
+
+        loop {
+            if !Self::try_expand_node(current_node, guide) {
+                return false;
+            }
+
+            match current_node {
+                Node::Empty => {
+                    break;
+                }
+                Node::Value(_) => {
+                    break;
+                }
+                Node::Short(short) => {
+                    let match_len = prefix_len(key_path, &short.key);
+
+                    if match_len < short.key.len() {
+                        break;
+                    }
+
+                    key_path = &key_path[short.key.len()..];
+                    current_node = &mut short.val;
+                }
+                Node::Full(full) => {
+                    if key_path.is_empty() {
+                        if !Self::try_expand_node(&mut full.children[16], guide) {
+                            return false;
+                        }
+                        break;
+                    }
+
+                    let idx = key_path[0] as usize;
+                    if idx >= 16 {
+                        break;
+                    }
+
+                    key_path = &key_path[1..];
+                    current_node = &mut full.children[idx];
+                }
+                Node::Hash(_) => {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn try_expand_node(node: &mut Node, guide: &HashMap<Multihash, Vec<u8>>) -> bool {
         match node {
             Node::Hash(hash) => {
-                if let Some(data) = guide.get(hash) {
-                    if let Ok(resolved_node) = Node::from_slice(data) {
-                        *node = resolved_node;
-                        Self::expand_node_from_guide(node, guide);
-                    }
-                }
+                let Some(data) = guide.get(hash) else {
+                    return false;
+                };
+
+                Node::from_slice(data).is_ok_and(|resolved_node| {
+                    *node = resolved_node;
+                    true
+                })
             }
-            Node::Full(full) => {
-                for child in full.children.iter_mut() {
-                    Self::expand_node_from_guide(child, guide);
-                }
-            }
-            Node::Short(short) => {
-                Self::expand_node_from_guide(&mut short.val, guide);
-            }
-            Node::Value(_) | Node::Empty => {}
+            _ => true,
         }
     }
 
@@ -271,15 +315,91 @@ impl<H: Hasher> Trie<H> {
         true
     }
 
+    pub fn retain<I, T>(&mut self, keys: I) -> bool
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<[u8]>,
+    {
+        let mut owned_paths: Vec<Vec<u8>> =
+            keys.into_iter().map(|k| slice_to_hex(k.as_ref())).collect();
+        owned_paths.sort();
+        let paths: Vec<&[u8]> = owned_paths.iter().map(Vec::as_slice).collect();
+        Self::prune_node(&mut self.root, &paths, 0)
+    }
+
+    fn prune_node(node: &mut Node, paths: &[&[u8]], pos: usize) -> bool {
+        use Node::*;
+
+        if paths.is_empty() {
+            let h = node.hash::<H>();
+            *node = Hash(h);
+            return false;
+        }
+
+        match node {
+            Empty | Value(_) => {
+                let keep = paths.iter().any(|p| p.len() == pos);
+                if !keep {
+                    let h = node.hash::<H>();
+                    *node = Hash(h);
+                }
+                keep
+            }
+            Hash(_) => false,
+
+            Short(short) => {
+                let key = &short.key;
+                let klen = key.len();
+                let mut matched = Vec::new();
+                for &p in paths {
+                    if p.len() >= pos + klen && &p[pos..pos + klen] == key.as_slice() {
+                        matched.push(p);
+                    }
+                }
+                if matched.is_empty() {
+                    let h = node.hash::<H>();
+                    *node = Hash(h);
+                    return false;
+                }
+                let keep = Self::prune_node(&mut short.val, &matched, pos + klen);
+                if !keep {
+                    let h = node.hash::<H>();
+                    *node = Hash(h);
+                }
+                keep
+            }
+
+            Full(full) => {
+                let mut any_keep = false;
+                let mut buckets: [Vec<&[u8]>; 17] = Default::default();
+                for &p in paths {
+                    let idx = if p.len() == pos { 16 } else { p[pos] as usize };
+                    buckets[idx].push(p);
+                }
+
+                buckets
+                    .iter()
+                    .filter(|b| !b.is_empty())
+                    .enumerate()
+                    .for_each(|(i, bucket)| {
+                        let child = &mut full.children[i];
+                        let next_pos = if i == 16 { pos } else { pos + 1 };
+                        any_keep |= Self::prune_node(child, bucket, next_pos);
+                    });
+
+                if !any_keep {
+                    let h = node.hash::<H>();
+                    *node = Hash(h);
+                }
+
+                any_keep
+            }
+        }
+    }
+
     pub fn verify_proof(&self, key: &[u8], proof_db: &HashMap<Multihash, Vec<u8>>) -> ProofResult {
         let expected_hash = self.root.hash::<H>();
         verify_proof_with_hash(key, proof_db, expected_hash)
-    }
-
-    pub fn reduce_one(&self, key: &[u8]) -> Self {
-        let mut proofs = HashMap::new();
-        assert!(self.prove(key, &mut proofs), "Failed to prove key");
-        Self::from_root_with_guide(self.root.hash::<H>(), proofs)
     }
 
     pub fn root_hash(&self) -> Multihash {

@@ -237,36 +237,6 @@ fn bench_weight_operations(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_reduce_operations(c: &mut Criterion) {
-    let mut group = c.benchmark_group("trie_reduce");
-
-    for size in SIZES.iter() {
-        let data = generate_test_data(*size);
-
-        let mut trie = TestTrie::empty();
-        data.iter().for_each(|(key, record)| {
-            trie.update(key, record.clone(), None);
-        });
-        trie.commit();
-
-        let test_keys: Vec<_> = data.iter().step_by(10).map(|(k, _)| k.clone()).collect();
-
-        group.throughput(Throughput::Elements(test_keys.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("reduce_one", size),
-            &(&trie, &test_keys),
-            |b, (trie, keys)| {
-                b.iter(|| {
-                    keys.iter().for_each(|key| {
-                        std::hint::black_box(trie.reduce_one(key));
-                    });
-                });
-            },
-        );
-    }
-    group.finish();
-}
-
 fn bench_memory_usage(c: &mut Criterion) {
     let mut group = c.benchmark_group("trie_memory");
 
@@ -302,7 +272,6 @@ criterion_group!(
     bench_verify_operations,
     bench_commit_operations,
     bench_weight_operations,
-    bench_reduce_operations,
     bench_memory_usage,
 );
 
