@@ -51,14 +51,6 @@ impl<H: Hasher> UnifiedNode<H> {
             None
         }
     }
-
-    pub fn as_proposal(&self) -> Option<&ProposalNode> {
-        if let UnifiedNode::Proposal(node) = self {
-            Some(node)
-        } else {
-            None
-        }
-    }
 }
 
 impl<H: Hasher> Node for UnifiedNode<H> {

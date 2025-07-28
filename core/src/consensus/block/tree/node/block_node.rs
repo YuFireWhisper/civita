@@ -6,6 +6,7 @@ use crate::{
     consensus::block::{
         self,
         tree::{
+            dag::Node,
             node::{AtomicWeight, ProposalNode},
             Mode, State,
         },
@@ -109,10 +110,6 @@ impl<H: Hasher> BlockNode<H> {
         true
     }
 
-    pub fn height(&self) -> u64 {
-        self.block.height
-    }
-
     pub fn trie_root_hash(&self) -> Multihash {
         self.trie.read().root_hash()
     }
@@ -129,5 +126,21 @@ impl<H> Clone for BlockNode<H> {
             state: Arc::clone(&self.state),
             mode: self.mode.clone(),
         }
+    }
+}
+
+impl<H: Hasher> Node for BlockNode<H> {
+    type Id = Multihash;
+
+    fn id(&self) -> Self::Id {
+        self.id()
+    }
+
+    fn validate(&self) -> bool {
+        self.validate()
+    }
+
+    fn on_parent_valid(&self, child: &Self) -> bool {
+        self.on_block_parent_valid(child)
     }
 }

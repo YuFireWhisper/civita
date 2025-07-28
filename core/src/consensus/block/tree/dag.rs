@@ -340,6 +340,42 @@ impl<N: Node> Dag<N> {
             });
     }
 
+    pub fn remove(&mut self, id: &N::Id) -> Option<N> {
+        let &idx = self.index.get(id)?;
+
+        self.index.remove(id);
+
+        let last = self.entries.len() - 1;
+        let removed_entry = if idx == last {
+            self.entries.pop().unwrap()
+        } else {
+            let entry = self.entries.swap_remove(idx);
+            let moved_id = entry.node.id().clone();
+            self.index.insert(moved_id, idx);
+            entry
+        };
+
+        for entry in &mut self.entries {
+            entry.children.retain(|&child_idx| child_idx != idx);
+            entry.children.iter_mut().for_each(|child_idx| {
+                if *child_idx == last {
+                    *child_idx = idx;
+                }
+            });
+
+            entry.waiting_children.retain(|&w| w != idx);
+            entry.waiting_children.iter_mut().for_each(|w| {
+                if *w == last {
+                    *w = idx;
+                }
+            });
+        }
+
+        self.phantom_waiting.remove(id);
+
+        Some(removed_entry.node)
+    }
+
     pub fn get_node(&self, id: &N::Id) -> Option<&N> {
         self.index
             .get(id)

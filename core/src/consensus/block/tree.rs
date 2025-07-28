@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use civita_serialize_derive::Serialize;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use libp2p::PeerId;
 use parking_lot::RwLock as ParkingRwLock;
 
@@ -11,7 +11,7 @@ use crate::{
             self,
             tree::{
                 dag::{Dag, Node, ValidationResult},
-                node::UnifiedNode,
+                node::{BlockNode, UnifiedNode},
             },
             Block,
         },
@@ -46,7 +46,7 @@ pub enum Mode {
     Normal(Vec<Vec<u8>>),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 #[derive(Debug)]
 #[derive(Default)]
 struct State {
@@ -54,13 +54,22 @@ struct State {
     tip_height: u64,
     tip_hash: Multihash,
 
-    checkpoint_total_weight: Weight,
-    checkpoint_hash: Multihash,
+    current_checkpoint_total_weight: Weight,
+    current_checkpoint_height: u64,
+    checkpoints: Vec<Multihash>,
 }
 
 pub struct Tree<H: Hasher> {
     sk: SecretKey,
-    dag: ParkingRwLock<Dag<UnifiedNode<H>>>,
+
+    block_dag: ParkingRwLock<Dag<BlockNode<H>>>,
+    proposal_dags: DashMap<Multihash, Dag<UnifiedNode<H>>>,
+
+    pending_blocks: DashSet<Multihash>,
+    invalidated_hashes: DashSet<Multihash>,
+
+    proposal_to_block: DashMap<Multihash, Multihash>,
+
     state: Arc<ParkingRwLock<State>>,
     sources: DashMap<Multihash, PeerId>,
     mode: Arc<Mode>,
@@ -138,14 +147,17 @@ impl State {
     }
 
     pub fn update_checkpoint(&mut self, weight: Weight, total_weight: Weight, hash: Multihash) {
-        if (self.checkpoint_total_weight as f64) * 0.67 < weight as f64 {
-            self.checkpoint_total_weight = total_weight;
-            self.checkpoint_hash = hash;
+        if (self.current_checkpoint_total_weight as f64) * 0.67 < weight as f64 {
+            self.current_checkpoint_total_weight = total_weight;
+            self.checkpoints.push(hash);
         }
     }
 
     pub fn checkpoint_hash(&self) -> Multihash {
-        self.checkpoint_hash
+        *self
+            .checkpoints
+            .last()
+            .expect("Checkpoint hash should exist in the state")
     }
 }
 
@@ -164,58 +176,72 @@ impl<H: Hasher> Tree<H> {
             tip_cumulative_weight: 0,
             tip_height: 0,
             tip_hash: hash,
-            checkpoint_total_weight: 0,
-            checkpoint_hash: hash,
+            current_checkpoint_height: 0,
+            current_checkpoint_total_weight: 0,
+            checkpoints: vec![hash],
         };
+
         let state = Arc::new(ParkingRwLock::new(state));
-
         let mode = Arc::new(mode);
+        let root = BlockNode::new(root_block, None, state.clone(), mode.clone());
 
-        let root_node = UnifiedNode::new_block(root_block, None, state.clone(), mode.clone());
+        let block_dag = Dag::with_root(root);
+        let block_dag = ParkingRwLock::new(block_dag);
+        let proposal_dags = DashMap::new();
 
         Self {
             sk,
-            dag: ParkingRwLock::new(Dag::with_root(root_node)),
+            block_dag,
+            proposal_dags,
+            pending_blocks: DashSet::new(),
+            invalidated_hashes: DashSet::new(),
+            proposal_to_block: DashMap::new(),
             state,
             sources: DashMap::new(),
             mode,
         }
     }
 
-    pub fn from_sync_state(sk: SecretKey, sync_state: SyncState, mode: Mode) -> Self {
-        let state = State {
-            tip_cumulative_weight: sync_state.tip_cumulative_weight,
-            tip_height: sync_state.tip_block.height,
-            tip_hash: sync_state.tip_block.hash::<H>(),
-            checkpoint_total_weight: sync_state.checkpoint_total_weight,
-            checkpoint_hash: sync_state.checkpoint_block.hash::<H>(),
-        };
-
-        let state = Arc::new(ParkingRwLock::new(state));
-
-        let mode = Arc::new(mode);
-
-        let root_node =
-            UnifiedNode::new_block(sync_state.tip_block, None, state.clone(), mode.clone());
-
-        let dag = ParkingRwLock::new(Dag::with_root(root_node));
-
-        Self {
-            sk,
-            dag,
-            state,
-            sources: DashMap::new(),
-            mode,
-        }
-    }
+    // pub fn from_sync_state(sk: SecretKey, sync_state: SyncState, mode: Mode) -> Self {
+    //     let state = State {
+    //         tip_cumulative_weight: sync_state.tip_cumulative_weight,
+    //         tip_height: sync_state.tip_block.height,
+    //         tip_hash: sync_state.tip_block.hash::<H>(),
+    //         checkpoint_total_weight: sync_state.checkpoint_total_weight,
+    //         checkpoint_hash: sync_state.checkpoint_block.hash::<H>(),
+    //     };
+    //
+    //     let state = Arc::new(ParkingRwLock::new(state));
+    //
+    //     let mode = Arc::new(mode);
+    //
+    //     let root_node =
+    //         UnifiedNode::new_block(sync_state.tip_block, None, state.clone(), mode.clone());
+    //
+    //     let dag = ParkingRwLock::new(Dag::with_root(root_node));
+    //
+    //     Self {
+    //         sk,
+    //         dag,
+    //         state,
+    //         sources: DashMap::new(),
+    //         mode,
+    //     }
+    // }
 
     pub fn from_other(sk: SecretKey, other: &Self) -> Self {
         let state = other.state.clone();
-        let dag = ParkingRwLock::new(other.dag.read().clone());
+
+        let block_dag = other.block_dag.read().clone();
+        let proposal_dags = other.proposal_dags.clone();
 
         Self {
             sk,
-            dag,
+            block_dag: ParkingRwLock::new(block_dag),
+            proposal_dags,
+            pending_blocks: DashSet::new(),
+            invalidated_hashes: DashSet::new(),
+            proposal_to_block: DashMap::new(),
             state,
             sources: DashMap::new(),
             mode: other.mode.clone(),
@@ -232,51 +258,114 @@ impl<H: Hasher> Tree<H> {
 
         let mut result = ProcessResult::new();
 
-        if self.dag.read().contains(&hash) {
+        if self.invalidated_hashes.contains(&hash)
+            || self.invalidated_hashes.contains(&block.parent)
+        {
+            self.invalidated_hashes.insert(hash);
+            result.add_invalidated(source);
+            return result;
+        }
+
+        if self.block_dag.read().contains(&hash) {
             return result;
         }
 
         if block.height <= self.checkpoint_height() {
+            self.invalidated_hashes.insert(hash);
             result.add_invalidated(source);
             return result;
         }
 
         self.sources.insert(hash, source);
+        self.pending_blocks.insert(hash);
 
-        let mut parent_ids = Vec::with_capacity(block.proposals.len() + 1);
-        parent_ids.push(block.parent);
-
-        block.proposals.iter().for_each(|p| {
-            parent_ids.push(*p);
-
-            if !self.dag.read().contains(p) {
-                result.add_phantom(*p);
-            }
-        });
-
-        let node =
-            UnifiedNode::new_block(block, Some(witness), self.state.clone(), self.mode.clone());
-
-        let dag_result = {
-            let mut dag_write = self.dag.write();
-            dag_write.upsert(node, parent_ids)
-        };
-
-        result.merge_from_validation_result(&dag_result, &self.sources);
+        self.upsert_block_to_proposal_dag(block, witness, &mut result);
 
         result
     }
 
     fn checkpoint_height(&self) -> u64 {
-        let hash = self.state.read().checkpoint_hash();
+        self.state.read().current_checkpoint_height
+    }
 
-        self.dag
-            .read()
-            .get_node(&hash)
-            .expect("Checkpoint hash should exist in the DAG")
-            .as_block()
-            .expect("Checkpoint node should be a block")
-            .height()
+    fn upsert_block_to_proposal_dag(
+        &self,
+        block: Block,
+        witness: block::Witness,
+        res: &mut ProcessResult,
+    ) {
+        let ps = self.generate_block_parents(&block, res);
+        let mut entry = self.proposal_dags.entry(block.parent).or_default();
+        let dag = entry.value_mut();
+        let n = UnifiedNode::new_block(block, Some(witness), self.state.clone(), self.mode.clone());
+        let dag_res = dag.upsert(n, ps);
+        self.process_validation_result(&dag_res, res);
+    }
+
+    fn generate_block_parents(&self, block: &Block, result: &mut ProcessResult) -> Vec<Multihash> {
+        let mut parents = Vec::with_capacity(block.proposals.len() + 1);
+        parents.push(block.parent);
+
+        if !self.block_dag.read().contains(&block.parent) {
+            result.add_phantom(block.parent);
+        }
+
+        let dag = self.proposal_dags.entry(block.parent).or_default();
+
+        block.proposals.iter().for_each(|prop| {
+            if !dag.contains(prop) {
+                result.add_phantom(*prop);
+            }
+            parents.push(*prop);
+        });
+
+        parents
+    }
+
+    fn process_validation_result(
+        &self,
+        validation_result: &ValidationResult<UnifiedNode<H>>,
+        process_result: &mut ProcessResult,
+    ) {
+        validation_result.validated.iter().for_each(|id| {
+            if self.pending_blocks.remove(id).is_some() {
+                let un_node = self
+                    .proposal_dags
+                    .get_mut(id)
+                    .expect("Node should exist in the DAG")
+                    .value_mut()
+                    .remove(id)
+                    .expect("Node should exist in the DAG");
+
+                let block_node = un_node
+                    .as_block()
+                    .expect("Node should be a BlockNode")
+                    .clone();
+
+                let parent = block_node.block.parent;
+                let _ = self
+                    .block_dag
+                    .write()
+                    .upsert(block_node, std::iter::once(parent));
+
+                let mut dag = self.proposal_dags.entry(parent).or_default();
+                dag.value_mut().upsert(un_node, std::iter::empty());
+            }
+
+            if let Some((_, source)) = self.sources.remove(id) {
+                process_result.add_validated(source);
+            }
+        });
+
+        validation_result.invalidated.iter().for_each(|id| {
+            if self.pending_blocks.remove(id).is_some() {
+                self.invalidated_hashes.insert(*id);
+                self.proposal_dags.remove(id);
+                if let Some((_, source)) = self.sources.remove(id) {
+                    process_result.add_invalidated(source);
+                }
+            }
+        });
     }
 
     pub fn update_proposal(
@@ -285,46 +374,39 @@ impl<H: Hasher> Tree<H> {
         witness: proposal::Witness,
         source: PeerId,
     ) -> ProcessResult {
+        let mut result = ProcessResult::new();
         let hash = proposal.hash::<H>();
 
-        let mut result = ProcessResult::new();
-
-        if self.dag.read().contains(&hash) {
-            return result;
-        }
-
-        if self
-            .block_height(&proposal.parent_hash)
-            .is_some_and(|height| height < self.checkpoint_height())
+        if self.invalidated_hashes.contains(&hash)
+            || self.invalidated_hashes.contains(&proposal.parent_hash)
         {
+            self.invalidated_hashes.insert(hash);
             result.add_invalidated(source);
             return result;
         }
 
         self.sources.insert(hash, source);
+        self.proposal_to_block.insert(hash, proposal.parent_hash);
 
-        let parent_hash = proposal.parent_hash;
-        let node = UnifiedNode::new_proposal(proposal, witness);
+        let dag_result = {
+            let mut entry = self.proposal_dags.entry(proposal.parent_hash).or_default();
+            let dag = entry.value_mut();
+            let parents = proposal.dependencies.iter().cloned().collect::<Vec<_>>();
+            let node = UnifiedNode::new_proposal(proposal, witness);
+            dag.upsert(node, parents)
+        };
 
-        let result = self.dag.write().upsert(node, vec![parent_hash]);
+        self.process_validation_result(&dag_result, &mut result);
 
-        ProcessResult::from_validation_result(&result, &self.sources)
-    }
-
-    fn block_height(&self, hash: &Multihash) -> Option<u64> {
-        self.dag
-            .read()
-            .get_node(hash)
-            .and_then(|n| n.as_block().map(|b| b.height()))
+        result
     }
 
     pub fn tip_trie(&self) -> Trie<H> {
-        self.dag
+        let tip_hash = self.tip_hash();
+        self.block_dag
             .read()
-            .get_node(&self.tip_hash())
+            .get_node(&tip_hash)
             .expect("Tip hash should exist in the DAG")
-            .as_block()
-            .expect("Tip node should be a block")
             .trie
             .read()
             .clone()
@@ -339,40 +421,42 @@ impl<H: Hasher> Tree<H> {
         parent: Multihash,
         vdf_proof: Vec<u8>,
     ) -> Option<(Block, block::Witness)> {
-        let prop_ids = self.dag.read().get_leaf_nodes(&parent)?;
+        let ids = self.proposal_dags.get(&parent)?.get_leaf_nodes(&parent)?;
 
-        if prop_ids.is_empty() {
+        if ids.is_empty() {
             return None;
         }
 
-        let dag_read = self.dag.read();
-        let parent_node = dag_read.get_node(&parent)?.as_block()?;
+        let (parent_trie, parent_hash, parent_height) = {
+            let dag = self.block_dag.read();
+            let p = dag.get_node(&parent)?;
+            let trie = p.trie.read().clone();
+            (trie, p.block.hash::<H>(), p.block.height)
+        };
+
+        let pk_hash = self.sk.public_key().to_hash::<H>();
 
         let weight = {
-            let key = self.sk.public_key().to_hash::<H>().to_bytes();
-            parent_node.trie.read().get(&key).map_or(0, |r| r.weight)
+            let key = pk_hash.to_bytes();
+            parent_trie.get(&key).map_or(0, |r| r.weight)
         };
 
         let block = block::Builder::new()
-            .with_parent_block::<H>(&parent_node.block)
+            .with_parent_hash(parent_hash)
+            .with_height(parent_height.wrapping_add(1))
             .with_proposer_pk(self.sk.public_key())
             .with_proposer_weight(weight)
-            .with_proposals(prop_ids)
+            .with_proposals(ids)
             .build();
 
         let block_hash = block.hash::<H>();
 
         let sig = self.sk.sign(&block_hash.to_bytes());
-        let proofs = block.generate_proofs(&parent_node.trie.read());
+        let proofs = block.generate_proofs(&parent_trie);
         let witness = block::Witness::new(sig, proofs, vdf_proof);
+        let peer_id = PeerId::from_multihash(pk_hash).unwrap();
 
-        drop(dag_read);
-
-        self.update_block(
-            block.clone(),
-            witness.clone(),
-            PeerId::from_multihash(self.sk.public_key().to_hash::<H>()).unwrap(),
-        );
+        self.update_block(block.clone(), witness.clone(), peer_id);
 
         Some((block, witness))
     }
@@ -381,12 +465,27 @@ impl<H: Hasher> Tree<H> {
     where
         I: IntoIterator<Item = Multihash>,
     {
-        let dag_read = self.dag.read();
-        ids.into_iter()
-            .filter_map(|id| dag_read.get_node(&id))
-            .filter_map(|node| node.as_proposal())
-            .map(|prop_node| (prop_node.proposal.clone(), prop_node.witness.clone()))
-            .collect()
+        let mut iter = ids.into_iter().peekable();
+
+        let Some(first) = iter.peek() else {
+            return Vec::new();
+        };
+
+        let mut proposals = Vec::new();
+
+        let Some(dag) = self.proposal_dags.get(first) else {
+            return proposals;
+        };
+
+        iter.for_each(|id| {
+            if let Some(UnifiedNode::Proposal(node)) = dag.get_node(&id) {
+                let proposal = node.proposal.clone();
+                let witness = node.witness.clone();
+                proposals.push((proposal, witness));
+            }
+        });
+
+        proposals
     }
 
     pub fn generate_sync_state<I>(&self, keys: I) -> Option<SyncState>
@@ -397,25 +496,29 @@ impl<H: Hasher> Tree<H> {
             return None;
         }
 
-        let dag_read = self.dag.read();
-        let tip_node = dag_read
-            .get_node(&self.tip_hash())
-            .expect("Tip hash should exist in the DAG")
-            .as_block()
-            .expect("Tip node should be a block");
-        let tip_trie = tip_node.trie.read().clone();
-        let tip_block = tip_node.block.clone();
-        let tip_cumulative_weight = self.state.read().tip_cumulative_weight;
+        let (tip_trie, tip_block, tip_cumulative_weight) = {
+            let dag_read = self.block_dag.read();
+            let tip_node = dag_read
+                .get_node(&self.tip_hash())
+                .expect("Tip hash should exist in the DAG");
+            let tip_trie = tip_node.trie.read().clone();
+            let block = tip_node.block.clone();
+            let cum_weight = self.state.read().tip_cumulative_weight;
 
-        let checkpoint_node = dag_read
-            .get_node(&self.state.read().checkpoint_hash())
-            .expect("Checkpoint hash should exist in the DAG")
-            .as_block()
-            .expect("Checkpoint node should be a block");
-        let checkpoint_block = checkpoint_node.block.clone();
-        let checkpoint_total_weight = self.state.read().checkpoint_total_weight;
+            (tip_trie, block, cum_weight)
+        };
 
-        drop(dag_read);
+        let (checkpoint_block, checkpoint_total_weight) = {
+            let state_read = self.state.read();
+            let checkpoint_hash = state_read.checkpoint_hash();
+            let dag_read = self.block_dag.read();
+
+            let c = dag_read
+                .get_node(&checkpoint_hash)
+                .expect("Checkpoint hash should exist in the DAG");
+
+            (c.block.clone(), state_read.current_checkpoint_total_weight)
+        };
 
         let tip_guide = tip_trie.generate_guide(keys)?;
 
