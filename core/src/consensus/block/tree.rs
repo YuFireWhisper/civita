@@ -31,11 +31,22 @@ pub struct ProcessResult {
     pub phantoms: Vec<Multihash>,
 }
 
+#[derive(Clone, Copy)]
+#[derive(Debug)]
+#[derive(Default)]
+struct State {
+    tip_cumulative_weight: Weight,
+    tip_height: u64,
+    tip_hash: Multihash,
+
+    checkpoint_total_weight: Weight,
+    checkpoint_hash: Multihash,
+}
+
 pub struct Tree<H: Hasher> {
     sk: SecretKey,
     dag: ParkingRwLock<Dag<UnifiedNode<H>>>,
-    tip: Arc<ParkingRwLock<(Weight, u64, Multihash)>>,
-    checkpoint: Arc<ParkingRwLock<(Weight, Multihash)>>,
+    state: Arc<ParkingRwLock<State>>,
     sources: DashMap<Multihash, PeerId>,
 }
 
@@ -88,6 +99,30 @@ impl ProcessResult {
     }
 }
 
+impl State {
+    pub fn update_tip(&mut self, cumulative_weight: Weight, height: u64, hash: Multihash) {
+        let new_tip = (cumulative_weight, height, hash);
+        let current_tip = (self.tip_cumulative_weight, self.tip_height, self.tip_hash);
+
+        if new_tip > current_tip {
+            self.tip_cumulative_weight = cumulative_weight;
+            self.tip_height = height;
+            self.tip_hash = hash;
+        }
+    }
+
+    pub fn update_checkpoint(&mut self, weight: Weight, total_weight: Weight, hash: Multihash) {
+        if (self.checkpoint_total_weight as f64) * 0.67 < weight as f64 {
+            self.checkpoint_total_weight = total_weight;
+            self.checkpoint_hash = hash;
+        }
+    }
+
+    pub fn checkpoint_hash(&self) -> Multihash {
+        self.checkpoint_hash
+    }
+}
+
 impl<H: Hasher> Tree<H> {
     pub fn empty(sk: SecretKey) -> Self {
         let root_block = block::Builder::new()
@@ -99,36 +134,37 @@ impl<H: Hasher> Tree<H> {
 
         let hash = root_block.hash::<H>();
 
-        let tip = Arc::new(ParkingRwLock::new((0, 0, hash)));
-        let checkpoint = Arc::new(ParkingRwLock::new((0, hash)));
+        let state = State {
+            tip_cumulative_weight: 0,
+            tip_height: 0,
+            tip_hash: hash,
+            checkpoint_total_weight: 0,
+            checkpoint_hash: hash,
+        };
+        let state = Arc::new(ParkingRwLock::new(state));
 
         let sig = sk.sign(&hash.to_bytes());
         let proofs = root_block.generate_proofs(&Trie::<H>::empty());
         let witness = block::Witness::new(sig, proofs, vec![]);
 
-        let root_node =
-            UnifiedNode::new_block(root_block, witness, tip.clone(), checkpoint.clone());
+        let root_node = UnifiedNode::new_block(root_block, witness, state.clone());
 
         Self {
             sk,
             dag: ParkingRwLock::new(Dag::with_root(root_node)),
-            tip,
-            checkpoint,
+            state,
             sources: DashMap::new(),
         }
     }
 
     pub fn from_other(sk: SecretKey, other: &Self) -> Self {
-        let tip = Arc::clone(&other.tip);
-        let checkpoint = Arc::clone(&other.checkpoint);
-
+        let state = other.state.clone();
         let dag = ParkingRwLock::new(other.dag.read().clone());
 
         Self {
             sk,
             dag,
-            tip,
-            checkpoint,
+            state,
             sources: DashMap::new(),
         }
     }
@@ -165,8 +201,7 @@ impl<H: Hasher> Tree<H> {
             }
         });
 
-        let node =
-            UnifiedNode::new_block(block, witness, self.tip.clone(), self.checkpoint.clone());
+        let node = UnifiedNode::new_block(block, witness, self.state.clone());
 
         let dag_result = {
             let mut dag_write = self.dag.write();
@@ -179,11 +214,11 @@ impl<H: Hasher> Tree<H> {
     }
 
     fn checkpoint_height(&self) -> u64 {
-        let checkpoint = self.checkpoint.read();
+        let hash = self.state.read().checkpoint_hash();
 
         self.dag
             .read()
-            .get_node(&checkpoint.1)
+            .get_node(&hash)
             .expect("Checkpoint hash should exist in the DAG")
             .as_block()
             .expect("Checkpoint node should be a block")
@@ -242,7 +277,7 @@ impl<H: Hasher> Tree<H> {
     }
 
     pub fn tip_hash(&self) -> Multihash {
-        self.tip.read().2
+        self.state.read().tip_hash
     }
 
     pub fn create_and_update_block(

@@ -5,11 +5,14 @@ use parking_lot::RwLock as ParkingRwLock;
 use crate::{
     consensus::block::{
         self,
-        tree::node::{AtomicWeight, ProposalNode},
+        tree::{
+            node::{AtomicWeight, ProposalNode},
+            State,
+        },
         Block,
     },
     crypto::{Hasher, Multihash},
-    utils::trie::{Trie, Weight},
+    utils::trie::Trie,
 };
 
 pub struct BlockNode<H> {
@@ -18,17 +21,11 @@ pub struct BlockNode<H> {
     pub trie: ParkingRwLock<Trie<H>>,
     pub weight: AtomicWeight,
     pub cumulative_weight: AtomicWeight,
-    pub tip: Arc<ParkingRwLock<(Weight, u64, Multihash)>>,
-    pub checkpoint: Arc<ParkingRwLock<(Weight, Multihash)>>,
+    pub state: Arc<ParkingRwLock<State>>,
 }
 
 impl<H: Hasher> BlockNode<H> {
-    pub fn new(
-        block: Block,
-        witness: block::Witness,
-        tip: Arc<ParkingRwLock<(Weight, u64, Multihash)>>,
-        checkpoint: Arc<ParkingRwLock<(Weight, Multihash)>>,
-    ) -> Self {
+    pub fn new(block: Block, witness: block::Witness, state: Arc<ParkingRwLock<State>>) -> Self {
         let trie = Trie::empty();
         let weight = AtomicWeight::default();
         let cumulative_weight = AtomicWeight::default();
@@ -39,8 +36,7 @@ impl<H: Hasher> BlockNode<H> {
             trie: ParkingRwLock::new(trie),
             weight,
             cumulative_weight,
-            tip,
-            checkpoint,
+            state,
         }
     }
 
@@ -85,24 +81,16 @@ impl<H: Hasher> BlockNode<H> {
     }
 
     pub fn validate(&self) -> bool {
-        let weight = self.weight.load(Ordering::Relaxed);
         let cumulative_weight = self.cumulative_weight.load(Ordering::Relaxed);
+        let weight = self.weight.load(Ordering::Relaxed);
+        let total_weight = self.trie.read().weight();
+        let height = self.block.height;
         let id = self.id();
 
-        let tip = self.tip.read();
-
-        if tip.0 < cumulative_weight || tip.1 < self.block.height || tip.2 > id {
-            drop(tip);
-            let mut tip = self.tip.write();
-            *tip = (cumulative_weight, self.block.height, id);
-        }
-
-        let checkpoint = self.checkpoint.read();
-
-        if (checkpoint.0 as f64) * 0.67 < weight as f64 {
-            drop(checkpoint);
-            let mut checkpoint = self.checkpoint.write();
-            *checkpoint = (weight, id);
+        {
+            let mut state = self.state.write();
+            state.update_tip(cumulative_weight, height, id);
+            state.update_checkpoint(weight, total_weight, id);
         }
 
         true
@@ -125,8 +113,7 @@ impl<H> Clone for BlockNode<H> {
             trie: ParkingRwLock::new(self.trie.read().clone()),
             weight: AtomicWeight::new(self.weight.load(Ordering::Relaxed)),
             cumulative_weight: AtomicWeight::new(self.cumulative_weight.load(Ordering::Relaxed)),
-            tip: Arc::clone(&self.tip),
-            checkpoint: Arc::clone(&self.checkpoint),
+            state: Arc::clone(&self.state),
         }
     }
 }

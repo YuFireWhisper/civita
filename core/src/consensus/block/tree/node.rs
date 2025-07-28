@@ -5,11 +5,14 @@ use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
     consensus::{
-        block::{self, tree::dag::Node, Block},
+        block::{
+            self,
+            tree::{dag::Node, State},
+            Block,
+        },
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash},
-    utils::trie::Weight,
 };
 
 mod block_node;
@@ -31,10 +34,9 @@ impl<H: Hasher> UnifiedNode<H> {
     pub fn new_block(
         block: Block,
         witness: block::Witness,
-        tip: Arc<ParkingRwLock<(Weight, u64, Multihash)>>,
-        checkpoint: Arc<ParkingRwLock<(Weight, Multihash)>>,
+        state: Arc<ParkingRwLock<State>>,
     ) -> Self {
-        UnifiedNode::Block(BlockNode::new(block, witness, tip, checkpoint))
+        UnifiedNode::Block(BlockNode::new(block, witness, state))
     }
 
     pub fn new_proposal(proposal: Proposal, witness: proposal::Witness) -> Self {
