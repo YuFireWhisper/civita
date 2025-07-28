@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use civita_serialize_derive::Serialize;
 use dashmap::DashMap;
 use libp2p::PeerId;
 use parking_lot::RwLock as ParkingRwLock;
@@ -31,6 +32,20 @@ pub struct ProcessResult {
     pub phantoms: Vec<Multihash>,
 }
 
+#[derive(Serialize)]
+pub struct SyncState {
+    tip_block: Block,
+    tip_cumulative_weight: Weight,
+    checkpoint_block: Block,
+    checkpoint_total_weight: Weight,
+    tip_guide: HashMap<Multihash, Vec<u8>>,
+}
+
+pub enum Mode {
+    Archive,
+    Normal(Vec<Vec<u8>>),
+}
+
 #[derive(Clone, Copy)]
 #[derive(Debug)]
 #[derive(Default)]
@@ -41,11 +56,6 @@ struct State {
 
     checkpoint_total_weight: Weight,
     checkpoint_hash: Multihash,
-}
-
-pub enum Mode {
-    Archive,
-    Normal(Vec<Vec<u8>>),
 }
 
 pub struct Tree<H: Hasher> {
@@ -102,6 +112,16 @@ impl ProcessResult {
             .for_each(|(_, source)| {
                 self.add_invalidated(source);
             });
+    }
+}
+
+impl Mode {
+    pub fn is_archive(&self) -> bool {
+        matches!(self, Mode::Archive)
+    }
+
+    pub fn is_normal(&self) -> bool {
+        matches!(self, Mode::Normal(_))
     }
 }
 
@@ -343,6 +363,45 @@ impl<H: Hasher> Tree<H> {
             .filter_map(|node| node.as_proposal())
             .map(|prop_node| (prop_node.proposal.clone(), prop_node.witness.clone()))
             .collect()
+    }
+
+    pub fn generate_sync_state<I>(&self, keys: I) -> Option<SyncState>
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        if self.mode.is_normal() {
+            return None;
+        }
+
+        let dag_read = self.dag.read();
+        let tip_node = dag_read
+            .get_node(&self.tip_hash())
+            .expect("Tip hash should exist in the DAG")
+            .as_block()
+            .expect("Tip node should be a block");
+        let tip_trie = tip_node.trie.read().clone();
+        let tip_block = tip_node.block.clone();
+        let tip_cumulative_weight = self.state.read().tip_cumulative_weight;
+
+        let checkpoint_node = dag_read
+            .get_node(&self.state.read().checkpoint_hash())
+            .expect("Checkpoint hash should exist in the DAG")
+            .as_block()
+            .expect("Checkpoint node should be a block");
+        let checkpoint_block = checkpoint_node.block.clone();
+        let checkpoint_total_weight = self.state.read().checkpoint_total_weight;
+
+        drop(dag_read);
+
+        let tip_guide = tip_trie.generate_guide(keys)?;
+
+        Some(SyncState {
+            tip_block,
+            tip_cumulative_weight,
+            checkpoint_block,
+            checkpoint_total_weight,
+            tip_guide,
+        })
     }
 }
 
