@@ -402,6 +402,22 @@ impl<H: Hasher> Trie<H> {
         verify_proof_with_hash(key, proof_db, expected_hash)
     }
 
+    pub fn generate_guide<'a, I, T>(&self, keys: I) -> Option<HashMap<Multihash, Vec<u8>>>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<[u8]> + 'a,
+    {
+        let mut guide = HashMap::new();
+        if keys
+            .into_iter()
+            .all(|key| self.prove(key.as_ref(), &mut guide))
+        {
+            Some(guide)
+        } else {
+            None
+        }
+    }
+
     pub fn root_hash(&self) -> Multihash {
         self.root.hash::<H>()
     }
