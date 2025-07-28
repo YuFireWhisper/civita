@@ -76,25 +76,6 @@ impl Full {
         });
     }
 
-    pub fn merge_with(&mut self, other: &Full) -> bool {
-        let mut changed = false;
-
-        self.children
-            .iter_mut()
-            .zip(other.children.iter())
-            .for_each(|(a, b)| {
-                if a.merge_with(b) {
-                    changed = true;
-                }
-            });
-
-        if changed {
-            self.clear_caches();
-        }
-
-        changed
-    }
-
     pub fn clear_caches(&mut self) {
         self.hash_cache = OnceLock::new();
         self.weight_cache = OnceLock::new();
@@ -129,24 +110,6 @@ impl Short {
         self.val.hash_children::<H>();
     }
 
-    pub fn merge_with(&mut self, other: &Short) -> bool {
-        if self.key != other.key {
-            return false;
-        }
-
-        let changed = self.val.merge_with(&other.val);
-
-        if changed {
-            self.hash_cache = OnceLock::new();
-        }
-
-        changed
-    }
-
-    pub fn weight(&self) -> u64 {
-        self.val.weight()
-    }
-
     pub fn clear_cache(&mut self) {
         self.hash_cache = OnceLock::new();
     }
@@ -169,10 +132,6 @@ impl Value {
     pub fn weight(&self) -> u64 {
         self.record.weight
     }
-
-    pub fn clear_cache(&mut self) {
-        self.hash_cache = OnceLock::new();
-    }
 }
 
 impl Node {
@@ -190,10 +149,6 @@ impl Node {
 
     pub fn is_empty(&self) -> bool {
         matches!(self, Node::Empty)
-    }
-
-    pub fn is_value(&self) -> bool {
-        matches!(self, Node::Value(_))
     }
 
     pub fn hash<H: Hasher>(&self) -> Multihash {
@@ -214,29 +169,28 @@ impl Node {
         }
     }
 
-    /// Merge this node with another node
-    /// Returns true if any changes were made
-    pub fn merge_with(&mut self, other: &Node) -> bool {
-        if matches!(self, Node::Hash(_)) {
-            *self = other.clone();
-            return true;
-        }
-
-        match (self, other) {
-            (Node::Full(a), Node::Full(b)) => a.merge_with(b),
-            (Node::Short(a), Node::Short(b)) => a.merge_with(b),
-            (Node::Value(a), Node::Value(b)) => a.record == b.record,
-            (_, Node::Hash(_)) => false,
-            _ => false,
-        }
-    }
-
     pub fn weight(&self) -> u64 {
         match self {
             Node::Full(full) => full.weight(),
             Node::Short(short) => short.val.weight(),
             Node::Value(value) => value.weight(),
             Node::Hash(_) | Node::Empty => 0,
+        }
+    }
+
+    pub fn as_short_mut(&mut self) -> Option<&mut Short> {
+        if let Node::Short(short) = self {
+            Some(short)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_full_mut(&mut self) -> Option<&mut Full> {
+        if let Node::Full(full) = self {
+            Some(full)
+        } else {
+            None
         }
     }
 }

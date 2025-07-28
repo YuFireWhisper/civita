@@ -81,20 +81,6 @@ impl<H: Hasher> Trie<H> {
         }
     }
 
-    pub fn update(
-        &mut self,
-        key: &[u8],
-        record: Record,
-        guile: Option<&HashMap<Multihash, Vec<u8>>>,
-    ) -> bool {
-        let key_vec = slice_to_hex(key);
-        let key = key_vec.as_slice();
-
-        let val = Node::new_value(record);
-
-        Self::insert_node(&mut self.root, &[], key, val, guile)
-    }
-
     pub fn update_many<'a, I, T>(
         &mut self,
         itmes: I,
@@ -109,117 +95,118 @@ impl<H: Hasher> Trie<H> {
             .any(|(key, record)| self.update(key.as_ref(), record, guide))
     }
 
-    /// Returns true if is dirty, false if not.
-    fn insert_node(
-        node: &mut Node,
-        prefix: &[u8],
+    pub fn update(
+        &mut self,
         key: &[u8],
-        val: Node,
-        guide: Option<&HashMap<Multihash, Vec<u8>>>,
+        record: Record,
+        _guile: Option<&HashMap<Multihash, Vec<u8>>>,
     ) -> bool {
-        if key.is_empty() {
-            if node.is_value() && node == &val {
-                return false;
-            }
-            *node = val;
-            return true;
-        }
+        let key_nibble = slice_to_hex(key);
+        let mut key_path = key_nibble.as_slice();
 
-        match node {
-            Node::Short(short) => {
-                let match_len = prefix_len(prefix, &short.key);
+        let mut curr_node_ref = &mut self.root;
+        let mut dirty = false;
 
-                if match_len == short.key.len() {
-                    let mut s_val = std::mem::take(&mut short.val);
+        loop {
+            let taken_node = std::mem::take(curr_node_ref);
 
-                    let prefix = &[prefix, &short.key[..match_len]].concat();
-                    let key = &key[match_len..];
-
-                    let is_dirty = Self::insert_node(&mut s_val, prefix, key, val, guide);
-
-                    if !is_dirty {
-                        return false;
+            match taken_node {
+                Node::Empty => {
+                    *curr_node_ref = Node::new_short(key_path.to_vec(), Node::new_value(record));
+                    dirty = true;
+                    break;
+                }
+                Node::Value(val) => {
+                    if key_path.is_empty() {
+                        if val.record != record {
+                            *curr_node_ref = Node::new_value(record);
+                            dirty = true;
+                        } else {
+                            *curr_node_ref = Node::Value(val);
+                        }
+                        break;
                     }
 
-                    short.clear_cache();
+                    let mut full = Full::default();
+                    full.children[16] = Node::Value(val);
 
-                    return true;
+                    let idx = key_path[0] as usize;
+                    let short = Node::new_short(key_path[1..].to_vec(), Node::new_value(record));
+                    full.children[idx] = short;
+
+                    *curr_node_ref = Node::from_full(full);
+                    dirty = true;
+
+                    break;
                 }
+                Node::Short(mut short) => {
+                    let match_len = prefix_len(key_path, &short.key);
 
-                let mut branch = Full::default();
+                    if match_len == short.key.len() {
+                        key_path = &key_path[match_len..];
+                        short.clear_cache();
+                        *curr_node_ref = Node::Short(short);
+                        curr_node_ref = &mut curr_node_ref.as_short_mut().unwrap().val;
+                        dirty = true;
+                        continue;
+                    }
 
-                {
-                    let idx = short.key[match_len] as usize;
-                    let prefix = &[prefix, &short.key[..match_len]].concat();
-                    let key = &short.key[match_len + 1..];
-                    Self::insert_node(
-                        &mut branch.children[idx],
-                        prefix,
-                        key,
-                        *short.val.clone(),
-                        guide,
-                    );
+                    let mut branch = Full::default();
+
+                    {
+                        let idx = short.key[match_len] as usize;
+                        let remaining = short.key[match_len + 1..].to_vec();
+                        branch.children[idx] = if remaining.is_empty() {
+                            *short.val
+                        } else {
+                            Node::new_short(remaining, *short.val)
+                        };
+                    }
+
+                    {
+                        let idx = key_path[match_len] as usize;
+                        let remaining = key_path[match_len + 1..].to_vec();
+                        branch.children[idx] = Node::new_short(remaining, Node::new_value(record));
+
+                        let prefix = &short.key[..match_len];
+                        *curr_node_ref = if prefix.is_empty() {
+                            Node::from_full(branch)
+                        } else {
+                            Node::new_short(prefix.to_vec(), Node::from_full(branch))
+                        };
+                    }
+
+                    dirty = true;
+                    break;
                 }
+                Node::Full(mut full) => {
+                    if key_path.is_empty() {
+                        if let Node::Value(val) = &full.children[16] {
+                            if val.record != record {
+                                full.children[16] = Node::new_value(record);
+                                dirty = true;
+                            }
+                        }
 
-                {
-                    let idx = key[match_len] as usize;
-                    let prefix = &[prefix, &key[..match_len]].concat();
-                    let key = &key[match_len + 1..];
-                    Self::insert_node(&mut branch.children[idx], prefix, key, val, guide);
+                        *curr_node_ref = Node::from_full(full);
+                        break;
+                    }
+
+                    let idx = key_path[0] as usize;
+                    key_path = &key_path[1..];
+                    full.clear_caches();
+                    *curr_node_ref = Node::Full(full);
+                    curr_node_ref = &mut curr_node_ref.as_full_mut().unwrap().children[idx];
+                    dirty = true;
+                    continue;
                 }
-
-                if match_len == 0 {
-                    *node = Node::from_full(branch);
-                    return true;
+                Node::Hash(hash) => {
+                    panic!("Unexpected hash node in update: {hash:?}");
                 }
-
-                let key = short.key.split_off(match_len);
-                *node = Node::new_short(key, branch);
-
-                true
-            }
-            Node::Full(ref mut full) => {
-                let idx = key[0] as usize;
-
-                let prefix = &[prefix, &key[..1]].concat();
-                let key = &key[1..];
-
-                let is_dirty = Self::insert_node(&mut full.children[idx], prefix, key, val, guide);
-
-                if !is_dirty {
-                    return false;
-                }
-
-                full.clear_caches();
-
-                true
-            }
-            Node::Empty => {
-                *node = Node::new_short(key.to_vec(), val);
-                true
-            }
-            Node::Hash(hash) => {
-                let Some(rn) = Self::resolve_from_guide(hash, guide) else {
-                    return false;
-                };
-
-                *node = rn;
-
-                Self::insert_node(node, prefix, key, val, guide)
-            }
-            Node::Value(_) => {
-                panic!("Unexpected value node in insert_new: {node:?}");
             }
         }
-    }
 
-    fn resolve_from_guide(
-        hash: &Multihash,
-        guide: Option<&HashMap<Multihash, Vec<u8>>>,
-    ) -> Option<Node> {
-        guide
-            .and_then(|g| g.get(hash))
-            .map(|data| Node::from_slice(data).expect("Node bytes should be valid"))
+        dirty
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Record> {
@@ -249,53 +236,38 @@ impl<H: Hasher> Trie<H> {
 
     pub fn prove(&self, key: &[u8], proof_db: &mut HashMap<Multihash, Vec<u8>>) -> bool {
         let key_vec = slice_to_hex(key);
-        let mut key = key_vec.as_slice();
+        let mut key_path = key_vec.as_slice();
+        let mut current_node = &self.root;
 
-        let mut changes = Vec::new();
-        let mut cur = self.root.clone();
-
-        while !key.is_empty() && !cur.is_empty() {
-            if !cur.is_empty() {
-                let hash = cur.hash::<H>();
-
-                if let Some(n) = proof_db.remove(&hash) {
-                    let mut n = Node::from_slice(&n).expect("Node bytes should be valid");
-                    n.merge_with(&cur);
-                    cur = n;
-                }
-
-                if proof_db.insert(hash, cur.to_vec()).is_none() {
-                    changes.push(hash);
-                }
+        loop {
+            if current_node.is_empty() {
+                break;
             }
 
-            match &cur {
+            let hash = current_node.hash::<H>();
+            proof_db.insert(hash, current_node.to_vec());
+
+            match current_node {
                 Node::Short(short) => {
-                    if !key.starts_with(&short.key) {
+                    if !key_path.starts_with(&short.key) {
                         break;
                     }
-                    key = &key[short.key.len()..];
-                    cur = *short.val.clone();
+                    key_path = &key_path[short.key.len()..];
+                    current_node = &short.val;
                 }
                 Node::Full(full) => {
-                    cur = full.children[key[0] as usize].to_owned();
-                    key = &key[1..];
+                    if key_path.is_empty() {
+                        break;
+                    }
+                    let idx = key_path[0] as usize;
+                    current_node = &full.children[idx];
+                    key_path = &key_path[1..];
                 }
-                Node::Hash(_) => {
-                    changes.iter().for_each(|h| {
-                        proof_db.remove(h);
-                    });
-                    return false;
-                }
-                Node::Value(_) => {
-                    panic!("Unexpected value node in proof generation: {cur:?}");
-                }
-                Node::Empty => {
-                    panic!("Unexpected empty node in proof generation");
-                }
-            };
+                Node::Value(_) => break,
+                Node::Hash(_) => return false,
+                Node::Empty => break,
+            }
         }
-
         true
     }
 
