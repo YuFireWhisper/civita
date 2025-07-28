@@ -33,7 +33,7 @@ pub enum UnifiedNode<H> {
 impl<H: Hasher> UnifiedNode<H> {
     pub fn new_block(
         block: Block,
-        witness: block::Witness,
+        witness: Option<block::Witness>,
         state: Arc<ParkingRwLock<State>>,
         mode: Arc<Mode>,
     ) -> Self {

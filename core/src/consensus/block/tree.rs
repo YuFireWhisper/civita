@@ -169,17 +169,40 @@ impl<H: Hasher> Tree<H> {
         };
         let state = Arc::new(ParkingRwLock::new(state));
 
-        let sig = sk.sign(&hash.to_bytes());
-        let proofs = root_block.generate_proofs(&Trie::<H>::empty());
-        let witness = block::Witness::new(sig, proofs, vec![]);
-
         let mode = Arc::new(mode);
 
-        let root_node = UnifiedNode::new_block(root_block, witness, state.clone(), mode.clone());
+        let root_node = UnifiedNode::new_block(root_block, None, state.clone(), mode.clone());
 
         Self {
             sk,
             dag: ParkingRwLock::new(Dag::with_root(root_node)),
+            state,
+            sources: DashMap::new(),
+            mode,
+        }
+    }
+
+    pub fn from_sync_state(sk: SecretKey, sync_state: SyncState, mode: Mode) -> Self {
+        let state = State {
+            tip_cumulative_weight: sync_state.tip_cumulative_weight,
+            tip_height: sync_state.tip_block.height,
+            tip_hash: sync_state.tip_block.hash::<H>(),
+            checkpoint_total_weight: sync_state.checkpoint_total_weight,
+            checkpoint_hash: sync_state.checkpoint_block.hash::<H>(),
+        };
+
+        let state = Arc::new(ParkingRwLock::new(state));
+
+        let mode = Arc::new(mode);
+
+        let root_node =
+            UnifiedNode::new_block(sync_state.tip_block, None, state.clone(), mode.clone());
+
+        let dag = ParkingRwLock::new(Dag::with_root(root_node));
+
+        Self {
+            sk,
+            dag,
             state,
             sources: DashMap::new(),
             mode,
@@ -231,7 +254,8 @@ impl<H: Hasher> Tree<H> {
             }
         });
 
-        let node = UnifiedNode::new_block(block, witness, self.state.clone(), self.mode.clone());
+        let node =
+            UnifiedNode::new_block(block, Some(witness), self.state.clone(), self.mode.clone());
 
         let dag_result = {
             let mut dag_write = self.dag.write();
