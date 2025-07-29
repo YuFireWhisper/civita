@@ -362,9 +362,9 @@ impl<N: Node> Dag<N> {
         Some(leaves)
     }
 
-    pub fn retain(&mut self, id: &N::Id) -> bool {
+    pub fn retain(&mut self, id: &N::Id) -> Vec<N> {
         let Some(&start_idx) = self.index.get(id) else {
-            return false;
+            return Vec::new();
         };
 
         let mut to_retain = HashSet::new();
@@ -395,7 +395,7 @@ impl<N: Node> Dag<N> {
             }
         });
 
-        true
+        removed_nodes
     }
 }
 

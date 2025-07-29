@@ -158,6 +158,10 @@ impl<H: Hasher> Checkpoint<H> {
                 let threshold = (self.total_weight() as f64) * 0.67;
 
                 if block_weight as f64 > threshold {
+                    let removed = self.block_dag.retain(&parent);
+                    removed.iter().for_each(|n| {
+                        self.proposal_dags.remove(&n.id());
+                    });
                     update_result.new_checkpoint = Some(block_node);
                 } else {
                     if block_cumulative_weight > tip_cumulative_weight {
