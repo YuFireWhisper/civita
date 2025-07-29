@@ -1,13 +1,12 @@
 use std::sync::{atomic::AtomicU64, Arc};
 
 use derivative::Derivative;
-use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
     consensus::{
         block::{
             self,
-            tree::{dag::Node, Mode, State},
+            tree::{dag::Node, Mode},
             Block,
         },
         proposal::{self, Proposal},
@@ -31,13 +30,8 @@ pub enum UnifiedNode<H> {
 }
 
 impl<H: Hasher> UnifiedNode<H> {
-    pub fn new_block(
-        block: Block,
-        witness: Option<block::Witness>,
-        state: Arc<ParkingRwLock<State>>,
-        mode: Arc<Mode>,
-    ) -> Self {
-        UnifiedNode::Block(BlockNode::new(block, witness, state, mode))
+    pub fn new_block(block: Block, witness: Option<block::Witness>, mode: Arc<Mode>) -> Self {
+        UnifiedNode::Block(BlockNode::new(block, witness, mode))
     }
 
     pub fn new_proposal(proposal: Proposal, witness: proposal::Witness) -> Self {

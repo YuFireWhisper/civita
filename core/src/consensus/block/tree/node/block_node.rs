@@ -8,7 +8,7 @@ use crate::{
         tree::{
             dag::Node,
             node::{AtomicWeight, ProposalNode},
-            Mode, State,
+            Mode,
         },
         Block,
     },
@@ -22,17 +22,11 @@ pub struct BlockNode<H> {
     pub trie: ParkingRwLock<Trie<H>>,
     pub weight: AtomicWeight,
     pub cumulative_weight: AtomicWeight,
-    pub state: Arc<ParkingRwLock<State>>,
     pub mode: Arc<Mode>,
 }
 
 impl<H: Hasher> BlockNode<H> {
-    pub fn new(
-        block: Block,
-        witness: Option<block::Witness>,
-        state: Arc<ParkingRwLock<State>>,
-        mode: Arc<Mode>,
-    ) -> Self {
+    pub fn new(block: Block, witness: Option<block::Witness>, mode: Arc<Mode>) -> Self {
         let trie = Trie::empty();
         let weight = AtomicWeight::default();
         let cumulative_weight = AtomicWeight::default();
@@ -43,7 +37,6 @@ impl<H: Hasher> BlockNode<H> {
             trie: ParkingRwLock::new(trie),
             weight,
             cumulative_weight,
-            state,
             mode,
         }
     }
@@ -95,17 +88,6 @@ impl<H: Hasher> BlockNode<H> {
             self.trie.write().retain(keys.iter().map(|k| k.as_slice()));
         }
 
-        let cumulative_weight = self.cumulative_weight.load(Ordering::Relaxed);
-        let weight = self.weight.load(Ordering::Relaxed);
-        let total_weight = self.trie.read().weight();
-        let id = self.id();
-
-        {
-            let mut state = self.state.write();
-            state.update_tip(cumulative_weight, id);
-            state.update_checkpoint(weight, total_weight, id);
-        }
-
         true
     }
 
@@ -122,7 +104,6 @@ impl<H> Clone for BlockNode<H> {
             trie: ParkingRwLock::new(self.trie.read().clone()),
             weight: AtomicWeight::new(self.weight.load(Ordering::Relaxed)),
             cumulative_weight: AtomicWeight::new(self.cumulative_weight.load(Ordering::Relaxed)),
-            state: Arc::clone(&self.state),
             mode: self.mode.clone(),
         }
     }
