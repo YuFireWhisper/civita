@@ -18,7 +18,7 @@ use crate::{
 
 pub struct BlockNode<H> {
     pub block: Block,
-    pub witness: Option<block::Witness>,
+    pub witness: block::Witness,
     pub trie: ParkingRwLock<Trie<H>>,
     pub weight: AtomicWeight,
     pub cumulative_weight: AtomicWeight,
@@ -26,7 +26,7 @@ pub struct BlockNode<H> {
 }
 
 impl<H: Hasher> BlockNode<H> {
-    pub fn new(block: Block, witness: Option<block::Witness>, mode: Arc<Mode>) -> Self {
+    pub fn new(block: Block, witness: block::Witness, mode: Arc<Mode>) -> Self {
         let trie = Trie::empty();
         let weight = AtomicWeight::default();
         let cumulative_weight = AtomicWeight::default();
@@ -46,13 +46,9 @@ impl<H: Hasher> BlockNode<H> {
     }
 
     pub fn on_block_parent_valid(&self, parent: &BlockNode<H>) -> bool {
-        let Some(witness) = &self.witness else {
-            return false;
-        };
-
+        let witness = &self.witness;
         let parent_trie = parent.trie.read();
         let root_hash = parent_trie.root_hash();
-
         if !self.block.verify_proposer_weight::<H>(witness, root_hash) {
             return false;
         }

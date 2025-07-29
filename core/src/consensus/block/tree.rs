@@ -121,8 +121,13 @@ impl<H: Hasher> Tree<H> {
             .with_proposer_weight(0)
             .build();
 
+        let sig = sk.sign(&root_block.hash::<H>().to_bytes());
+        let proofs = HashMap::new();
+        let vdf_proof = vec![];
+        let witness = block::Witness::new(sig, proofs, vdf_proof);
+
         let mode = Arc::new(mode);
-        let block_node = BlockNode::new(root_block, None, mode.clone());
+        let block_node = BlockNode::new(root_block, witness, mode.clone());
 
         let checkpoint = Checkpoint::new(block_node, mode.clone());
         let checkpoints = ParkingRwLock::new(vec![checkpoint]);

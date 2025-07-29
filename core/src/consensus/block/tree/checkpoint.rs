@@ -107,7 +107,7 @@ impl<H: Hasher> Checkpoint<H> {
     ) -> ValidationResult<UnifiedNode<H>> {
         let parents = self.generate_block_parents(&block, result);
         let entry = self.proposal_dags.entry(block.parent).or_default();
-        let n = UnifiedNode::new_block(block, Some(witness), self.mode.clone());
+        let n = UnifiedNode::new_block(block, witness, self.mode.clone());
         entry.upsert(n, parents)
     }
 
