@@ -361,6 +361,42 @@ impl<N: Node> Dag<N> {
 
         Some(leaves)
     }
+
+    pub fn retain(&mut self, id: &N::Id) -> bool {
+        let Some(&start_idx) = self.index.get(id) else {
+            return false;
+        };
+
+        let mut to_retain = HashSet::new();
+        let mut stack = vec![start_idx];
+
+        while let Some(u) = stack.pop() {
+            if to_retain.insert(u) {
+                self.entries[u].parents.iter().for_each(|&p| {
+                    stack.push(p);
+                });
+            }
+        }
+
+        let mut removed_nodes = Vec::new();
+        let mut indices_to_remove = Vec::new();
+
+        self.entries.iter().enumerate().for_each(|(idx, entry)| {
+            if !to_retain.contains(&idx) && entry.node.is_some() {
+                indices_to_remove.push(idx);
+            }
+        });
+
+        indices_to_remove.sort_by(|a, b| b.cmp(a));
+
+        indices_to_remove.iter().for_each(|&idx| {
+            if let Some(node) = self.remove(&self.entries[idx].id()) {
+                removed_nodes.push(node);
+            }
+        });
+
+        true
+    }
 }
 
 #[cfg(test)]
