@@ -34,7 +34,8 @@ pub struct Operation {
 #[derivative(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Proposal {
-    pub parent_hash: Multihash,
+    pub parent: Multihash,
+    pub checkpoint: Multihash,
     pub dependencies: HashSet<Multihash>,
     pub operations: BTreeMap<Vec<u8>, Operation>,
     pub proposer_pk: PublicKey,
@@ -55,7 +56,8 @@ pub struct Witness {
 
 #[derive(Default)]
 pub struct Builder {
-    pub parent_hash: Option<Multihash>,
+    pub parent: Option<Multihash>,
+    pub checkpoint: Option<Multihash>,
     pub dependencies: HashSet<Multihash>,
     pub operations: BTreeMap<Vec<u8>, Operation>,
     pub proposer_pk: Option<PublicKey>,
@@ -180,7 +182,12 @@ impl Builder {
     }
 
     pub fn with_parent_hash(mut self, parent: Multihash) -> Self {
-        self.parent_hash = Some(parent);
+        self.parent = Some(parent);
+        self
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: Multihash) -> Self {
+        self.checkpoint = Some(checkpoint);
         self
     }
 
@@ -222,11 +229,13 @@ impl Builder {
     }
 
     pub fn build(self) -> Option<Proposal> {
-        let parent_hash = self.parent_hash?;
+        let parent = self.parent?;
+        let checkpoint = self.checkpoint?;
         let proposer_pk = self.proposer_pk?;
 
         Some(Proposal {
-            parent_hash,
+            parent,
+            checkpoint,
             dependencies: self.dependencies,
             operations: self.operations,
             proposer_pk,

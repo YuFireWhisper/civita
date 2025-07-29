@@ -157,7 +157,7 @@ impl Builder {
 
     pub fn with_parent_block<H: Hasher>(mut self, parent: &Block) -> Self {
         self.parent = Some(parent.hash::<H>());
-        self.checkpoint = Some(parent.checkpoint.clone());
+        self.checkpoint = Some(parent.checkpoint);
         self
     }
 
