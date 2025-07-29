@@ -28,6 +28,7 @@ pub enum Error {}
 #[derive(Serialize)]
 pub struct Block {
     pub parent: Multihash,
+    pub checkpoint: Multihash,
     pub proposals: BTreeSet<Multihash>,
     pub proposer_pk: PublicKey,
     pub proposer_weight: Weight,
@@ -48,6 +49,7 @@ pub struct Witness {
 #[derive(Default)]
 pub struct Builder {
     parent: Option<Multihash>,
+    checkpoint: Option<Multihash>,
     proposals: BTreeSet<Multihash>,
     proposer_pk: Option<PublicKey>,
     proposer_weight: Option<Weight>,
@@ -56,12 +58,14 @@ pub struct Builder {
 impl Block {
     pub fn new(
         parent: Multihash,
+        checkpoint: Multihash,
         proposals: BTreeSet<Multihash>,
         proposer_pk: PublicKey,
         proposer_weight: Weight,
     ) -> Self {
         Block {
             parent,
+            checkpoint,
             proposals,
             proposer_pk,
             proposer_weight,
@@ -153,11 +157,17 @@ impl Builder {
 
     pub fn with_parent_block<H: Hasher>(mut self, parent: &Block) -> Self {
         self.parent = Some(parent.hash::<H>());
+        self.checkpoint = Some(parent.checkpoint.clone());
         self
     }
 
     pub fn with_parent_hash(mut self, parent: Multihash) -> Self {
         self.parent = Some(parent);
+        self
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: Multihash) -> Self {
+        self.checkpoint = Some(checkpoint);
         self
     }
 
@@ -181,10 +191,11 @@ impl Builder {
 
     pub fn build(self) -> Block {
         let parent = self.parent.expect("Parent block must be set");
+        let checkpoint = self.checkpoint.expect("Checkpoint must be set");
         let proposals = self.proposals;
         let proposer_pk = self.proposer_pk.expect("Proposer public key must be set");
         let proposer_weight = self.proposer_weight.expect("Proposer weight must be set");
 
-        Block::new(parent, proposals, proposer_pk, proposer_weight)
+        Block::new(parent, checkpoint, proposals, proposer_pk, proposer_weight)
     }
 }
