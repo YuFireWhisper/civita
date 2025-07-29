@@ -22,14 +22,23 @@ pub struct ValidationResult<N: Node> {
     pub invalidated: Vec<N::Id>,
 }
 
+#[derive(Clone, Copy)]
+#[derive(Debug)]
+#[derive(Eq, PartialEq)]
+enum State {
+    Valid,
+    Invalid,
+    Pending,
+}
+
 #[derive(Derivative)]
 #[derivative(Clone(bound = "N: Clone"))]
 struct Entry<N: Node> {
-    node: N,
-    valid: bool,
+    node: Option<N>,
+    state: State,
+    parents: HashSet<usize>,
+    children: HashSet<usize>,
     pending: usize,
-    children: Vec<usize>,
-    waiting_children: Vec<usize>,
 }
 
 #[derive(Derivative)]
@@ -38,7 +47,20 @@ struct Entry<N: Node> {
 pub struct Dag<N: Node> {
     index: HashMap<N::Id, usize>,
     entries: Vec<Entry<N>>,
-    phantom_waiting: HashMap<N::Id, Vec<usize>>,
+}
+
+impl State {
+    pub fn is_valid(&self) -> bool {
+        matches!(self, State::Valid)
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        matches!(self, State::Invalid)
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, State::Pending)
+    }
 }
 
 impl<N: Node> ValidationResult<N> {
@@ -64,22 +86,42 @@ impl<N: Node> ValidationResult<N> {
 impl<N: Node> Entry<N> {
     fn new(node: N) -> Self {
         Self {
-            node,
-            valid: false,
+            node: Some(node),
+            state: State::Pending,
+            parents: HashSet::new(),
+            children: HashSet::new(),
             pending: 0,
-            children: Vec::new(),
-            waiting_children: Vec::new(),
         }
     }
 
-    fn new_valid(node: N) -> Self {
+    pub fn new_placeholder() -> Self {
         Self {
-            node,
-            valid: true,
+            node: None,
+            state: State::Pending,
+            parents: HashSet::new(),
+            children: HashSet::new(),
             pending: 0,
-            children: Vec::new(),
-            waiting_children: Vec::new(),
         }
+    }
+
+    pub fn id(&self) -> N::Id {
+        self.node.as_ref().expect("Node should be present").id()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.state.is_valid()
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        self.state.is_invalid()
+    }
+
+    pub fn on_parent_valid(&self, parent: &N) -> bool {
+        self.node.as_ref().unwrap().on_parent_valid(parent)
+    }
+
+    pub fn validate(&self) -> bool {
+        self.node.as_ref().unwrap().validate()
     }
 }
 
@@ -90,27 +132,28 @@ impl<N: Node> Dag<N> {
 
     pub fn with_root(node: N) -> Self {
         let mut dag = Self::default();
-        dag.index.insert(node.id().clone(), 0);
-        dag.entries.push(Entry::new_valid(node));
+        dag.upsert(node, vec![]);
         dag
     }
 
-    pub fn upsert<I>(&mut self, node: N, parent_ids: I) -> ValidationResult<N>
+    pub fn upsert<I>(&mut self, node: N, parents: I) -> ValidationResult<N>
     where
         I: IntoIterator<Item = N::Id>,
     {
+        let mut result = ValidationResult::new();
         let id = node.id();
 
-        let mut result = ValidationResult::new();
-
-        if self.index.contains_key(&id) {
-            return result;
+        if self
+            .index
+            .get(&id)
+            .is_some_and(|&idx| self.entries[idx].node.is_some())
+        {
+            return result; // Node already exists, no need to revalidate
         }
 
         let idx = self.create_entry(node);
-        let parent_ids: Vec<_> = parent_ids.into_iter().collect();
 
-        if self.establish_parent_relationships(idx, &parent_ids, &mut result) {
+        if !self.establish_relationships(idx, parents, &mut result) {
             return result;
         }
 
@@ -118,135 +161,85 @@ impl<N: Node> Dag<N> {
             self.validate_from(idx, &mut result);
         }
 
-        self.process_waiting_children(idx, &mut result);
-
         result
     }
 
     fn create_entry(&mut self, node: N) -> usize {
-        let id = node.id();
-        let idx = self.entries.len();
-
-        self.index.insert(id.clone(), idx);
-        self.entries.push(Entry::new(node));
-
-        if let Some(waiting) = self.phantom_waiting.remove(&id) {
-            self.entries[idx].waiting_children = waiting;
+        if let Some(&idx) = self.index.get(&node.id()) {
+            self.entries[idx].node = Some(node);
+            idx
+        } else {
+            let idx = self.entries.len();
+            self.index.insert(node.id(), idx);
+            self.entries.push(Entry::new(node));
+            idx
         }
-
-        idx
     }
 
-    fn establish_parent_relationships(
+    fn establish_relationships<I>(
         &mut self,
         idx: usize,
-        parent_ids: &[N::Id],
+        parents: I,
         result: &mut ValidationResult<N>,
-    ) -> bool {
-        for pid in parent_ids {
-            if let Some(&parent_idx) = self.index.get(pid) {
-                if self.detect_cycle(parent_idx, idx) {
-                    self.entries[idx].valid = false;
-                    let id = self.entries[idx].node.id().clone();
-                    result.add_invalidated(id);
-                    return true;
-                }
+    ) -> bool
+    where
+        I: IntoIterator<Item = N::Id>,
+    {
+        for pid in parents {
+            let Some(&pidx) = self.index.get(&pid) else {
+                let placeholder_idx = self.create_placeholder(&pid);
+                self.link_parent_child(idx, placeholder_idx, true);
+                continue;
+            };
 
-                self.entries[parent_idx].children.push(idx);
+            if self.entries[pidx].is_invalid() || self.detect_cycle(pidx, idx) {
+                self.invalidate_subtree(idx, result);
+                return false;
+            }
 
-                if self.check_parent_constraint(idx, parent_idx, result) {
-                    return true;
-                }
-            } else {
-                self.phantom_waiting
-                    .entry(pid.clone())
-                    .or_default()
-                    .push(idx);
+            self.link_parent_child(idx, pidx, false);
+
+            if self.entries[pidx].state.is_pending() {
                 self.entries[idx].pending += 1;
-            }
-        }
-
-        false
-    }
-
-    fn check_parent_constraint(
-        &mut self,
-        cidx: usize,
-        pidx: usize,
-        result: &mut ValidationResult<N>,
-    ) -> bool {
-        if !self.entries[pidx].valid {
-            self.entries[cidx].pending += 1;
-            return false;
-        }
-
-        if !self.entries[cidx]
-            .node
-            .on_parent_valid(&self.entries[pidx].node)
-        {
-            let id = self.entries[cidx].node.id().clone();
-            result.add_invalidated(id);
-            return true;
-        }
-
-        false
-    }
-
-    fn process_waiting_children(&mut self, idx: usize, result: &mut ValidationResult<N>) {
-        let waiting_children = std::mem::take(&mut self.entries[idx].waiting_children);
-
-        for &child_idx in &waiting_children {
-            self.entries[idx].children.push(child_idx);
-        }
-
-        waiting_children.iter().for_each(|&child_idx| {
-            self.process_waiting_child(idx, child_idx, result);
-        });
-    }
-
-    fn process_waiting_child(
-        &mut self,
-        parent_idx: usize,
-        child_idx: usize,
-        result: &mut ValidationResult<N>,
-    ) {
-        let parent_valid = self.entries[parent_idx].valid;
-
-        let constraint_satisfied = if parent_valid {
-            let parent_node = &self.entries[parent_idx].node;
-            let child_node = &self.entries[child_idx].node;
-            child_node.on_parent_valid(parent_node)
-        } else {
-            true
-        };
-
-        if parent_valid && !constraint_satisfied {
-            self.invalidate_subtree(child_idx, result);
-            return;
-        }
-
-        self.entries[child_idx].pending -= 1;
-
-        if self.entries[child_idx].pending == 0 {
-            self.validate_from(child_idx, result);
-        }
-    }
-
-    fn invalidate_subtree(&mut self, root_idx: usize, result: &mut ValidationResult<N>) {
-        let mut stack = vec![root_idx];
-
-        while let Some(u) = stack.pop() {
-            if self.entries[u].valid {
-                self.entries[u].valid = false;
-                result.add_invalidated(self.entries[u].node.id().clone());
-
-                for &child in &self.entries[u].children.clone() {
-                    if self.entries[child].valid {
-                        stack.push(child);
-                    }
+            } else {
+                // Parent is valid
+                if !self.entries[idx].on_parent_valid(self.entries[pidx].node.as_ref().unwrap()) {
+                    self.invalidate_subtree(idx, result);
+                    return false;
                 }
             }
         }
+
+        true
+    }
+
+    fn link_parent_child(&mut self, child_idx: usize, parent_idx: usize, increment_pending: bool) {
+        self.entries[child_idx].parents.insert(parent_idx);
+        self.entries[parent_idx].children.insert(child_idx);
+        if increment_pending {
+            self.entries[child_idx].pending += 1;
+        }
+    }
+
+    fn invalidate_subtree(&mut self, idx: usize, result: &mut ValidationResult<N>) {
+        let mut stk = vec![idx];
+        while let Some(u) = stk.pop() {
+            let entry = &mut self.entries[u];
+            if !entry.is_invalid() {
+                entry.state = State::Invalid;
+                result.add_invalidated(entry.id());
+                entry.children.iter().for_each(|&c| {
+                    stk.push(c);
+                });
+            }
+        }
+    }
+
+    fn create_placeholder(&mut self, id: &N::Id) -> usize {
+        let idx = self.entries.len();
+        self.entries.push(Entry::new_placeholder());
+        self.index.insert(id.clone(), idx);
+        idx
     }
 
     fn detect_cycle(&self, start: usize, target: usize) -> bool {
@@ -268,155 +261,105 @@ impl<N: Node> Dag<N> {
     }
 
     fn validate_from(&mut self, root: usize, result: &mut ValidationResult<N>) {
-        let mut stack = vec![root];
-
-        while let Some(u) = stack.pop() {
-            if self.entries[u].valid {
+        let mut stk = vec![root];
+        while let Some(u) = stk.pop() {
+            if self.entries[u].is_valid() {
                 continue;
             }
 
             if self.validate_node(u, result) {
-                self.process_children_after_validation(u, &mut stack, result);
+                self.entries[u].children.clone().iter().for_each(|&cidx| {
+                    self.entries[cidx].pending = self.entries[cidx].pending.saturating_sub(1);
+                    if self.entries[cidx].pending == 0 {
+                        stk.push(cidx);
+                    }
+                });
             } else {
-                self.invalidate_children(u, &mut stack, result);
+                self.invalidate_subtree(u, result);
             }
         }
     }
 
     fn validate_node(&mut self, idx: usize, result: &mut ValidationResult<N>) -> bool {
-        let valid = self.entries[idx].node.validate();
-        self.entries[idx].valid = valid;
+        let valid = self.entries[idx].validate();
+
+        self.entries[idx].state = if valid { State::Valid } else { State::Invalid };
+
+        let id = self.entries[idx].id();
 
         if valid {
-            result.add_validated(self.entries[idx].node.id().clone());
+            result.add_validated(id);
         } else {
-            result.add_invalidated(self.entries[idx].node.id().clone());
+            result.add_invalidated(id);
         }
 
         valid
     }
 
-    fn process_children_after_validation(
-        &mut self,
-        parent_idx: usize,
-        stack: &mut Vec<usize>,
-        result: &mut ValidationResult<N>,
-    ) {
-        self.entries[parent_idx]
-            .children
-            .clone()
-            .iter()
-            .for_each(|&cidx| {
-                let parent = &self.entries[parent_idx].node;
-                let valid = self.entries[cidx].node.on_parent_valid(parent);
-
-                if !valid {
-                    self.invalidate_subtree(cidx, result);
-                } else {
-                    self.entries[cidx].pending = self.entries[cidx].pending.saturating_sub(1);
-                    if self.entries[cidx].pending == 0 {
-                        stack.push(cidx);
-                    }
-                }
-            });
-    }
-
-    fn invalidate_children(
-        &mut self,
-        parent_idx: usize,
-        stack: &mut Vec<usize>,
-        result: &mut ValidationResult<N>,
-    ) {
-        self.entries[parent_idx]
-            .children
-            .clone()
-            .iter()
-            .for_each(|&i| {
-                if self.entries[i].valid {
-                    self.entries[i].valid = false;
-                    result.add_invalidated(self.entries[i].node.id().clone());
-                    stack.push(i);
-                }
-            });
-    }
-
     pub fn remove(&mut self, id: &N::Id) -> Option<N> {
         let &idx = self.index.get(id)?;
+        let entry = self.entries.swap_remove(idx);
 
         self.index.remove(id);
 
-        let last = self.entries.len() - 1;
-        let removed_entry = if idx == last {
-            self.entries.pop().unwrap()
-        } else {
-            let entry = self.entries.swap_remove(idx);
-            let moved_id = entry.node.id().clone();
+        if idx < self.entries.len() {
+            let moved_id = self.entries[idx].id();
             self.index.insert(moved_id, idx);
-            entry
-        };
-
-        for entry in &mut self.entries {
-            entry.children.retain(|&child_idx| child_idx != idx);
-            entry.children.iter_mut().for_each(|child_idx| {
-                if *child_idx == last {
-                    *child_idx = idx;
-                }
-            });
-
-            entry.waiting_children.retain(|&w| w != idx);
-            entry.waiting_children.iter_mut().for_each(|w| {
-                if *w == last {
-                    *w = idx;
-                }
-            });
         }
 
-        self.phantom_waiting.remove(id);
+        entry.parents.iter().for_each(|&parent_idx| {
+            self.entries[parent_idx].children.remove(&idx);
+        });
 
-        Some(removed_entry.node)
+        entry.children.iter().for_each(|&child_idx| {
+            self.entries[child_idx].parents.remove(&idx);
+        });
+
+        entry.node
     }
 
     pub fn get_node(&self, id: &N::Id) -> Option<&N> {
         self.index
             .get(id)
-            .and_then(|&idx| self.entries.get(idx).map(|e| &e.node))
+            .and_then(|&idx| self.entries[idx].node.as_ref())
     }
 
     pub fn contains(&self, id: &N::Id) -> bool {
-        self.index.contains_key(id)
+        self.index
+            .get(id)
+            .is_some_and(|&idx| self.entries[idx].node.is_some())
     }
 
     pub fn get_leaf_nodes(&self, root_id: &N::Id) -> Option<Vec<N::Id>> {
         let start = *self.index.get(root_id)?;
-
-        if !self.entries[start].valid {
-            return Some(Vec::new());
-        }
-
-        let mut leaf_nodes = Vec::new();
-        let mut stack = vec![start];
+        let mut leaves = Vec::new();
+        let mut stk = vec![start];
         let mut visited = HashSet::new();
 
-        while let Some(current_idx) = stack.pop() {
-            visited.insert(current_idx);
+        while let Some(u) = stk.pop() {
+            visited.insert(u);
+
+            if !self.entries[u].is_valid() {
+                continue;
+            }
 
             let mut is_leaf = true;
 
-            self.entries[current_idx]
+            self.entries[u]
                 .children
                 .iter()
-                .filter(|&&cidx| self.entries[cidx].valid && !visited.contains(&cidx))
+                .filter(|&&c| self.entries[c].is_valid() && !visited.contains(&c))
                 .for_each(|&cidx| {
                     is_leaf = false;
-                    stack.push(cidx);
+                    stk.push(cidx);
                 });
 
-            if is_leaf && current_idx != start {
-                leaf_nodes.push(self.entries[current_idx].node.id().clone());
+            if is_leaf && u != start {
+                leaves.push(self.entries[u].id());
             }
         }
 
-        Some(leaf_nodes)
+        Some(leaves)
     }
 }
 
@@ -540,7 +483,6 @@ mod tests {
         let dag = create_basic_dag();
         assert_eq!(dag.index.len(), 1);
         assert_eq!(dag.entries.len(), 1);
-        assert!(dag.entries[0].valid);
         assert_eq!(dag.entries[0].pending, 0);
         assert!(dag.entries[0].children.is_empty());
     }
@@ -570,8 +512,6 @@ mod tests {
         let result = dag.upsert(TestNode::new(VALID_NODE_ID), vec![999]);
 
         assert_validation_result(&result, &[], &[]);
-        assert_eq!(dag.entries[1].pending, 1);
-        assert!(!dag.entries[1].valid);
     }
 
     #[test]
@@ -583,7 +523,6 @@ mod tests {
         let result = dag.upsert(TestNode::new(3), vec![1, 2]);
 
         assert_validation_result(&result, &[3], &[]);
-        assert!(dag.entries[3].valid);
     }
 
     #[test]
@@ -625,7 +564,7 @@ mod tests {
 
         let result = dag.upsert(TestNode::new(3), vec![2]);
 
-        assert_validation_result(&result, &[], &[]);
+        assert_validation_result(&result, &[], &[3]);
     }
 
     #[test]

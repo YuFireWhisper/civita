@@ -65,7 +65,7 @@ pub struct Tree<H: Hasher> {
     block_dag: ParkingRwLock<Dag<BlockNode<H>>>,
     proposal_dags: DashMap<Multihash, Dag<UnifiedNode<H>>>,
 
-    pending_blocks: DashSet<Multihash>,
+    pending_blocks: DashMap<Multihash, Multihash>,
     invalidated_hashes: DashSet<Multihash>,
 
     proposal_to_block: DashMap<Multihash, Multihash>,
@@ -185,7 +185,7 @@ impl<H: Hasher> Tree<H> {
         let mode = Arc::new(mode);
         let root = BlockNode::new(root_block, None, state.clone(), mode.clone());
 
-        let block_dag = Dag::with_root(root);
+        let block_dag = Dag::with_root(root.clone());
         let block_dag = ParkingRwLock::new(block_dag);
         let proposal_dags = DashMap::new();
 
@@ -193,7 +193,7 @@ impl<H: Hasher> Tree<H> {
             sk,
             block_dag,
             proposal_dags,
-            pending_blocks: DashSet::new(),
+            pending_blocks: DashMap::new(),
             invalidated_hashes: DashSet::new(),
             proposal_to_block: DashMap::new(),
             state,
@@ -239,7 +239,7 @@ impl<H: Hasher> Tree<H> {
             sk,
             block_dag: ParkingRwLock::new(block_dag),
             proposal_dags,
-            pending_blocks: DashSet::new(),
+            pending_blocks: DashMap::new(),
             invalidated_hashes: DashSet::new(),
             proposal_to_block: DashMap::new(),
             state,
@@ -277,9 +277,10 @@ impl<H: Hasher> Tree<H> {
         }
 
         self.sources.insert(hash, source);
-        self.pending_blocks.insert(hash);
+        self.pending_blocks.insert(hash, block.parent);
 
-        self.upsert_block_to_proposal_dag(block, witness, &mut result);
+        let dag_res = self.upsert_block_to_proposal_dag(block, witness, &mut result);
+        self.process_validation_result(&dag_res, &mut result);
 
         result
     }
@@ -293,22 +294,16 @@ impl<H: Hasher> Tree<H> {
         block: Block,
         witness: block::Witness,
         res: &mut ProcessResult,
-    ) {
+    ) -> ValidationResult<UnifiedNode<H>> {
         let ps = self.generate_block_parents(&block, res);
         let mut entry = self.proposal_dags.entry(block.parent).or_default();
         let dag = entry.value_mut();
         let n = UnifiedNode::new_block(block, Some(witness), self.state.clone(), self.mode.clone());
-        let dag_res = dag.upsert(n, ps);
-        self.process_validation_result(&dag_res, res);
+        dag.upsert(n, ps)
     }
 
     fn generate_block_parents(&self, block: &Block, result: &mut ProcessResult) -> Vec<Multihash> {
-        let mut parents = Vec::with_capacity(block.proposals.len() + 1);
-        parents.push(block.parent);
-
-        if !self.block_dag.read().contains(&block.parent) {
-            result.add_phantom(block.parent);
-        }
+        let mut parents = Vec::with_capacity(block.proposals.len());
 
         let dag = self.proposal_dags.entry(block.parent).or_default();
 
@@ -328,13 +323,12 @@ impl<H: Hasher> Tree<H> {
         process_result: &mut ProcessResult,
     ) {
         validation_result.validated.iter().for_each(|id| {
-            if self.pending_blocks.remove(id).is_some() {
+            if let Some((id, parent)) = self.pending_blocks.remove(id) {
                 let un_node = self
                     .proposal_dags
-                    .get_mut(id)
-                    .expect("Node should exist in the DAG")
-                    .value_mut()
-                    .remove(id)
+                    .get_mut(&parent)
+                    .expect("Parent DAG should exist")
+                    .remove(&id)
                     .expect("Node should exist in the DAG");
 
                 let block_node = un_node
@@ -342,13 +336,12 @@ impl<H: Hasher> Tree<H> {
                     .expect("Node should be a BlockNode")
                     .clone();
 
-                let parent = block_node.block.parent;
                 let _ = self
                     .block_dag
                     .write()
                     .upsert(block_node, std::iter::once(parent));
 
-                let mut dag = self.proposal_dags.entry(parent).or_default();
+                let mut dag = self.proposal_dags.entry(id).or_default();
                 dag.value_mut().upsert(un_node, std::iter::empty());
             }
 
