@@ -98,12 +98,11 @@ impl<H: Hasher> BlockNode<H> {
         let cumulative_weight = self.cumulative_weight.load(Ordering::Relaxed);
         let weight = self.weight.load(Ordering::Relaxed);
         let total_weight = self.trie.read().weight();
-        let height = self.block.height;
         let id = self.id();
 
         {
             let mut state = self.state.write();
-            state.update_tip(cumulative_weight, height, id);
+            state.update_tip(cumulative_weight, id);
             state.update_checkpoint(weight, total_weight, id);
         }
 

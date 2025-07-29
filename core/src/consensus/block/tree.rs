@@ -51,11 +51,9 @@ pub enum Mode {
 #[derive(Default)]
 struct State {
     tip_cumulative_weight: Weight,
-    tip_height: u64,
     tip_hash: Multihash,
 
     current_checkpoint_total_weight: Weight,
-    current_checkpoint_height: u64,
     checkpoints: Vec<Multihash>,
 }
 
@@ -135,13 +133,12 @@ impl Mode {
 }
 
 impl State {
-    pub fn update_tip(&mut self, cumulative_weight: Weight, height: u64, hash: Multihash) {
-        let new_tip = (cumulative_weight, height, hash);
-        let current_tip = (self.tip_cumulative_weight, self.tip_height, self.tip_hash);
+    pub fn update_tip(&mut self, cumulative_weight: Weight, hash: Multihash) {
+        let new_tip = (cumulative_weight, hash);
+        let current_tip = (self.tip_cumulative_weight, self.tip_hash);
 
         if new_tip > current_tip {
             self.tip_cumulative_weight = cumulative_weight;
-            self.tip_height = height;
             self.tip_hash = hash;
         }
     }
@@ -165,7 +162,6 @@ impl<H: Hasher> Tree<H> {
     pub fn empty(sk: SecretKey, mode: Mode) -> Self {
         let root_block = block::Builder::new()
             .with_parent_hash(Multihash::default())
-            .with_height(0)
             .with_proposer_pk(sk.public_key())
             .with_proposer_weight(0)
             .build();
@@ -174,9 +170,7 @@ impl<H: Hasher> Tree<H> {
 
         let state = State {
             tip_cumulative_weight: 0,
-            tip_height: 0,
             tip_hash: hash,
-            current_checkpoint_height: 0,
             current_checkpoint_total_weight: 0,
             checkpoints: vec![hash],
         };
@@ -270,12 +264,6 @@ impl<H: Hasher> Tree<H> {
             return result;
         }
 
-        if block.height <= self.checkpoint_height() {
-            self.invalidated_hashes.insert(hash);
-            result.add_invalidated(source);
-            return result;
-        }
-
         self.sources.insert(hash, source);
         self.pending_blocks.insert(hash, block.parent);
 
@@ -283,10 +271,6 @@ impl<H: Hasher> Tree<H> {
         self.process_validation_result(&dag_res, &mut result);
 
         result
-    }
-
-    fn checkpoint_height(&self) -> u64 {
-        self.state.read().current_checkpoint_height
     }
 
     fn upsert_block_to_proposal_dag(
@@ -420,11 +404,11 @@ impl<H: Hasher> Tree<H> {
             return None;
         }
 
-        let (parent_trie, parent_hash, parent_height) = {
+        let (parent_trie, parent_hash) = {
             let dag = self.block_dag.read();
             let p = dag.get_node(&parent)?;
             let trie = p.trie.read().clone();
-            (trie, p.block.hash::<H>(), p.block.height)
+            (trie, p.block.hash::<H>())
         };
 
         let pk_hash = self.sk.public_key().to_hash::<H>();
@@ -436,7 +420,6 @@ impl<H: Hasher> Tree<H> {
 
         let block = block::Builder::new()
             .with_parent_hash(parent_hash)
-            .with_height(parent_height.wrapping_add(1))
             .with_proposer_pk(self.sk.public_key())
             .with_proposer_weight(weight)
             .with_proposals(ids)
@@ -592,7 +575,6 @@ mod tests {
 
         let block = block::Builder::new()
             .with_parent_hash(tree.tip_hash())
-            .with_height(1)
             .with_proposals([hash])
             .with_proposer_pk(pk)
             .with_proposer_weight(0)
