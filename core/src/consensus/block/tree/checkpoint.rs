@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use civita_serialize_derive::Serialize;
 use derivative::Derivative;
 
 use crate::{
@@ -29,6 +30,19 @@ pub struct UpdateResult<H> {
     pub invalidated: Vec<Multihash>,
     pub phantoms: Vec<Multihash>,
     pub new_checkpoint: Option<BlockNode<H>>,
+}
+
+#[derive(Serialize)]
+pub struct EstablishedBlock {
+    pub block: Block,
+    pub witness: block::Witness,
+    pub proposals: HashMap<Multihash, (Proposal, proposal::Witness)>,
+}
+
+#[derive(Serialize)]
+pub struct EstablishedCheckpoint {
+    pub root_hash: Multihash,
+    blocks: HashMap<Multihash, EstablishedBlock>,
 }
 
 pub struct Checkpoint<H: Hasher> {
@@ -150,7 +164,7 @@ impl<H: Hasher> Checkpoint<H> {
                 let block_cumulative_weight = block_node.cumulative_weight.load(Relaxed);
                 let tip_cumulative_weight = self
                     .block_dag
-                    .get_node(&self.tip)
+                    .get(&self.tip)
                     .expect("Tip should exist")
                     .cumulative_weight
                     .load(Relaxed);
@@ -189,7 +203,7 @@ impl<H: Hasher> Checkpoint<H> {
 
     fn total_weight(&self) -> u64 {
         self.block_dag
-            .get_node(&self.root_hash)
+            .get(&self.root_hash)
             .expect("Tip node should exist")
             .trie
             .read()
@@ -230,7 +244,7 @@ impl<H: Hasher> Checkpoint<H> {
 
     pub fn tip_node(&self) -> &BlockNode<H> {
         self.block_dag
-            .get_node(&self.tip)
+            .get(&self.tip)
             .expect("Tip node should exist")
     }
 
@@ -258,7 +272,7 @@ impl<H: Hasher> Checkpoint<H> {
 
     pub fn parent_trie(&self, parent: &Multihash) -> Option<Trie<H>> {
         self.block_dag
-            .get_node(parent)
+            .get(parent)
             .map(|node| node.trie.read().clone())
     }
 
@@ -269,8 +283,60 @@ impl<H: Hasher> Checkpoint<H> {
     pub fn root_block(&self) -> &Block {
         &self
             .block_dag
-            .get_node(&self.root_hash)
+            .get(&self.root_hash)
             .expect("Root node should exist")
             .block
+    }
+
+    pub fn into_established_checkpoint(mut self) -> EstablishedCheckpoint {
+        let mut blocks = HashMap::new();
+
+        let mut cur = self.root_hash;
+
+        loop {
+            let cur_node = self
+                .block_dag
+                .get(&cur)
+                .expect("Node should exist in the DAG");
+
+            let mut proposals = HashMap::new();
+
+            let mut dag = self
+                .proposal_dags
+                .remove(&cur)
+                .expect("Proposal DAG should exist");
+
+            cur_node.block.proposals.iter().for_each(|p| {
+                let pn = dag
+                    .remove(p)
+                    .expect("Proposal node should exist")
+                    .into_proposal();
+                proposals.insert(*p, (pn.proposal, pn.witness));
+            });
+
+            let block = EstablishedBlock {
+                block: cur_node.block.clone(),
+                witness: cur_node.witness.clone(),
+                proposals,
+            };
+
+            blocks.insert(cur, block);
+
+            let children = self
+                .block_dag
+                .get_children(&cur)
+                .expect("Children should exist");
+
+            match children.len() {
+                0 => break,
+                1 => cur = children[0],
+                _ => panic!("Checkpoint root should have a single child"),
+            }
+        }
+
+        EstablishedCheckpoint {
+            root_hash: self.root_hash,
+            blocks,
+        }
     }
 }

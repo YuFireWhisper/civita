@@ -318,7 +318,7 @@ impl<N: Node> Dag<N> {
         entry.node
     }
 
-    pub fn get_node(&self, id: &N::Id) -> Option<&N> {
+    pub fn get(&self, id: &N::Id) -> Option<&N> {
         self.index
             .get(id)
             .and_then(|&idx| self.entries[idx].node.as_ref())
@@ -396,6 +396,16 @@ impl<N: Node> Dag<N> {
         });
 
         removed_nodes
+    }
+
+    pub fn get_children(&self, id: &N::Id) -> Option<Vec<N::Id>> {
+        let &idx = self.index.get(id)?;
+        let children_ids = self.entries[idx]
+            .children
+            .iter()
+            .filter_map(|&cidx| self.entries[cidx].node.as_ref().map(|n| n.id()))
+            .collect();
+        Some(children_ids)
     }
 }
 
@@ -676,7 +686,7 @@ mod tests {
     #[test]
     fn get_existing_node() {
         let dag = create_basic_dag();
-        let node = dag.get_node(&ROOT_NODE_ID);
+        let node = dag.get(&ROOT_NODE_ID);
 
         assert!(node.is_some());
         assert_eq!(node.unwrap().id(), ROOT_NODE_ID);
@@ -685,7 +695,7 @@ mod tests {
     #[test]
     fn get_nonexistent_node() {
         let dag = create_basic_dag();
-        let node = dag.get_node(&999);
+        let node = dag.get(&999);
         assert!(node.is_none());
     }
 

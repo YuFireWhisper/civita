@@ -319,7 +319,7 @@ impl<H: Hasher> Tree<H> {
         let mut proposals = Vec::new();
 
         iter.for_each(|id| {
-            if let Some(UnifiedNode::Proposal(node)) = dag.get_node(&id) {
+            if let Some(UnifiedNode::Proposal(node)) = dag.get(&id) {
                 let proposal = node.proposal.clone();
                 let witness = node.witness.clone();
                 proposals.push((proposal, witness));

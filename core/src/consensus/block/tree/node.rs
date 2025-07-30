@@ -45,6 +45,14 @@ impl<H: Hasher> UnifiedNode<H> {
             None
         }
     }
+
+    pub fn into_proposal(self) -> ProposalNode {
+        if let UnifiedNode::Proposal(node) = self {
+            node
+        } else {
+            panic!("Cannot convert BlockNode to ProposalNode");
+        }
+    }
 }
 
 impl<H: Hasher> Node for UnifiedNode<H> {
