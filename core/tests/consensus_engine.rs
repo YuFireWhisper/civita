@@ -7,7 +7,6 @@ use civita_core::{
         engine::Validator,
         proposal, Engine,
     },
-    crypto::Multihash,
     utils::trie::Record,
 };
 
@@ -47,6 +46,7 @@ async fn basic_operations() {
     const NUM: usize = 5;
     const PROPOSAL_TOPIC: u8 = 0;
     const BLOCK_TOPIC: u8 = 1;
+    const REQUEST_RESPONSE_TOPIC: u8 = 2;
 
     const TARGET_IDX: usize = 4;
 
@@ -59,6 +59,7 @@ async fn basic_operations() {
     let engine_config = civita_core::consensus::engine::Config {
         proposal_topic: PROPOSAL_TOPIC,
         block_topic: BLOCK_TOPIC,
+        request_response_topic: REQUEST_RESPONSE_TOPIC,
         vdf_params: VDF_PARAMS,
         vdf_difficulty: VDF_DIFFICULTY,
     };

@@ -1,15 +1,12 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use libp2p::{
-    request_response::{OutboundFailure, OutboundRequestId, ResponseChannel},
-    PeerId, Swarm,
-};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use libp2p::{PeerId, Swarm};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::network::{
     behaviour::Behaviour,
-    request_response::{Event, Message},
+    request_response::{Event, Message, ResponseChannel, CHANNEL_SIZE},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -23,65 +20,81 @@ pub enum Error {
     #[error("{0}")]
     Send(String),
 
-    #[error("Timeout while waiting for response")]
-    Timeout,
-
-    #[error(transparent)]
-    OutboundFailure(#[from] OutboundFailure),
-
-    #[error("Channel closed")]
-    ChannelClosed,
-}
-
-enum ReqeustResult {
-    GotResponse(Vec<u8>),
-    Failed(OutboundFailure),
+    #[error("Empty message")]
+    EmptyMessage,
 }
 
 pub struct RequestResponse {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
-    tx: mpsc::Sender<(PeerId, Message)>,
-
-    waiting_resp: DashMap<OutboundRequestId, oneshot::Sender<ReqeustResult>>,
+    txs: DashMap<u8, mpsc::Sender<Message>>,
 }
 
 impl RequestResponse {
-    pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>, tx: mpsc::Sender<(PeerId, Message)>) -> Self {
+    pub fn new(swarm: Arc<Mutex<Swarm<Behaviour>>>) -> Self {
         Self {
             swarm,
-            tx,
-            waiting_resp: DashMap::new(),
+            txs: DashMap::new(),
         }
     }
 
     pub async fn handle_event(&self, event: Event) -> Result<()> {
-        match event {
-            Event::Message { message, peer, .. } => match message {
-                Message::Request { .. } => {
-                    self.tx.send((peer, message)).await?;
-                }
-                Message::Response {
-                    response,
-                    request_id,
+        use libp2p::request_response::Message as Libp2pMessage;
+
+        if let Event::Message { peer, message, .. } = event {
+            match message {
+                Libp2pMessage::Request {
+                    request, channel, ..
                 } => {
-                    if let Some(tx) = self.waiting_resp.remove(&request_id) {
-                        let _ = tx.1.send(ReqeustResult::GotResponse(response));
-                    }
+                    self.handle_reqeust(peer, request, channel).await?;
                 }
-            },
-            Event::OutboundFailure {
-                request_id, error, ..
-            } => {
-                if let Some(tx) = self.waiting_resp.remove(&request_id) {
-                    let _ = tx.1.send(ReqeustResult::Failed(error));
+                Libp2pMessage::Response { response, .. } => {
+                    self.handle_response(peer, response).await?;
                 }
             }
-            _ => {}
         }
         Ok(())
     }
 
-    pub async fn send_request(&self, peer_id: PeerId, request: Vec<u8>) {
+    async fn handle_reqeust(
+        &self,
+        peer: PeerId,
+        mut request: Vec<u8>,
+        channel: ResponseChannel,
+    ) -> Result<()> {
+        let topic = request.pop().ok_or(Error::EmptyMessage)?;
+
+        if let Some(tx) = self.txs.get(&topic) {
+            let msg = Message::new_request(peer, request, channel);
+            tx.send(msg).await.map_err(Error::from)?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_response(&self, peer: PeerId, mut response: Vec<u8>) -> Result<()> {
+        let topic = response.pop().ok_or(Error::EmptyMessage)?;
+
+        if let Some(tx) = self.txs.get(&topic) {
+            let message = Message::Response { peer, response };
+            tx.send(message).await.map_err(Error::from)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn subscribe(&self, topic: u8) -> mpsc::Receiver<Message> {
+        let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
+        self.txs.insert(topic, tx);
+        rx
+    }
+
+    pub fn unsubscribe(&self, topic: u8) {
+        self.txs.remove(&topic);
+    }
+
+    pub async fn send_request(&self, peer_id: PeerId, mut request: Vec<u8>, topic: u8) {
+        request.push(topic);
+
         let mut swarm = self.swarm.lock().await;
         let _ = swarm
             .behaviour_mut()
@@ -91,41 +104,20 @@ impl RequestResponse {
 
     pub async fn send_response(
         &self,
-        ch: ResponseChannel<Vec<u8>>,
-        response: Vec<u8>,
+        channel: ResponseChannel,
+        mut response: Vec<u8>,
+        topic: u8,
     ) -> Result<()> {
+        response.push(topic);
+
         let mut swarm = self.swarm.lock().await;
         swarm
             .behaviour_mut()
             .req_resp_mut()
-            .send_response(ch, response)
+            .send_response(channel, response)
             .map_err(|_| Error::SendResponse)?;
+
         Ok(())
-    }
-
-    pub async fn send_request_and_wait(
-        &self,
-        peer_id: PeerId,
-        request: Vec<u8>,
-        timeout: tokio::time::Duration,
-    ) -> Result<Vec<u8>> {
-        let (tx, rx) = oneshot::channel();
-        let mut swarm = self.swarm.lock().await;
-        let id = swarm
-            .behaviour_mut()
-            .req_resp_mut()
-            .send_request(&peer_id, request);
-
-        self.waiting_resp.insert(id, tx);
-
-        tokio::select! {
-            res = rx => match res {
-                Ok(ReqeustResult::GotResponse(response)) => Ok(response),
-                Ok(ReqeustResult::Failed(error)) => Err(Error::OutboundFailure(error)),
-                Err(_) => Err(Error::ChannelClosed),
-            },
-            _ = tokio::time::sleep(timeout) => Err(Error::Timeout),
-        }
     }
 }
 

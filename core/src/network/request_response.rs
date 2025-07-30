@@ -8,7 +8,6 @@ use crate::network::behaviour::Behaviour;
 mod network;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
-type Message = request_response::Message<Vec<u8>, Vec<u8>>;
 type Event = request_response::Event<Vec<u8>, Vec<u8>>;
 type ResponseChannel = request_response::ResponseChannel<Vec<u8>>;
 
@@ -21,63 +20,76 @@ pub enum Error {
     Network(#[from] network::Error),
 }
 
-pub enum RequestResponse {
-    Network {
-        network: network::RequestResponse,
-        rx: Mutex<mpsc::Receiver<(PeerId, Message)>>,
+pub enum Message {
+    Request {
+        peer: PeerId,
+        request: Vec<u8>,
+        channel: ResponseChannel,
     },
+    Response {
+        peer: PeerId,
+        response: Vec<u8>,
+    },
+}
+
+pub enum RequestResponse {
+    Network(network::RequestResponse),
+}
+
+impl Message {
+    pub fn new_request(peer: PeerId, request: Vec<u8>, channel: ResponseChannel) -> Self {
+        Self::Request {
+            peer,
+            request,
+            channel,
+        }
+    }
+
+    pub fn new_response(peer: PeerId, response: Vec<u8>) -> Self {
+        Self::Response { peer, response }
+    }
 }
 
 impl RequestResponse {
     pub fn new_network(swarm: Arc<Mutex<Swarm<Behaviour>>>) -> Self {
-        let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-        let network = network::RequestResponse::new(swarm, tx);
-        Self::Network {
-            network,
-            rx: Mutex::new(rx),
-        }
+        RequestResponse::Network(network::RequestResponse::new(swarm))
     }
 
     pub async fn handle_event_network(&self, event: Event) -> Result<()> {
         match self {
-            Self::Network { network, .. } => network.handle_event(event).await.map_err(Error::from),
+            Self::Network(n) => n.handle_event(event).await.map_err(Error::from),
         }
     }
 
-    pub async fn send_request(&self, peer_id: libp2p::PeerId, request: Vec<u8>) {
+    pub fn subscribe(&self, topic: u8) -> mpsc::Receiver<Message> {
         match self {
-            Self::Network { network, .. } => {
-                network.send_request(peer_id, request).await;
-            }
+            Self::Network(n) => n.subscribe(topic),
         }
     }
 
-    pub async fn send_reqeust_and_wait(
+    pub fn unsubscribe(&self, topic: u8) {
+        match self {
+            Self::Network(n) => n.unsubscribe(topic),
+        }
+    }
+
+    pub async fn send_request(&self, peer_id: libp2p::PeerId, request: Vec<u8>, topic: u8) {
+        match self {
+            Self::Network(n) => n.send_request(peer_id, request, topic).await,
+        }
+    }
+
+    pub async fn send_response(
         &self,
-        peer_id: libp2p::PeerId,
-        request: Vec<u8>,
-        timeout: tokio::time::Duration,
-    ) -> Result<Vec<u8>> {
+        ch: ResponseChannel,
+        response: Vec<u8>,
+        topic: u8,
+    ) -> Result<()> {
         match self {
-            Self::Network { network, .. } => network
-                .send_request_and_wait(peer_id, request, timeout)
+            Self::Network(n) => n
+                .send_response(ch, response, topic)
                 .await
                 .map_err(Error::from),
-        }
-    }
-
-    pub async fn send_response(&self, ch: ResponseChannel, response: Vec<u8>) -> Result<()> {
-        match self {
-            Self::Network { network, .. } => network
-                .send_response(ch, response)
-                .await
-                .map_err(Error::from),
-        }
-    }
-
-    pub async fn recv(&self) -> Option<(PeerId, Message)> {
-        match self {
-            Self::Network { rx, .. } => rx.lock().await.recv().await,
         }
     }
 }

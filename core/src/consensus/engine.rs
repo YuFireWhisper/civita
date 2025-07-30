@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use civita_serialize::Serialize;
-use libp2p::{request_response::Message, PeerId};
+use libp2p::PeerId;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
@@ -11,7 +11,11 @@ use crate::{
         proposal::{self, Operation, Proposal},
     },
     crypto::{Hasher, Multihash, PublicKey, SecretKey},
-    network::{gossipsub, request_response::RequestResponse, Gossipsub, Transport},
+    network::{
+        gossipsub,
+        request_response::{Message, RequestResponse},
+        Gossipsub, Transport,
+    },
     utils::trie::{Record, Trie},
 };
 
@@ -42,6 +46,7 @@ pub trait Validator {
 pub struct Config {
     pub proposal_topic: u8,
     pub block_topic: u8,
+    pub request_response_topic: u8,
     pub vdf_params: u16,
     pub vdf_difficulty: u64,
 }
@@ -52,6 +57,7 @@ pub struct Engine<H: Hasher, V> {
     request_response: Arc<RequestResponse>,
     proposal_topic: u8,
     block_topic: u8,
+    req_resp_topic: u8,
     block_tree: Tree<H>,
     sk: SecretKey,
     vdf: WesolowskiVDF,
@@ -78,6 +84,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
             request_response,
             proposal_topic: config.proposal_topic,
             block_topic: config.block_topic,
+            req_resp_topic: config.request_response_topic,
             block_tree,
             sk,
             vdf,
@@ -108,6 +115,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
     pub async fn run(&self) -> Result<()> {
         let mut prop_rx = self.gossipsub.subscribe(self.proposal_topic).await?;
         let mut block_rx = self.gossipsub.subscribe(self.block_topic).await?;
+        let mut request_response_rx = self.request_response.subscribe(self.req_resp_topic);
 
         let mut vdf_task = Some(self.start_vdf_task());
 
@@ -119,8 +127,8 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
                 Some(msg) = block_rx.recv() => {
                     self.on_recv_block(msg).await;
                 }
-                Some((source, msg)) = self.request_response.recv() => {
-                    self.on_recv_reqeust_response(source, msg).await;
+                Some(msg) = request_response_rx.recv() => {
+                    self.on_recv_reqeust_response(msg).await;
                 }
                 result = vdf_task.as_mut().unwrap() => {
                     match result {
@@ -256,40 +264,50 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
 
         if !res.phantoms.is_empty() {
             let bytes = res.phantoms.to_vec();
-            self.request_response.send_request(source, bytes).await;
+            self.request_response
+                .send_request(source, bytes, self.req_resp_topic)
+                .await;
         }
     }
 
-    async fn on_recv_reqeust_response(&self, source: PeerId, msg: Message<Vec<u8>, Vec<u8>>) {
+    async fn on_recv_reqeust_response(&self, msg: Message) {
         match msg {
             Message::Request {
-                request, channel, ..
+                peer,
+                request,
+                channel,
             } => {
-                let hashes =
-                    Vec::<Multihash>::from_reader(&mut request.as_slice()).unwrap_or_default();
+                let hashes = Vec::from_reader(&mut request.as_slice()).unwrap_or_default();
 
                 if hashes.is_empty() {
+                    self.disconnect_peer(peer).await;
                     return;
                 }
 
                 let bytes = self.block_tree.get_proposals(hashes).to_vec();
 
-                if let Err(e) = self.request_response.send_response(channel, bytes).await {
+                if bytes.is_empty() {
+                    return;
+                }
+
+                if let Err(e) = self
+                    .request_response
+                    .send_response(channel, bytes, self.req_resp_topic)
+                    .await
+                {
                     log::error!("Failed to send response: {e}");
                 }
             }
-            Message::Response { response, .. } => {
-                let props =
-                    Vec::<(Proposal, proposal::Witness)>::from_reader(&mut response.as_slice())
-                        .unwrap_or_default();
+            Message::Response { peer, response } => {
+                let props = Vec::from_reader(&mut response.as_slice()).unwrap_or_default();
 
                 if props.is_empty() {
-                    self.disconnect_peer(source).await;
+                    self.disconnect_peer(peer).await;
                     return;
                 }
 
                 for (prop, witness) in props {
-                    self.verify_proposal(prop, witness, source).await;
+                    self.verify_proposal(prop, witness, peer).await;
                 }
             }
         }
