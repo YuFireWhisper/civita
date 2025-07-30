@@ -10,7 +10,7 @@ use crate::{
         block::{
             self,
             tree::{
-                checkpoint::{Checkpoint, EstablishedCheckpoint, UpdateResult},
+                checkpoint::{Checkpoint, EstablishedBlock, UpdateResult},
                 dag::{Node, ValidationResult},
                 node::{BlockNode, UnifiedNode},
             },
@@ -19,7 +19,7 @@ use crate::{
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash, SecretKey},
-    utils::trie::{Trie, Weight},
+    utils::trie::Trie,
 };
 
 mod checkpoint;
@@ -35,11 +35,9 @@ pub struct ProcessResult {
 }
 
 #[derive(Serialize)]
-pub struct SyncState {
-    tip_block: Block,
-    tip_cumulative_weight: Weight,
-    checkpoint_block: Block,
-    tip_guide: HashMap<Multihash, Vec<u8>>,
+pub enum SyncState {
+    Archive(Box<Vec<Vec<EstablishedBlock>>>),
+    Normal(Box<checkpoint::Summary>),
 }
 
 pub enum Mode {
@@ -50,7 +48,7 @@ pub enum Mode {
 pub struct Tree<H: Hasher> {
     sk: SecretKey,
     checkpoint: ParkingRwLock<Checkpoint<H>>,
-    history: ParkingRwLock<Vec<EstablishedCheckpoint>>,
+    history: ParkingRwLock<Vec<Vec<EstablishedBlock>>>,
     sources: DashMap<Multihash, PeerId>,
     mode: Arc<Mode>,
 }
@@ -130,7 +128,7 @@ impl<H: Hasher> Tree<H> {
         let mode = Arc::new(mode);
         let block_node = BlockNode::new(root_block, witness, mode.clone());
 
-        let checkpoint = Checkpoint::new(block_node, mode.clone());
+        let checkpoint = Checkpoint::new_empty(block_node, mode.clone());
         let checkpoint = ParkingRwLock::new(checkpoint);
         let history = ParkingRwLock::new(Vec::new());
 
@@ -143,32 +141,43 @@ impl<H: Hasher> Tree<H> {
         }
     }
 
-    // pub fn from_sync_state(sk: SecretKey, sync_state: SyncState, mode: Mode) -> Self {
-    //     let state = State {
-    //         tip_cumulative_weight: sync_state.tip_cumulative_weight,
-    //         tip_height: sync_state.tip_block.height,
-    //         tip_hash: sync_state.tip_block.hash::<H>(),
-    //         checkpoint_total_weight: sync_state.checkpoint_total_weight,
-    //         checkpoint_hash: sync_state.checkpoint_block.hash::<H>(),
-    //     };
-    //
-    //     let state = Arc::new(ParkingRwLock::new(state));
-    //
-    //     let mode = Arc::new(mode);
-    //
-    //     let root_node =
-    //         UnifiedNode::new_block(sync_state.tip_block, None, state.clone(), mode.clone());
-    //
-    //     let dag = ParkingRwLock::new(Dag::with_root(root_node));
-    //
-    //     Self {
-    //         sk,
-    //         dag,
-    //         state,
-    //         sources: DashMap::new(),
-    //         mode,
-    //     }
-    // }
+    pub fn from_sync_state(sk: SecretKey, sync_state: SyncState, mode: Mode) -> Option<Self> {
+        let mode = Arc::new(mode);
+
+        match sync_state {
+            SyncState::Archive(mut history) => {
+                if !mode.is_archive() {
+                    return None;
+                }
+
+                let last = history.pop()?;
+                let checkpoint = Checkpoint::from_blocks(last)?;
+
+                Some(Self {
+                    sk,
+                    checkpoint: ParkingRwLock::new(checkpoint),
+                    history: ParkingRwLock::new(*history),
+                    sources: DashMap::new(),
+                    mode,
+                })
+            }
+            SyncState::Normal(summary) => {
+                if !mode.is_normal() {
+                    return None;
+                }
+
+                let checkpoint = Checkpoint::from_summary(*summary, mode.clone())?;
+
+                Some(Self {
+                    sk,
+                    checkpoint: ParkingRwLock::new(checkpoint),
+                    history: ParkingRwLock::new(Vec::new()),
+                    sources: DashMap::new(),
+                    mode,
+                })
+            }
+        }
+    }
 
     pub fn from_other(_: SecretKey, _: &Self) -> Self {
         unimplemented!("Tree::from_other is not implemented yet");
@@ -201,14 +210,14 @@ impl<H: Hasher> Tree<H> {
         if let Some(block) = result.new_checkpoint {
             let original = {
                 let mut o = self.checkpoint.write();
-                let n = Checkpoint::new(block, self.mode.clone());
+                let n = Checkpoint::new_empty(block, self.mode.clone());
                 std::mem::replace(&mut *o, n)
             };
 
             if self.mode.is_archive() {
-                let established = original.into_established();
+                let blocks = original.into_blocks();
                 let mut history = self.history.write();
-                history.push(established);
+                history.push(blocks);
             }
         }
 
@@ -330,31 +339,21 @@ impl<H: Hasher> Tree<H> {
         proposals
     }
 
-    pub fn generate_sync_state<I>(&self, keys: I) -> Option<SyncState>
-    where
-        I: IntoIterator<Item = Vec<u8>>,
-    {
+    pub fn generate_sync_state<I>(&self, mode: Arc<Mode>) -> Option<SyncState> {
         if self.mode.is_normal() {
             return None;
         }
 
-        let (tip_trie, tip_block, tip_cumulative_weight, checkpoint_block) = {
-            let checkpoint = self.checkpoint.read();
-            let tip_trie = checkpoint.tip_trie();
-            let tip_block = checkpoint.tip_block().clone();
-            let tip_cum_weight = checkpoint.tip_cumulative_weight();
-            let checkpoint_block = checkpoint.root_block().clone();
-            (tip_trie, tip_block, tip_cum_weight, checkpoint_block)
-        };
+        let checkpoint = self.checkpoint.read();
 
-        let tip_guide = tip_trie.generate_guide(keys)?;
-
-        Some(SyncState {
-            tip_block,
-            tip_cumulative_weight,
-            checkpoint_block,
-            tip_guide,
-        })
+        match &*mode {
+            Mode::Archive => {
+                let mut history = self.history.read().clone();
+                history.push(checkpoint.to_blocks());
+                Some(SyncState::Archive(history.into()))
+            }
+            Mode::Normal(keys) => Some(SyncState::Normal(checkpoint.summary(keys).into())),
+        }
     }
 }
 

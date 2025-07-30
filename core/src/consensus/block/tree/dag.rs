@@ -407,6 +407,17 @@ impl<N: Node> Dag<N> {
             .collect();
         Some(children_ids)
     }
+
+    pub fn soft_remove(&mut self, id: &N::Id) -> Option<N> {
+        let &idx = self.index.get(id)?;
+        let entry = &mut self.entries[idx];
+
+        let node = entry.node.take();
+
+        entry.state = State::Invalid;
+
+        node
+    }
 }
 
 #[cfg(test)]

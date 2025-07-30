@@ -1,5 +1,9 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::{
+    collections::HashMap,
+    sync::{atomic::Ordering, Arc},
+};
 
+use civita_serialize_derive::Serialize;
 use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
@@ -13,8 +17,18 @@ use crate::{
         Block,
     },
     crypto::{Hasher, Multihash},
-    utils::trie::Trie,
+    utils::trie::{Trie, Weight},
 };
+
+#[derive(Serialize)]
+pub struct SerializedBlockNode {
+    pub block: Block,
+    pub witness: block::Witness,
+    pub trie_root: Multihash,
+    pub trie_guide: HashMap<Multihash, Vec<u8>>,
+    pub weight: Weight,
+    pub cumulative_weight: Weight,
+}
 
 pub struct BlockNode<H> {
     pub block: Block,
@@ -39,6 +53,30 @@ impl<H: Hasher> BlockNode<H> {
             cumulative_weight,
             mode,
         }
+    }
+
+    pub fn from_serialized(serialized: SerializedBlockNode, mode: Arc<Mode>) -> Option<Self> {
+        let keys = match mode.as_ref() {
+            Mode::Normal(keys) => keys,
+            _ => panic!("Cannot create BlockNode from serialized data in non-normal mode"),
+        };
+
+        let mut trie = Trie::empty();
+        if !trie.expand(keys, &serialized.trie_guide) {
+            return None;
+        }
+
+        let weight = AtomicWeight::new(serialized.weight);
+        let cumulative_weight = AtomicWeight::new(serialized.cumulative_weight);
+
+        Some(Self {
+            block: serialized.block,
+            witness: serialized.witness,
+            trie: ParkingRwLock::new(trie),
+            weight,
+            cumulative_weight,
+            mode,
+        })
     }
 
     pub fn id(&self) -> Multihash {
@@ -89,6 +127,27 @@ impl<H: Hasher> BlockNode<H> {
 
     pub fn trie_root_hash(&self) -> Multihash {
         self.trie.read().root_hash()
+    }
+
+    pub fn to_serialized<'a, I, T>(&self, keys: I) -> Option<SerializedBlockNode>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<[u8]> + 'a,
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let trie = self.trie.read();
+        let trie_root = trie.root_hash();
+        let trie_guide = trie.generate_guide(keys)?;
+
+        Some(SerializedBlockNode {
+            block: self.block.clone(),
+            witness: self.witness.clone(),
+            trie_root,
+            trie_guide,
+            weight: self.weight.load(Relaxed),
+            cumulative_weight: self.cumulative_weight.load(Relaxed),
+        })
     }
 }
 

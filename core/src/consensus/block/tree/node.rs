@@ -18,6 +18,7 @@ mod block_node;
 mod proposal_node;
 
 pub use block_node::BlockNode;
+pub use block_node::SerializedBlockNode;
 pub use proposal_node::ProposalNode;
 
 type AtomicWeight = AtomicU64;
@@ -40,6 +41,14 @@ impl<H: Hasher> UnifiedNode<H> {
 
     pub fn as_block(&self) -> Option<&BlockNode<H>> {
         if let UnifiedNode::Block(node) = self {
+            Some(node)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_proposal(&self) -> Option<&ProposalNode> {
+        if let UnifiedNode::Proposal(node) = self {
             Some(node)
         } else {
             None
