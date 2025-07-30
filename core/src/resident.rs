@@ -43,13 +43,16 @@ pub enum Error {
 
     #[error("Failed to create tree")]
     FailedToCreateTree,
+
+    #[error("No bootstrap peers configured")]
+    NoBootstrapPeers,
 }
 
 pub struct Config {
     vdf_param: u16,
     vdf_difficulty: u64,
     mode: Mode,
-    bootstrap_peer: PeerId,
+    bootstrap_peers: Vec<PeerId>,
     bootstrap_timeout: tokio::time::Duration,
 }
 
@@ -89,18 +92,25 @@ impl<H: Hasher, V: Validator> Resident<H, V> {
     }
 
     async fn bootstrap(transport: Arc<Transport>, config: &mut Config) -> Result<block::Tree<H>> {
+        if config.bootstrap_peers.is_empty() {
+            return Err(Error::NoBootstrapPeers);
+        }
+
         let req_resp = transport.request_response();
         let msg = config.mode.to_vec();
 
-        req_resp
-            .send_request(config.bootstrap_peer, msg, BOOTSTRAP_TOPIC)
-            .await;
+        for &peer in &config.bootstrap_peers {
+            req_resp
+                .send_request(peer, msg.clone(), BOOTSTRAP_TOPIC)
+                .await;
+        }
 
         let mut rx = req_resp.subscribe(BOOTSTRAP_TOPIC);
+
         let response = tokio::time::timeout(config.bootstrap_timeout, async {
             while let Some(msg) = rx.recv().await {
                 if let request_response::Message::Response { peer, response } = msg {
-                    if peer == config.bootstrap_peer {
+                    if config.bootstrap_peers.contains(&peer) {
                         return response;
                     }
                 }
@@ -109,7 +119,8 @@ impl<H: Hasher, V: Validator> Resident<H, V> {
         })
         .await
         .map_err(|_| Error::BootstrapTimeout)?;
-        req_resp.unsubscribe(REQUEST_RESPONSE_TOPIC);
+
+        req_resp.unsubscribe(BOOTSTRAP_TOPIC);
 
         let state = SyncState::from_slice(&response).map_err(|_| Error::InvalidMessage)?;
 
