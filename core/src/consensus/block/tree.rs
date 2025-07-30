@@ -41,6 +41,7 @@ pub enum SyncState {
     Normal(Box<checkpoint::Summary>),
 }
 
+#[derive(Serialize)]
 pub enum Mode {
     Archive,
     Normal(Vec<Vec<u8>>),

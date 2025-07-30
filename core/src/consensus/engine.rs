@@ -31,7 +31,7 @@ pub enum Error {
     Proposal(#[from] proposal::Error),
 }
 
-pub trait Validator {
+pub trait Validator: Sync + Send + 'static {
     fn validate_proposal<'a, I>(
         &self,
         opt_iter: I,
