@@ -62,7 +62,13 @@ pub struct Resident<H: Hasher, V> {
 }
 
 impl<H: Hasher, V: Validator> Resident<H, V> {
-    pub async fn new(transport: Arc<Transport>, validator: V, mut config: Config) -> Result<Self> {
+    pub async fn new(
+        transport: Arc<Transport>,
+        validator: V,
+        mut config: Config,
+    ) -> Result<Arc<Self>> {
+        let is_archive = config.mode.is_archive();
+
         let tree = Self::bootstrap(transport.clone(), &mut config).await?;
 
         let engine_config = consensus::engine::Config {
@@ -85,10 +91,19 @@ impl<H: Hasher, V: Validator> Resident<H, V> {
             engine.run().await.expect("Failed to run consensus engine");
         });
 
-        Ok(Self {
+        let resident = Self {
             transport,
             engine: consensus_engine,
-        })
+        };
+
+        let resident = Arc::new(resident);
+
+        if is_archive {
+            let resident_clone = Arc::clone(&resident);
+            resident_clone.start_recving();
+        }
+
+        Ok(resident)
     }
 
     async fn bootstrap(transport: Arc<Transport>, config: &mut Config) -> Result<block::Tree<H>> {
@@ -127,5 +142,40 @@ impl<H: Hasher, V: Validator> Resident<H, V> {
         let mode = std::mem::replace(&mut config.mode, Mode::Archive);
         block::Tree::<H>::from_sync_state(transport.secret_key().clone(), state, mode)
             .ok_or(Error::FailedToCreateTree)
+    }
+
+    fn start_recving(self: Arc<Self>) {
+        let req_resp = self.transport.request_response();
+        let mut rx = req_resp.subscribe(BOOTSTRAP_TOPIC);
+
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if let request_response::Message::Request {
+                    peer,
+                    request,
+                    channel,
+                } = msg
+                {
+                    if request.is_empty() {
+                        continue;
+                    }
+
+                    let Ok(mode) = Mode::from_slice(&request) else {
+                        continue; // Invalid message, skip
+                    };
+
+                    let state = self.engine.generate_sync_state(mode);
+                    let response = state.to_vec();
+
+                    if let Err(e) = req_resp
+                        .send_response(channel, response, BOOTSTRAP_TOPIC)
+                        .await
+                    {
+                        log::error!("Failed to send response to {peer}: {e}");
+                        continue; // Log error and continue
+                    }
+                }
+            }
+        });
     }
 }
