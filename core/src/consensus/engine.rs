@@ -307,4 +307,8 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
     pub fn tip_trie(&self) -> Trie<H> {
         self.block_tree.tip_trie()
     }
+
+    pub fn checkpoint_hash(&self) -> Multihash {
+        self.block_tree.checkpoint_hash()
+    }
 }

@@ -40,6 +40,7 @@ pub struct EstablishedBlock {
     pub proposals: Vec<(Proposal, proposal::Witness)>,
 }
 
+#[derive(Clone)]
 #[derive(Serialize)]
 pub struct Summary {
     pub block_node: SerializedBlockNode,
@@ -215,41 +216,50 @@ impl<H: Hasher> Checkpoint<H> {
 
         result.validated.into_iter().for_each(|hash| {
             if let Some(parent) = self.pending_blocks.remove(&hash) {
-                let n = self
+                let node = self
                     .proposal_dags
                     .get_mut(&parent)
                     .expect("Parent should exist")
                     .remove(&hash)
-                    .expect("Node should exist");
+                    .expect("Node should exist")
+                    .into_block();
 
-                let block_node = n.as_block().expect("Node should be a block").clone();
-                let block_weight = block_node.weight.load(Relaxed);
-                let block_cumulative_weight = block_node.cumulative_weight.load(Relaxed);
-                let tip_cumulative_weight = self
-                    .block_dag
-                    .get(&self.tip_hash)
-                    .expect("Tip should exist")
-                    .cumulative_weight
-                    .load(Relaxed);
+                self.block_dag.upsert(node, std::iter::once(parent));
+
+                let (block_weight, block_cumulative_weight, block_height) = {
+                    let node = self.block_dag.get(&hash).expect("Node should exist");
+                    (
+                        node.weight.load(Relaxed),
+                        node.cumulative_weight.load(Relaxed),
+                        node.height.load(Relaxed),
+                    )
+                };
+
+                let (tip_cumulative_weight, tip_height) = {
+                    let node = self
+                        .block_dag
+                        .get(&self.tip_hash)
+                        .expect("Tip node should exist");
+                    (
+                        node.cumulative_weight.load(Relaxed),
+                        node.height.load(Relaxed),
+                    )
+                };
 
                 let threshold = (self.total_weight() as f64) * 0.67;
-
                 if block_weight as f64 > threshold {
                     let removed = self.block_dag.retain(&parent);
                     removed.iter().for_each(|n| {
                         self.proposal_dags.remove(&n.id());
                     });
+                    let block_node = self.block_dag.get(&hash).unwrap().clone();
                     update_result.new_checkpoint = Some(block_node);
                 } else {
-                    if block_cumulative_weight > tip_cumulative_weight {
-                        self.tip_hash = block_node.id();
+                    let b = (block_cumulative_weight, block_height);
+                    let t = (tip_cumulative_weight, tip_height);
+                    if b > t {
+                        self.tip_hash = hash;
                     }
-
-                    self.block_dag.upsert(block_node, std::iter::once(parent));
-                    self.proposal_dags
-                        .entry(hash)
-                        .or_default()
-                        .upsert(n, std::iter::empty());
                 }
             }
 
@@ -341,7 +351,6 @@ impl<H: Hasher> Checkpoint<H> {
 
         let mut queue = VecDeque::new();
         queue.push_back(self.root_hash);
-        visited.insert(self.root_hash);
 
         while let Some(hash) = queue.pop_front() {
             if visited.contains(&hash) {
@@ -357,18 +366,20 @@ impl<H: Hasher> Checkpoint<H> {
 
             let mut proposals = Vec::with_capacity(cur_node.block.proposals.len());
 
-            let mut dag = self
-                .proposal_dags
-                .remove(&hash)
-                .expect("Proposal DAG should exist");
+            if !cur_node.block.proposals.is_empty() {
+                let mut dag = self
+                    .proposal_dags
+                    .remove(&cur_node.block.parent)
+                    .expect("Proposal DAG should exist");
 
-            cur_node.block.proposals.iter().for_each(|p| {
-                let pn = dag
-                    .soft_remove(p)
-                    .expect("Proposal node should exist")
-                    .into_proposal();
-                proposals.push((pn.proposal, pn.witness));
-            });
+                cur_node.block.proposals.iter().for_each(|p| {
+                    let pn = dag
+                        .soft_remove(p)
+                        .expect("Proposal node should exist")
+                        .into_proposal();
+                    proposals.push((pn.proposal, pn.witness));
+                });
+            }
 
             let block = EstablishedBlock {
                 block: cur_node.block,
@@ -398,29 +409,35 @@ impl<H: Hasher> Checkpoint<H> {
 
         let mut queue = VecDeque::new();
         queue.push_back(self.root_hash);
-        visited.insert(self.root_hash);
 
         while let Some(hash) = queue.pop_front() {
+            if visited.contains(&hash) {
+                continue;
+            }
+
             let cur_node = self
                 .block_dag
                 .get(&hash)
                 .expect("Node should exist in the DAG");
 
             let mut proposals = Vec::with_capacity(cur_node.block.proposals.len());
-            let dag = self
-                .proposal_dags
-                .get(&hash)
-                .expect("Proposal DAG should exist");
 
-            cur_node.block.proposals.iter().for_each(|p| {
-                let pn = dag
-                    .get(p)
-                    .expect("Proposal node should exist")
-                    .as_proposal()
-                    .expect("Node should be a proposal")
-                    .clone();
-                proposals.push((pn.proposal, pn.witness));
-            });
+            if !cur_node.block.proposals.is_empty() {
+                let dag = self
+                    .proposal_dags
+                    .get(&cur_node.block.parent)
+                    .expect("Proposal DAG should exist");
+
+                cur_node.block.proposals.iter().for_each(|p| {
+                    let pn = dag
+                        .get(p)
+                        .expect("Proposal node should exist")
+                        .as_proposal()
+                        .expect("Node should be a proposal")
+                        .clone();
+                    proposals.push((pn.proposal, pn.witness));
+                });
+            }
 
             let block = EstablishedBlock {
                 block: cur_node.block.clone(),

@@ -34,6 +34,7 @@ pub struct ProcessResult {
     pub phantoms: Vec<Multihash>,
 }
 
+#[derive(Clone)]
 #[derive(Serialize)]
 pub enum SyncState {
     Archive(Box<Vec<Vec<EstablishedBlock>>>),
@@ -116,6 +117,7 @@ impl<H: Hasher> Tree<H> {
     pub fn empty(sk: SecretKey, mode: Mode) -> Self {
         let root_block = block::Builder::new()
             .with_parent_hash(Multihash::default())
+            .with_checkpoint(Multihash::default())
             .with_proposer_pk(sk.public_key())
             .with_proposer_weight(0)
             .build();
@@ -179,10 +181,6 @@ impl<H: Hasher> Tree<H> {
         }
     }
 
-    pub fn from_other(_: SecretKey, _: &Self) -> Self {
-        unimplemented!("Tree::from_other is not implemented yet");
-    }
-
     pub fn update_block(
         &self,
         block: Block,
@@ -202,7 +200,7 @@ impl<H: Hasher> Tree<H> {
         self.process_result(result)
     }
 
-    fn checkpoint_hash(&self) -> Multihash {
+    pub fn checkpoint_hash(&self) -> Multihash {
         self.checkpoint.read().root_hash()
     }
 
@@ -276,7 +274,7 @@ impl<H: Hasher> Tree<H> {
         let (ids, trie) = {
             let checkpoint = self.checkpoint.read();
             let dag = checkpoint.get_proposal_dag(parent)?;
-            let ids = dag.get_leaf_nodes(&parent)?;
+            let ids = dag.get_leaf_nodes();
             let trie = checkpoint.parent_trie(&parent)?;
             (ids, trie)
         };
@@ -294,6 +292,7 @@ impl<H: Hasher> Tree<H> {
 
         let block = block::Builder::new()
             .with_parent_hash(parent)
+            .with_checkpoint(self.checkpoint_hash())
             .with_proposer_pk(self.sk.public_key())
             .with_proposer_weight(weight)
             .with_proposals(ids)
@@ -322,9 +321,9 @@ impl<H: Hasher> Tree<H> {
         };
 
         let checkpoint = self.checkpoint.read();
-        let dag = checkpoint
-            .get_proposal_dag(*first)
-            .expect("Proposal DAG should exist");
+        let Some(dag) = checkpoint.get_proposal_dag(*first) else {
+            return Vec::new();
+        };
 
         let mut proposals = Vec::new();
 
@@ -339,14 +338,14 @@ impl<H: Hasher> Tree<H> {
         proposals
     }
 
-    pub fn generate_sync_state<I>(&self, mode: Arc<Mode>) -> Option<SyncState> {
+    pub fn generate_sync_state(&self, mode: Mode) -> Option<SyncState> {
         if self.mode.is_normal() {
             return None;
         }
 
         let checkpoint = self.checkpoint.read();
 
-        match &*mode {
+        match &mode {
             Mode::Archive => {
                 let mut history = self.history.read().clone();
                 history.push(checkpoint.to_blocks());
@@ -380,6 +379,7 @@ mod tests {
 
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())
+            .with_checkpoint(tree.checkpoint_hash())
             .with_proposer_pk(pk)
             .build()
             .expect("Failed to build proposal");
@@ -409,6 +409,7 @@ mod tests {
 
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())
+            .with_checkpoint(tree.checkpoint_hash())
             .with_proposer_pk(pk.clone())
             .build()
             .expect("Failed to build proposal");
@@ -424,6 +425,7 @@ mod tests {
 
         let block = block::Builder::new()
             .with_parent_hash(tree.tip_hash())
+            .with_checkpoint(tree.checkpoint_hash())
             .with_proposals([hash])
             .with_proposer_pk(pk)
             .with_proposer_weight(0)

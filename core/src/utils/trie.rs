@@ -32,7 +32,7 @@ pub enum ProofResult {
 #[derivative(Clone(bound = ""))]
 #[derivative(Default(bound = ""))]
 pub struct Trie<H> {
-    root: Node,
+    pub root: Node,
     _marker: PhantomData<H>,
 }
 

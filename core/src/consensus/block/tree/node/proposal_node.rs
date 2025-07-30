@@ -8,6 +8,7 @@ use crate::{
     crypto::{Hasher, Multihash},
 };
 
+#[derive(Debug)]
 pub struct ProposalNode {
     pub proposal: Proposal,
     pub witness: proposal::Witness,

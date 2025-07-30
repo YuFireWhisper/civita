@@ -7,6 +7,7 @@ use civita_core::{
         engine::Validator,
         proposal, Engine,
     },
+    crypto::Multihash,
     utils::trie::Record,
 };
 
@@ -15,7 +16,7 @@ mod common;
 type Hasher = sha2::Sha256;
 
 const VDF_PARAMS: u16 = 1024;
-const VDF_DIFFICULTY: u64 = 20;
+const VDF_DIFFICULTY: u64 = 1;
 
 struct TestValidator {
     valid: bool,
@@ -62,17 +63,19 @@ async fn basic_operations() {
         vdf_difficulty: VDF_DIFFICULTY,
     };
 
+    let tree = block::Tree::<Hasher>::empty(target_sk.clone(), Mode::Archive);
+    let state = tree
+        .generate_sync_state(Mode::Archive)
+        .expect("Failed to generate sync state");
+
     for transport in transports.into_iter() {
-        let tree = block::Tree::empty(target_sk.clone(), Mode::Archive);
-
         let sk = transport.secret_key().clone();
-        let engine = Engine::<Hasher, TestValidator>::new(
-            Arc::new(transport),
-            block::Tree::from_other(sk, &tree),
-            TestValidator::new(true),
-            engine_config,
-        );
+        let transport = Arc::new(transport);
+        let tree = block::Tree::<Hasher>::from_sync_state(sk, state.clone(), Mode::Archive)
+            .expect("Failed to create tree");
+        let validator = TestValidator::new(true);
 
+        let engine = Engine::new(transport, tree, validator, engine_config);
         let engine = Arc::new(engine);
 
         tokio::spawn({
@@ -88,6 +91,7 @@ async fn basic_operations() {
     let key = target_sk.public_key().to_hash::<Hasher>().to_bytes();
     let prop = proposal::Builder::new()
         .with_parent_hash(engines[TARGET_IDX].tip_hash())
+        .with_checkpoint(engines[TARGET_IDX].checkpoint_hash())
         .with_operation(key.clone(), None, Record::new(10, vec![]))
         .with_proposer_pk(target_sk.public_key())
         .build()

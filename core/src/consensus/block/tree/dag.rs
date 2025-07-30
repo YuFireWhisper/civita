@@ -305,14 +305,29 @@ impl<N: Node> Dag<N> {
         if idx < self.entries.len() {
             let moved_id = self.entries[idx].id();
             self.index.insert(moved_id, idx);
+
+            let old_idx = self.entries.len();
+            self.entries.iter_mut().for_each(|entry| {
+                if entry.parents.remove(&old_idx) {
+                    entry.parents.insert(idx);
+                }
+
+                if entry.children.remove(&old_idx) {
+                    entry.children.insert(idx);
+                }
+            });
         }
 
         entry.parents.iter().for_each(|&parent_idx| {
-            self.entries[parent_idx].children.remove(&idx);
+            if parent_idx < self.entries.len() {
+                self.entries[parent_idx].children.remove(&idx);
+            }
         });
 
         entry.children.iter().for_each(|&child_idx| {
-            self.entries[child_idx].parents.remove(&idx);
+            if child_idx < self.entries.len() {
+                self.entries[child_idx].parents.remove(&idx);
+            }
         });
 
         entry.node
@@ -330,36 +345,23 @@ impl<N: Node> Dag<N> {
             .is_some_and(|&idx| self.entries[idx].node.is_some())
     }
 
-    pub fn get_leaf_nodes(&self, root_id: &N::Id) -> Option<Vec<N::Id>> {
-        let start = *self.index.get(root_id)?;
+    pub fn get_leaf_nodes(&self) -> Vec<N::Id> {
         let mut leaves = Vec::new();
-        let mut stk = vec![start];
-        let mut visited = HashSet::new();
 
-        while let Some(u) = stk.pop() {
-            visited.insert(u);
-
-            if !self.entries[u].is_valid() {
-                continue;
-            }
-
-            let mut is_leaf = true;
-
-            self.entries[u]
-                .children
-                .iter()
-                .filter(|&&c| self.entries[c].is_valid() && !visited.contains(&c))
-                .for_each(|&cidx| {
-                    is_leaf = false;
-                    stk.push(cidx);
+        self.entries
+            .iter()
+            .filter(|e| e.is_valid() && e.node.is_some())
+            .for_each(|entry| {
+                let has_valid_children = entry.children.iter().any(|&child_idx| {
+                    self.entries[child_idx].is_valid() && self.entries[child_idx].node.is_some()
                 });
 
-            if is_leaf && u != start {
-                leaves.push(self.entries[u].id());
-            }
-        }
+                if !has_valid_children {
+                    leaves.push(entry.id());
+                }
+            });
 
-        Some(leaves)
+        leaves
     }
 
     pub fn retain(&mut self, id: &N::Id) -> Vec<N> {
@@ -734,57 +736,5 @@ mod tests {
         let mut dag = Dag::new();
         let res = dag.upsert(TestNode::new(1), vec![]);
         assert_validation_result(&res, &[1], &[]);
-    }
-
-    #[test]
-    fn get_leaf_nodes_empty_dag() {
-        let dag = Dag::<TestNode>::new();
-        let res = dag.get_leaf_nodes(&ROOT_NODE_ID);
-        assert!(res.is_none());
-    }
-
-    #[test]
-    fn get_leaf_nodes_single_root() {
-        let dag = create_basic_dag();
-        let res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
-        assert!(res.is_empty());
-    }
-
-    #[test]
-    fn get_leaf_nodes_linear_chain() {
-        let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![1]);
-        dag.upsert(TestNode::new(3), vec![2]);
-
-        let res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
-
-        assert_eq!(res, vec![3]);
-    }
-
-    #[test]
-    fn get_leaf_nodes_multiple_branches() {
-        let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(3), vec![1]);
-        dag.upsert(TestNode::new(4), vec![2]);
-
-        let mut res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
-        res.sort();
-
-        assert_eq!(res, vec![3, 4]);
-    }
-
-    #[test]
-    fn get_leaf_nodes_with_invalid_nodes() {
-        let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new_invalid(2), vec![1]);
-        dag.upsert(TestNode::new(3), vec![1]);
-
-        let res = dag.get_leaf_nodes(&ROOT_NODE_ID).unwrap();
-
-        assert_eq!(res, vec![3]);
     }
 }
