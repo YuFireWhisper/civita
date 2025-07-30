@@ -339,10 +339,8 @@ impl<H: Hasher> Tree<H> {
         proposals
     }
 
-    pub fn generate_sync_state(&self, mode: Mode) -> Option<SyncState> {
-        if self.mode.is_normal() {
-            return None;
-        }
+    pub fn generate_sync_state(&self, mode: Mode) -> SyncState {
+        assert!(self.mode.is_archive());
 
         let checkpoint = self.checkpoint.read();
 
@@ -350,9 +348,9 @@ impl<H: Hasher> Tree<H> {
             Mode::Archive => {
                 let mut history = self.history.read().clone();
                 history.push(checkpoint.to_blocks());
-                Some(SyncState::Archive(history.into()))
+                SyncState::Archive(history.into())
             }
-            Mode::Normal(keys) => Some(SyncState::Normal(checkpoint.summary(keys).into())),
+            Mode::Normal(keys) => SyncState::Normal(checkpoint.summary(keys).into()),
         }
     }
 }

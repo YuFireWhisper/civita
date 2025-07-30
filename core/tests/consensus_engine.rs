@@ -65,9 +65,7 @@ async fn basic_operations() {
     };
 
     let tree = block::Tree::<Hasher>::empty(target_sk.clone(), Mode::Archive);
-    let state = tree
-        .generate_sync_state(Mode::Archive)
-        .expect("Failed to generate sync state");
+    let state = tree.generate_sync_state(Mode::Archive);
 
     for transport in transports.into_iter() {
         let sk = transport.secret_key().clone();
