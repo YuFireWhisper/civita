@@ -10,7 +10,7 @@ use crate::{
         block::{
             self,
             tree::{
-                checkpoint::{Checkpoint, UpdateResult},
+                checkpoint::{Checkpoint, EstablishedCheckpoint, UpdateResult},
                 dag::{Node, ValidationResult},
                 node::{BlockNode, UnifiedNode},
             },
@@ -49,7 +49,8 @@ pub enum Mode {
 
 pub struct Tree<H: Hasher> {
     sk: SecretKey,
-    checkpoints: ParkingRwLock<Vec<Checkpoint<H>>>,
+    checkpoint: ParkingRwLock<Checkpoint<H>>,
+    history: ParkingRwLock<Vec<EstablishedCheckpoint>>,
     sources: DashMap<Multihash, PeerId>,
     mode: Arc<Mode>,
 }
@@ -130,11 +131,13 @@ impl<H: Hasher> Tree<H> {
         let block_node = BlockNode::new(root_block, witness, mode.clone());
 
         let checkpoint = Checkpoint::new(block_node, mode.clone());
-        let checkpoints = ParkingRwLock::new(vec![checkpoint]);
+        let checkpoint = ParkingRwLock::new(checkpoint);
+        let history = ParkingRwLock::new(Vec::new());
 
         Self {
             sk,
-            checkpoints,
+            checkpoint,
+            history,
             sources: DashMap::new(),
             mode,
         }
@@ -183,24 +186,30 @@ impl<H: Hasher> Tree<H> {
 
         let hash = block.hash::<H>();
         self.sources.insert(hash, source);
-        let mut checkpoints = self.checkpoints.write();
-        let checkpoint = checkpoints.last_mut().expect("Checkpoint should exist");
-        let result = checkpoint.update_block(block, witness);
+        let result = {
+            let mut checkpoint = self.checkpoint.write();
+            checkpoint.update_block(block, witness)
+        };
         self.process_result(result)
     }
 
     fn checkpoint_hash(&self) -> Multihash {
-        self.checkpoints
-            .read()
-            .last()
-            .expect("Checkpoint should exist")
-            .root_hash()
+        self.checkpoint.read().root_hash()
     }
 
     fn process_result(&self, mut result: UpdateResult<H>) -> ProcessResult {
         if let Some(block) = result.new_checkpoint {
-            let checkpoint = Checkpoint::new(block, self.mode.clone());
-            self.checkpoints.write().push(checkpoint);
+            let original = {
+                let mut o = self.checkpoint.write();
+                let n = Checkpoint::new(block, self.mode.clone());
+                std::mem::replace(&mut *o, n)
+            };
+
+            if self.mode.is_archive() {
+                let established = original.into_established();
+                let mut history = self.history.write();
+                history.push(established);
+            }
         }
 
         let mut process_result = ProcessResult::new();
@@ -233,26 +242,21 @@ impl<H: Hasher> Tree<H> {
 
         let hash = proposal.hash::<H>();
         self.sources.insert(hash, source);
-        let mut checkpoints = self.checkpoints.write();
-        let checkpoint = checkpoints.last_mut().expect("Checkpoint should exist");
-        let result = checkpoint.update_proposal(proposal, witness);
+
+        let result = {
+            let mut checkpoint = self.checkpoint.write();
+            checkpoint.update_proposal(proposal, witness)
+        };
+
         self.process_result(result)
     }
 
     pub fn tip_trie(&self) -> Trie<H> {
-        let checkpoints = self.checkpoints.read();
-        checkpoints
-            .last()
-            .expect("Checkpoint should exist")
-            .tip_trie()
+        self.checkpoint.read().tip_trie()
     }
 
     pub fn tip_hash(&self) -> Multihash {
-        let checkpoints = self.checkpoints.read();
-        checkpoints
-            .last()
-            .expect("Checkpoint should exist")
-            .tip_hash()
+        self.checkpoint.read().tip_hash()
     }
 
     pub fn create_and_update_block(
@@ -261,8 +265,7 @@ impl<H: Hasher> Tree<H> {
         vdf_proof: Vec<u8>,
     ) -> Option<(Block, block::Witness)> {
         let (ids, trie) = {
-            let checkpoints = self.checkpoints.read();
-            let checkpoint = checkpoints.last().expect("Checkpoint should exist");
+            let checkpoint = self.checkpoint.read();
             let dag = checkpoint.get_proposal_dag(parent)?;
             let ids = dag.get_leaf_nodes(&parent)?;
             let trie = checkpoint.parent_trie(&parent)?;
@@ -309,10 +312,8 @@ impl<H: Hasher> Tree<H> {
             return Vec::new();
         };
 
-        let checkpoints = self.checkpoints.read();
-        let dag = checkpoints
-            .last()
-            .expect("Checkpoint should exist")
+        let checkpoint = self.checkpoint.read();
+        let dag = checkpoint
             .get_proposal_dag(*first)
             .expect("Proposal DAG should exist");
 
@@ -338,8 +339,7 @@ impl<H: Hasher> Tree<H> {
         }
 
         let (tip_trie, tip_block, tip_cumulative_weight, checkpoint_block) = {
-            let checkpoints = self.checkpoints.read();
-            let checkpoint = checkpoints.last().expect("Checkpoint should exist");
+            let checkpoint = self.checkpoint.read();
             let tip_trie = checkpoint.tip_trie();
             let tip_block = checkpoint.tip_block().clone();
             let tip_cum_weight = checkpoint.tip_cumulative_weight();

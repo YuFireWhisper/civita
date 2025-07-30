@@ -288,7 +288,7 @@ impl<H: Hasher> Checkpoint<H> {
             .block
     }
 
-    pub fn into_established_checkpoint(mut self) -> EstablishedCheckpoint {
+    pub fn into_established(mut self) -> EstablishedCheckpoint {
         let mut blocks = HashMap::new();
 
         let mut cur = self.root_hash;
