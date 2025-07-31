@@ -420,6 +420,10 @@ impl<N: Node> Dag<N> {
 
         node
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
 }
 
 #[cfg(test)]

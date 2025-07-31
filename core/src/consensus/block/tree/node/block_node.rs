@@ -7,6 +7,7 @@ use std::{
 };
 
 use civita_serialize_derive::Serialize;
+use dashmap::{DashMap, DashSet};
 use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
@@ -16,7 +17,7 @@ use crate::{
         Block,
     },
     crypto::{Hasher, Multihash},
-    utils::{trie::Trie, Record},
+    utils::{trie::Trie, Operation, Record},
 };
 
 #[derive(Clone)]
@@ -39,7 +40,11 @@ pub struct BlockNode<H, T: Record> {
     pub weight: ParkingRwLock<T::Weight>,
     pub cumulative_weight: ParkingRwLock<T::Weight>,
     pub mode: Arc<Mode>,
-    pub finalized: AtomicBool,
+    pub existing_keys: DashMap<Vec<u8>, bool>,
+    pub proposal_dependencies: DashSet<Multihash>,
+    pub operations: DashMap<Vec<u8>, T::Operation>,
+    pub proofs: DashMap<Multihash, Vec<u8>>,
+    pub validated: AtomicBool,
 }
 
 impl<H: Hasher, T: Record> BlockNode<H, T> {
@@ -54,7 +59,11 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
             height: Default::default(),
             weight: Default::default(),
             cumulative_weight: Default::default(),
-            finalized: Default::default(),
+            operations: DashMap::new(),
+            existing_keys: DashMap::new(),
+            proposal_dependencies: DashSet::new(),
+            proofs: DashMap::new(),
+            validated: AtomicBool::new(false),
         }
     }
 
@@ -80,7 +89,11 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
             weight,
             cumulative_weight,
             mode,
-            finalized: AtomicBool::new(true),
+            operations: DashMap::new(),
+            existing_keys: DashMap::new(),
+            proposal_dependencies: DashSet::new(),
+            proofs: DashMap::new(),
+            validated: AtomicBool::new(false),
         })
     }
 
@@ -91,61 +104,108 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
     pub fn on_block_parent_valid(&self, parent: &Self) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
 
-        if self.finalized.load(Relaxed) {
-            let height = parent.height.load(Relaxed).wrapping_add(1);
-            self.height.store(height, Relaxed);
-            return true;
+        let witness = &self.witness;
+
+        let mut trie = parent.trie.read().clone();
+        let pk_hash = self.block.proposer_pk.to_hash::<H>().to_bytes();
+
+        if !trie.expand(std::iter::once(pk_hash.as_slice()), &witness.proofs) {
+            return false;
         }
 
-        let witness = &self.witness;
-        let parent_trie = parent.trie.read();
-        let root_hash = parent_trie.root_hash();
-        if !self.block.verify_proposer_weight::<H>(witness, root_hash) {
+        if self.block.proposer_weight
+            != trie
+                .get(&pk_hash)
+                .map(|record| record.weight())
+                .unwrap_or_default()
+        {
             return false;
         }
 
         let height = parent.height.load(Relaxed).wrapping_add(1);
-
         let cumulative_weight = *parent.cumulative_weight.read() + self.block.proposer_weight;
 
-        *self.trie.write() = parent_trie.clone();
-        *self.weight.write() = self.block.proposer_weight;
-        *self.cumulative_weight.write() = cumulative_weight;
+        *self.trie.write() = trie;
+        *self.weight.write() += self.block.proposer_weight;
+        *self.cumulative_weight.write() += cumulative_weight;
         self.height.store(height, Relaxed);
 
         true
     }
 
     pub fn on_proposal_parent_valid(&self, parent: &ProposalNode<T>) -> bool {
-        let prop = &parent.proposal;
-        let witness = &parent.witness;
-        let weight = *parent.proposer_weight.read();
+        if parent.proposal.dependencies.is_empty() {
+            if parent
+                .proposal
+                .operations
+                .keys()
+                .any(|k| self.existing_keys.get(k).is_some_and(|dep| *dep.value()))
+            {
+                return false;
+            }
 
-        {
-            let mut trie = self.trie.write();
-            prop.apply_operations(&mut trie, witness);
+            parent.proposal.operations.iter().for_each(|(k, o)| {
+                self.existing_keys
+                    .insert(k.clone(), o.is_order_dependent(k));
+            });
+        } else {
+            if parent
+                .proposal
+                .dependencies
+                .iter()
+                .any(|key| self.proposal_dependencies.contains(key))
+            {
+                return false;
+            }
+
+            parent.proposal.dependencies.iter().for_each(|key| {
+                self.proposal_dependencies.insert(*key);
+            });
         }
+
+        if self.trie.read().root.is_empty() {
+            parent.witness.proofs.iter().for_each(|(k, v)| {
+                self.proofs.insert(*k, v.clone());
+            });
+        } else {
+            self.trie.write().expand(
+                parent.proposal.operations.keys().map(|k| k.as_slice()),
+                &parent.witness.proofs,
+            );
+        }
+
+        let weight = *parent.proposer_weight.read();
 
         *self.weight.write() += weight;
         *self.cumulative_weight.write() += weight;
+        parent.proposal.operations.iter().for_each(|(k, o)| {
+            self.operations.insert(k.clone(), o.clone());
+        });
 
         true
     }
 
     pub fn validate(&self) -> bool {
-        self.trie.write().commit();
-
-        if let Mode::Normal(keys) = self.mode.as_ref() {
-            self.trie.write().retain(keys.iter().map(|k| k.as_slice()));
+        if !self.validated.fetch_or(true, Ordering::Relaxed) {
+            return true;
         }
 
-        self.finalized.store(true, Ordering::Relaxed);
+        let mut trie = self.trie.write();
+
+        if !trie.apply_operations(
+            self.operations
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone())),
+            Some(&self.witness.proofs),
+        ) {
+            return false;
+        }
+
+        if let Mode::Normal(keys) = self.mode.as_ref() {
+            trie.retain(keys.iter().map(|k| k.as_slice()));
+        }
 
         true
-    }
-
-    pub fn trie_root_hash(&self) -> Multihash {
-        self.trie.read().root_hash()
     }
 
     pub fn to_serialized<'a, I, U>(&self, keys: I) -> Option<SerializedBlockNode<T>>
@@ -181,7 +241,11 @@ impl<H, T: Record> Clone for BlockNode<H, T> {
             weight: ParkingRwLock::new(*self.weight.read()),
             cumulative_weight: ParkingRwLock::new(*self.cumulative_weight.read()),
             mode: self.mode.clone(),
-            finalized: AtomicBool::new(self.finalized.load(Ordering::Relaxed)),
+            operations: self.operations.clone(),
+            existing_keys: self.existing_keys.clone(),
+            proposal_dependencies: self.proposal_dependencies.clone(),
+            proofs: self.proofs.clone(),
+            validated: AtomicBool::new(self.validated.load(Ordering::Relaxed)),
         }
     }
 }

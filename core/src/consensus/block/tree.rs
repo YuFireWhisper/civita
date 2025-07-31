@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use civita_serialize_derive::Serialize;
 use dashmap::DashMap;
@@ -12,7 +12,7 @@ use crate::{
             tree::{
                 checkpoint::{Checkpoint, EstablishedBlock, UpdateResult},
                 dag::{Node, ValidationResult},
-                node::{BlockNode, UnifiedNode},
+                node::UnifiedNode,
             },
             Block,
         },
@@ -116,22 +116,8 @@ impl Mode {
 
 impl<H: Hasher, T: Record> Tree<H, T> {
     pub fn empty(sk: SecretKey, mode: Mode) -> Self {
-        let root_block = block::Builder::new()
-            .with_parent_hash(Multihash::default())
-            .with_checkpoint(Multihash::default())
-            .with_proposer_pk(sk.public_key())
-            .with_proposer_weight(Default::default())
-            .build();
-
-        let sig = sk.sign(&root_block.hash::<H>().to_bytes());
-        let proofs = HashMap::new();
-        let vdf_proof = vec![];
-        let witness = block::Witness::new(sig, proofs, vdf_proof);
-
         let mode = Arc::new(mode);
-        let block_node = BlockNode::new(root_block, witness, mode.clone());
-
-        let checkpoint = Checkpoint::new_empty(block_node, mode.clone());
+        let checkpoint = Checkpoint::new_empty(mode.clone());
         let checkpoint = ParkingRwLock::new(checkpoint);
         let history = ParkingRwLock::new(Vec::new());
 
@@ -208,8 +194,8 @@ impl<H: Hasher, T: Record> Tree<H, T> {
     fn process_result(&self, mut result: UpdateResult<H, T>) -> ProcessResult {
         if let Some(block) = result.new_checkpoint {
             let original = {
+                let n = Checkpoint::new(block, self.mode.clone());
                 let mut o = self.checkpoint.write();
-                let n = Checkpoint::new_empty(block, self.mode.clone());
                 std::mem::replace(&mut *o, n)
             };
 
@@ -300,6 +286,7 @@ impl<H: Hasher, T: Record> Tree<H, T> {
             .build();
 
         let block_hash = block.hash::<H>();
+        println!("Creating block with hash: {:?}", block_hash.digest());
 
         let sig = self.sk.sign(&block_hash.to_bytes());
         let proofs = block.generate_proofs(&trie);
@@ -373,11 +360,13 @@ mod tests {
     const VDF_DIFFICULTY: u64 = 1;
 
     #[derive(Clone)]
+    #[derive(Debug)]
     #[derive(Eq, PartialEq)]
     #[derive(Serialize)]
     struct TestOperation;
 
     #[derive(Clone)]
+    #[derive(Debug)]
     #[derive(Default)]
     #[derive(Eq, PartialEq)]
     #[derive(Serialize)]
@@ -415,6 +404,7 @@ mod tests {
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())
             .with_checkpoint(tree.checkpoint_hash())
+            .with_operation(vec![1, 2, 3], TestOperation)
             .with_proposer_pk(pk)
             .build()
             .expect("Failed to build proposal");
@@ -445,6 +435,7 @@ mod tests {
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())
             .with_checkpoint(tree.checkpoint_hash())
+            .with_operation(vec![1, 2, 3], TestOperation)
             .with_proposer_pk(pk.clone())
             .build()
             .expect("Failed to build proposal");

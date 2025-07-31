@@ -23,6 +23,17 @@ use crate::{
     utils::{trie::Trie, Record, Weight},
 };
 
+enum ValidatedType {
+    BlockInProposalDag((Multihash, Multihash)),
+    BlockInBlockDag(Multihash),
+    Proposal(Multihash),
+}
+
+enum ValidationType {
+    Validated(ValidatedType),
+    Invalidated(Multihash),
+}
+
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct UpdateResult<H, T: Record> {
@@ -43,7 +54,7 @@ pub struct EstablishedBlock<T: Record> {
 #[derive(Clone)]
 #[derive(Serialize)]
 pub struct Summary<T: Record> {
-    pub block_node: SerializedBlockNode<T>,
+    pub block_node: Option<SerializedBlockNode<T>>,
     pub root_hash: Multihash,
     pub root_total_weight: T::Weight,
 }
@@ -78,26 +89,54 @@ impl<H, T: Record> UpdateResult<H, T> {
 }
 
 impl<H: Hasher, T: Record> Checkpoint<H, T> {
-    pub fn new_empty(root: BlockNode<H, T>, mode: Arc<Mode>) -> Self {
-        let tip_hash = root.id();
-        let root_hash = tip_hash;
-        let root_total_weight = *root.weight.read();
-        let block_dag = Dag::with_root(root);
+    pub fn new(root: BlockNode<H, T>, mode: Arc<Mode>) -> Self {
+        let hash = root.id();
+        let total_weight = root.trie.read().weight();
+
+        let mut block_dag = Dag::new();
+        block_dag.upsert(root.clone(), std::iter::empty());
+
+        let mut proposal_dag = Dag::new();
+        let node = UnifiedNode::Block(root);
+        proposal_dag.upsert(node, std::iter::empty());
+
+        let proposal_dags = HashMap::from([(hash, proposal_dag)]);
+
+        let tip_hash = hash;
+        let root_hash = hash;
+        let root_total_weight = total_weight;
 
         Self {
             block_dag,
-            proposal_dags: HashMap::new(),
-            pending_blocks: HashMap::new(),
-            invalid_hashes: HashSet::new(),
+            proposal_dags,
+            mode,
             tip_hash,
             root_hash,
             root_total_weight,
+            pending_blocks: Default::default(),
+            invalid_hashes: Default::default(),
+        }
+    }
+
+    pub fn new_empty(mode: Arc<Mode>) -> Self {
+        Self {
             mode,
+            block_dag: Default::default(),
+            proposal_dags: Default::default(),
+            pending_blocks: Default::default(),
+            invalid_hashes: Default::default(),
+            tip_hash: Default::default(),
+            root_hash: Default::default(),
+            root_total_weight: Default::default(),
         }
     }
 
     pub fn from_summary(summary: Summary<T>, mode: Arc<Mode>) -> Option<Self> {
-        let block_node = BlockNode::from_serialized(summary.block_node, mode.clone())?;
+        let Some(block_node) = summary.block_node else {
+            return Some(Self::new_empty(mode));
+        };
+
+        let block_node = BlockNode::from_serialized(block_node, mode.clone())?;
 
         let tip_hash = block_node.id();
 
@@ -106,23 +145,18 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
         Some(Self {
             block_dag,
-            proposal_dags: HashMap::new(),
-            pending_blocks: HashMap::new(),
-            invalid_hashes: HashSet::new(),
             tip_hash,
             root_hash: summary.root_hash,
             root_total_weight: summary.root_total_weight,
             mode,
+            proposal_dags: Default::default(),
+            pending_blocks: Default::default(),
+            invalid_hashes: Default::default(),
         })
     }
 
-    pub fn from_blocks(mut blocks: Vec<EstablishedBlock<T>>) -> Option<Self> {
-        let mode = Arc::new(Mode::Archive);
-
-        let root_block = blocks.pop()?;
-        let root_node = BlockNode::new(root_block.block, root_block.witness, mode.clone());
-
-        let mut checkpoint = Self::new_empty(root_node, mode);
+    pub fn from_blocks(blocks: Vec<EstablishedBlock<T>>) -> Option<Self> {
+        let mut checkpoint = Self::new_empty(Arc::new(Mode::Archive));
 
         let valid = blocks.into_iter().all(|block| {
             let valid = block
@@ -210,63 +244,145 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         result: ValidationResult<UnifiedNode<H, T>>,
         update_result: &mut UpdateResult<H, T>,
     ) {
-        use std::sync::atomic::Ordering::Relaxed;
+        let mut stk = vec![];
+        stk.extend(result.validated.into_iter().map(|n| {
+            let t = if let Some(parent) = self.pending_blocks.remove(&n) {
+                ValidatedType::BlockInProposalDag((parent, n))
+            } else {
+                ValidatedType::Proposal(n)
+            };
 
-        result.validated.into_iter().for_each(|hash| {
-            if let Some(parent) = self.pending_blocks.remove(&hash) {
-                let node = self
-                    .proposal_dags
-                    .get_mut(&parent)
-                    .expect("Parent should exist")
-                    .remove(&hash)
-                    .expect("Node should exist")
-                    .into_block();
+            ValidationType::Validated(t)
+        }));
 
-                self.block_dag.upsert(node, std::iter::once(parent));
+        stk.extend(
+            result
+                .invalidated
+                .into_iter()
+                .map(ValidationType::Invalidated),
+        );
 
-                let (block_weight, block_cumulative_weight, block_height) = {
-                    let node = self.block_dag.get(&hash).expect("Node should exist");
-                    (
-                        *node.weight.read(),
-                        *node.cumulative_weight.read(),
-                        node.height.load(Relaxed),
-                    )
-                };
-
-                let (tip_cumulative_weight, tip_height) = {
-                    let node = self
-                        .block_dag
-                        .get(&self.tip_hash)
-                        .expect("Tip node should exist");
-                    (*node.cumulative_weight.read(), node.height.load(Relaxed))
-                };
-
-                let threshold = self.total_weight().mul_f64(0.67);
-                if block_weight > threshold {
-                    let removed = self.block_dag.retain(&parent);
-                    removed.iter().for_each(|n| {
-                        self.proposal_dags.remove(&n.id());
-                    });
-                    let block_node = self.block_dag.get(&hash).unwrap().clone();
-                    update_result.new_checkpoint = Some(block_node);
-                } else {
-                    let b = (block_cumulative_weight, block_height);
-                    let t = (tip_cumulative_weight, tip_height);
-                    if b > t {
-                        self.tip_hash = hash;
-                    }
+        while let Some(v) = stk.pop() {
+            match v {
+                ValidationType::Validated(validated) => {
+                    self.process_validated(validated, update_result, &mut stk);
+                }
+                ValidationType::Invalidated(hash) => {
+                    self.proposal_dags.remove(&hash);
+                    self.pending_blocks.remove(&hash);
+                    self.invalid_hashes.insert(hash);
+                    update_result.add_invalidated(hash);
                 }
             }
+        }
+    }
 
-            update_result.add_validated(hash);
-        });
+    fn process_validated(
+        &mut self,
+        validated: ValidatedType,
+        result: &mut UpdateResult<H, T>,
+        stk: &mut Vec<ValidationType>,
+    ) {
+        match validated {
+            ValidatedType::BlockInProposalDag((parent, hash)) => {
+                self.process_validated_block_in_proposal_dag(parent, hash, stk);
+            }
+            ValidatedType::BlockInBlockDag(hash) => {
+                result.add_validated(hash);
+                self.process_validated_block_in_block_dag(hash, result);
+            }
+            ValidatedType::Proposal(hash) => {
+                result.add_validated(hash);
+            }
+        }
+    }
 
-        result.invalidated.into_iter().for_each(|hash| {
-            self.proposal_dags.remove(&hash);
-            self.pending_blocks.remove(&hash);
-            self.invalid_hashes.insert(hash);
-            update_result.add_invalidated(hash);
-        });
+    fn process_validated_block_in_proposal_dag(
+        &mut self,
+        parent: Multihash,
+        hash: Multihash,
+        stk: &mut Vec<ValidationType>,
+    ) {
+        let unified_node = self
+            .proposal_dags
+            .get_mut(&parent)
+            .expect("Parent should exist")
+            .remove(&hash)
+            .expect("Node should exist");
+
+        let block_node = unified_node
+            .as_block()
+            .expect("Node should be a block")
+            .clone();
+
+        let r = if self.tip_hash == Multihash::default() {
+            self.block_dag.upsert(block_node, std::iter::empty())
+        } else {
+            self.block_dag.upsert(block_node, std::iter::once(parent))
+        };
+
+        stk.extend(
+            r.validated
+                .into_iter()
+                .map(|n| ValidationType::Validated(ValidatedType::BlockInBlockDag(n))),
+        );
+        stk.extend(r.invalidated.into_iter().map(ValidationType::Invalidated));
+    }
+
+    fn process_validated_block_in_block_dag(
+        &mut self,
+        hash: Multihash,
+        result: &mut UpdateResult<H, T>,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let node = self
+            .block_dag
+            .get(&hash)
+            .expect("Node should exist in the DAG");
+
+        if self.tip_hash == Multihash::default() {
+            self.tip_hash = hash;
+            self.root_hash = hash;
+            self.root_total_weight = node.trie.read().weight();
+            return;
+        }
+
+        if !self.block_dag.contains(&hash) {
+            return;
+        }
+
+        let (block_weight, block_cumulative_weight, block_height) = {
+            let weight = *node.weight.read();
+            let cumulative_weight = *node.cumulative_weight.read();
+            (weight, cumulative_weight, node.height.load(Relaxed))
+        };
+
+        let (tip_cumulative_weight, tip_height) = {
+            let node = self
+                .block_dag
+                .get(&self.tip_hash)
+                .expect("Tip node should exist");
+            (*node.cumulative_weight.read(), node.height.load(Relaxed))
+        };
+
+        let threshold = self.total_weight().mul_f64(0.67);
+
+        let parent = node.block.parent;
+
+        if block_weight > threshold {
+            self.block_dag.retain(&parent).iter().for_each(|n| {
+                self.proposal_dags.remove(&n.id());
+            });
+            let block_node = self.block_dag.remove(&hash).expect("Node should exist");
+            result.new_checkpoint = Some(block_node);
+        } else {
+            let b = (block_cumulative_weight, block_height);
+            let t = (tip_cumulative_weight, tip_height);
+            if b > t {
+                self.tip_hash = hash;
+            }
+        }
     }
 
     fn total_weight(&self) -> T::Weight {
@@ -293,7 +409,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             return result;
         }
 
-        let dag_result = self.upsert_proposal_to_proposal_dag(proposal, witness);
+        let dag_result = self.upsert_proposal_to_proposal_dag(proposal, witness, &mut result);
         self.process_validation_result(dag_result, &mut result);
 
         result
@@ -303,11 +419,34 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         &mut self,
         proposal: Proposal<T>,
         witness: proposal::Witness,
+        result: &mut UpdateResult<H, T>,
     ) -> ValidationResult<UnifiedNode<H, T>> {
-        let parents = proposal.dependencies.iter().cloned().collect::<Vec<_>>();
+        let parents = self.generate_proposal_parents(&proposal, result);
         let entry = self.proposal_dags.entry(proposal.parent).or_default();
         let node = UnifiedNode::new_proposal(proposal, witness);
         entry.upsert(node, parents)
+    }
+
+    fn generate_proposal_parents(
+        &mut self,
+        proposal: &Proposal<T>,
+        result: &mut UpdateResult<H, T>,
+    ) -> Vec<Multihash> {
+        let mut parents = Vec::with_capacity(1 + proposal.dependencies.len());
+        let dag = self.proposal_dags.entry(proposal.parent).or_default();
+
+        if self.tip_hash != Multihash::default() {
+            parents.push(proposal.parent);
+        }
+
+        proposal.dependencies.iter().for_each(|dep| {
+            if !dag.contains(dep) {
+                result.add_phantom(*dep);
+            }
+            parents.push(*dep);
+        });
+
+        parents
     }
 
     pub fn tip_node(&self) -> &BlockNode<H, T> {
@@ -321,6 +460,9 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     pub fn tip_trie(&self) -> Trie<H, T> {
+        if self.block_dag.is_empty() {
+            return Trie::default();
+        }
         self.tip_node().trie.read().clone()
     }
 
@@ -329,6 +471,10 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     pub fn parent_trie(&self, parent: &Multihash) -> Option<Trie<H, T>> {
+        if self.block_dag.is_empty() {
+            return Some(Trie::default());
+        }
+
         self.block_dag
             .get(parent)
             .map(|node| node.trie.read().clone())
@@ -340,6 +486,10 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
     pub fn into_blocks(mut self) -> Vec<EstablishedBlock<T>> {
         assert!(self.mode.is_archive());
+
+        if self.block_dag.is_empty() {
+            return Vec::new();
+        }
 
         let mut blocks = Vec::new();
         let mut visited = HashSet::new();
@@ -398,6 +548,10 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
     pub fn to_blocks(&self) -> Vec<EstablishedBlock<T>> {
         assert!(self.mode.is_archive());
+
+        if self.block_dag.is_empty() {
+            return Vec::new();
+        }
 
         let mut blocks = Vec::new();
         let mut visited = HashSet::new();
@@ -471,7 +625,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         let root_total_weight = self.root_total_weight;
 
         Summary {
-            block_node,
+            block_node: Some(block_node),
             root_hash,
             root_total_weight,
         }

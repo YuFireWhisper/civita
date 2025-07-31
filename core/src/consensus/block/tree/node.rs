@@ -38,6 +38,14 @@ impl<H: Hasher, T: Record> UnifiedNode<H, T> {
         UnifiedNode::Proposal(ProposalNode::new(proposal, witness))
     }
 
+    pub fn as_block(&self) -> Option<&BlockNode<H, T>> {
+        if let UnifiedNode::Block(node) = self {
+            Some(node)
+        } else {
+            None
+        }
+    }
+
     pub fn as_proposal(&self) -> Option<&ProposalNode<T>> {
         if let UnifiedNode::Proposal(node) = self {
             Some(node)
@@ -51,14 +59,6 @@ impl<H: Hasher, T: Record> UnifiedNode<H, T> {
             node
         } else {
             panic!("Cannot convert BlockNode to ProposalNode");
-        }
-    }
-
-    pub fn into_block(self) -> BlockNode<H, T> {
-        if let UnifiedNode::Block(node) = self {
-            node
-        } else {
-            panic!("Cannot convert ProposalNode to BlockNode");
         }
     }
 }

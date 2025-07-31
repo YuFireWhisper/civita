@@ -29,7 +29,9 @@ pub trait Operation: Clone + Eq + Serialize + Send + Sync + 'static {
     fn is_order_dependent(&self, key: &[u8]) -> bool;
 }
 
-pub trait Record: Clone + Default + Eq + Serialize + Send + Sync + 'static {
+pub trait Record:
+    Clone + Default + Eq + Serialize + Send + Sync + 'static + std::fmt::Debug
+{
     type Weight: Weight;
     type Operation: Operation;
 
