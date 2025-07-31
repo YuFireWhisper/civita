@@ -20,46 +20,46 @@ use crate::{
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash},
-    utils::trie::Trie,
+    utils::{trie::Trie, Record, Weight},
 };
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
-pub struct UpdateResult<H> {
+pub struct UpdateResult<H, T: Record> {
     pub validated: Vec<Multihash>,
     pub invalidated: Vec<Multihash>,
     pub phantoms: Vec<Multihash>,
-    pub new_checkpoint: Option<BlockNode<H>>,
+    pub new_checkpoint: Option<BlockNode<H, T>>,
 }
 
 #[derive(Clone)]
 #[derive(Serialize)]
-pub struct EstablishedBlock {
-    pub block: Block,
+pub struct EstablishedBlock<T: Record> {
+    pub block: Block<T>,
     pub witness: block::Witness,
-    pub proposals: Vec<(Proposal, proposal::Witness)>,
+    pub proposals: Vec<(Proposal<T>, proposal::Witness)>,
 }
 
 #[derive(Clone)]
 #[derive(Serialize)]
-pub struct Summary {
-    pub block_node: SerializedBlockNode,
+pub struct Summary<T: Record> {
+    pub block_node: SerializedBlockNode<T>,
     pub root_hash: Multihash,
-    pub root_total_weight: u64,
+    pub root_total_weight: T::Weight,
 }
 
-pub struct Checkpoint<H: Hasher> {
-    block_dag: Dag<BlockNode<H>>,
-    proposal_dags: HashMap<Multihash, Dag<UnifiedNode<H>>>,
+pub struct Checkpoint<H: Hasher, T: Record> {
+    block_dag: Dag<BlockNode<H, T>>,
+    proposal_dags: HashMap<Multihash, Dag<UnifiedNode<H, T>>>,
     pending_blocks: HashMap<Multihash, Multihash>,
     invalid_hashes: HashSet<Multihash>,
     mode: Arc<Mode>,
     tip_hash: Multihash,
     root_hash: Multihash,
-    root_total_weight: u64,
+    root_total_weight: T::Weight,
 }
 
-impl<H> UpdateResult<H> {
+impl<H, T: Record> UpdateResult<H, T> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -77,13 +77,11 @@ impl<H> UpdateResult<H> {
     }
 }
 
-impl<H: Hasher> Checkpoint<H> {
-    pub fn new_empty(root: BlockNode<H>, mode: Arc<Mode>) -> Self {
-        use std::sync::atomic::Ordering::Relaxed;
-
+impl<H: Hasher, T: Record> Checkpoint<H, T> {
+    pub fn new_empty(root: BlockNode<H, T>, mode: Arc<Mode>) -> Self {
         let tip_hash = root.id();
         let root_hash = tip_hash;
-        let root_total_weight = root.weight.load(Relaxed);
+        let root_total_weight = *root.weight.read();
         let block_dag = Dag::with_root(root);
 
         Self {
@@ -98,7 +96,7 @@ impl<H: Hasher> Checkpoint<H> {
         }
     }
 
-    pub fn from_summary(summary: Summary, mode: Arc<Mode>) -> Option<Self> {
+    pub fn from_summary(summary: Summary<T>, mode: Arc<Mode>) -> Option<Self> {
         let block_node = BlockNode::from_serialized(summary.block_node, mode.clone())?;
 
         let tip_hash = block_node.id();
@@ -118,7 +116,7 @@ impl<H: Hasher> Checkpoint<H> {
         })
     }
 
-    pub fn from_blocks(mut blocks: Vec<EstablishedBlock>) -> Option<Self> {
+    pub fn from_blocks(mut blocks: Vec<EstablishedBlock<T>>) -> Option<Self> {
         let mode = Arc::new(Mode::Archive);
 
         let root_block = blocks.pop()?;
@@ -153,7 +151,7 @@ impl<H: Hasher> Checkpoint<H> {
         Some(checkpoint)
     }
 
-    pub fn update_block(&mut self, block: Block, witness: block::Witness) -> UpdateResult<H> {
+    pub fn update_block(&mut self, block: Block<T>, witness: block::Witness) -> UpdateResult<H, T> {
         let hash = block.hash::<H>();
 
         let mut result = UpdateResult::new();
@@ -179,10 +177,10 @@ impl<H: Hasher> Checkpoint<H> {
 
     fn upsert_block_to_proposal_dag(
         &mut self,
-        block: Block,
+        block: Block<T>,
         witness: block::Witness,
-        result: &mut UpdateResult<H>,
-    ) -> ValidationResult<UnifiedNode<H>> {
+        result: &mut UpdateResult<H, T>,
+    ) -> ValidationResult<UnifiedNode<H, T>> {
         let parents = self.generate_block_parents(&block, result);
         let entry = self.proposal_dags.entry(block.parent).or_default();
         let n = UnifiedNode::new_block(block, witness, self.mode.clone());
@@ -191,8 +189,8 @@ impl<H: Hasher> Checkpoint<H> {
 
     fn generate_block_parents(
         &mut self,
-        block: &Block,
-        result: &mut UpdateResult<H>,
+        block: &Block<T>,
+        result: &mut UpdateResult<H, T>,
     ) -> Vec<Multihash> {
         let mut parents = Vec::with_capacity(block.proposals.len());
         let dag = self.proposal_dags.entry(block.parent).or_default();
@@ -209,8 +207,8 @@ impl<H: Hasher> Checkpoint<H> {
 
     fn process_validation_result(
         &mut self,
-        result: ValidationResult<UnifiedNode<H>>,
-        update_result: &mut UpdateResult<H>,
+        result: ValidationResult<UnifiedNode<H, T>>,
+        update_result: &mut UpdateResult<H, T>,
     ) {
         use std::sync::atomic::Ordering::Relaxed;
 
@@ -229,8 +227,8 @@ impl<H: Hasher> Checkpoint<H> {
                 let (block_weight, block_cumulative_weight, block_height) = {
                     let node = self.block_dag.get(&hash).expect("Node should exist");
                     (
-                        node.weight.load(Relaxed),
-                        node.cumulative_weight.load(Relaxed),
+                        *node.weight.read(),
+                        *node.cumulative_weight.read(),
                         node.height.load(Relaxed),
                     )
                 };
@@ -240,14 +238,11 @@ impl<H: Hasher> Checkpoint<H> {
                         .block_dag
                         .get(&self.tip_hash)
                         .expect("Tip node should exist");
-                    (
-                        node.cumulative_weight.load(Relaxed),
-                        node.height.load(Relaxed),
-                    )
+                    (*node.cumulative_weight.read(), node.height.load(Relaxed))
                 };
 
-                let threshold = (self.total_weight() as f64) * 0.67;
-                if block_weight as f64 > threshold {
+                let threshold = self.total_weight().mul_f64(0.67);
+                if block_weight > threshold {
                     let removed = self.block_dag.retain(&parent);
                     removed.iter().for_each(|n| {
                         self.proposal_dags.remove(&n.id());
@@ -274,7 +269,7 @@ impl<H: Hasher> Checkpoint<H> {
         });
     }
 
-    fn total_weight(&self) -> u64 {
+    fn total_weight(&self) -> T::Weight {
         self.block_dag
             .get(&self.root_hash)
             .expect("Tip node should exist")
@@ -285,9 +280,9 @@ impl<H: Hasher> Checkpoint<H> {
 
     pub fn update_proposal(
         &mut self,
-        proposal: Proposal,
+        proposal: Proposal<T>,
         witness: proposal::Witness,
-    ) -> UpdateResult<H> {
+    ) -> UpdateResult<H, T> {
         let hash = proposal.hash::<H>();
 
         let mut result = UpdateResult::new();
@@ -306,16 +301,16 @@ impl<H: Hasher> Checkpoint<H> {
 
     fn upsert_proposal_to_proposal_dag(
         &mut self,
-        proposal: Proposal,
+        proposal: Proposal<T>,
         witness: proposal::Witness,
-    ) -> ValidationResult<UnifiedNode<H>> {
+    ) -> ValidationResult<UnifiedNode<H, T>> {
         let parents = proposal.dependencies.iter().cloned().collect::<Vec<_>>();
         let entry = self.proposal_dags.entry(proposal.parent).or_default();
         let node = UnifiedNode::new_proposal(proposal, witness);
         entry.upsert(node, parents)
     }
 
-    pub fn tip_node(&self) -> &BlockNode<H> {
+    pub fn tip_node(&self) -> &BlockNode<H, T> {
         self.block_dag
             .get(&self.tip_hash)
             .expect("Tip node should exist")
@@ -325,15 +320,15 @@ impl<H: Hasher> Checkpoint<H> {
         self.tip_hash
     }
 
-    pub fn tip_trie(&self) -> Trie<H> {
+    pub fn tip_trie(&self) -> Trie<H, T> {
         self.tip_node().trie.read().clone()
     }
 
-    pub fn get_proposal_dag(&self, parent: Multihash) -> Option<&Dag<UnifiedNode<H>>> {
+    pub fn get_proposal_dag(&self, parent: Multihash) -> Option<&Dag<UnifiedNode<H, T>>> {
         self.proposal_dags.get(&parent)
     }
 
-    pub fn parent_trie(&self, parent: &Multihash) -> Option<Trie<H>> {
+    pub fn parent_trie(&self, parent: &Multihash) -> Option<Trie<H, T>> {
         self.block_dag
             .get(parent)
             .map(|node| node.trie.read().clone())
@@ -343,7 +338,7 @@ impl<H: Hasher> Checkpoint<H> {
         self.root_hash
     }
 
-    pub fn into_blocks(mut self) -> Vec<EstablishedBlock> {
+    pub fn into_blocks(mut self) -> Vec<EstablishedBlock<T>> {
         assert!(self.mode.is_archive());
 
         let mut blocks = Vec::new();
@@ -401,7 +396,7 @@ impl<H: Hasher> Checkpoint<H> {
         blocks
     }
 
-    pub fn to_blocks(&self) -> Vec<EstablishedBlock> {
+    pub fn to_blocks(&self) -> Vec<EstablishedBlock<T>> {
         assert!(self.mode.is_archive());
 
         let mut blocks = Vec::new();
@@ -460,10 +455,10 @@ impl<H: Hasher> Checkpoint<H> {
         blocks
     }
 
-    pub fn summary<'a, I, T>(&self, keys: I) -> Summary
+    pub fn summary<'a, I, K>(&self, keys: I) -> Summary<T>
     where
-        I: IntoIterator<Item = T>,
-        T: AsRef<[u8]> + 'a,
+        I: IntoIterator<Item = K>,
+        K: AsRef<[u8]> + 'a,
     {
         assert!(self.mode.is_archive());
 

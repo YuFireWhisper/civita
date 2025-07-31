@@ -2,37 +2,37 @@ use std::sync::OnceLock;
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
+use derivative::Derivative;
 
 use crate::{
     crypto::{Hasher, Multihash},
-    utils::trie::{
-        keys::{hex_to_vec, vec_to_hex},
-        record::Record,
+    utils::{
+        trie::keys::{hex_to_vec, vec_to_hex},
+        Record,
     },
 };
 
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Default)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Full {
-    pub children: Box<[Node; 17]>,
+pub struct Full<T: Record> {
+    pub children: Box<[Node<T>; 17]>,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 
     #[serialize(skip)]
-    weight_cache: OnceLock<u64>,
+    weight_cache: OnceLock<T::Weight>,
 }
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Short {
+pub struct Short<T: Record> {
     #[serialize(serialize_with = "serialize_key", deserialize_with = "deserialize_key")]
     pub key: Vec<u8>, // Hex
-    pub val: Box<Node>,
+    pub val: Box<Node<T>>,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -41,27 +41,28 @@ pub struct Short {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Value {
-    pub record: Record,
+pub struct Value<T> {
+    pub record: T,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
 
+#[derive(Derivative)]
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Default)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub enum Node {
+pub enum Node<T: Record> {
     #[default]
     Empty,
-    Full(Full),
-    Short(Short),
+    Full(Full<T>),
+    Short(Short<T>),
     Hash(Multihash),
-    Value(Value),
+    Value(Value<T>),
 }
 
-impl Full {
+impl<T: Record> Full<T> {
     pub fn hash<H: Hasher>(&self) -> Multihash {
         *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
@@ -81,15 +82,15 @@ impl Full {
         self.weight_cache = OnceLock::new();
     }
 
-    pub fn weight(&self) -> u64 {
+    pub fn weight(&self) -> T::Weight {
         *self
             .weight_cache
             .get_or_init(|| self.children.iter().map(|child| child.weight()).sum())
     }
 }
 
-impl Short {
-    pub fn new<T: Into<Box<Node>>>(key: Vec<u8>, val: T) -> Self {
+impl<T: Record> Short<T> {
+    pub fn new<U: Into<Box<Node<T>>>>(key: Vec<u8>, val: U) -> Self {
         let val = val.into();
 
         Short {
@@ -115,8 +116,8 @@ impl Short {
     }
 }
 
-impl Value {
-    pub fn new(record: Record) -> Self {
+impl<T: Record> Value<T> {
+    pub fn new(record: T) -> Self {
         Self {
             record,
             hash_cache: OnceLock::new(),
@@ -129,26 +130,35 @@ impl Value {
             .get_or_init(|| H::hash(&self.record.to_vec()))
     }
 
-    pub fn weight(&self) -> u64 {
-        self.record.weight
+    pub fn weight(&self) -> T::Weight {
+        self.record.weight()
     }
 }
 
-impl Node {
-    pub fn new_short<T: Into<Node>>(key: Vec<u8>, val: T) -> Self {
-        Node::Short(Short::new(key, val.into()))
+impl<T: Record> Node<T> {
+    pub fn new_short<U: Into<Box<Node<T>>>>(key: Vec<u8>, val: U) -> Self {
+        Node::Short(Short::new(key, val))
     }
 
-    pub fn new_value(record: Record) -> Self {
+    pub fn new_value(record: T) -> Self {
         Node::Value(Value::new(record))
     }
 
-    pub fn from_full(full: Full) -> Self {
+    pub fn from_full(full: Full<T>) -> Self {
         Node::Full(full)
     }
 
     pub fn is_empty(&self) -> bool {
         matches!(self, Node::Empty)
+    }
+
+    pub fn weight(&self) -> T::Weight {
+        match self {
+            Node::Full(full) => full.weight(),
+            Node::Short(short) => short.val.weight(),
+            Node::Value(value) => value.weight(),
+            Node::Hash(_) | Node::Empty => T::Weight::default(),
+        }
     }
 
     pub fn hash<H: Hasher>(&self) -> Multihash {
@@ -169,16 +179,7 @@ impl Node {
         }
     }
 
-    pub fn weight(&self) -> u64 {
-        match self {
-            Node::Full(full) => full.weight(),
-            Node::Short(short) => short.val.weight(),
-            Node::Value(value) => value.weight(),
-            Node::Hash(_) | Node::Empty => 0,
-        }
-    }
-
-    pub fn as_short_mut(&mut self) -> Option<&mut Short> {
+    pub fn as_short_mut(&mut self) -> Option<&mut Short<T>> {
         if let Node::Short(short) = self {
             Some(short)
         } else {
@@ -186,7 +187,7 @@ impl Node {
         }
     }
 
-    pub fn as_full_mut(&mut self) -> Option<&mut Full> {
+    pub fn as_full_mut(&mut self) -> Option<&mut Full<T>> {
         if let Node::Full(full) = self {
             Some(full)
         } else {
@@ -219,8 +220,21 @@ fn deserialize_key<R: std::io::Read>(reader: &mut R) -> Result<Vec<u8>, civita_s
     Ok(hex_nibbles)
 }
 
-impl From<Full> for Node {
-    fn from(full: Full) -> Self {
+impl<T: Record> From<Full<T>> for Node<T> {
+    fn from(full: Full<T>) -> Self {
         Node::Full(full)
+    }
+}
+
+impl<T: Record> Default for Full<T> {
+    fn default() -> Self {
+        let children = std::array::from_fn(|_| Node::Empty);
+        let children = Box::new(children);
+
+        Full {
+            children,
+            hash_cache: OnceLock::new(),
+            weight_cache: OnceLock::new(),
+        }
     }
 }

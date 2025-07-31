@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::Arc;
 
 use derivative::Derivative;
 
@@ -12,6 +12,7 @@ use crate::{
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash},
+    utils::Record,
 };
 
 mod block_node;
@@ -21,25 +22,23 @@ pub use block_node::BlockNode;
 pub use block_node::SerializedBlockNode;
 pub use proposal_node::ProposalNode;
 
-type AtomicWeight = AtomicU64;
-
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-pub enum UnifiedNode<H> {
-    Block(BlockNode<H>),
-    Proposal(ProposalNode),
+pub enum UnifiedNode<H, T: Record> {
+    Block(BlockNode<H, T>),
+    Proposal(ProposalNode<T>),
 }
 
-impl<H: Hasher> UnifiedNode<H> {
-    pub fn new_block(block: Block, witness: block::Witness, mode: Arc<Mode>) -> Self {
+impl<H: Hasher, T: Record> UnifiedNode<H, T> {
+    pub fn new_block(block: Block<T>, witness: block::Witness, mode: Arc<Mode>) -> Self {
         UnifiedNode::Block(BlockNode::new(block, witness, mode))
     }
 
-    pub fn new_proposal(proposal: Proposal, witness: proposal::Witness) -> Self {
+    pub fn new_proposal(proposal: Proposal<T>, witness: proposal::Witness) -> Self {
         UnifiedNode::Proposal(ProposalNode::new(proposal, witness))
     }
 
-    pub fn as_proposal(&self) -> Option<&ProposalNode> {
+    pub fn as_proposal(&self) -> Option<&ProposalNode<T>> {
         if let UnifiedNode::Proposal(node) = self {
             Some(node)
         } else {
@@ -47,7 +46,7 @@ impl<H: Hasher> UnifiedNode<H> {
         }
     }
 
-    pub fn into_proposal(self) -> ProposalNode {
+    pub fn into_proposal(self) -> ProposalNode<T> {
         if let UnifiedNode::Proposal(node) = self {
             node
         } else {
@@ -55,7 +54,7 @@ impl<H: Hasher> UnifiedNode<H> {
         }
     }
 
-    pub fn into_block(self) -> BlockNode<H> {
+    pub fn into_block(self) -> BlockNode<H, T> {
         if let UnifiedNode::Block(node) = self {
             node
         } else {
@@ -64,7 +63,7 @@ impl<H: Hasher> UnifiedNode<H> {
     }
 }
 
-impl<H: Hasher> Node for UnifiedNode<H> {
+impl<H: Hasher, T: Record> Node for UnifiedNode<H, T> {
     type Id = Multihash;
 
     fn id(&self) -> Self::Id {

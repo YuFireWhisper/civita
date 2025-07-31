@@ -14,6 +14,7 @@ use crate::{
     },
     crypto::Hasher,
     network::{request_response, Transport},
+    utils::Record,
 };
 
 const PROPOSAL_TOPIC: u8 = 0;
@@ -56,12 +57,12 @@ pub struct Config {
     bootstrap_timeout: tokio::time::Duration,
 }
 
-pub struct Resident<H: Hasher, V> {
+pub struct Resident<H: Hasher, V, T: Record> {
     transport: Arc<Transport>,
-    engine: Arc<consensus::Engine<H, V>>,
+    engine: Arc<consensus::Engine<H, V, T>>,
 }
 
-impl<H: Hasher, V: Validator> Resident<H, V> {
+impl<H: Hasher, V: Validator, T: Record> Resident<H, V, T> {
     pub async fn new(
         transport: Arc<Transport>,
         validator: V,
@@ -106,7 +107,10 @@ impl<H: Hasher, V: Validator> Resident<H, V> {
         Ok(resident)
     }
 
-    async fn bootstrap(transport: Arc<Transport>, config: &mut Config) -> Result<block::Tree<H>> {
+    async fn bootstrap(
+        transport: Arc<Transport>,
+        config: &mut Config,
+    ) -> Result<block::Tree<H, T>> {
         if config.bootstrap_peers.is_empty() {
             return Err(Error::NoBootstrapPeers);
         }
@@ -140,7 +144,7 @@ impl<H: Hasher, V: Validator> Resident<H, V> {
         let state = SyncState::from_slice(&response).map_err(|_| Error::InvalidMessage)?;
 
         let mode = std::mem::replace(&mut config.mode, Mode::Archive);
-        block::Tree::<H>::from_sync_state(transport.secret_key().clone(), state, mode)
+        block::Tree::<H, T>::from_sync_state(transport.secret_key().clone(), state, mode)
             .ok_or(Error::FailedToCreateTree)
     }
 

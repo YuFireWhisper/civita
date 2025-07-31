@@ -10,7 +10,10 @@ use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
-    utils::trie::{self, ProofResult, Record, Trie, Weight},
+    utils::{
+        trie::{self, ProofResult, Trie},
+        Record,
+    },
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -20,24 +23,14 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {}
 
 #[derive(Clone)]
-#[derive(Debug)]
-#[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Operation {
-    pub from: Option<Record>,
-    pub to: Record,
-}
-
-#[derive(Clone)]
-#[derive(Debug)]
 #[derive(Derivative)]
 #[derivative(Eq, PartialEq)]
-#[derive(Serialize)]
-pub struct Proposal {
+pub struct Proposal<T: Record> {
     pub parent: Multihash,
     pub checkpoint: Multihash,
     pub dependencies: HashSet<Multihash>,
-    pub operations: BTreeMap<Vec<u8>, Operation>,
+    pub operations: BTreeMap<Vec<u8>, T::Operation>,
     pub proposer_pk: PublicKey,
     pub metadata: Option<Vec<u8>>,
     #[serialize(skip)]
@@ -54,37 +47,18 @@ pub struct Witness {
     pub vdf_proof: Vec<u8>,
 }
 
-#[derive(Default)]
-pub struct Builder {
+#[derive(Derivative)]
+#[derivative(Default(bound = ""))]
+pub struct Builder<T: Record> {
     pub parent: Option<Multihash>,
     pub checkpoint: Option<Multihash>,
     pub dependencies: HashSet<Multihash>,
-    pub operations: BTreeMap<Vec<u8>, Operation>,
+    pub operations: BTreeMap<Vec<u8>, T::Operation>,
     pub proposer_pk: Option<PublicKey>,
     pub metadata: Option<Vec<u8>>,
 }
 
-impl Operation {
-    pub fn new(from: Option<Record>, to: Record) -> Self {
-        Operation { from, to }
-    }
-
-    pub fn new_clcu<H: Hasher>(from: Option<Record>, to: Record) -> Self {
-        let mut data = Vec::new();
-        from.to_writer(&mut data);
-        to.to_writer(&mut data);
-        Operation { from, to }
-    }
-
-    pub fn to_sign_data<H: Hasher>(&self) -> Multihash {
-        let mut data = Vec::new();
-        self.from.to_writer(&mut data);
-        self.to.to_writer(&mut data);
-        H::hash(&data)
-    }
-}
-
-impl Proposal {
+impl<T: Record> Proposal<T> {
     pub fn hash<H: Hasher>(&self) -> Multihash {
         *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
@@ -92,7 +66,7 @@ impl Proposal {
     pub fn generate_witness<H: Hasher>(
         &self,
         sk: &SecretKey,
-        trie: &Trie<H>,
+        trie: &Trie<H, T>,
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
     ) -> Result<Witness> {
@@ -107,7 +81,7 @@ impl Proposal {
         Ok(Witness::new(sig, proofs, vdf_proof))
     }
 
-    pub fn generate_proofs<H: Hasher>(&self, trie: &Trie<H>) -> HashMap<Multihash, Vec<u8>> {
+    pub fn generate_proofs<H: Hasher>(&self, trie: &Trie<H, T>) -> HashMap<Multihash, Vec<u8>> {
         let mut proofs = HashMap::new();
 
         self.operations
@@ -140,29 +114,21 @@ impl Proposal {
         &self,
         witness: &Witness,
         trie_root: Multihash,
-    ) -> Option<Weight> {
+    ) -> Option<T::Weight> {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
 
-        match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
-            ProofResult::Exists(record) => Some(record.weight),
-            ProofResult::NotExists => Some(0),
+        match trie::verify_proof_with_hash::<T>(&key, &witness.proofs, trie_root) {
+            ProofResult::Exists(record) => Some(record.weight()),
+            ProofResult::NotExists => Some(T::Weight::default()),
             ProofResult::Invalid => None,
         }
     }
 
-    pub fn verify_operations<H: Hasher>(&self, witness: &Witness, trie_root: Multihash) -> bool {
-        self.operations.iter().all(|(key, op)| {
-            match trie::verify_proof_with_hash(key, &witness.proofs, trie_root) {
-                ProofResult::Exists(record) => op.from.as_ref().is_some_and(|from| from == &record),
-                ProofResult::NotExists => op.from.is_none(),
-                ProofResult::Invalid => false,
-            }
-        })
-    }
-
-    pub fn apply_operations<H: Hasher>(&self, trie: &mut Trie<H>, witness: &Witness) -> bool {
-        let iter = self.operations.iter().map(|(k, v)| (k, v.to.clone()));
-        trie.update_many(iter, Some(&witness.proofs))
+    pub fn apply_operations<H: Hasher>(&self, trie: &mut Trie<H, T>, witness: &Witness) -> bool {
+        trie.apply_operations(
+            self.operations.iter().map(|(k, v)| (k, v.clone())),
+            Some(&witness.proofs),
+        )
     }
 }
 
@@ -176,7 +142,7 @@ impl Witness {
     }
 }
 
-impl Builder {
+impl<T: Record> Builder<T> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -204,15 +170,14 @@ impl Builder {
         self
     }
 
-    pub fn with_operation(mut self, key: Vec<u8>, from: Option<Record>, to: Record) -> Self {
-        let operation = Operation::new(from, to);
+    pub fn with_operation(mut self, key: Vec<u8>, operation: T::Operation) -> Self {
         self.operations.insert(key, operation);
         self
     }
 
     pub fn with_operations<I>(mut self, ops: I) -> Self
     where
-        I: IntoIterator<Item = (Vec<u8>, Operation)>,
+        I: IntoIterator<Item = (Vec<u8>, T::Operation)>,
     {
         self.operations.extend(ops);
         self
@@ -228,7 +193,7 @@ impl Builder {
         self
     }
 
-    pub fn build(self) -> Option<Proposal> {
+    pub fn build(self) -> Option<Proposal<T>> {
         let parent = self.parent?;
         let checkpoint = self.checkpoint?;
         let proposer_pk = self.proposer_pk?;

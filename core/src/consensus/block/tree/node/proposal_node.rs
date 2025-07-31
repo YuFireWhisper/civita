@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
     consensus::{
@@ -6,21 +6,21 @@ use crate::{
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash},
+    utils::Record,
 };
 
-#[derive(Debug)]
-pub struct ProposalNode {
-    pub proposal: Proposal,
+pub struct ProposalNode<T: Record> {
+    pub proposal: Proposal<T>,
     pub witness: proposal::Witness,
-    pub proposer_weight: AtomicU64,
+    pub proposer_weight: ParkingRwLock<T::Weight>,
 }
 
-impl ProposalNode {
-    pub fn new(proposal: Proposal, witness: proposal::Witness) -> Self {
+impl<T: Record> ProposalNode<T> {
+    pub fn new(proposal: Proposal<T>, witness: proposal::Witness) -> Self {
         Self {
             proposal,
             witness,
-            proposer_weight: AtomicU64::new(0),
+            proposer_weight: Default::default(),
         }
     }
 
@@ -28,15 +28,8 @@ impl ProposalNode {
         self.proposal.hash::<H>()
     }
 
-    pub fn on_block_parent_valid<H: Hasher>(&self, parent: &BlockNode<H>) -> bool {
+    pub fn on_block_parent_valid<H: Hasher>(&self, parent: &BlockNode<H, T>) -> bool {
         let trie_root = parent.trie_root_hash();
-
-        if !self
-            .proposal
-            .verify_operations::<H>(&self.witness, trie_root)
-        {
-            return false;
-        }
 
         let Some(weight) = self
             .proposal
@@ -45,19 +38,13 @@ impl ProposalNode {
             return false;
         };
 
-        self.proposer_weight.store(weight, Ordering::Relaxed);
+        *self.proposer_weight.write() = weight;
 
         true
     }
 
-    pub fn on_proposal_parent_valid(&self, parent: &ProposalNode) -> bool {
-        let parent_op = &parent.proposal.operations;
-
-        self.proposal.operations.iter().any(|(k, op)| {
-            parent_op
-                .get(k)
-                .is_some_and(|pop| op.from.as_ref().is_none_or(|from| from != &pop.to))
-        })
+    pub fn on_proposal_parent_valid(&self, _: &ProposalNode<T>) -> bool {
+        true
     }
 
     pub fn validate(&self) -> bool {
@@ -65,12 +52,12 @@ impl ProposalNode {
     }
 }
 
-impl Clone for ProposalNode {
+impl<T: Record> Clone for ProposalNode<T> {
     fn clone(&self) -> Self {
         Self {
             proposal: self.proposal.clone(),
             witness: self.witness.clone(),
-            proposer_weight: AtomicU64::new(self.proposer_weight.load(Ordering::Relaxed)),
+            proposer_weight: ParkingRwLock::new(*self.proposer_weight.read()),
         }
     }
 }

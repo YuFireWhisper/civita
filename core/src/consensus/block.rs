@@ -5,11 +5,15 @@ use std::{
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
+use derivative::Derivative;
 use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
     crypto::{Hasher, Multihash, PublicKey, Signature},
-    utils::trie::{self, ProofResult, Trie, Weight},
+    utils::{
+        trie::{self, ProofResult, Trie},
+        Record,
+    },
 };
 
 pub mod tree;
@@ -26,12 +30,12 @@ pub enum Error {}
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Block {
+pub struct Block<T: Record> {
     pub parent: Multihash,
     pub checkpoint: Multihash,
     pub proposals: BTreeSet<Multihash>,
     pub proposer_pk: PublicKey,
-    pub proposer_weight: Weight,
+    pub proposer_weight: T::Weight,
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -46,22 +50,23 @@ pub struct Witness {
     pub vdf_proof: Vec<u8>,
 }
 
-#[derive(Default)]
-pub struct Builder {
+#[derive(Derivative)]
+#[derivative(Default(bound = ""))]
+pub struct Builder<T: Record> {
     parent: Option<Multihash>,
     checkpoint: Option<Multihash>,
     proposals: BTreeSet<Multihash>,
     proposer_pk: Option<PublicKey>,
-    proposer_weight: Option<Weight>,
+    proposer_weight: Option<T::Weight>,
 }
 
-impl Block {
+impl<T: Record> Block<T> {
     pub fn new(
         parent: Multihash,
         checkpoint: Multihash,
         proposals: BTreeSet<Multihash>,
         proposer_pk: PublicKey,
-        proposer_weight: Weight,
+        proposer_weight: T::Weight,
     ) -> Self {
         Block {
             parent,
@@ -77,7 +82,7 @@ impl Block {
         *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
     }
 
-    pub fn generate_proofs<H: Hasher>(&self, trie: &Trie<H>) -> HashMap<Multihash, Vec<u8>> {
+    pub fn generate_proofs<H: Hasher>(&self, trie: &Trie<H, T>) -> HashMap<Multihash, Vec<u8>> {
         let mut proofs = HashMap::new();
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
         trie.prove(&key, &mut proofs);
@@ -118,9 +123,9 @@ impl Block {
     ) -> bool {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
 
-        match trie::verify_proof_with_hash(&key, &witness.proofs, trie_root) {
-            ProofResult::Exists(record) => record.weight == self.proposer_weight,
-            ProofResult::NotExists => self.proposer_weight == 0,
+        match trie::verify_proof_with_hash::<T>(&key, &witness.proofs, trie_root) {
+            ProofResult::Exists(record) => record.weight() == self.proposer_weight,
+            ProofResult::NotExists => self.proposer_weight == Default::default(),
             ProofResult::Invalid => false,
         }
     }
@@ -132,9 +137,9 @@ impl Block {
     ) -> bool {
         let key = self.proposer_pk.to_hash::<H>().to_bytes();
 
-        match trie::verify_proof_with_hash(&key, proofs, trie_root) {
-            ProofResult::Exists(record) => record.weight == self.proposer_weight,
-            ProofResult::NotExists => self.proposer_weight == 0,
+        match trie::verify_proof_with_hash::<T>(&key, proofs, trie_root) {
+            ProofResult::Exists(record) => record.weight() == self.proposer_weight,
+            ProofResult::NotExists => self.proposer_weight == Default::default(),
             ProofResult::Invalid => false,
         }
     }
@@ -150,12 +155,12 @@ impl Witness {
     }
 }
 
-impl Builder {
+impl<T: Record> Builder<T> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_parent_block<H: Hasher>(mut self, parent: &Block) -> Self {
+    pub fn with_parent_block<H: Hasher>(mut self, parent: &Block<T>) -> Self {
         self.parent = Some(parent.hash::<H>());
         self.checkpoint = Some(parent.checkpoint);
         self
@@ -184,12 +189,12 @@ impl Builder {
         self
     }
 
-    pub fn with_proposer_weight(mut self, proposer_weight: Weight) -> Self {
+    pub fn with_proposer_weight(mut self, proposer_weight: T::Weight) -> Self {
         self.proposer_weight = Some(proposer_weight);
         self
     }
 
-    pub fn build(self) -> Block {
+    pub fn build(self) -> Block<T> {
         let parent = self.parent.expect("Parent block must be set");
         let checkpoint = self.checkpoint.expect("Checkpoint must be set");
         let proposals = self.proposals;

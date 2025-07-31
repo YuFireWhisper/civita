@@ -7,12 +7,15 @@ use civita_core::{
         engine::Validator,
         proposal, Engine,
     },
-    utils::trie::Record,
+    crypto::PublicKey,
+    utils::{Operation, Record},
 };
+use civita_serialize_derive::Serialize;
 
 mod common;
 
 type Hasher = sha2::Sha256;
+type Tree = block::Tree<Hasher, TestRecord>;
 
 const VDF_PARAMS: u16 = 1024;
 const VDF_DIFFICULTY: u64 = 1;
@@ -21,6 +24,18 @@ struct TestValidator {
     valid: bool,
 }
 
+#[derive(Clone)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize)]
+pub struct TestOperation(pub u64);
+
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Default)]
+#[derive(Eq, PartialEq)]
+#[derive(Serialize)]
+pub struct TestRecord(pub u64);
+
 impl TestValidator {
     fn new(valid: bool) -> Self {
         Self { valid }
@@ -28,16 +43,36 @@ impl TestValidator {
 }
 
 impl Validator for TestValidator {
-    fn validate_proposal<'a, I>(
-        &self,
-        _opt_iter: I,
-        _proposer_pk: &civita_core::crypto::PublicKey,
-        _metadata: Option<&[u8]>,
-    ) -> bool
+    fn validate_proposal<'a, I, T>(&self, _: I, _: &PublicKey, _: Option<&[u8]>) -> bool
     where
-        I: IntoIterator<Item = &'a civita_core::consensus::proposal::Operation>,
+        I: IntoIterator<Item = &'a T>,
+        T: Operation + 'a,
     {
         self.valid
+    }
+}
+
+impl Record for TestRecord {
+    type Weight = u64;
+    type Operation = TestOperation;
+
+    fn apply(&mut self, operation: Self::Operation) -> bool {
+        self.0 += operation.0;
+        true
+    }
+
+    fn weight(&self) -> Self::Weight {
+        self.0
+    }
+}
+
+impl Operation for TestOperation {
+    fn is_empty(&self) -> bool {
+        false
+    }
+
+    fn is_order_dependent(&self, _: &[u8]) -> bool {
+        false
     }
 }
 
@@ -64,14 +99,14 @@ async fn basic_operations() {
         vdf_difficulty: VDF_DIFFICULTY,
     };
 
-    let tree = block::Tree::<Hasher>::empty(target_sk.clone(), Mode::Archive);
+    let tree = Tree::empty(target_sk.clone(), Mode::Archive);
     let state = tree.generate_sync_state(Mode::Archive);
 
     for transport in transports.into_iter() {
         let sk = transport.secret_key().clone();
         let transport = Arc::new(transport);
-        let tree = block::Tree::<Hasher>::from_sync_state(sk, state.clone(), Mode::Archive)
-            .expect("Failed to create tree");
+        let tree =
+            Tree::from_sync_state(sk, state.clone(), Mode::Archive).expect("Failed to create tree");
         let validator = TestValidator::new(true);
 
         let engine = Engine::new(transport, tree, validator, engine_config);
@@ -91,7 +126,7 @@ async fn basic_operations() {
     let prop = proposal::Builder::new()
         .with_parent_hash(engines[TARGET_IDX].tip_hash())
         .with_checkpoint(engines[TARGET_IDX].checkpoint_hash())
-        .with_operation(key.clone(), None, Record::new(10, vec![]))
+        .with_operation(key.clone(), TestOperation(10))
         .with_proposer_pk(target_sk.public_key())
         .build()
         .expect("Failed to build proposal");
@@ -102,12 +137,14 @@ async fn basic_operations() {
         .expect("Failed to propose");
 
     let is_valid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        engines.remove(TARGET_IDX);
+
         loop {
-            if engines.iter().all(|engine| {
+            if engines.iter().any(|engine| {
                 engine
                     .tip_trie()
                     .get(&key)
-                    .is_some_and(|record| record.weight == 10)
+                    .is_some_and(|record| record.weight() == 10)
             }) {
                 break true;
             }

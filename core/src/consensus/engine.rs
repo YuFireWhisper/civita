@@ -12,7 +12,7 @@ use crate::{
             tree::{Mode, SyncState, Tree},
             Block,
         },
-        proposal::{self, Operation, Proposal},
+        proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash, PublicKey, SecretKey},
     network::{
@@ -20,7 +20,7 @@ use crate::{
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    utils::trie::{Record, Trie},
+    utils::{trie::Trie, Operation, Record},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -36,14 +36,15 @@ pub enum Error {
 }
 
 pub trait Validator: Sync + Send + 'static {
-    fn validate_proposal<'a, I>(
+    fn validate_proposal<'a, I, T>(
         &self,
         opt_iter: I,
         propoer_pk: &PublicKey,
         metadata: Option<&[u8]>,
     ) -> bool
     where
-        I: IntoIterator<Item = &'a Operation>;
+        I: IntoIterator<Item = &'a T>,
+        T: Operation + 'a;
 }
 
 #[derive(Clone, Copy)]
@@ -55,24 +56,24 @@ pub struct Config {
     pub vdf_difficulty: u64,
 }
 
-pub struct Engine<H: Hasher, V> {
+pub struct Engine<H: Hasher, V, T: Record> {
     transport: Arc<Transport>,
     gossipsub: Arc<Gossipsub>,
     request_response: Arc<RequestResponse>,
     proposal_topic: u8,
     block_topic: u8,
     req_resp_topic: u8,
-    block_tree: Tree<H>,
+    block_tree: Tree<H, T>,
     sk: SecretKey,
     vdf: WesolowskiVDF,
     vdf_difficulty: u64,
     validator: V,
 }
 
-impl<H: Hasher, V: Validator> Engine<H, V> {
+impl<H: Hasher, V: Validator, T: Record> Engine<H, V, T> {
     pub fn new(
         transport: Arc<Transport>,
-        block_tree: Tree<H>,
+        block_tree: Tree<H, T>,
         validator: V,
         config: Config,
     ) -> Self {
@@ -97,7 +98,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         }
     }
 
-    pub async fn propose(&self, prop: Proposal) -> Result<()> {
+    pub async fn propose(&self, prop: Proposal<T>) -> Result<()> {
         let witness = prop.generate_witness(
             &self.sk,
             &self.block_tree.tip_trie(),
@@ -198,7 +199,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         self.verify_proposal(prop.clone(), witness, source).await;
     }
 
-    async fn verify_proposal(&self, prop: Proposal, witness: proposal::Witness, source: PeerId) {
+    async fn verify_proposal(&self, prop: Proposal<T>, witness: proposal::Witness, source: PeerId) {
         if !prop.verify_signature::<H>(&witness) {
             self.disconnect_peer(source).await;
             return;
@@ -249,7 +250,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         self.verify_block(block, witness, source).await;
     }
 
-    async fn verify_block(&self, block: Block, witness: block::Witness, source: PeerId) {
+    async fn verify_block(&self, block: Block<T>, witness: block::Witness, source: PeerId) {
         if !block.verify_signature::<H>(&witness) {
             self.disconnect_peer(source).await;
             return;
@@ -317,7 +318,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         }
     }
 
-    pub fn get_self_record(&self) -> Record {
+    pub fn get_self_record(&self) -> T {
         let key = self.sk.public_key().to_hash::<H>().to_bytes();
         self.block_tree.tip_trie().get(&key).unwrap_or_default()
     }
@@ -326,7 +327,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         self.block_tree.tip_hash()
     }
 
-    pub fn tip_trie(&self) -> Trie<H> {
+    pub fn tip_trie(&self) -> Trie<H, T> {
         self.block_tree.tip_trie()
     }
 
@@ -334,7 +335,7 @@ impl<H: Hasher, V: Validator> Engine<H, V> {
         self.block_tree.checkpoint_hash()
     }
 
-    pub fn generate_sync_state(&self, mode: Mode) -> SyncState {
+    pub fn generate_sync_state(&self, mode: Mode) -> SyncState<T> {
         self.block_tree.generate_sync_state(mode)
     }
 }

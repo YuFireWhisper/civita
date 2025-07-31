@@ -19,7 +19,7 @@ use crate::{
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash, SecretKey},
-    utils::trie::Trie,
+    utils::{trie::Trie, Record},
 };
 
 mod checkpoint;
@@ -36,9 +36,9 @@ pub struct ProcessResult {
 
 #[derive(Clone)]
 #[derive(Serialize)]
-pub enum SyncState {
-    Archive(Box<Vec<Vec<EstablishedBlock>>>),
-    Normal(Box<checkpoint::Summary>),
+pub enum SyncState<T: Record> {
+    Archive(Box<Vec<Vec<EstablishedBlock<T>>>>),
+    Normal(Box<checkpoint::Summary<T>>),
 }
 
 #[derive(Serialize)]
@@ -47,10 +47,10 @@ pub enum Mode {
     Normal(Vec<Vec<u8>>),
 }
 
-pub struct Tree<H: Hasher> {
+pub struct Tree<H: Hasher, T: Record> {
     sk: SecretKey,
-    checkpoint: ParkingRwLock<Checkpoint<H>>,
-    history: ParkingRwLock<Vec<Vec<EstablishedBlock>>>,
+    checkpoint: ParkingRwLock<Checkpoint<H, T>>,
+    history: ParkingRwLock<Vec<Vec<EstablishedBlock<T>>>>,
     sources: DashMap<Multihash, PeerId>,
     mode: Arc<Mode>,
 }
@@ -114,13 +114,13 @@ impl Mode {
     }
 }
 
-impl<H: Hasher> Tree<H> {
+impl<H: Hasher, T: Record> Tree<H, T> {
     pub fn empty(sk: SecretKey, mode: Mode) -> Self {
         let root_block = block::Builder::new()
             .with_parent_hash(Multihash::default())
             .with_checkpoint(Multihash::default())
             .with_proposer_pk(sk.public_key())
-            .with_proposer_weight(0)
+            .with_proposer_weight(Default::default())
             .build();
 
         let sig = sk.sign(&root_block.hash::<H>().to_bytes());
@@ -144,7 +144,7 @@ impl<H: Hasher> Tree<H> {
         }
     }
 
-    pub fn from_sync_state(sk: SecretKey, sync_state: SyncState, mode: Mode) -> Option<Self> {
+    pub fn from_sync_state(sk: SecretKey, sync_state: SyncState<T>, mode: Mode) -> Option<Self> {
         let mode = Arc::new(mode);
 
         match sync_state {
@@ -184,7 +184,7 @@ impl<H: Hasher> Tree<H> {
 
     pub fn update_block(
         &self,
-        block: Block,
+        block: Block<T>,
         witness: block::Witness,
         source: PeerId,
     ) -> ProcessResult {
@@ -205,7 +205,7 @@ impl<H: Hasher> Tree<H> {
         self.checkpoint.read().root_hash()
     }
 
-    fn process_result(&self, mut result: UpdateResult<H>) -> ProcessResult {
+    fn process_result(&self, mut result: UpdateResult<H, T>) -> ProcessResult {
         if let Some(block) = result.new_checkpoint {
             let original = {
                 let mut o = self.checkpoint.write();
@@ -240,7 +240,7 @@ impl<H: Hasher> Tree<H> {
 
     pub fn update_proposal(
         &self,
-        proposal: Proposal,
+        proposal: Proposal<T>,
         witness: proposal::Witness,
         source: PeerId,
     ) -> ProcessResult {
@@ -259,7 +259,7 @@ impl<H: Hasher> Tree<H> {
         self.process_result(result)
     }
 
-    pub fn tip_trie(&self) -> Trie<H> {
+    pub fn tip_trie(&self) -> Trie<H, T> {
         self.checkpoint.read().tip_trie()
     }
 
@@ -271,7 +271,7 @@ impl<H: Hasher> Tree<H> {
         &self,
         parent: Multihash,
         vdf_proof: Vec<u8>,
-    ) -> Option<(Block, block::Witness)> {
+    ) -> Option<(Block<T>, block::Witness)> {
         let (ids, trie) = {
             let checkpoint = self.checkpoint.read();
             let dag = checkpoint.get_proposal_dag(parent)?;
@@ -288,7 +288,7 @@ impl<H: Hasher> Tree<H> {
 
         let weight = {
             let key = pk_hash.to_bytes();
-            trie.get(&key).map_or(0, |r| r.weight)
+            trie.get(&key).map_or_else(Default::default, |r| r.weight())
         };
 
         let block = block::Builder::new()
@@ -311,7 +311,7 @@ impl<H: Hasher> Tree<H> {
         Some((block, witness))
     }
 
-    pub fn get_proposals<I>(&self, ids: I) -> Vec<(Proposal, proposal::Witness)>
+    pub fn get_proposals<I>(&self, ids: I) -> Vec<(Proposal<T>, proposal::Witness)>
     where
         I: IntoIterator<Item = Multihash>,
     {
@@ -339,7 +339,7 @@ impl<H: Hasher> Tree<H> {
         proposals
     }
 
-    pub fn generate_sync_state(&self, mode: Mode) -> SyncState {
+    pub fn generate_sync_state(&self, mode: Mode) -> SyncState<T> {
         assert!(self.mode.is_archive());
 
         let checkpoint = self.checkpoint.read();
@@ -361,20 +361,56 @@ mod tests {
     use crate::{
         consensus::{block, proposal},
         crypto::SecretKey,
+        utils::Operation,
     };
     use libp2p::PeerId;
     use vdf::VDFParams;
 
     type TestHasher = sha2::Sha256;
+    type TestTree = Tree<TestHasher, TestRecord>;
 
     const VDF_PARAMS: vdf::WesolowskiVDFParams = vdf::WesolowskiVDFParams(1024);
     const VDF_DIFFICULTY: u64 = 1;
+
+    #[derive(Clone)]
+    #[derive(Eq, PartialEq)]
+    #[derive(Serialize)]
+    struct TestOperation;
+
+    #[derive(Clone)]
+    #[derive(Default)]
+    #[derive(Eq, PartialEq)]
+    #[derive(Serialize)]
+    struct TestRecord;
+
+    impl Record for TestRecord {
+        type Operation = TestOperation;
+        type Weight = u64;
+
+        fn apply(&mut self, _: Self::Operation) -> bool {
+            true
+        }
+
+        fn weight(&self) -> Self::Weight {
+            0
+        }
+    }
+
+    impl Operation for TestOperation {
+        fn is_empty(&self) -> bool {
+            false
+        }
+
+        fn is_order_dependent(&self, _: &[u8]) -> bool {
+            false
+        }
+    }
 
     #[test]
     fn update_proposal() {
         let sk = SecretKey::random();
         let pk = sk.public_key();
-        let tree = Tree::<TestHasher>::empty(sk.clone(), Mode::Archive);
+        let tree = TestTree::empty(sk.clone(), Mode::Archive);
 
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())
@@ -404,7 +440,7 @@ mod tests {
     fn update_block() {
         let sk = SecretKey::random();
         let pk = sk.public_key();
-        let tree = Tree::<TestHasher>::empty(sk, Mode::Archive);
+        let tree = TestTree::empty(sk, Mode::Archive);
 
         let prop = proposal::Builder::new()
             .with_parent_hash(tree.tip_hash())

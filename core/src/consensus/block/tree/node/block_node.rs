@@ -12,59 +12,53 @@ use parking_lot::RwLock as ParkingRwLock;
 use crate::{
     consensus::block::{
         self,
-        tree::{
-            dag::Node,
-            node::{AtomicWeight, ProposalNode},
-            Mode,
-        },
+        tree::{dag::Node, node::ProposalNode, Mode},
         Block,
     },
     crypto::{Hasher, Multihash},
-    utils::trie::{Trie, Weight},
+    utils::{trie::Trie, Record},
 };
 
 #[derive(Clone)]
 #[derive(Serialize)]
-pub struct SerializedBlockNode {
-    pub block: Block,
+pub struct SerializedBlockNode<T: Record> {
+    pub block: Block<T>,
     pub witness: block::Witness,
     pub trie_root: Multihash,
     pub trie_guide: HashMap<Multihash, Vec<u8>>,
     pub height: u64,
-    pub weight: Weight,
-    pub cumulative_weight: Weight,
+    pub weight: T::Weight,
+    pub cumulative_weight: T::Weight,
 }
 
-pub struct BlockNode<H> {
-    pub block: Block,
+pub struct BlockNode<H, T: Record> {
+    pub block: Block<T>,
     pub witness: block::Witness,
-    pub trie: ParkingRwLock<Trie<H>>,
+    pub trie: ParkingRwLock<Trie<H, T>>,
     pub height: AtomicU64,
-    pub weight: AtomicWeight,
-    pub cumulative_weight: AtomicWeight,
+    pub weight: ParkingRwLock<T::Weight>,
+    pub cumulative_weight: ParkingRwLock<T::Weight>,
     pub mode: Arc<Mode>,
     pub finalized: AtomicBool,
 }
 
-impl<H: Hasher> BlockNode<H> {
-    pub fn new(block: Block, witness: block::Witness, mode: Arc<Mode>) -> Self {
+impl<H: Hasher, T: Record> BlockNode<H, T> {
+    pub fn new(block: Block<T>, witness: block::Witness, mode: Arc<Mode>) -> Self {
         let trie = Trie::empty();
-        let weight = AtomicWeight::default();
-        let cumulative_weight = AtomicWeight::default();
 
         Self {
             block,
             witness,
             trie: ParkingRwLock::new(trie),
-            height: AtomicU64::new(0),
-            weight,
-            cumulative_weight,
             mode,
-            finalized: AtomicBool::new(false),
+            height: Default::default(),
+            weight: Default::default(),
+            cumulative_weight: Default::default(),
+            finalized: Default::default(),
         }
     }
 
-    pub fn from_serialized(serialized: SerializedBlockNode, mode: Arc<Mode>) -> Option<Self> {
+    pub fn from_serialized(serialized: SerializedBlockNode<T>, mode: Arc<Mode>) -> Option<Self> {
         let keys = match mode.as_ref() {
             Mode::Normal(keys) => keys,
             _ => panic!("Cannot create BlockNode from serialized data in non-normal mode"),
@@ -75,8 +69,8 @@ impl<H: Hasher> BlockNode<H> {
             return None;
         }
 
-        let weight = AtomicWeight::new(serialized.weight);
-        let cumulative_weight = AtomicWeight::new(serialized.cumulative_weight);
+        let weight = ParkingRwLock::new(serialized.weight);
+        let cumulative_weight = ParkingRwLock::new(serialized.cumulative_weight);
 
         Some(Self {
             block: serialized.block,
@@ -94,7 +88,7 @@ impl<H: Hasher> BlockNode<H> {
         self.block.hash::<H>()
     }
 
-    pub fn on_block_parent_valid(&self, parent: &BlockNode<H>) -> bool {
+    pub fn on_block_parent_valid(&self, parent: &Self) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
 
         if self.finalized.load(Relaxed) {
@@ -111,29 +105,29 @@ impl<H: Hasher> BlockNode<H> {
         }
 
         let height = parent.height.load(Relaxed).wrapping_add(1);
-        let cumulative_weight = parent.cumulative_weight.load(Relaxed) + self.block.proposer_weight;
+
+        let cumulative_weight = *parent.cumulative_weight.read() + self.block.proposer_weight;
 
         *self.trie.write() = parent_trie.clone();
-
+        *self.weight.write() = self.block.proposer_weight;
+        *self.cumulative_weight.write() = cumulative_weight;
         self.height.store(height, Relaxed);
-        self.weight.store(self.block.proposer_weight, Relaxed);
-        self.cumulative_weight.store(cumulative_weight, Relaxed);
 
         true
     }
 
-    pub fn on_proposal_parent_valid(&self, parent: &ProposalNode) -> bool {
+    pub fn on_proposal_parent_valid(&self, parent: &ProposalNode<T>) -> bool {
         let prop = &parent.proposal;
         let witness = &parent.witness;
-        let weight = parent.proposer_weight.load(Ordering::Relaxed);
+        let weight = *parent.proposer_weight.read();
 
         {
             let mut trie = self.trie.write();
             prop.apply_operations(&mut trie, witness);
         }
 
-        self.weight.fetch_add(weight, Ordering::Relaxed);
-        self.cumulative_weight.fetch_add(weight, Ordering::Relaxed);
+        *self.weight.write() += weight;
+        *self.cumulative_weight.write() += weight;
 
         true
     }
@@ -154,10 +148,10 @@ impl<H: Hasher> BlockNode<H> {
         self.trie.read().root_hash()
     }
 
-    pub fn to_serialized<'a, I, T>(&self, keys: I) -> Option<SerializedBlockNode>
+    pub fn to_serialized<'a, I, U>(&self, keys: I) -> Option<SerializedBlockNode<T>>
     where
-        I: IntoIterator<Item = T>,
-        T: AsRef<[u8]> + 'a,
+        I: IntoIterator<Item = U>,
+        U: AsRef<[u8]> + 'a,
     {
         use std::sync::atomic::Ordering::Relaxed;
 
@@ -171,28 +165,28 @@ impl<H: Hasher> BlockNode<H> {
             trie_root,
             trie_guide,
             height: self.height.load(Relaxed),
-            weight: self.weight.load(Relaxed),
-            cumulative_weight: self.cumulative_weight.load(Relaxed),
+            weight: *self.weight.read(),
+            cumulative_weight: *self.cumulative_weight.read(),
         })
     }
 }
 
-impl<H> Clone for BlockNode<H> {
+impl<H, T: Record> Clone for BlockNode<H, T> {
     fn clone(&self) -> Self {
         Self {
             block: self.block.clone(),
             witness: self.witness.clone(),
             trie: ParkingRwLock::new(self.trie.read().clone()),
             height: AtomicU64::new(self.height.load(Ordering::Relaxed)),
-            weight: AtomicWeight::new(self.weight.load(Ordering::Relaxed)),
-            cumulative_weight: AtomicWeight::new(self.cumulative_weight.load(Ordering::Relaxed)),
+            weight: ParkingRwLock::new(*self.weight.read()),
+            cumulative_weight: ParkingRwLock::new(*self.cumulative_weight.read()),
             mode: self.mode.clone(),
             finalized: AtomicBool::new(self.finalized.load(Ordering::Relaxed)),
         }
     }
 }
 
-impl<H: Hasher> Node for BlockNode<H> {
+impl<H: Hasher, T: Record> Node for BlockNode<H, T> {
     type Id = Multihash;
 
     fn id(&self) -> Self::Id {
