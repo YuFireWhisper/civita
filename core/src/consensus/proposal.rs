@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::OnceLock,
 };
 
@@ -29,7 +29,7 @@ pub enum Error {}
 pub struct Proposal<T: Record> {
     pub parent: Multihash,
     pub checkpoint: Multihash,
-    pub dependencies: HashSet<Multihash>,
+    pub dependencies: BTreeSet<Multihash>,
     pub operations: BTreeMap<Vec<u8>, T::Operation>,
     pub proposer_pk: PublicKey,
     pub metadata: Option<Vec<u8>>,
@@ -52,7 +52,7 @@ pub struct Witness {
 pub struct Builder<T: Record> {
     pub parent: Option<Multihash>,
     pub checkpoint: Option<Multihash>,
-    pub dependencies: HashSet<Multihash>,
+    pub dependencies: BTreeSet<Multihash>,
     pub operations: BTreeMap<Vec<u8>, T::Operation>,
     pub proposer_pk: Option<PublicKey>,
     pub metadata: Option<Vec<u8>>,
