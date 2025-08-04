@@ -170,7 +170,7 @@ impl<H: Hasher, T: Record> Tree<H, T> {
 
     pub fn update_block(
         &self,
-        block: Block<T>,
+        block: Block,
         witness: block::Witness,
         source: PeerId,
     ) -> ProcessResult {
@@ -257,7 +257,7 @@ impl<H: Hasher, T: Record> Tree<H, T> {
         &self,
         parent: Multihash,
         vdf_proof: Vec<u8>,
-    ) -> Option<(Block<T>, block::Witness)> {
+    ) -> Option<(Block, block::Witness)> {
         let (ids, trie) = {
             let checkpoint = self.checkpoint.read();
             let dag = checkpoint.get_proposal_dag(parent)?;
@@ -272,21 +272,14 @@ impl<H: Hasher, T: Record> Tree<H, T> {
 
         let pk_hash = self.sk.public_key().to_hash::<H>();
 
-        let weight = {
-            let key = pk_hash.to_bytes();
-            trie.get(&key).map_or_else(Default::default, |r| r.weight())
-        };
-
         let block = block::Builder::new()
             .with_parent_hash(parent)
             .with_checkpoint(self.checkpoint_hash())
             .with_proposer_pk(self.sk.public_key())
-            .with_proposer_weight(weight)
             .with_proposals(ids)
             .build();
 
         let block_hash = block.hash::<H>();
-        println!("Creating block with hash: {:?}", block_hash.digest());
 
         let sig = self.sk.sign(&block_hash.to_bytes());
         let proofs = block.generate_proofs(&trie);
@@ -454,7 +447,6 @@ mod tests {
             .with_checkpoint(tree.checkpoint_hash())
             .with_proposals([hash])
             .with_proposer_pk(pk)
-            .with_proposer_weight(0)
             .build();
 
         let block_hash = block.hash::<TestHasher>();

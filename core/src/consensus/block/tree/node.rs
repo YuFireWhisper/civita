@@ -30,7 +30,7 @@ pub enum UnifiedNode<H, T: Record> {
 }
 
 impl<H: Hasher, T: Record> UnifiedNode<H, T> {
-    pub fn new_block(block: Block<T>, witness: block::Witness, mode: Arc<Mode>) -> Self {
+    pub fn new_block(block: Block, witness: block::Witness, mode: Arc<Mode>) -> Self {
         UnifiedNode::Block(BlockNode::new(block, witness, mode))
     }
 

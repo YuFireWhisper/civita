@@ -23,7 +23,7 @@ use crate::{
 #[derive(Clone)]
 #[derive(Serialize)]
 pub struct SerializedBlockNode<T: Record> {
-    pub block: Block<T>,
+    pub block: Block,
     pub witness: block::Witness,
     pub trie_root: Multihash,
     pub trie_guide: HashMap<Multihash, Vec<u8>>,
@@ -33,7 +33,7 @@ pub struct SerializedBlockNode<T: Record> {
 }
 
 pub struct BlockNode<H, T: Record> {
-    pub block: Block<T>,
+    pub block: Block,
     pub witness: block::Witness,
     pub trie: ParkingRwLock<Trie<H, T>>,
     pub height: AtomicU64,
@@ -48,7 +48,7 @@ pub struct BlockNode<H, T: Record> {
 }
 
 impl<H: Hasher, T: Record> BlockNode<H, T> {
-    pub fn new(block: Block<T>, witness: block::Witness, mode: Arc<Mode>) -> Self {
+    pub fn new(block: Block, witness: block::Witness, mode: Arc<Mode>) -> Self {
         let trie = Trie::empty();
 
         Self {
@@ -113,22 +113,14 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
             return false;
         }
 
-        if self.block.proposer_weight
-            != trie
-                .get(&pk_hash)
-                .map(|record| record.weight())
-                .unwrap_or_default()
-        {
-            return false;
-        }
-
         let height = parent.height.load(Relaxed).wrapping_add(1);
-        let cumulative_weight = *parent.cumulative_weight.read() + self.block.proposer_weight;
+        let weight = self.block.get_proposer_weight(&trie);
+        let cumulative_weight = *parent.cumulative_weight.read() + weight;
 
-        *self.trie.write() = trie;
-        *self.weight.write() += self.block.proposer_weight;
-        *self.cumulative_weight.write() += cumulative_weight;
         self.height.store(height, Relaxed);
+        *self.trie.write() = trie;
+        *self.weight.write() += weight;
+        *self.cumulative_weight.write() += cumulative_weight;
 
         true
     }

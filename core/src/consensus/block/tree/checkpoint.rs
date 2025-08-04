@@ -46,7 +46,7 @@ pub struct UpdateResult<H, T: Record> {
 #[derive(Clone)]
 #[derive(Serialize)]
 pub struct EstablishedBlock<T: Record> {
-    pub block: Block<T>,
+    pub block: Block,
     pub witness: block::Witness,
     pub proposals: Vec<(Proposal<T>, proposal::Witness)>,
 }
@@ -185,7 +185,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         Some(checkpoint)
     }
 
-    pub fn update_block(&mut self, block: Block<T>, witness: block::Witness) -> UpdateResult<H, T> {
+    pub fn update_block(&mut self, block: Block, witness: block::Witness) -> UpdateResult<H, T> {
         let hash = block.hash::<H>();
 
         let mut result = UpdateResult::new();
@@ -211,7 +211,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
     fn upsert_block_to_proposal_dag(
         &mut self,
-        block: Block<T>,
+        block: Block,
         witness: block::Witness,
         result: &mut UpdateResult<H, T>,
     ) -> ValidationResult<UnifiedNode<H, T>> {
@@ -223,7 +223,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
     fn generate_block_parents(
         &mut self,
-        block: &Block<T>,
+        block: &Block,
         result: &mut UpdateResult<H, T>,
     ) -> Vec<Multihash> {
         let mut parents = Vec::with_capacity(block.proposals.len());

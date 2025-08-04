@@ -250,7 +250,7 @@ impl<H: Hasher, V: Validator, T: Record> Engine<H, V, T> {
         self.verify_block(block, witness, source).await;
     }
 
-    async fn verify_block(&self, block: Block<T>, witness: block::Witness, source: PeerId) {
+    async fn verify_block(&self, block: Block, witness: block::Witness, source: PeerId) {
         if !block.verify_signature::<H>(&witness) {
             self.disconnect_peer(source).await;
             return;
