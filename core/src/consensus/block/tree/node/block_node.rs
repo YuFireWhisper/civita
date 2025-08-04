@@ -221,6 +221,10 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
             cumulative_weight: *self.cumulative_weight.read(),
         })
     }
+
+    pub fn trie_clone(&self) -> Trie<H, T> {
+        self.trie.read().clone()
+    }
 }
 
 impl<H, T: Record> Clone for BlockNode<H, T> {
