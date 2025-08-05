@@ -14,13 +14,13 @@ use crate::{
         },
         proposal::{self, Proposal},
     },
-    crypto::{Hasher, Multihash, PublicKey, SecretKey},
+    crypto::{Hasher, Multihash, SecretKey},
     network::{
         gossipsub,
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    utils::{trie::Trie, Operation, Record},
+    utils::{trie::Trie, Record},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -35,18 +35,6 @@ pub enum Error {
     Proposal(#[from] proposal::Error),
 }
 
-pub trait Validator: Sync + Send + 'static {
-    fn validate_proposal<'a, I, T>(
-        &self,
-        opt_iter: I,
-        propoer_pk: &PublicKey,
-        metadata: Option<&[u8]>,
-    ) -> bool
-    where
-        I: IntoIterator<Item = &'a T>,
-        T: Operation + 'a;
-}
-
 #[derive(Clone, Copy)]
 pub struct Config {
     pub proposal_topic: u8,
@@ -56,7 +44,7 @@ pub struct Config {
     pub vdf_difficulty: u64,
 }
 
-pub struct Engine<H: Hasher, V, T: Record> {
+pub struct Engine<H: Hasher, T: Record> {
     transport: Arc<Transport>,
     gossipsub: Arc<Gossipsub>,
     request_response: Arc<RequestResponse>,
@@ -67,16 +55,10 @@ pub struct Engine<H: Hasher, V, T: Record> {
     sk: SecretKey,
     vdf: WesolowskiVDF,
     vdf_difficulty: u64,
-    validator: V,
 }
 
-impl<H: Hasher, V: Validator, T: Record> Engine<H, V, T> {
-    pub fn new(
-        transport: Arc<Transport>,
-        block_tree: Tree<H, T>,
-        validator: V,
-        config: Config,
-    ) -> Self {
+impl<H: Hasher, T: Record> Engine<H, T> {
+    pub fn new(transport: Arc<Transport>, block_tree: Tree<H, T>, config: Config) -> Self {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let sk = transport.secret_key().clone();
@@ -94,7 +76,6 @@ impl<H: Hasher, V: Validator, T: Record> Engine<H, V, T> {
             sk,
             vdf,
             vdf_difficulty,
-            validator,
         }
     }
 
@@ -206,15 +187,6 @@ impl<H: Hasher, V: Validator, T: Record> Engine<H, V, T> {
         }
 
         if !prop.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
-            self.disconnect_peer(source).await;
-            return;
-        }
-
-        if !self.validator.validate_proposal(
-            prop.operations.values(),
-            &prop.proposer_pk,
-            prop.metadata.as_deref(),
-        ) {
             self.disconnect_peer(source).await;
             return;
         }

@@ -10,7 +10,6 @@ use crate::{
             self,
             tree::{Mode, SyncState},
         },
-        engine::Validator,
     },
     crypto::Hasher,
     network::{request_response, Transport},
@@ -57,17 +56,13 @@ pub struct Config {
     bootstrap_timeout: tokio::time::Duration,
 }
 
-pub struct Resident<H: Hasher, V, T: Record> {
+pub struct Resident<H: Hasher, T: Record> {
     transport: Arc<Transport>,
-    engine: Arc<consensus::Engine<H, V, T>>,
+    engine: Arc<consensus::Engine<H, T>>,
 }
 
-impl<H: Hasher, V: Validator, T: Record> Resident<H, V, T> {
-    pub async fn new(
-        transport: Arc<Transport>,
-        validator: V,
-        mut config: Config,
-    ) -> Result<Arc<Self>> {
+impl<H: Hasher, T: Record> Resident<H, T> {
+    pub async fn new(transport: Arc<Transport>, mut config: Config) -> Result<Arc<Self>> {
         let is_archive = config.mode.is_archive();
 
         let tree = Self::bootstrap(transport.clone(), &mut config).await?;
@@ -83,7 +78,6 @@ impl<H: Hasher, V: Validator, T: Record> Resident<H, V, T> {
         let consensus_engine = Arc::new(consensus::Engine::new(
             transport.clone(),
             tree,
-            validator,
             engine_config,
         ));
 

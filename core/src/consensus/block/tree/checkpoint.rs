@@ -355,6 +355,8 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     fn handle_block_in_dag_validated(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
         use std::sync::atomic::Ordering::Relaxed;
 
+        result.add_validated(hash);
+
         if self.state.tip_hash == Multihash::default() {
             // First block in the DAG
             self.state.tip_hash = hash;
@@ -514,15 +516,15 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         self.state.proposal_dags.get(&hash)
     }
 
-    pub fn parent_trie(&self, parent: &Multihash) -> Option<Trie<H, T>> {
-        (!self.state.block_dag.is_empty())
-            .then_some(
-                self.state
-                    .block_dag
-                    .get(parent)
-                    .map(|node| node.trie_clone()),
-            )
-            .flatten()
+    pub fn get_trie(&self, parent: &Multihash) -> Option<Trie<H, T>> {
+        if self.state.block_dag.is_empty() {
+            return Some(Default::default());
+        }
+
+        self.state
+            .block_dag
+            .get(parent)
+            .map(|node| node.trie_clone())
     }
 
     pub fn into_blocks(mut self) -> Vec<EstablishedBlock<T>> {

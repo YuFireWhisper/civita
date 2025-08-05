@@ -262,7 +262,7 @@ impl<H: Hasher, T: Record> Tree<H, T> {
             let checkpoint = self.checkpoint.read();
             let dag = checkpoint.get_proposal_dag(parent)?;
             let ids = dag.get_leaf_nodes();
-            let trie = checkpoint.parent_trie(&parent)?;
+            let trie = checkpoint.get_trie(&parent)?;
             (ids, trie)
         };
 

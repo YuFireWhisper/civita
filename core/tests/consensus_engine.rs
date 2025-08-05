@@ -4,10 +4,8 @@ use civita_core::{
     self,
     consensus::{
         block::{self, tree::Mode},
-        engine::Validator,
         proposal, Engine,
     },
-    crypto::PublicKey,
     utils::{Operation, Record},
 };
 use civita_serialize_derive::Serialize;
@@ -20,10 +18,6 @@ type Tree = block::Tree<Hasher, TestRecord>;
 const VDF_PARAMS: u16 = 1024;
 const VDF_DIFFICULTY: u64 = 1;
 
-struct TestValidator {
-    valid: bool,
-}
-
 #[derive(Clone)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
@@ -35,22 +29,6 @@ pub struct TestOperation(pub u64);
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct TestRecord(pub u64);
-
-impl TestValidator {
-    fn new(valid: bool) -> Self {
-        Self { valid }
-    }
-}
-
-impl Validator for TestValidator {
-    fn validate_proposal<'a, I, T>(&self, _: I, _: &PublicKey, _: Option<&[u8]>) -> bool
-    where
-        I: IntoIterator<Item = &'a T>,
-        T: Operation + 'a,
-    {
-        self.valid
-    }
-}
 
 impl Record for TestRecord {
     type Weight = u64;
@@ -107,9 +85,8 @@ async fn basic_operations() {
         let transport = Arc::new(transport);
         let tree =
             Tree::from_sync_state(sk, state.clone(), Mode::Archive).expect("Failed to create tree");
-        let validator = TestValidator::new(true);
 
-        let engine = Engine::new(transport, tree, validator, engine_config);
+        let engine = Engine::new(transport, tree, engine_config);
         let engine = Arc::new(engine);
 
         tokio::spawn({
@@ -156,5 +133,5 @@ async fn basic_operations() {
     .await
     .unwrap_or(false);
 
-    assert!(is_valid, "All engines should have the same record");
+    assert!(is_valid, "Proposal was not applied by all engines");
 }
