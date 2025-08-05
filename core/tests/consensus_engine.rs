@@ -56,7 +56,7 @@ impl Record for TestRecord {
     type Weight = u64;
     type Operation = TestOperation;
 
-    fn apply(&mut self, operation: Self::Operation) -> bool {
+    fn try_apply(&mut self, operation: Self::Operation) -> bool {
         self.0 += operation.0;
         true
     }

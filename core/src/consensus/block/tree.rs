@@ -369,7 +369,7 @@ mod tests {
         type Operation = TestOperation;
         type Weight = u64;
 
-        fn apply(&mut self, _: Self::Operation) -> bool {
+        fn try_apply(&mut self, _: Self::Operation) -> bool {
             true
         }
 

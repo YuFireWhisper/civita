@@ -160,14 +160,14 @@ impl<H: Hasher, T: Record> Trie<H, T> {
             match taken_node {
                 Node::Empty => {
                     let mut record = T::default();
-                    record.apply(operation);
+                    record.try_apply(operation);
                     *cur_node = Node::new_short(key_path.to_vec(), Node::new_value(record));
                     dirty = true;
                     break;
                 }
                 Node::Value(mut val) => {
                     if key_path.is_empty() {
-                        if val.record.apply(operation) {
+                        if val.record.try_apply(operation) {
                             dirty = true;
                         }
                         *cur_node = Node::Value(val);
@@ -179,7 +179,7 @@ impl<H: Hasher, T: Record> Trie<H, T> {
                         full.children[16] = Node::Value(val);
                         let idx = key_path[0] as usize;
                         let mut record = T::default();
-                        record.apply(operation);
+                        record.try_apply(operation);
                         let short =
                             Node::new_short(key_path[1..].to_vec(), Node::new_value(record));
                         full.children[idx] = short;
@@ -215,7 +215,7 @@ impl<H: Hasher, T: Record> Trie<H, T> {
 
                     {
                         let mut record = T::default();
-                        record.apply(operation);
+                        record.try_apply(operation);
 
                         let idx = key_path[match_len] as usize;
                         let remaining = key_path[match_len + 1..].to_vec();
@@ -235,10 +235,10 @@ impl<H: Hasher, T: Record> Trie<H, T> {
                 Node::Full(mut full) => {
                     if key_path.is_empty() {
                         if let Node::Value(ref mut val) = &mut full.children[16] {
-                            dirty = val.record.apply(operation);
+                            dirty = val.record.try_apply(operation);
                         } else {
                             let mut record = T::default();
-                            record.apply(operation);
+                            record.try_apply(operation);
                             full.children[16] = Node::new_value(record);
                             dirty = true;
                         }
@@ -563,7 +563,7 @@ mod tests {
         type Operation = u64;
         type Weight = u64;
 
-        fn apply(&mut self, operation: Self::Operation) -> bool {
+        fn try_apply(&mut self, operation: Self::Operation) -> bool {
             *self += operation;
             true
         }

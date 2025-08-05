@@ -36,7 +36,7 @@ pub trait Record:
     type Operation: Operation;
 
     fn weight(&self) -> Self::Weight;
-    fn apply(&mut self, operation: Self::Operation) -> bool;
+    fn try_apply(&mut self, operation: Self::Operation) -> bool;
 }
 
 impl Weight for u64 {
