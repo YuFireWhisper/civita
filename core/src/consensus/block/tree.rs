@@ -433,9 +433,11 @@ mod tests {
             .build()
             .expect("Failed to build proposal");
 
+        let proofs = prop.generate_proofs(&tree.tip_trie());
+
         let vdf = VDF_PARAMS.new();
         let witness = prop
-            .generate_witness(&tree.sk, &tree.tip_trie(), &vdf, VDF_DIFFICULTY)
+            .generate_witness::<TestHasher>(&tree.sk, proofs, &vdf, VDF_DIFFICULTY)
             .expect("Failed to generate witness");
 
         let hash = prop.hash::<TestHasher>();

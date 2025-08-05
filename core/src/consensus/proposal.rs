@@ -66,14 +66,13 @@ impl<T: Record> Proposal<T> {
     pub fn generate_witness<H: Hasher>(
         &self,
         sk: &SecretKey,
-        trie: &Trie<H, T>,
+        proofs: HashMap<Multihash, Vec<u8>>,
         vdf: &WesolowskiVDF,
         vdf_difficulty: u64,
     ) -> Result<Witness> {
         let hash = self.hash::<H>().to_bytes();
 
         let sig = sk.sign(&hash);
-        let proofs = self.generate_proofs::<H>(trie);
         let vdf_proof = vdf
             .solve(&hash, vdf_difficulty)
             .expect("VDF proof should be valid");

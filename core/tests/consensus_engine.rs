@@ -131,8 +131,10 @@ async fn basic_operations() {
         .build()
         .expect("Failed to build proposal");
 
+    let proofs = prop.generate_proofs(&engines[TARGET_IDX].tip_trie());
+
     engines[TARGET_IDX]
-        .propose(prop)
+        .propose(prop, proofs)
         .await
         .expect("Failed to propose");
 

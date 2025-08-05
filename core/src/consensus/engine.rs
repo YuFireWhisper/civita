@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use civita_serialize::Serialize;
 use libp2p::PeerId;
@@ -98,13 +98,13 @@ impl<H: Hasher, V: Validator, T: Record> Engine<H, V, T> {
         }
     }
 
-    pub async fn propose(&self, prop: Proposal<T>) -> Result<()> {
-        let witness = prop.generate_witness(
-            &self.sk,
-            &self.block_tree.tip_trie(),
-            &self.vdf,
-            self.vdf_difficulty,
-        )?;
+    pub async fn propose(
+        &self,
+        prop: Proposal<T>,
+        proofs: HashMap<Multihash, Vec<u8>>,
+    ) -> Result<()> {
+        let witness =
+            prop.generate_witness::<H>(&self.sk, proofs, &self.vdf, self.vdf_difficulty)?;
 
         let mut bytes = Vec::new();
         prop.to_writer(&mut bytes);
