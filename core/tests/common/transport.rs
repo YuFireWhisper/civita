@@ -10,7 +10,7 @@ pub async fn create_transports(n: usize) -> Vec<Transport> {
     let mut transports = Vec::with_capacity(n);
 
     for _ in 0..n {
-        let sk = SecretKey::random();
+        let sk = SecretKey::random_secp256k1();
         let listen_addr: Multiaddr = LISTEN_ADDRESS.parse().unwrap();
         let config = NetworkConfig::default();
         if let Ok(transport) = Transport::new_network(sk, listen_addr, config).await {

@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn update_proposal() {
-        let sk = SecretKey::random();
+        let sk = SecretKey::random_secp256k1();
         let pk = sk.public_key();
         let tree = TestTree::empty(sk.clone(), Mode::Archive);
 
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn update_block() {
-        let sk = SecretKey::random();
+        let sk = SecretKey::random_secp256k1();
         let pk = sk.public_key();
         let tree = TestTree::empty(sk, Mode::Archive);
 

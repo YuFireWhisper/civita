@@ -100,7 +100,7 @@ impl Ord for PublicKey {
 }
 
 impl SecretKey {
-    pub fn random() -> Self {
+    pub fn random_secp256k1() -> Self {
         SecretKey::Secp256k1(ec::SecretKey::<ark_secp256k1::Config>::random())
     }
 
