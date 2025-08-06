@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use civita_serialize_derive::Serialize;
 use dashmap::DashMap;
@@ -12,7 +12,7 @@ use crate::{
             tree::{
                 checkpoint::{Checkpoint, EstablishedBlock, UpdateResult},
                 dag::{Node, ValidationResult},
-                node::UnifiedNode,
+                node::{BlockNode, SerializedBlockNode, UnifiedNode},
             },
             Block,
         },
@@ -34,13 +34,6 @@ pub struct ProcessResult {
     pub phantoms: Vec<Multihash>,
 }
 
-#[derive(Clone)]
-#[derive(Serialize)]
-pub enum SyncState<T: Record> {
-    Archive(Box<Vec<Vec<EstablishedBlock<T>>>>),
-    Normal(Box<checkpoint::Summary<T>>),
-}
-
 #[derive(Serialize)]
 pub enum Mode {
     Archive,
@@ -50,7 +43,7 @@ pub enum Mode {
 pub struct Tree<H: Hasher, T: Record> {
     sk: SecretKey,
     checkpoint: ParkingRwLock<Checkpoint<H, T>>,
-    history: ParkingRwLock<Vec<Vec<EstablishedBlock<T>>>>,
+    history: DashMap<Multihash, HashMap<Multihash, EstablishedBlock<T>>>,
     sources: DashMap<Multihash, PeerId>,
     mode: Arc<Mode>,
 }
@@ -119,53 +112,43 @@ impl<H: Hasher, T: Record> Tree<H, T> {
         let mode = Arc::new(mode);
         let checkpoint = Checkpoint::new_empty(mode.clone());
         let checkpoint = ParkingRwLock::new(checkpoint);
-        let history = ParkingRwLock::new(Vec::new());
 
         Self {
             sk,
             checkpoint,
-            history,
-            sources: DashMap::new(),
             mode,
+            history: DashMap::new(),
+            sources: DashMap::new(),
         }
     }
 
-    pub fn from_sync_state(sk: SecretKey, sync_state: SyncState<T>, mode: Mode) -> Option<Self> {
+    pub fn from_tip(sk: SecretKey, tip: BlockNode<H, T>, mode: Mode) -> Self {
         let mode = Arc::new(mode);
+        let checkpoint = ParkingRwLock::new(Checkpoint::new(tip, mode.clone()));
 
-        match sync_state {
-            SyncState::Archive(mut history) => {
-                if !mode.is_archive() {
-                    return None;
-                }
-
-                let last = history.pop()?;
-                let checkpoint = Checkpoint::from_blocks(last)?;
-
-                Some(Self {
-                    sk,
-                    checkpoint: ParkingRwLock::new(checkpoint),
-                    history: ParkingRwLock::new(*history),
-                    sources: DashMap::new(),
-                    mode,
-                })
-            }
-            SyncState::Normal(summary) => {
-                if !mode.is_normal() {
-                    return None;
-                }
-
-                let checkpoint = Checkpoint::from_summary(*summary, mode.clone())?;
-
-                Some(Self {
-                    sk,
-                    checkpoint: ParkingRwLock::new(checkpoint),
-                    history: ParkingRwLock::new(Vec::new()),
-                    sources: DashMap::new(),
-                    mode,
-                })
-            }
+        Self {
+            sk,
+            checkpoint,
+            mode,
+            history: DashMap::new(),
+            sources: DashMap::new(),
         }
+    }
+
+    pub fn from_blocks<I>(sk: SecretKey, blocks: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = EstablishedBlock<T>>,
+    {
+        let mode = Arc::new(Mode::Archive);
+        let (checkpoint, history) = Checkpoint::from_blocks(blocks)?;
+
+        Some(Self {
+            sk,
+            checkpoint: ParkingRwLock::new(checkpoint),
+            history: history.into_iter().collect(),
+            sources: DashMap::new(),
+            mode,
+        })
     }
 
     pub fn update_block(
@@ -200,9 +183,9 @@ impl<H: Hasher, T: Record> Tree<H, T> {
             };
 
             if self.mode.is_archive() {
+                let hash = original.root_hash();
                 let blocks = original.into_blocks();
-                let mut history = self.history.write();
-                history.push(blocks);
+                self.history.insert(hash, blocks.into_iter().collect());
             }
         }
 
@@ -319,19 +302,38 @@ impl<H: Hasher, T: Record> Tree<H, T> {
         proposals
     }
 
-    pub fn generate_sync_state(&self, mode: Mode) -> SyncState<T> {
+    pub fn tip_seralized<I>(&self, keys: I) -> Option<SerializedBlockNode<T>>
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
         assert!(self.mode.is_archive());
 
         let checkpoint = self.checkpoint.read();
 
-        match &mode {
-            Mode::Archive => {
-                let mut history = self.history.read().clone();
-                history.push(checkpoint.to_blocks());
-                SyncState::Archive(history.into())
-            }
-            Mode::Normal(keys) => SyncState::Normal(checkpoint.summary(keys).into()),
+        if checkpoint.is_empty() {
+            return None;
         }
+
+        Some(
+            checkpoint
+                .tip_node()
+                .to_serialized(keys)
+                .expect("Failed to serialize tip node"),
+        )
+    }
+
+    pub fn to_blocks(&self) -> impl IntoIterator<Item = EstablishedBlock<T>> {
+        assert!(self.mode.is_archive());
+
+        let mut blocks = Vec::new();
+
+        self.history.iter().for_each(|entry| {
+            blocks.extend(entry.value().values().cloned());
+        });
+
+        blocks.extend(self.checkpoint.read().to_blocks().into_values());
+
+        blocks
     }
 }
 

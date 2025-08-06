@@ -12,7 +12,7 @@ use crate::{
             self,
             tree::{
                 dag::{Dag, ValidationResult},
-                node::{BlockNode, SerializedBlockNode, UnifiedNode},
+                node::{BlockNode, UnifiedNode},
                 Mode,
             },
             Block,
@@ -23,18 +23,14 @@ use crate::{
     utils::{trie::Trie, Record, Weight},
 };
 
+pub type Blocks<T> = HashMap<Multihash, EstablishedBlock<T>>;
+
 #[derive(Clone)]
 #[derive(Serialize)]
 pub struct EstablishedBlock<T: Record> {
     pub block: Block,
     pub witness: block::Witness,
-    pub proposals: Vec<(Proposal<T>, proposal::Witness)>,
-}
-
-#[derive(Clone)]
-#[derive(Serialize)]
-pub struct Summary<T: Record> {
-    pub block_node: Option<SerializedBlockNode<T>>,
+    pub proposals: HashMap<Multihash, (Proposal<T>, proposal::Witness)>,
 }
 
 #[derive(Derivative)]
@@ -157,6 +153,13 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         }
     }
 
+    pub fn with_root(root: BlockNode<H, T>, mode: Arc<Mode>) -> Self {
+        Self {
+            state: State::with_root(root),
+            mode,
+        }
+    }
+
     pub fn new_empty(mode: Arc<Mode>) -> Self {
         Self {
             state: State::new(),
@@ -164,45 +167,56 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         }
     }
 
-    pub fn from_summary(summary: Summary<T>, mode: Arc<Mode>) -> Option<Self> {
-        if mode.is_archive() {
-            return None;
-        }
+    pub fn from_blocks<I>(blocks: I) -> Option<(Self, HashMap<Multihash, Blocks<T>>)>
+    where
+        I: IntoIterator<Item = EstablishedBlock<T>>,
+    {
+        let mode = Arc::new(Mode::Archive);
 
-        let block_node = summary.block_node?;
-        let tip = BlockNode::from_serialized(block_node, mode.clone())?;
+        let mut unests = HashMap::new();
+        let mut ests = HashMap::new();
 
-        Some(Self::new(tip, mode))
-    }
+        blocks.into_iter().all(|block| {
+            let checkpoint_hash = block.block.checkpoint;
 
-    pub fn from_blocks(blocks: Vec<EstablishedBlock<T>>) -> Option<Self> {
-        let mut checkpoint = Self::new_empty(Arc::new(Mode::Archive));
-
-        let valid = blocks.into_iter().all(|block| {
-            let valid = block
-                .proposals
-                .into_iter()
-                .all(|(p, w)| checkpoint.update_proposal(p, w).invalidated.is_empty());
-
-            if !valid {
+            if ests.contains_key(&checkpoint_hash) {
                 return false;
             }
 
-            let hash = block.block.hash::<H>();
+            let checkpoint = unests
+                .entry(checkpoint_hash)
+                .or_insert_with(|| Checkpoint::<H, T>::new_empty(mode.clone()));
+
+            if block
+                .proposals
+                .into_values()
+                .any(|(p, w)| !checkpoint.update_proposal(p, w).invalidated.is_empty())
+            {
+                return false;
+            }
+
             let res = checkpoint.update_block(block.block, block.witness);
 
-            if !res.invalidated.is_empty() || !res.validated.contains(&hash) {
+            if !res.invalidated.is_empty() {
                 return false;
+            }
+
+            if let Some(n) = res.new_checkpoint {
+                let tmp = unests
+                    .remove(&checkpoint_hash)
+                    .expect("Checkpoint should exist");
+                ests.insert(checkpoint_hash, tmp.into_blocks());
+                unests.insert(n.id(), Checkpoint::with_root(n, mode.clone()));
             }
 
             true
         });
 
-        if !valid {
-            return None;
+        match unests.len() {
+            0 => Some((Checkpoint::new_empty(mode), ests)),
+            1 => Some((unests.into_values().next().unwrap(), ests)),
+            _ => None,
         }
-
-        Some(checkpoint)
     }
 
     pub fn update_block(&mut self, block: Block, witness: block::Witness) -> UpdateResult<H, T> {
@@ -360,6 +374,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         if self.state.tip_hash == Multihash::default() {
             // First block in the DAG
             self.state.tip_hash = hash;
+            self.state.root_hash = hash;
             return;
         }
 
@@ -493,7 +508,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             .collect::<Vec<_>>()
     }
 
-    fn tip_node(&self) -> &BlockNode<H, T> {
+    pub fn tip_node(&self) -> &BlockNode<H, T> {
+        assert!(
+            !self.state.block_dag.is_empty(),
+            "Block DAG should not be empty"
+        );
+
         self.state
             .block_dag
             .get(&self.state.tip_hash)
@@ -527,20 +547,20 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             .map(|node| node.trie_clone())
     }
 
-    pub fn into_blocks(mut self) -> Vec<EstablishedBlock<T>> {
+    pub fn into_blocks(mut self) -> Blocks<T> {
         assert!(self.mode.is_archive());
 
         if self.state.block_dag.is_empty() {
-            return Vec::new();
+            return HashMap::new();
         }
 
-        let mut blocks = Vec::new();
+        let mut blocks = HashMap::new();
         let mut visited = HashSet::new();
 
-        let mut queue = VecDeque::new();
-        queue.push_back(self.state.root_hash);
+        let mut stk = VecDeque::new();
+        stk.push_back(self.state.tip_hash);
 
-        while let Some(hash) = queue.pop_front() {
+        while let Some(hash) = stk.pop_front() {
             if visited.contains(&hash) {
                 continue;
             }
@@ -550,25 +570,25 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             let cur_node = self
                 .state
                 .block_dag
-                .soft_remove(&hash)
+                .remove(&hash)
                 .expect("Node should exist in the DAG");
 
-            let mut proposals = Vec::with_capacity(cur_node.block.proposals.len());
-
+            let mut proposals = HashMap::new();
             if !cur_node.block.proposals.is_empty() {
-                let mut dag = self
+                let dag = self
                     .state
                     .proposal_dags
                     .remove(&cur_node.block.parent)
                     .expect("Proposal DAG should exist");
 
-                cur_node.block.proposals.iter().for_each(|p| {
-                    let pn = dag
-                        .soft_remove(p)
-                        .expect("Proposal node should exist")
-                        .into_proposal();
-                    proposals.push((pn.proposal, pn.witness));
-                });
+                proposals = dag
+                    .into_ancestors(&cur_node.id(), false)
+                    .into_iter()
+                    .map(|(id, n)| {
+                        let pn = n.into_proposal();
+                        (id, (pn.proposal, pn.witness))
+                    })
+                    .collect();
             }
 
             let block = EstablishedBlock {
@@ -577,12 +597,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
                 proposals,
             };
 
-            blocks.push(block);
+            blocks.insert(hash, block);
 
             if let Some(children) = self.state.block_dag.get_children(&hash) {
                 children.iter().for_each(|&child| {
                     if !visited.contains(&child) {
-                        queue.push_back(child);
+                        stk.push_back(child);
                     }
                 });
             }
@@ -591,14 +611,14 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         blocks
     }
 
-    pub fn to_blocks(&self) -> Vec<EstablishedBlock<T>> {
+    pub fn to_blocks(&self) -> Blocks<T> {
         assert!(self.mode.is_archive());
 
         if self.state.block_dag.is_empty() {
-            return Vec::new();
+            return HashMap::new();
         }
 
-        let mut blocks = Vec::new();
+        let mut blocks = HashMap::new();
         let mut visited = HashSet::new();
 
         let mut queue = VecDeque::new();
@@ -615,7 +635,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
                 .get(&hash)
                 .expect("Node should exist in the DAG");
 
-            let mut proposals = Vec::with_capacity(cur_node.block.proposals.len());
+            let mut proposals = HashMap::new();
 
             if !cur_node.block.proposals.is_empty() {
                 let dag = self
@@ -624,15 +644,14 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
                     .get(&cur_node.block.parent)
                     .expect("Proposal DAG should exist");
 
-                cur_node.block.proposals.iter().for_each(|p| {
-                    let pn = dag
-                        .get(p)
-                        .expect("Proposal node should exist")
-                        .as_proposal()
-                        .expect("Node should be a proposal")
-                        .clone();
-                    proposals.push((pn.proposal, pn.witness));
-                });
+                proposals = dag
+                    .get_ancestors(&cur_node.id(), false)
+                    .into_iter()
+                    .map(|(id, n)| {
+                        let pn = n.as_proposal().expect("Node should be a proposal");
+                        (id, (pn.proposal.clone(), pn.witness.clone()))
+                    })
+                    .collect();
             }
 
             let block = EstablishedBlock {
@@ -641,7 +660,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
                 proposals,
             };
 
-            blocks.push(block);
+            blocks.insert(hash, block);
 
             if let Some(children) = self.state.block_dag.get_children(&hash) {
                 children.iter().for_each(|&child| {
@@ -656,24 +675,11 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         blocks
     }
 
-    pub fn summary<'a, I, K>(&self, keys: I) -> Summary<T>
-    where
-        I: IntoIterator<Item = K>,
-        K: AsRef<[u8]> + 'a,
-    {
-        assert!(self.mode.is_archive());
-
-        let block_node = self
-            .tip_node()
-            .to_serialized(keys)
-            .expect("Serialization should succeed");
-
-        Summary {
-            block_node: Some(block_node),
-        }
-    }
-
     pub fn root_hash(&self) -> Multihash {
         self.state.root_hash
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state.block_dag.is_empty()
     }
 }

@@ -424,6 +424,74 @@ impl<N: Node> Dag<N> {
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
     }
+
+    pub fn into_ancestors(mut self, id: &N::Id, include_roots: bool) -> HashMap<N::Id, N> {
+        let Some(&start_idx) = self.index.get(id) else {
+            return HashMap::new();
+        };
+
+        let mut ancestors = HashMap::new();
+        let mut visited = HashSet::new();
+        let mut stk = vec![start_idx];
+
+        while let Some(idx) = stk.pop() {
+            if !visited.insert(idx) {
+                continue;
+            }
+
+            self.entries[idx].parents.iter().for_each(|idx| {
+                stk.push(*idx);
+            });
+        }
+
+        visited.remove(&start_idx);
+
+        visited.iter().for_each(|&idx| {
+            if let Some(node) = self.entries[idx].node.take() {
+                let is_root = self.entries[idx].parents.is_empty();
+
+                if include_roots || !is_root {
+                    ancestors.insert(node.id(), node);
+                }
+            }
+        });
+
+        ancestors
+    }
+
+    pub fn get_ancestors(&self, id: &N::Id, include_roots: bool) -> HashMap<N::Id, &N> {
+        let Some(&start_idx) = self.index.get(id) else {
+            return HashMap::new();
+        };
+
+        let mut ancestors = HashMap::new();
+        let mut visited = HashSet::new();
+        let mut stk = vec![start_idx];
+
+        while let Some(idx) = stk.pop() {
+            if !visited.insert(idx) {
+                continue;
+            }
+
+            self.entries[idx].parents.iter().for_each(|&pidx| {
+                stk.push(pidx);
+            });
+        }
+
+        visited.remove(&start_idx);
+
+        visited.iter().for_each(|&idx| {
+            if let Some(node) = self.entries[idx].node.as_ref() {
+                let is_root = self.entries[idx].parents.is_empty();
+
+                if include_roots || !is_root {
+                    ancestors.insert(node.id(), node);
+                }
+            }
+        });
+
+        ancestors
+    }
 }
 
 #[cfg(test)]

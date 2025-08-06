@@ -7,11 +7,7 @@ use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
     consensus::{
-        block::{
-            self,
-            tree::{Mode, SyncState, Tree},
-            Block,
-        },
+        block::{self, tree::Tree, Block},
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash, SecretKey},
@@ -307,7 +303,7 @@ impl<H: Hasher, T: Record> Engine<H, T> {
         self.block_tree.checkpoint_hash()
     }
 
-    pub fn generate_sync_state(&self, mode: Mode) -> SyncState<T> {
-        self.block_tree.generate_sync_state(mode)
+    pub fn block_tree(&self) -> &Tree<H, T> {
+        &self.block_tree
     }
 }

@@ -78,14 +78,12 @@ async fn basic_operations() {
     };
 
     let tree = Tree::empty(target_sk.clone(), Mode::Archive);
-    let state = tree.generate_sync_state(Mode::Archive);
+    let blocks = tree.to_blocks().into_iter().collect::<Vec<_>>();
 
     for transport in transports.into_iter() {
         let sk = transport.secret_key().clone();
         let transport = Arc::new(transport);
-        let tree =
-            Tree::from_sync_state(sk, state.clone(), Mode::Archive).expect("Failed to create tree");
-
+        let tree = Tree::from_blocks(sk.clone(), blocks.clone()).expect("Failed to create tree");
         let engine = Engine::new(transport, tree, engine_config);
         let engine = Arc::new(engine);
 
