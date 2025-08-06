@@ -160,3 +160,15 @@ impl Proof {
         }
     }
 }
+
+impl Default for PublicKey {
+    fn default() -> Self {
+        PublicKey::Secp256k1(ec::SecretKey::<ark_secp256k1::Config>::default().public_key())
+    }
+}
+
+impl Default for SecretKey {
+    fn default() -> Self {
+        SecretKey::Secp256k1(ec::SecretKey::<ark_secp256k1::Config>::default())
+    }
+}

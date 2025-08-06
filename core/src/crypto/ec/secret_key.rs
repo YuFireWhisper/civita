@@ -3,6 +3,7 @@ use ark_ec::{
     CurveGroup,
 };
 use ark_ff::PrimeField;
+use ark_ff::Zero;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use civita_serialize::Serialize;
 use derivative::Derivative;
@@ -52,5 +53,11 @@ impl<C: SWCurveConfig> traits::SecretKey for SecretKey<C> {
 
     fn public_key(&self) -> Self::PublicKey {
         self.pk
+    }
+}
+
+impl<C: SWCurveConfig> Default for SecretKey<C> {
+    fn default() -> Self {
+        Self::new(C::ScalarField::zero())
     }
 }

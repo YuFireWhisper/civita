@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use civita_serialize::Serialize;
 
-pub trait SecretKey: Clone + Debug + Eq + Serialize + Sync + Send + 'static {
+pub trait SecretKey: Clone + Debug + Default + Eq + Serialize + Sync + Send + 'static {
     type PublicKey;
 
     fn random() -> Self;
