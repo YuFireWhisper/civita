@@ -5,11 +5,10 @@ use std::{
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
-use derivative::Derivative;
 use vdf::{WesolowskiVDF, VDF};
 
 use crate::{
-    crypto::{Hasher, Multihash, PublicKey, Signature},
+    crypto::{Hasher, Multihash, PublicKey, SecretKey, Signature},
     utils::{trie::Trie, Record},
 };
 
@@ -25,6 +24,7 @@ pub enum Error {}
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Default)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
 pub struct Block {
@@ -46,8 +46,7 @@ pub struct Witness {
     pub vdf_proof: Vec<u8>,
 }
 
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
+#[derive(Default)]
 pub struct Builder {
     parent: Option<Multihash>,
     checkpoint: Option<Multihash>,
@@ -169,5 +168,18 @@ impl Builder {
         let proposer_pk = self.proposer_pk.expect("Proposer public key must be set");
 
         Block::new(parent, checkpoint, proposals, proposer_pk)
+    }
+}
+
+impl Default for Witness {
+    fn default() -> Self {
+        let block = Block::default();
+        let sig = SecretKey::default().sign(&block.to_vec());
+
+        Witness {
+            sig,
+            proofs: HashMap::new(),
+            vdf_proof: Vec::new(),
+        }
     }
 }
