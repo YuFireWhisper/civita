@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use civita_serialize_derive::Serialize;
 use derivative::Derivative;
@@ -49,8 +46,6 @@ enum ShouldUpdate {
 
 struct State<H: Hasher, T: Record> {
     dag: Dag<UnifiedNode<H, T>>,
-    pending_blocks: HashMap<Multihash, Multihash>, // hash -> parent
-    invalid_hashes: HashSet<Multihash>,
     tip_hash: Multihash,
     root_hash: Multihash,
 }
@@ -94,19 +89,7 @@ impl<H: Hasher, T: Record> State<H, T> {
             dag,
             tip_hash,
             root_hash: tip_hash,
-            pending_blocks: Default::default(),
-            invalid_hashes: Default::default(),
         }
-    }
-
-    pub fn is_block_invalided(&self, block: &Block) -> bool {
-        self.invalid_hashes.contains(&block.hash::<H>())
-            || self.invalid_hashes.contains(&block.parent)
-    }
-
-    pub fn is_proposal_invalided(&self, proposal: &Proposal<T>) -> bool {
-        self.invalid_hashes.contains(&proposal.hash::<H>())
-            || self.invalid_hashes.contains(&proposal.parent)
     }
 
     pub fn contains(&self, hash: &Multihash) -> bool {
@@ -193,17 +176,9 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         let hash = block.hash::<H>();
         let mut result = UpdateResult::new();
 
-        if self.state.is_block_invalided(&block) {
-            self.state.invalid_hashes.insert(hash);
-            result.add_invalidated(hash);
-            return result;
-        }
-
         if self.state.contains(&hash) {
             return result;
         }
-
-        self.state.pending_blocks.insert(hash, block.parent);
 
         let dag_result = self.upsert_block_to_proposal_dag(block, witness, &mut result);
 
@@ -277,7 +252,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         validation_result
             .invalidated
             .iter()
-            .for_each(|&hash| self.handle_invalidated_hash(hash, result));
+            .for_each(|&hash| result.add_invalidated(hash));
 
         self.state.tip_hash = tip_hash;
 
@@ -325,11 +300,6 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         None
     }
 
-    fn handle_invalidated_hash(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
-        self.state.invalid_hashes.insert(hash);
-        result.add_invalidated(hash);
-    }
-
     fn create_new_checkpoint(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
         self.state.dag.retain(&hash);
 
@@ -348,16 +318,10 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         proposal: Proposal<T>,
         witness: proposal::Witness,
     ) -> UpdateResult<H, T> {
-        let hash = proposal.hash::<H>();
         let mut result = UpdateResult::new();
 
-        if self.state.is_proposal_invalided(&proposal) {
-            self.state.invalid_hashes.insert(hash);
-            result.add_invalidated(hash);
-            return result;
-        }
-
         let dag_result = self.upsert_proposal_to_proposal_dag(proposal, witness, &mut result);
+
         self.process_validation_result(dag_result, &mut result);
 
         result
