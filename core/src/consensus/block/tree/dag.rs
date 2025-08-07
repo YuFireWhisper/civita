@@ -47,6 +47,8 @@ struct Entry<N: Node> {
 pub struct Dag<N: Node> {
     index: HashMap<N::Id, usize>,
     entries: Vec<Entry<N>>,
+    zero_in: HashSet<usize>,
+    zero_out: HashSet<usize>,
 }
 
 impl State {
@@ -165,15 +167,12 @@ impl<N: Node> Dag<N> {
     }
 
     fn create_entry(&mut self, node: N) -> usize {
-        if let Some(&idx) = self.index.get(&node.id()) {
-            self.entries[idx].node = Some(node);
-            idx
-        } else {
-            let idx = self.entries.len();
-            self.index.insert(node.id(), idx);
-            self.entries.push(Entry::new(node));
-            idx
-        }
+        let idx = self.entries.len();
+        self.entries.push(Entry::new(node));
+        self.index.insert(self.entries[idx].id(), idx);
+        self.zero_in.insert(idx);
+        self.zero_out.insert(idx);
+        idx
     }
 
     fn establish_relationships<I>(
@@ -214,10 +213,21 @@ impl<N: Node> Dag<N> {
     }
 
     fn link_parent_child(&mut self, child_idx: usize, parent_idx: usize, increment_pending: bool) {
+        let was_zero_in = self.entries[child_idx].parents.is_empty();
+        let was_zero_out = self.entries[parent_idx].children.is_empty();
+
         self.entries[child_idx].parents.insert(parent_idx);
         self.entries[parent_idx].children.insert(child_idx);
         if increment_pending {
             self.entries[child_idx].pending += 1;
+        }
+
+        if was_zero_in {
+            self.zero_in.remove(&child_idx);
+        }
+
+        if was_zero_out {
+            self.zero_out.remove(&parent_idx);
         }
     }
 
@@ -296,6 +306,32 @@ impl<N: Node> Dag<N> {
         valid
     }
 
+    pub fn get(&self, id: &N::Id) -> Option<&N> {
+        self.index
+            .get(id)
+            .and_then(|&idx| self.entries[idx].node.as_ref())
+    }
+
+    pub fn pop_front(&mut self) -> Vec<N> {
+        let ids = std::mem::take(&mut self.zero_in);
+        ids.iter()
+            .filter_map(|&idx| {
+                let id = self.entries[idx].id();
+                self.remove(&id)
+            })
+            .collect()
+    }
+
+    pub fn pop_back(&mut self) -> Vec<N> {
+        let ids = std::mem::take(&mut self.zero_out);
+        ids.iter()
+            .filter_map(|&idx| {
+                let id = self.entries[idx].id();
+                self.remove(&id)
+            })
+            .collect()
+    }
+
     pub fn remove(&mut self, id: &N::Id) -> Option<N> {
         let &idx = self.index.get(id)?;
         let entry = self.entries.swap_remove(idx);
@@ -321,22 +357,22 @@ impl<N: Node> Dag<N> {
         entry.parents.iter().for_each(|&parent_idx| {
             if parent_idx < self.entries.len() {
                 self.entries[parent_idx].children.remove(&idx);
+                if self.entries[parent_idx].children.is_empty() {
+                    self.zero_out.insert(parent_idx);
+                }
             }
         });
 
         entry.children.iter().for_each(|&child_idx| {
             if child_idx < self.entries.len() {
                 self.entries[child_idx].parents.remove(&idx);
+                if self.entries[child_idx].parents.is_empty() {
+                    self.zero_in.insert(child_idx);
+                }
             }
         });
 
         entry.node
-    }
-
-    pub fn get(&self, id: &N::Id) -> Option<&N> {
-        self.index
-            .get(id)
-            .and_then(|&idx| self.entries[idx].node.as_ref())
     }
 
     pub fn contains(&self, id: &N::Id) -> bool {
