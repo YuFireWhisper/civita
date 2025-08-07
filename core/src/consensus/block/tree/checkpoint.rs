@@ -82,8 +82,7 @@ impl<H: Hasher, T: Record> State<H, T> {
         let tip_hash = root.id();
 
         let node = UnifiedNode::Block(root);
-        let mut dag = Dag::new();
-        dag.upsert(node, std::iter::empty());
+        let dag = Dag::with_root(node);
 
         Self {
             dag,
@@ -180,43 +179,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             return result;
         }
 
-        let dag_result = self.upsert_block_to_proposal_dag(block, witness, &mut result);
+        let n = UnifiedNode::new_block(block, witness, self.mode.clone());
+        let dag_result = self.state.dag.upsert(n);
 
         self.process_validation_result(dag_result, &mut result);
 
         result
-    }
-
-    fn upsert_block_to_proposal_dag(
-        &mut self,
-        block: Block,
-        witness: block::Witness,
-        result: &mut UpdateResult<H, T>,
-    ) -> ValidationResult<UnifiedNode<H, T>> {
-        let parents = self.collect_block_parents(&block, result);
-        let n = UnifiedNode::new_block(block, witness, self.mode.clone());
-        self.state.dag.upsert(n, parents)
-    }
-
-    fn collect_block_parents(
-        &mut self,
-        block: &Block,
-        result: &mut UpdateResult<H, T>,
-    ) -> Vec<Multihash> {
-        let mut parents = Vec::with_capacity(block.proposals.len() + 1);
-
-        block
-            .proposals
-            .iter()
-            .chain(std::iter::once(&block.parent))
-            .for_each(|p| {
-                if !self.state.contains(p) {
-                    result.add_phantom(*p);
-                }
-                parents.push(*p);
-            });
-
-        parents
     }
 
     fn process_validation_result(
@@ -228,9 +196,9 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
         let should_update = validation_result
             .validated
-            .iter()
-            .inspect(|&hash| result.add_validated(*hash))
-            .filter_map(|&hash| {
+            .into_iter()
+            .inspect(|&hash| result.add_validated(hash))
+            .filter_map(|hash| {
                 let node = self
                     .state
                     .dag
@@ -253,6 +221,10 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             .invalidated
             .iter()
             .for_each(|&hash| result.add_invalidated(hash));
+
+        validation_result.phantoms.into_iter().for_each(|hash| {
+            result.add_phantom(hash);
+        });
 
         self.state.tip_hash = tip_hash;
 
@@ -320,40 +292,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     ) -> UpdateResult<H, T> {
         let mut result = UpdateResult::new();
 
-        let dag_result = self.upsert_proposal_to_proposal_dag(proposal, witness, &mut result);
+        let n = UnifiedNode::new_proposal(proposal, witness);
+        let dag_result = self.state.dag.upsert(n);
 
         self.process_validation_result(dag_result, &mut result);
 
         result
-    }
-
-    fn upsert_proposal_to_proposal_dag(
-        &mut self,
-        proposal: Proposal<T>,
-        witness: proposal::Witness,
-        result: &mut UpdateResult<H, T>,
-    ) -> ValidationResult<UnifiedNode<H, T>> {
-        let parents = self.collect_proposal_parents(&proposal, result);
-        let node = UnifiedNode::new_proposal(proposal, witness);
-        self.state.dag.upsert(node, parents)
-    }
-
-    fn collect_proposal_parents(
-        &mut self,
-        proposal: &Proposal<T>,
-        result: &mut UpdateResult<H, T>,
-    ) -> impl IntoIterator<Item = Multihash> {
-        proposal
-            .dependencies
-            .iter()
-            .inspect(|&dep| {
-                if !self.state.contains(dep) {
-                    result.add_phantom(*dep);
-                }
-            })
-            .chain(std::iter::once(&proposal.parent))
-            .copied()
-            .collect::<Vec<_>>()
     }
 
     pub fn tip_node(&self) -> &BlockNode<H, T> {

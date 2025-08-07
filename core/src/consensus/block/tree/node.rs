@@ -85,6 +85,13 @@ impl<H: Hasher, T: Record> Node for UnifiedNode<H, T> {
         }
     }
 
+    fn parents(&self) -> Vec<Self::Id> {
+        match self {
+            UnifiedNode::Block(node) => node.parents(),
+            UnifiedNode::Proposal(node) => node.parents(),
+        }
+    }
+
     fn validate(&self) -> bool {
         match self {
             UnifiedNode::Block(node) => node.validate(),

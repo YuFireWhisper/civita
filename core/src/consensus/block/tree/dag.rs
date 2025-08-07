@@ -10,6 +10,7 @@ pub trait Node {
     type Id: Clone + Eq + Hash + Debug;
 
     fn id(&self) -> Self::Id;
+    fn parents(&self) -> Vec<Self::Id>;
     fn validate(&self) -> bool;
     fn on_parent_valid(&self, child: &Self) -> bool;
 }
@@ -20,6 +21,7 @@ pub trait Node {
 pub struct ValidationResult<N: Node> {
     pub validated: Vec<N::Id>,
     pub invalidated: Vec<N::Id>,
+    pub phantoms: Vec<N::Id>,
 }
 
 #[derive(Clone, Copy)]
@@ -133,26 +135,30 @@ impl<N: Node> Dag<N> {
     }
 
     pub fn with_root(node: N) -> Self {
-        let mut dag = Self::default();
-        dag.upsert(node, vec![]);
-        dag
+        let id = node.id();
+        let index = HashMap::from([(id, 0)]);
+        let entries = vec![Entry::new(node)];
+        let zero_in = HashSet::from([0]);
+        let zero_out = HashSet::from([0]);
+
+        Self {
+            index,
+            entries,
+            zero_in,
+            zero_out,
+        }
     }
 
-    pub fn upsert<I>(&mut self, node: N, parents: I) -> ValidationResult<N>
-    where
-        I: IntoIterator<Item = N::Id>,
-    {
+    pub fn upsert(&mut self, node: N) -> ValidationResult<N> {
         let mut result = ValidationResult::new();
+
         let id = node.id();
 
-        if self
-            .index
-            .get(&id)
-            .is_some_and(|&idx| self.entries[idx].node.is_some())
-        {
-            return result; // Node already exists, no need to revalidate
+        if self.contains(&id) {
+            return result;
         }
 
+        let parents = node.parents();
         let idx = self.create_entry(node);
 
         if !self.establish_relationships(idx, parents, &mut result) {
@@ -188,6 +194,7 @@ impl<N: Node> Dag<N> {
             let Some(&pidx) = self.index.get(&pid) else {
                 let placeholder_idx = self.create_placeholder(&pid);
                 self.link_parent_child(idx, placeholder_idx, true);
+                result.add_invalidated(pid);
                 continue;
             };
 
@@ -529,7 +536,6 @@ impl<N: Node> Dag<N> {
         ancestors
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +547,7 @@ mod tests {
 
     struct TestNode {
         id: u32,
+        parents: Vec<u32>,
         should_validate: bool,
         parent_validation_logic: Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
     }
@@ -549,6 +556,16 @@ mod tests {
         fn new(id: u32) -> Self {
             Self {
                 id,
+                parents: vec![],
+                should_validate: true,
+                parent_validation_logic: None,
+            }
+        }
+
+        fn new_with_parents(id: u32, parents: Vec<u32>) -> Self {
+            Self {
+                id,
+                parents,
                 should_validate: true,
                 parent_validation_logic: None,
             }
@@ -557,17 +574,28 @@ mod tests {
         fn new_invalid(id: u32) -> Self {
             Self {
                 id,
+                parents: vec![],
                 should_validate: false,
                 parent_validation_logic: None,
             }
         }
 
-        fn with_parent_logic<F>(id: u32, logic: F) -> Self
+        fn new_invalid_with_parents(id: u32, parents: Vec<u32>) -> Self {
+            Self {
+                id,
+                parents,
+                should_validate: false,
+                parent_validation_logic: None,
+            }
+        }
+
+        fn with_parent_logic<F>(id: u32, parents: Vec<u32>, logic: F) -> Self
         where
             F: Fn(u32) -> bool + 'static + Send + Sync,
         {
             Self {
                 id,
+                parents,
                 should_validate: true,
                 parent_validation_logic: Some(Arc::new(logic)),
             }
@@ -579,6 +607,10 @@ mod tests {
 
         fn id(&self) -> Self::Id {
             self.id
+        }
+
+        fn parents(&self) -> Vec<Self::Id> {
+            self.parents.clone()
         }
 
         fn validate(&self) -> bool {
@@ -602,11 +634,14 @@ mod tests {
         result: &ValidationResult<TestNode>,
         expected_validated: &[u32],
         expected_invalidated: &[u32],
+        expected_phantoms: &[u32],
     ) {
         let validated_set: HashSet<_> = result.validated.iter().collect();
         let invalidated_set: HashSet<_> = result.invalidated.iter().collect();
+        let phantoms_set: HashSet<_> = result.phantoms.iter().collect();
         let expected_validated_set: HashSet<_> = expected_validated.iter().collect();
         let expected_invalidated_set: HashSet<_> = expected_invalidated.iter().collect();
+        let expected_phantoms_set: HashSet<_> = expected_phantoms.iter().collect();
 
         assert_eq!(
             validated_set, expected_validated_set,
@@ -618,6 +653,11 @@ mod tests {
             "Invalidated nodes mismatch. Expected: {:?}, Got: {:?}",
             expected_invalidated, result.invalidated
         );
+        assert_eq!(
+            phantoms_set, expected_phantoms_set,
+            "Phantom nodes mismatch. Expected: {:?}, Got: {:?}",
+            expected_phantoms, result.phantoms
+        );
     }
 
     #[test]
@@ -625,6 +665,7 @@ mod tests {
         let result = ValidationResult::<TestNode>::new();
         assert!(result.validated.is_empty());
         assert!(result.invalidated.is_empty());
+        assert!(result.phantoms.is_empty());
     }
 
     #[test]
@@ -658,150 +699,163 @@ mod tests {
     fn upsert_single_child() {
         let mut dag = create_basic_dag();
 
-        let res = dag.upsert(TestNode::new(VALID_NODE_ID), vec![ROOT_NODE_ID]);
+        let res = dag.upsert(TestNode::new_with_parents(
+            VALID_NODE_ID,
+            vec![ROOT_NODE_ID],
+        ));
 
-        assert_validation_result(&res, &[VALID_NODE_ID], &[]);
+        assert_validation_result(&res, &[VALID_NODE_ID], &[], &[]);
     }
 
     #[test]
     fn upsert_duplicate_node() {
         let mut dag = create_basic_dag();
 
-        dag.upsert(TestNode::new(VALID_NODE_ID), vec![ROOT_NODE_ID]);
-        let res = dag.upsert(TestNode::new(VALID_NODE_ID), vec![ROOT_NODE_ID]);
+        dag.upsert(TestNode::new_with_parents(
+            VALID_NODE_ID,
+            vec![ROOT_NODE_ID],
+        ));
+        let res = dag.upsert(TestNode::new_with_parents(
+            VALID_NODE_ID,
+            vec![ROOT_NODE_ID],
+        ));
 
-        assert_validation_result(&res, &[], &[]);
+        assert_validation_result(&res, &[], &[], &[]);
     }
 
     #[test]
     fn upsert_with_nonexistent_parent() {
         let mut dag = create_basic_dag();
-        let result = dag.upsert(TestNode::new(VALID_NODE_ID), vec![999]);
+        let result = dag.upsert(TestNode::new_with_parents(VALID_NODE_ID, vec![999]));
 
-        assert_validation_result(&result, &[], &[]);
+        assert_validation_result(&result, &[], &[], &[999]);
     }
 
     #[test]
     fn upsert_multiple_parents() {
         let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
+        dag.upsert(TestNode::new_with_parents(1, vec![ROOT_NODE_ID]));
+        dag.upsert(TestNode::new_with_parents(2, vec![ROOT_NODE_ID]));
 
-        let result = dag.upsert(TestNode::new(3), vec![1, 2]);
+        let result = dag.upsert(TestNode::new_with_parents(3, vec![1, 2]));
 
-        assert_validation_result(&result, &[3], &[]);
+        assert_validation_result(&result, &[3], &[], &[]);
     }
 
     #[test]
     fn upsert_invalid_node() {
         let mut dag = create_basic_dag();
 
-        let res = dag.upsert(TestNode::new_invalid(INVALID_NODE_ID), vec![ROOT_NODE_ID]);
+        let res = dag.upsert(TestNode::new_invalid_with_parents(
+            INVALID_NODE_ID,
+            vec![ROOT_NODE_ID],
+        ));
 
-        assert_validation_result(&res, &[], &[INVALID_NODE_ID]);
+        assert_validation_result(&res, &[], &[INVALID_NODE_ID], &[]);
     }
 
     #[test]
     fn parent_validation_rejection() {
         let mut dag = create_basic_dag();
-        let node = TestNode::with_parent_logic(VALID_NODE_ID, |_| false);
+        let node = TestNode::with_parent_logic(VALID_NODE_ID, vec![ROOT_NODE_ID], |_| false);
 
-        let res = dag.upsert(node, vec![ROOT_NODE_ID]);
+        let res = dag.upsert(node);
 
-        assert_validation_result(&res, &[], &[VALID_NODE_ID]);
+        assert_validation_result(&res, &[], &[VALID_NODE_ID], &[]);
     }
 
     #[test]
     fn parent_validation_acceptance() {
         let mut dag = create_basic_dag();
-        let node =
-            TestNode::with_parent_logic(VALID_NODE_ID, |parent_id| parent_id == ROOT_NODE_ID);
+        let node = TestNode::with_parent_logic(VALID_NODE_ID, vec![ROOT_NODE_ID], |parent_id| {
+            parent_id == ROOT_NODE_ID
+        });
 
-        let res = dag.upsert(node, vec![ROOT_NODE_ID]);
+        let res = dag.upsert(node);
 
-        assert_validation_result(&res, &[VALID_NODE_ID], &[]);
+        assert_validation_result(&res, &[VALID_NODE_ID], &[], &[]);
     }
 
     #[test]
     fn invalidation_cascades_to_children() {
         let mut dag = create_basic_dag();
 
-        dag.upsert(TestNode::new_invalid(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![1]);
+        dag.upsert(TestNode::new_invalid_with_parents(1, vec![ROOT_NODE_ID]));
+        dag.upsert(TestNode::new_with_parents(2, vec![1]));
 
-        let result = dag.upsert(TestNode::new(3), vec![2]);
+        let result = dag.upsert(TestNode::new_with_parents(3, vec![2]));
 
-        assert_validation_result(&result, &[], &[3]);
+        assert_validation_result(&result, &[], &[3], &[]);
     }
 
     #[test]
     fn parent_rejection_cascades() {
         let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![1]);
+        dag.upsert(TestNode::new_with_parents(1, vec![ROOT_NODE_ID]));
+        dag.upsert(TestNode::new_with_parents(2, vec![1]));
 
-        let rejecting_node = TestNode::with_parent_logic(3, |_| false);
-        let result = dag.upsert(rejecting_node, vec![1]);
+        let rejecting_node = TestNode::with_parent_logic(3, vec![1], |_| false);
+        let result = dag.upsert(rejecting_node);
 
-        assert_validation_result(&result, &[], &[3]);
+        assert_validation_result(&result, &[], &[3], &[]);
     }
 
     #[test]
     fn cycle_detection_direct() {
         let mut dag = Dag::new();
-        dag.upsert(TestNode::new(1), vec![]);
-        dag.upsert(TestNode::new(2), vec![1]);
+        dag.upsert(TestNode::new(1));
+        dag.upsert(TestNode::new_with_parents(2, vec![1]));
 
-        let result = dag.upsert(TestNode::new(1), vec![2]);
+        let result = dag.upsert(TestNode::new_with_parents(1, vec![2]));
 
-        assert_validation_result(&result, &[], &[]);
+        assert_validation_result(&result, &[], &[], &[]);
     }
 
     #[test]
     fn cycle_detection_indirect() {
         let mut dag = Dag::new();
-        dag.upsert(TestNode::new(1), vec![]);
-        dag.upsert(TestNode::new(2), vec![1]);
-        dag.upsert(TestNode::new(3), vec![2]);
+        dag.upsert(TestNode::new(1));
+        dag.upsert(TestNode::new_with_parents(2, vec![1]));
+        dag.upsert(TestNode::new_with_parents(3, vec![2]));
 
-        let result = dag.upsert(TestNode::new(1), vec![3]);
+        let result = dag.upsert(TestNode::new_with_parents(1, vec![3]));
 
-        assert_validation_result(&result, &[], &[]);
+        assert_validation_result(&result, &[], &[], &[]);
     }
 
     #[test]
     fn no_false_cycle_detection() {
         let mut dag = create_basic_dag();
-        dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
+        dag.upsert(TestNode::new_with_parents(1, vec![ROOT_NODE_ID]));
+        dag.upsert(TestNode::new_with_parents(2, vec![ROOT_NODE_ID]));
 
-        let result = dag.upsert(TestNode::new(3), vec![1, 2]);
+        let result = dag.upsert(TestNode::new_with_parents(3, vec![1, 2]));
 
-        assert_validation_result(&result, &[3], &[]);
+        assert_validation_result(&result, &[3], &[], &[]);
     }
 
     #[test]
     fn pending_validation_resolution() {
         let mut dag = create_basic_dag();
 
-        let res1 = dag.upsert(TestNode::new(2), vec![1]);
-        let res2 = dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
+        let res1 = dag.upsert(TestNode::new_with_parents(2, vec![1]));
+        let res2 = dag.upsert(TestNode::new_with_parents(1, vec![ROOT_NODE_ID]));
 
-        assert_validation_result(&res1, &[], &[]);
-        assert_validation_result(&res2, &[1, 2], &[]);
+        assert_validation_result(&res1, &[], &[], &[1]);
+        assert_validation_result(&res2, &[1, 2], &[], &[]);
     }
 
     #[test]
     fn multiple_pending_parents() {
         let mut dag = create_basic_dag();
 
-        let res3 = dag.upsert(TestNode::new(3), vec![1, 2]);
-        let res1 = dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        let res2 = dag.upsert(TestNode::new(2), vec![ROOT_NODE_ID]);
+        let res3 = dag.upsert(TestNode::new_with_parents(3, vec![1, 2]));
+        let res1 = dag.upsert(TestNode::new_with_parents(1, vec![ROOT_NODE_ID]));
+        let res2 = dag.upsert(TestNode::new_with_parents(2, vec![ROOT_NODE_ID]));
 
-        assert_validation_result(&res3, &[], &[]);
-        assert_validation_result(&res1, &[1], &[]);
-        assert_validation_result(&res2, &[2, 3], &[]);
+        assert_validation_result(&res3, &[], &[], &[1, 2]);
+        assert_validation_result(&res1, &[1], &[], &[]);
+        assert_validation_result(&res2, &[2, 3], &[], &[]);
     }
 
     #[test]
@@ -824,25 +878,25 @@ mod tests {
     fn invalidation_with_complex_dependencies() {
         let mut dag = create_basic_dag();
 
-        let invalid_node = TestNode::with_parent_logic(5, |_| false);
+        let invalid_node = TestNode::with_parent_logic(5, vec![1], |_| false);
 
-        let res1 = dag.upsert(TestNode::new(1), vec![ROOT_NODE_ID]);
-        let res2 = dag.upsert(TestNode::new(2), vec![1]);
-        let res3 = dag.upsert(TestNode::new(3), vec![1]);
-        let res4 = dag.upsert(TestNode::new(4), vec![2, 3]);
-        let res5 = dag.upsert(invalid_node, vec![1]);
+        let res1 = dag.upsert(TestNode::new_with_parents(1, vec![ROOT_NODE_ID]));
+        let res2 = dag.upsert(TestNode::new_with_parents(2, vec![1]));
+        let res3 = dag.upsert(TestNode::new_with_parents(3, vec![1]));
+        let res4 = dag.upsert(TestNode::new_with_parents(4, vec![2, 3]));
+        let res5 = dag.upsert(invalid_node);
 
-        assert_validation_result(&res1, &[1], &[]);
-        assert_validation_result(&res2, &[2], &[]);
-        assert_validation_result(&res3, &[3], &[]);
-        assert_validation_result(&res4, &[4], &[]);
-        assert_validation_result(&res5, &[], &[5]);
+        assert_validation_result(&res1, &[1], &[], &[]);
+        assert_validation_result(&res2, &[2], &[], &[]);
+        assert_validation_result(&res3, &[3], &[], &[]);
+        assert_validation_result(&res4, &[4], &[], &[]);
+        assert_validation_result(&res5, &[], &[5], &[]);
     }
 
     #[test]
     fn edge_case_empty_parent_list() {
         let mut dag = Dag::new();
-        let res = dag.upsert(TestNode::new(1), vec![]);
-        assert_validation_result(&res, &[1], &[]);
+        let res = dag.upsert(TestNode::new(1));
+        assert_validation_result(&res, &[1], &[], &[]);
     }
 }

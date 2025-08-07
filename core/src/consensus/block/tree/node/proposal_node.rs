@@ -33,6 +33,15 @@ impl<T: Record> ProposalNode<T> {
         self.proposal.hash::<H>()
     }
 
+    pub fn parents(&self) -> Vec<Multihash> {
+        self.proposal
+            .dependencies
+            .iter()
+            .chain(std::iter::once(&self.proposal.parent))
+            .copied()
+            .collect()
+    }
+
     pub fn on_block_parent_valid<H: Hasher>(&self, parent: &BlockNode<H, T>) -> bool {
         let trie_root = {
             let mut trie = parent.trie.write();

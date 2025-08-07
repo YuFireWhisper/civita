@@ -13,7 +13,7 @@ use parking_lot::RwLock as ParkingRwLock;
 use crate::{
     consensus::block::{
         self,
-        tree::{dag::Node, node::ProposalNode, Mode},
+        tree::{node::ProposalNode, Mode},
         Block,
     },
     crypto::{Hasher, Multihash},
@@ -120,6 +120,15 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
 
     pub fn id(&self) -> Multihash {
         self.block.hash::<H>()
+    }
+
+    pub fn parents(&self) -> Vec<Multihash> {
+        self.block
+            .proposals
+            .iter()
+            .chain(std::iter::once(&self.block.parent))
+            .copied()
+            .collect()
     }
 
     pub fn on_block_parent_valid(&self, parent: &Self) -> bool {
@@ -264,21 +273,5 @@ impl<H, T: Record> Clone for BlockNode<H, T> {
             proofs: self.proofs.clone(),
             validated: AtomicBool::new(self.validated.load(Ordering::Relaxed)),
         }
-    }
-}
-
-impl<H: Hasher, T: Record> Node for BlockNode<H, T> {
-    type Id = Multihash;
-
-    fn id(&self) -> Self::Id {
-        self.id()
-    }
-
-    fn validate(&self) -> bool {
-        self.validate()
-    }
-
-    fn on_parent_valid(&self, child: &Self) -> bool {
-        self.on_block_parent_valid(child)
     }
 }
