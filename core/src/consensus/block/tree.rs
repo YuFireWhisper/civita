@@ -124,7 +124,7 @@ impl<H: Hasher, T: Record> Tree<H, T> {
 
     pub fn from_tip(sk: SecretKey, tip: BlockNode<H, T>, mode: Mode) -> Self {
         let mode = Arc::new(mode);
-        let checkpoint = ParkingRwLock::new(Checkpoint::new(tip, mode.clone()));
+        let checkpoint = ParkingRwLock::new(Checkpoint::with_root(tip, mode.clone()));
 
         Self {
             sk,
@@ -177,7 +177,7 @@ impl<H: Hasher, T: Record> Tree<H, T> {
     fn process_result(&self, mut result: UpdateResult<H, T>) -> ProcessResult {
         if let Some(block) = result.new_checkpoint {
             let original = {
-                let n = Checkpoint::new(block, self.mode.clone());
+                let n = Checkpoint::with_root(block, self.mode.clone());
                 let mut o = self.checkpoint.write();
                 std::mem::replace(&mut *o, n)
             };
