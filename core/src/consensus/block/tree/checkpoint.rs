@@ -44,14 +44,10 @@ enum ShouldUpdate {
     Tip,
 }
 
-struct State<H: Hasher, T: Record> {
+pub struct Checkpoint<H: Hasher, T: Record> {
     dag: Dag<UnifiedNode<H, T>>,
     tip_hash: Multihash,
     root_hash: Multihash,
-}
-
-pub struct Checkpoint<H: Hasher, T: Record> {
-    state: State<H, T>,
     mode: Arc<Mode>,
 }
 
@@ -73,49 +69,23 @@ impl<H, T: Record> UpdateResult<H, T> {
     }
 }
 
-impl<H: Hasher, T: Record> State<H, T> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_root(root: BlockNode<H, T>) -> Self {
-        let tip_hash = root.id();
-
+impl<H: Hasher, T: Record> Checkpoint<H, T> {
+    pub fn with_root(root: BlockNode<H, T>, mode: Arc<Mode>) -> Self {
+        let hash = root.id();
         let node = UnifiedNode::Block(root);
         let dag = Dag::with_root(node);
 
         Self {
             dag,
-            tip_hash,
-            root_hash: tip_hash,
-        }
-    }
-
-    pub fn contains(&self, hash: &Multihash) -> bool {
-        self.dag.contains(hash)
-    }
-}
-
-impl<H: Hasher, T: Record> Checkpoint<H, T> {
-    pub fn new(tip: BlockNode<H, T>, mode: Arc<Mode>) -> Self {
-        Self {
-            state: State::with_root(tip),
-            mode,
-        }
-    }
-
-    pub fn with_root(root: BlockNode<H, T>, mode: Arc<Mode>) -> Self {
-        Self {
-            state: State::with_root(root),
+            tip_hash: hash,
+            root_hash: hash,
             mode,
         }
     }
 
     pub fn new_empty(mode: Arc<Mode>) -> Self {
-        Self {
-            state: State::new(),
-            mode,
-        }
+        let root = BlockNode::genesis();
+        Self::with_root(root, mode)
     }
 
     pub fn from_blocks<I>(blocks: I) -> Option<(Self, HashMap<Multihash, Blocks<T>>)>
@@ -175,12 +145,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         let hash = block.hash::<H>();
         let mut result = UpdateResult::new();
 
-        if self.state.contains(&hash) {
+        if self.dag.contains(&hash) {
             return result;
         }
 
         let n = UnifiedNode::new_block(block, witness, self.mode.clone());
-        let dag_result = self.state.dag.upsert(n);
+        let dag_result = self.dag.upsert(n);
 
         self.process_validation_result(dag_result, &mut result);
 
@@ -192,20 +162,14 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         validation_result: ValidationResult<UnifiedNode<H, T>>,
         result: &mut UpdateResult<H, T>,
     ) {
-        let mut tip_hash = self.state.tip_hash;
+        let mut tip_hash = self.tip_hash;
 
         let should_update = validation_result
             .validated
             .into_iter()
             .inspect(|&hash| result.add_validated(hash))
             .filter_map(|hash| {
-                let node = self
-                    .state
-                    .dag
-                    .get(&hash)
-                    .expect("Node should exist in the DAG");
-
-                node.as_block().and_then(|node| {
+                self.get_block_node(&hash).and_then(|node| {
                     match self.should_update_block(node, &tip_hash)? {
                         ShouldUpdate::Checkpoint => Some(hash),
                         ShouldUpdate::Tip => {
@@ -226,11 +190,15 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             result.add_phantom(hash);
         });
 
-        self.state.tip_hash = tip_hash;
+        self.tip_hash = tip_hash;
 
         if let Some(hash) = should_update {
             self.create_new_checkpoint(hash, result);
         }
+    }
+
+    fn get_block_node(&self, hash: &Multihash) -> Option<&BlockNode<H, T>> {
+        self.dag.get(hash).and_then(|node| node.as_block())
     }
 
     fn should_update_block(
@@ -250,12 +218,8 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
         let tip_metrics = {
             let n = self
-                .state
-                .dag
-                .get(tip_hash)
-                .expect("Tip node should exist")
-                .as_block()
-                .unwrap();
+                .get_block_node(tip_hash)
+                .expect("Tip node should exist");
             (*n.cumulative_weight.read(), n.height.load(Relaxed))
         };
 
@@ -273,10 +237,9 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     fn create_new_checkpoint(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
-        self.state.dag.retain(&hash);
+        self.dag.retain(&hash);
 
         let node = self
-            .state
             .dag
             .remove(&hash)
             .expect("Node should exist")
@@ -293,7 +256,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         let mut result = UpdateResult::new();
 
         let n = UnifiedNode::new_proposal(proposal, witness);
-        let dag_result = self.state.dag.upsert(n);
+        let dag_result = self.dag.upsert(n);
 
         self.process_validation_result(dag_result, &mut result);
 
@@ -301,16 +264,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     pub fn tip_node(&self) -> &BlockNode<H, T> {
-        self.state
-            .dag
-            .get(&self.state.tip_hash)
+        self.get_block_node(&self.tip_hash)
             .expect("Tip node should exist")
-            .as_block()
-            .expect("Tip node should be a block")
     }
 
     pub fn tip_hash(&self) -> Multihash {
-        self.state.tip_hash
+        self.tip_hash
     }
 
     pub fn tip_trie(&self) -> Trie<H, T> {
@@ -318,13 +277,8 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     pub fn get_trie(&self, parent: &Multihash) -> Option<Trie<H, T>> {
-        self.state.dag.get(parent).map(|node| {
-            node.as_block()
-                .expect("Node should be a block")
-                .trie
-                .read()
-                .clone()
-        })
+        self.get_block_node(parent)
+            .map(|node| node.trie.read().clone())
     }
 
     pub fn into_blocks(mut self) -> Blocks<T> {
@@ -336,7 +290,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     pub fn root_hash(&self) -> Multihash {
-        self.state.root_hash
+        self.root_hash
     }
 
     #[deprecated]
@@ -347,12 +301,5 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     #[deprecated]
     pub fn get_proposal_dag(&self, hash: Multihash) -> Option<&Dag<UnifiedNode<H, T>>> {
         unimplemented!()
-    }
-}
-
-impl<H: Hasher, T: Record> Default for State<H, T> {
-    fn default() -> Self {
-        let root = BlockNode::genesis();
-        Self::with_root(root)
     }
 }
