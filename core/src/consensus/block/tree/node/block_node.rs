@@ -48,6 +48,27 @@ pub struct BlockNode<H, T: Record> {
 }
 
 impl<H: Hasher, T: Record> BlockNode<H, T> {
+    pub fn genesis() -> Self {
+        let block = Block::default();
+        let witness = block::Witness::default();
+        let mode = Arc::new(Mode::Normal(Default::default()));
+
+        Self {
+            block,
+            witness,
+            trie: ParkingRwLock::new(Trie::empty()),
+            height: AtomicU64::new(0),
+            weight: ParkingRwLock::new(T::Weight::default()),
+            cumulative_weight: ParkingRwLock::new(T::Weight::default()),
+            mode,
+            existing_keys: DashMap::new(),
+            proposal_dependencies: DashSet::new(),
+            operations: DashMap::new(),
+            proofs: DashMap::new(),
+            validated: AtomicBool::new(false),
+        }
+    }
+
     pub fn new(block: Block, witness: block::Witness, mode: Arc<Mode>) -> Self {
         let trie = Trie::empty();
 
