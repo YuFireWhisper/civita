@@ -49,8 +49,6 @@ enum ValidationEvent {
     InvalidatedHash { hash: Multihash },
 }
 
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
 struct State<H: Hasher, T: Record> {
     block_dag: Dag<BlockNode<H, T>>,
     proposal_dags: HashMap<Multihash, Dag<UnifiedNode<H, T>>>,
@@ -681,5 +679,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
     pub fn is_empty(&self) -> bool {
         self.state.block_dag.is_empty()
+    }
+}
+
+impl<H: Hasher, T: Record> Default for State<H, T> {
+    fn default() -> Self {
+        let root = BlockNode::genesis();
+        Self::with_root(root)
     }
 }
