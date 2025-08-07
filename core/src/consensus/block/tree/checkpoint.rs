@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 
@@ -43,15 +43,18 @@ pub struct UpdateResult<H, T: Record> {
 }
 
 enum ValidationEvent {
-    BlockValidated { parent: Multihash, hash: Multihash },
-    BlockInDagValidated { hash: Multihash },
-    ProposalValidated { hash: Multihash },
-    InvalidatedHash { hash: Multihash },
+    BlockValidated(Multihash),
+    ProposalValidated(Multihash),
+    InvalidatedHash(Multihash),
+}
+
+enum ShouldUpdate {
+    Checkpoint,
+    Tip,
 }
 
 struct State<H: Hasher, T: Record> {
-    block_dag: Dag<BlockNode<H, T>>,
-    proposal_dags: HashMap<Multihash, Dag<UnifiedNode<H, T>>>,
+    dag: Dag<UnifiedNode<H, T>>,
     pending_blocks: HashMap<Multihash, Multihash>, // hash -> parent
     invalid_hashes: HashSet<Multihash>,
     tip_hash: Multihash,
@@ -81,24 +84,6 @@ impl<H, T: Record> UpdateResult<H, T> {
     }
 }
 
-impl ValidationEvent {
-    pub fn new_block_validated(parent: Multihash, hash: Multihash) -> Self {
-        ValidationEvent::BlockValidated { parent, hash }
-    }
-
-    pub fn new_block_in_dag_validated(hash: Multihash) -> Self {
-        ValidationEvent::BlockInDagValidated { hash }
-    }
-
-    pub fn new_proposal_validated(hash: Multihash) -> Self {
-        ValidationEvent::ProposalValidated { hash }
-    }
-
-    pub fn new_invalidated_hash(hash: Multihash) -> Self {
-        ValidationEvent::InvalidatedHash { hash }
-    }
-}
-
 impl<H: Hasher, T: Record> State<H, T> {
     pub fn new() -> Self {
         Self::default()
@@ -107,20 +92,12 @@ impl<H: Hasher, T: Record> State<H, T> {
     pub fn with_root(root: BlockNode<H, T>) -> Self {
         let tip_hash = root.id();
 
-        let mut block_dag = Dag::new();
-        block_dag.upsert(root.clone(), std::iter::empty());
-
-        let mut proposal_dags = HashMap::new();
         let node = UnifiedNode::Block(root);
-        proposal_dags.insert(tip_hash, Dag::new());
-        proposal_dags
-            .get_mut(&tip_hash)
-            .unwrap()
-            .upsert(node, std::iter::empty());
+        let mut dag = Dag::new();
+        dag.upsert(node, std::iter::empty());
 
         Self {
-            block_dag,
-            proposal_dags,
+            dag,
             tip_hash,
             root_hash: tip_hash,
             pending_blocks: Default::default(),
@@ -138,8 +115,8 @@ impl<H: Hasher, T: Record> State<H, T> {
             || self.invalid_hashes.contains(&proposal.parent)
     }
 
-    pub fn is_block_existed(&self, hash: &Multihash) -> bool {
-        self.block_dag.contains(hash)
+    pub fn contains(&self, hash: &Multihash) -> bool {
+        self.dag.contains(hash)
     }
 }
 
@@ -228,7 +205,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             return result;
         }
 
-        if self.state.is_block_existed(&hash) {
+        if self.state.contains(&hash) {
             return result;
         }
 
@@ -248,9 +225,8 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         result: &mut UpdateResult<H, T>,
     ) -> ValidationResult<UnifiedNode<H, T>> {
         let parents = self.collect_block_parents(&block, result);
-        let entry = self.state.proposal_dags.entry(block.parent).or_default();
         let n = UnifiedNode::new_block(block, witness, self.mode.clone());
-        entry.upsert(n, parents)
+        self.state.dag.upsert(n, parents)
     }
 
     fn collect_block_parents(
@@ -258,191 +234,119 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         block: &Block,
         result: &mut UpdateResult<H, T>,
     ) -> Vec<Multihash> {
-        let mut parents = Vec::with_capacity(block.proposals.len());
-        let dag = self.state.proposal_dags.entry(block.parent).or_default();
+        let mut parents = Vec::with_capacity(block.proposals.len() + 1);
 
-        block.proposals.iter().for_each(|p| {
-            if !dag.contains(p) {
-                result.add_phantom(*p);
-            }
-            parents.push(*p);
-        });
+        block
+            .proposals
+            .iter()
+            .chain(std::iter::once(&block.parent))
+            .for_each(|p| {
+                if !self.state.contains(p) {
+                    result.add_phantom(*p);
+                }
+                parents.push(*p);
+            });
 
         parents
     }
 
     fn process_validation_result(
         &mut self,
-        result: ValidationResult<UnifiedNode<H, T>>,
-        update_result: &mut UpdateResult<H, T>,
-    ) {
-        let events = self.convert_dag_result_to_events(result);
-        self.process_events(events, update_result);
-    }
-
-    fn convert_dag_result_to_events(
-        &self,
-        result: ValidationResult<UnifiedNode<H, T>>,
-    ) -> VecDeque<ValidationEvent> {
-        result
-            .validated
-            .iter()
-            .copied()
-            .map(|n| {
-                if let Some(parent) = self.state.pending_blocks.get(&n) {
-                    ValidationEvent::new_block_validated(*parent, n)
-                } else {
-                    ValidationEvent::new_proposal_validated(n)
-                }
-            })
-            .chain(
-                result
-                    .invalidated
-                    .into_iter()
-                    .map(ValidationEvent::new_invalidated_hash),
-            )
-            .collect()
-    }
-
-    fn process_events(
-        &mut self,
-        mut events: VecDeque<ValidationEvent>,
+        validation_result: ValidationResult<UnifiedNode<H, T>>,
         result: &mut UpdateResult<H, T>,
     ) {
-        while let Some(event) = events.pop_front() {
-            match event {
-                ValidationEvent::BlockValidated { parent, hash } => {
-                    events.extend(self.handle_block_validated(parent, hash));
-                }
-                ValidationEvent::BlockInDagValidated { hash } => {
-                    self.handle_block_in_dag_validated(hash, result);
-                }
-                ValidationEvent::ProposalValidated { hash } => {
-                    result.add_validated(hash);
-                }
-                ValidationEvent::InvalidatedHash { hash } => {
-                    self.handle_invalidated_hash(hash, result);
-                }
-            }
+        let mut tip_hash = self.state.tip_hash;
+
+        let should_update = validation_result
+            .validated
+            .iter()
+            .inspect(|&hash| result.add_validated(*hash))
+            .filter_map(|&hash| {
+                let node = self
+                    .state
+                    .dag
+                    .get(&hash)
+                    .expect("Node should exist in the DAG");
+
+                node.as_block().and_then(|node| {
+                    match self.should_update_block(node, &tip_hash)? {
+                        ShouldUpdate::Checkpoint => Some(hash),
+                        ShouldUpdate::Tip => {
+                            tip_hash = hash;
+                            None
+                        }
+                    }
+                })
+            })
+            .next();
+
+        validation_result
+            .invalidated
+            .iter()
+            .for_each(|&hash| self.handle_invalidated_hash(hash, result));
+
+        self.state.tip_hash = tip_hash;
+
+        if let Some(hash) = should_update {
+            self.create_new_checkpoint(hash, result);
         }
     }
 
-    fn handle_block_validated(
-        &mut self,
-        parent: Multihash,
-        hash: Multihash,
-    ) -> impl Iterator<Item = ValidationEvent> {
-        let unified_node = self
-            .state
-            .proposal_dags
-            .get_mut(&parent)
-            .expect("Parent should exist")
-            .remove(&hash)
-            .expect("Node should exist");
-
-        let block_node = unified_node
-            .as_block()
-            .expect("Node should be a block")
-            .clone();
-
-        let dag_result = self
-            .state
-            .block_dag
-            .upsert(block_node, std::iter::once(parent));
-
-        dag_result
-            .validated
-            .into_iter()
-            .map(ValidationEvent::new_block_in_dag_validated)
-            .chain(
-                dag_result
-                    .invalidated
-                    .into_iter()
-                    .map(ValidationEvent::new_invalidated_hash),
-            )
-    }
-
-    fn handle_block_in_dag_validated(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
+    fn should_update_block(
+        &self,
+        node: &BlockNode<H, T>,
+        tip_hash: &Multihash,
+    ) -> Option<ShouldUpdate> {
         use std::sync::atomic::Ordering::Relaxed;
-
-        result.add_validated(hash);
-
-        let node = match self.state.block_dag.get(&hash) {
-            Some(node) => node,
-            None => return,
-        };
 
         let block_metrics = {
             let weight = *node.weight.read();
             let cumulative_weight = *node.cumulative_weight.read();
             let height = node.height.load(Relaxed);
-            (weight, cumulative_weight, height)
+            let total_weight = node.trie.read().weight();
+            (weight, cumulative_weight, height, total_weight)
         };
 
         let tip_metrics = {
-            let n = self.tip_node();
+            let n = self
+                .state
+                .dag
+                .get(tip_hash)
+                .expect("Tip node should exist")
+                .as_block()
+                .unwrap();
             (*n.cumulative_weight.read(), n.height.load(Relaxed))
         };
 
-        self.update_tip_if_needed(hash, block_metrics, tip_metrics, result);
-    }
+        let threshold = block_metrics.3.mul_f64(0.67);
 
-    fn update_tip_if_needed(
-        &mut self,
-        hash: Multihash,
-        block_metrics: (T::Weight, T::Weight, u64),
-        tip_metrics: (T::Weight, u64),
-        result: &mut UpdateResult<H, T>,
-    ) {
-        let (block_weight, block_cumulative_weight, block_height) = block_metrics;
-        let (tip_cumulative_weight, tip_height) = tip_metrics;
-
-        let threshold = self.calculate_weight_threshold();
-
-        if block_weight > threshold {
-            self.create_new_checkpoint(hash, result);
-            return;
+        if block_metrics.0 > threshold {
+            return Some(ShouldUpdate::Checkpoint);
         }
 
-        if (block_cumulative_weight, block_height) > (tip_cumulative_weight, tip_height) {
-            self.state.tip_hash = hash;
+        if (block_metrics.1, block_metrics.2) > tip_metrics {
+            return Some(ShouldUpdate::Tip);
         }
-    }
 
-    fn calculate_weight_threshold(&self) -> T::Weight {
-        let total_weight = self
-            .state
-            .block_dag
-            .get(&self.state.tip_hash)
-            .expect("Tip node should exist")
-            .trie
-            .read()
-            .weight();
-        total_weight.mul_f64(0.67)
-    }
-
-    fn create_new_checkpoint(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
-        let node = self.state.block_dag.get(&hash).expect("Node should exist");
-        let parent = node.block.parent;
-
-        self.state.block_dag.retain(&parent).iter().for_each(|n| {
-            self.state.proposal_dags.remove(&n.id());
-        });
-
-        let block_node = self
-            .state
-            .block_dag
-            .remove(&hash)
-            .expect("Node should exist");
-
-        result.new_checkpoint = Some(block_node);
+        None
     }
 
     fn handle_invalidated_hash(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
-        self.state.proposal_dags.remove(&hash);
-        self.state.pending_blocks.remove(&hash);
         self.state.invalid_hashes.insert(hash);
         result.add_invalidated(hash);
+    }
+
+    fn create_new_checkpoint(&mut self, hash: Multihash, result: &mut UpdateResult<H, T>) {
+        self.state.dag.retain(&hash);
+
+        let node = self
+            .state
+            .dag
+            .remove(&hash)
+            .expect("Node should exist")
+            .into_block();
+
+        result.new_checkpoint = Some(node);
     }
 
     pub fn update_proposal(
@@ -472,9 +376,8 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         result: &mut UpdateResult<H, T>,
     ) -> ValidationResult<UnifiedNode<H, T>> {
         let parents = self.collect_proposal_parents(&proposal, result);
-        let entry = self.state.proposal_dags.entry(proposal.parent).or_default();
         let node = UnifiedNode::new_proposal(proposal, witness);
-        entry.upsert(node, parents)
+        self.state.dag.upsert(node, parents)
     }
 
     fn collect_proposal_parents(
@@ -482,13 +385,11 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         proposal: &Proposal<T>,
         result: &mut UpdateResult<H, T>,
     ) -> impl IntoIterator<Item = Multihash> {
-        let dag = self.state.proposal_dags.entry(proposal.parent).or_default();
-
         proposal
             .dependencies
             .iter()
             .inspect(|&dep| {
-                if !dag.contains(dep) {
+                if !self.state.contains(dep) {
                     result.add_phantom(*dep);
                 }
             })
@@ -498,15 +399,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     pub fn tip_node(&self) -> &BlockNode<H, T> {
-        assert!(
-            !self.state.block_dag.is_empty(),
-            "Block DAG should not be empty"
-        );
-
         self.state
-            .block_dag
+            .dag
             .get(&self.state.tip_hash)
             .expect("Tip node should exist")
+            .as_block()
+            .expect("Tip node should be a block")
     }
 
     pub fn tip_hash(&self) -> Multihash {
@@ -514,154 +412,39 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
     }
 
     pub fn tip_trie(&self) -> Trie<H, T> {
-        if !self.state.block_dag.is_empty() {
-            self.tip_node().trie_clone()
-        } else {
-            Default::default()
-        }
-    }
-
-    pub fn get_proposal_dag(&self, hash: Multihash) -> Option<&Dag<UnifiedNode<H, T>>> {
-        self.state.proposal_dags.get(&hash)
+        self.tip_node().trie.read().clone()
     }
 
     pub fn get_trie(&self, parent: &Multihash) -> Option<Trie<H, T>> {
-        if self.state.block_dag.is_empty() {
-            return Some(Default::default());
-        }
-
-        self.state
-            .block_dag
-            .get(parent)
-            .map(|node| node.trie_clone())
+        self.state.dag.get(parent).map(|node| {
+            node.as_block()
+                .expect("Node should be a block")
+                .trie
+                .read()
+                .clone()
+        })
     }
 
     pub fn into_blocks(mut self) -> Blocks<T> {
-        assert!(self.mode.is_archive());
-
-        let mut blocks = HashMap::new();
-        let mut visited = HashSet::new();
-
-        let mut stk = VecDeque::new();
-        stk.push_back(self.state.tip_hash);
-
-        while let Some(hash) = stk.pop_front() {
-            if visited.contains(&hash) {
-                continue;
-            }
-
-            visited.insert(hash);
-
-            let cur_node = self
-                .state
-                .block_dag
-                .remove(&hash)
-                .expect("Node should exist in the DAG");
-
-            let mut proposals = HashMap::new();
-            if !cur_node.block.proposals.is_empty() {
-                let dag = self
-                    .state
-                    .proposal_dags
-                    .remove(&cur_node.block.parent)
-                    .expect("Proposal DAG should exist");
-
-                proposals = dag
-                    .into_ancestors(&cur_node.id(), false)
-                    .into_iter()
-                    .map(|(id, n)| {
-                        let pn = n.into_proposal();
-                        (id, (pn.proposal, pn.witness))
-                    })
-                    .collect();
-            }
-
-            let block = EstablishedBlock {
-                block: cur_node.block,
-                witness: cur_node.witness,
-                proposals,
-            };
-
-            blocks.insert(hash, block);
-
-            if let Some(children) = self.state.block_dag.get_children(&hash) {
-                children.iter().for_each(|&child| {
-                    if !visited.contains(&child) {
-                        stk.push_back(child);
-                    }
-                });
-            }
-        }
-
-        blocks
+        todo!()
     }
 
     pub fn to_blocks(&self) -> Blocks<T> {
-        assert!(self.mode.is_archive());
-
-        let mut blocks = HashMap::new();
-        let mut visited = HashSet::new();
-
-        let mut queue = VecDeque::new();
-        queue.push_back(self.state.root_hash);
-
-        while let Some(hash) = queue.pop_front() {
-            if visited.contains(&hash) {
-                continue;
-            }
-
-            let cur_node = self
-                .state
-                .block_dag
-                .get(&hash)
-                .expect("Node should exist in the DAG");
-
-            let mut proposals = HashMap::new();
-
-            if !cur_node.block.proposals.is_empty() {
-                let dag = self
-                    .state
-                    .proposal_dags
-                    .get(&cur_node.block.parent)
-                    .expect("Proposal DAG should exist");
-
-                proposals = dag
-                    .get_ancestors(&cur_node.id(), false)
-                    .into_iter()
-                    .map(|(id, n)| {
-                        let pn = n.as_proposal().expect("Node should be a proposal");
-                        (id, (pn.proposal.clone(), pn.witness.clone()))
-                    })
-                    .collect();
-            }
-
-            let block = EstablishedBlock {
-                block: cur_node.block.clone(),
-                witness: cur_node.witness.clone(),
-                proposals,
-            };
-
-            blocks.insert(hash, block);
-
-            if let Some(children) = self.state.block_dag.get_children(&hash) {
-                children.iter().for_each(|&child| {
-                    if !visited.contains(&child) {
-                        queue.push_back(child);
-                        visited.insert(child);
-                    }
-                });
-            }
-        }
-
-        blocks
+        todo!()
     }
 
     pub fn root_hash(&self) -> Multihash {
         self.state.root_hash
     }
 
+    #[deprecated]
     pub fn is_empty(&self) -> bool {
-        self.state.block_dag.is_empty()
+        unimplemented!()
+    }
+
+    #[deprecated]
+    pub fn get_proposal_dag(&self, hash: Multihash) -> Option<&Dag<UnifiedNode<H, T>>> {
+        unimplemented!()
     }
 }
 

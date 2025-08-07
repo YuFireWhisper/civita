@@ -54,12 +54,24 @@ impl<H: Hasher, T: Record> UnifiedNode<H, T> {
         }
     }
 
+    pub fn into_block(self) -> BlockNode<H, T> {
+        if let UnifiedNode::Block(node) = self {
+            node
+        } else {
+            panic!("Cannot convert ProposalNode to BlockNode");
+        }
+    }
+
     pub fn into_proposal(self) -> ProposalNode<T> {
         if let UnifiedNode::Proposal(node) = self {
             node
         } else {
             panic!("Cannot convert BlockNode to ProposalNode");
         }
+    }
+
+    pub fn is_block(&self) -> bool {
+        matches!(self, UnifiedNode::Block(_))
     }
 }
 
