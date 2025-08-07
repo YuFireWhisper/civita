@@ -42,12 +42,6 @@ pub struct UpdateResult<H, T: Record> {
     pub new_checkpoint: Option<BlockNode<H, T>>,
 }
 
-enum ValidationEvent {
-    BlockValidated(Multihash),
-    ProposalValidated(Multihash),
-    InvalidatedHash(Multihash),
-}
-
 enum ShouldUpdate {
     Checkpoint,
     Tip,
