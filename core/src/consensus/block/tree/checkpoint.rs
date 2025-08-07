@@ -345,13 +345,10 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             .expect("Node should be a block")
             .clone();
 
-        let parents = if self.state.tip_hash == Multihash::default() {
-            Vec::new()
-        } else {
-            vec![parent]
-        };
-
-        let dag_result = self.state.block_dag.upsert(block_node, parents);
+        let dag_result = self
+            .state
+            .block_dag
+            .upsert(block_node, std::iter::once(parent));
 
         dag_result
             .validated
@@ -369,13 +366,6 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
         use std::sync::atomic::Ordering::Relaxed;
 
         result.add_validated(hash);
-
-        if self.state.tip_hash == Multihash::default() {
-            // First block in the DAG
-            self.state.tip_hash = hash;
-            self.state.root_hash = hash;
-            return;
-        }
 
         let node = match self.state.block_dag.get(&hash) {
             Some(node) => node,
@@ -502,7 +492,7 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
                     result.add_phantom(*dep);
                 }
             })
-            .chain((self.state.tip_hash != Multihash::default()).then_some(&proposal.parent))
+            .chain(std::iter::once(&proposal.parent))
             .copied()
             .collect::<Vec<_>>()
     }
@@ -548,10 +538,6 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
     pub fn into_blocks(mut self) -> Blocks<T> {
         assert!(self.mode.is_archive());
-
-        if self.state.block_dag.is_empty() {
-            return HashMap::new();
-        }
 
         let mut blocks = HashMap::new();
         let mut visited = HashSet::new();
@@ -612,10 +598,6 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
 
     pub fn to_blocks(&self) -> Blocks<T> {
         assert!(self.mode.is_archive());
-
-        if self.state.block_dag.is_empty() {
-            return HashMap::new();
-        }
 
         let mut blocks = HashMap::new();
         let mut visited = HashSet::new();
