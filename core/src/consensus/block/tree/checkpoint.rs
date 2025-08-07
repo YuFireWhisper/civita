@@ -210,11 +210,12 @@ impl<H: Hasher, T: Record> Checkpoint<H, T> {
             true
         });
 
-        match unests.len() {
-            0 => Some((Checkpoint::new_empty(mode), ests)),
-            1 => Some((unests.into_values().next().unwrap(), ests)),
-            _ => None,
+        if unests.len() != 1 {
+            // Checkpoint must have exactly one root
+            return None;
         }
+
+        Some((unests.into_values().next().unwrap(), ests))
     }
 
     pub fn update_block(&mut self, block: Block, witness: block::Witness) -> UpdateResult<H, T> {
