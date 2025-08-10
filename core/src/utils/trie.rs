@@ -36,6 +36,12 @@ pub struct Trie<H, T: Record> {
     _marker: PhantomData<H>,
 }
 
+impl<T> ProofResult<T> {
+    pub fn is_invalid(&self) -> bool {
+        matches!(self, ProofResult::Invalid)
+    }
+}
+
 impl<H: Hasher, T: Record> Trie<H, T> {
     pub fn empty() -> Self {
         Self::default()
