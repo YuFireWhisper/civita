@@ -30,6 +30,7 @@ pub enum Error {}
 pub struct Block {
     pub parent: Multihash,
     pub checkpoint: Multihash,
+    pub height: u32,
     pub proposals: BTreeSet<Multihash>,
     pub proposer_pk: PublicKey,
     #[serialize(skip)]
@@ -64,6 +65,7 @@ impl Block {
         Block {
             parent,
             checkpoint,
+            height: 0,
             proposals,
             proposer_pk,
             hash_cache: OnceLock::new(),
