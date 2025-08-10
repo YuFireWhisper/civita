@@ -1,5 +1,6 @@
+use std::sync::OnceLock;
+
 use dashmap::DashSet;
-use parking_lot::RwLock as ParkingRwLock;
 
 use crate::{
     consensus::{
@@ -7,15 +8,16 @@ use crate::{
         proposal::{self, Proposal},
     },
     crypto::{Hasher, Multihash},
-    utils::Record,
+    utils::{trie, Record},
 };
 
+#[derive(Clone)]
 pub struct ProposalNode<T: Record> {
     pub proposal: Proposal<T>,
     pub witness: proposal::Witness,
-    pub proposer_weight: ParkingRwLock<T::Weight>,
-    pub remaining: DashSet<Vec<u8>>,
-    pub existing_keys: DashSet<Vec<u8>>,
+    proposer_weight: OnceLock<T::Weight>,
+    remaining: DashSet<Vec<u8>>,
+    existing_keys: DashSet<Vec<u8>>,
 }
 
 impl<T: Record> ProposalNode<T> {
@@ -43,23 +45,22 @@ impl<T: Record> ProposalNode<T> {
     }
 
     pub fn on_block_parent_valid<H: Hasher>(&self, parent: &BlockNode<H, T>) -> bool {
-        let trie_root = {
-            let mut trie = parent.trie.write();
+        let trie_root = parent.trie_root();
 
-            let key = self.proposal.proposer_pk.to_hash::<H>().to_bytes();
-            let iter = self
-                .proposal
-                .operations
-                .keys()
-                .map(|k| k.as_slice())
-                .chain(std::iter::once(key.as_slice()));
+        let key = self.proposal.proposer_pk.to_hash::<H>().to_bytes();
 
-            if !trie.expand(iter, &self.witness.proofs) {
-                return false;
-            }
-
-            trie.root_hash()
-        };
+        if self
+            .proposal
+            .operations
+            .keys()
+            .map(|k| k.as_slice())
+            .chain(std::iter::once(key.as_slice()))
+            .any(|key| {
+                trie::verify_proof_with_hash::<T>(key, &self.witness.proofs, trie_root).is_invalid()
+            })
+        {
+            return false;
+        }
 
         let Some(weight) = self
             .proposal
@@ -68,7 +69,7 @@ impl<T: Record> ProposalNode<T> {
             return false;
         };
 
-        *self.proposer_weight.write() = weight;
+        self.proposer_weight.set(weight);
 
         true
     }
@@ -107,16 +108,11 @@ impl<T: Record> ProposalNode<T> {
     pub fn validate(&self) -> bool {
         true
     }
-}
 
-impl<T: Record> Clone for ProposalNode<T> {
-    fn clone(&self) -> Self {
-        Self {
-            proposal: self.proposal.clone(),
-            witness: self.witness.clone(),
-            proposer_weight: ParkingRwLock::new(*self.proposer_weight.read()),
-            remaining: self.remaining.clone(),
-            existing_keys: self.existing_keys.clone(),
-        }
+    pub fn proposer_weight(&self) -> T::Weight {
+        self.proposer_weight
+            .get()
+            .cloned()
+            .expect("Proposer weight should be set after validation")
     }
 }
