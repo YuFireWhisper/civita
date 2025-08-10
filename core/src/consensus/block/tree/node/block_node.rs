@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
 use dashmap::{DashMap, DashSet};
@@ -24,6 +26,7 @@ pub struct BlockNode<H, T: Record> {
     block: Block,
     witness: block::Witness,
     trie: ParkingRwLock<Trie<H, T>>,
+    trie_root: OnceLock<Multihash>,
     cumulative_weight: ParkingRwLock<T::Weight>,
     operations: DashMap<Vec<u8>, T::Operation>,
     existing_keys: DashMap<Vec<u8>, bool>,
@@ -113,9 +116,7 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
             &parent.witness.proofs,
         );
 
-        let weight = *parent.proposer_weight.read();
-
-        *self.cumulative_weight.write() += weight;
+        *self.cumulative_weight.write() += parent.proposer_weight();
         parent.proposal.operations.iter().for_each(|(k, o)| {
             self.operations.insert(k.clone(), o.clone());
         });
@@ -136,19 +137,35 @@ impl<H: Hasher, T: Record> BlockNode<H, T> {
         }
 
         let root_hash = trie.root_hash();
-
-        *self.trie.write() = Trie::from_root(root_hash);
+        self.trie_root
+            .set(root_hash)
+            .expect("Root hash should be set only once");
 
         true
+    }
+
+    pub fn trie_root(&self) -> Multihash {
+        self.trie_root
+            .get()
+            .cloned()
+            .expect("Trie root should be set after validation")
     }
 }
 
 impl<H, T: Record> Clone for BlockNode<H, T> {
     fn clone(&self) -> Self {
+        let trie_root = OnceLock::new();
+        if let Some(root) = self.trie_root.get() {
+            trie_root
+                .set(*root)
+                .expect("Trie root should be set only once");
+        }
+
         Self {
             block: self.block.clone(),
             witness: self.witness.clone(),
             trie: ParkingRwLock::new(self.trie.read().clone()),
+            trie_root,
             cumulative_weight: ParkingRwLock::new(*self.cumulative_weight.read()),
             operations: self.operations.clone(),
             existing_keys: self.existing_keys.clone(),
