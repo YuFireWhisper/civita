@@ -8,7 +8,7 @@ use crate::crypto::traits::{
 };
 
 mod ec;
-mod hasher;
+pub mod hasher;
 mod traits;
 
 pub use traits::hasher::{Hasher, Multihash};
