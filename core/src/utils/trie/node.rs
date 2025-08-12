@@ -5,34 +5,31 @@ use civita_serialize_derive::Serialize;
 use derivative::Derivative;
 
 use crate::{
-    crypto::{Hasher, Multihash},
-    utils::{
-        trie::keys::{hex_to_vec, vec_to_hex},
-        Record,
-    },
+    crypto::{hasher::Hasher, Multihash},
+    utils::trie::keys::{hex_to_vec, vec_to_hex},
 };
 
 #[derive(Clone)]
 #[derive(Debug)]
+#[derive(Default)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Full<T: Record> {
-    pub children: Box<[Node<T>; 17]>,
-    #[serialize(skip)]
-    hash_cache: OnceLock<Multihash>,
+pub struct Full {
+    pub children: Box<[Node; 17]>,
 
     #[serialize(skip)]
-    weight_cache: OnceLock<T::Weight>,
+    hash_cache: OnceLock<Multihash>,
 }
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Short<T: Record> {
+pub struct Short {
     #[serialize(serialize_with = "serialize_key", deserialize_with = "deserialize_key")]
     pub key: Vec<u8>, // Hex
-    pub val: Box<Node<T>>,
+    pub val: Box<Node>,
+
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -41,8 +38,9 @@ pub struct Short<T: Record> {
 #[derive(Debug)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub struct Value<T> {
-    pub record: T,
+pub struct Value {
+    pub value: Vec<u8>,
+
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
@@ -53,44 +51,39 @@ pub struct Value<T> {
 #[derive(Default)]
 #[derive(Eq, PartialEq)]
 #[derive(Serialize)]
-pub enum Node<T: Record> {
+pub enum Node {
     #[default]
     Empty,
-    Full(Full<T>),
-    Short(Short<T>),
+    Full(Full),
+    Short(Short),
     Hash(Multihash),
-    Value(Value<T>),
+    Value(Value),
 }
 
-impl<T: Record> Full<T> {
-    pub fn hash<H: Hasher>(&self) -> Multihash {
-        *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
+impl Full {
+    pub fn hash(&self) -> Multihash {
+        *self
+            .hash_cache
+            .get_or_init(|| Hasher::digest(&self.to_vec()))
     }
 
-    pub fn hash_children<H: Hasher>(&self) {
+    pub fn hash_children(&self) {
         if self.hash_cache.get().is_some() {
             return; // Already hashed
         }
 
         self.children.iter().for_each(|child| {
-            child.hash_children::<H>();
+            child.hash_children();
         });
     }
 
     pub fn clear_caches(&mut self) {
         self.hash_cache = OnceLock::new();
-        self.weight_cache = OnceLock::new();
-    }
-
-    pub fn weight(&self) -> T::Weight {
-        *self
-            .weight_cache
-            .get_or_init(|| self.children.iter().map(|child| child.weight()).sum())
     }
 }
 
-impl<T: Record> Short<T> {
-    pub fn new<U: Into<Box<Node<T>>>>(key: Vec<u8>, val: U) -> Self {
+impl Short {
+    pub fn new<T: Into<Box<Node>>>(key: Vec<u8>, val: T) -> Self {
         let val = val.into();
 
         Short {
@@ -100,15 +93,16 @@ impl<T: Record> Short<T> {
         }
     }
 
-    pub fn hash<H: Hasher>(&self) -> Multihash {
-        *self.hash_cache.get_or_init(|| H::hash(&self.to_vec()))
+    pub fn hash(&self) -> Multihash {
+        *self
+            .hash_cache
+            .get_or_init(|| Hasher::digest(&self.to_vec()))
     }
 
-    pub fn hash_children<H: Hasher>(&self) {
-        if self.hash_cache.get().is_some() {
-            return; // Already hashed
+    pub fn hash_children(&self) {
+        if self.hash_cache.get().is_none() {
+            self.val.hash_children();
         }
-        self.val.hash_children::<H>();
     }
 
     pub fn clear_cache(&mut self) {
@@ -116,78 +110,49 @@ impl<T: Record> Short<T> {
     }
 }
 
-impl<T: Record> Value<T> {
-    pub fn new(record: T) -> Self {
+impl Value {
+    pub fn new(value: Vec<u8>) -> Self {
         Self {
-            record,
+            value,
             hash_cache: OnceLock::new(),
         }
     }
 
-    pub fn hash<H: Hasher>(&self) -> Multihash {
+    pub fn hash(&self) -> Multihash {
         *self
             .hash_cache
-            .get_or_init(|| H::hash(&self.record.to_vec()))
-    }
-
-    pub fn weight(&self) -> T::Weight {
-        self.record.weight()
+            .get_or_init(|| Hasher::digest(&self.to_vec()))
     }
 }
 
-impl<T: Record> Node<T> {
-    pub fn new_short<U: Into<Box<Node<T>>>>(key: Vec<u8>, val: U) -> Self {
+impl Node {
+    pub fn new_short<T: Into<Box<Node>>>(key: Vec<u8>, val: T) -> Self {
         Node::Short(Short::new(key, val))
-    }
-
-    pub fn new_value(record: T) -> Self {
-        Node::Value(Value::new(record))
-    }
-
-    pub fn from_full(full: Full<T>) -> Self {
-        Node::Full(full)
     }
 
     pub fn is_empty(&self) -> bool {
         matches!(self, Node::Empty)
     }
 
-    pub fn weight(&self) -> T::Weight {
+    pub fn hash(&self) -> Multihash {
         match self {
-            Node::Full(full) => full.weight(),
-            Node::Short(short) => short.val.weight(),
-            Node::Value(value) => value.weight(),
-            Node::Hash(_) | Node::Empty => T::Weight::default(),
-        }
-    }
-
-    pub fn hash<H: Hasher>(&self) -> Multihash {
-        match self {
-            Node::Full(full) => full.hash::<H>(),
-            Node::Short(short) => short.hash::<H>(),
-            Node::Value(value) => value.hash::<H>(),
+            Node::Full(full) => full.hash(),
+            Node::Short(short) => short.hash(),
+            Node::Value(value) => value.hash(),
             Node::Hash(hash) => *hash,
             Node::Empty => Multihash::default(),
         }
     }
 
-    pub fn hash_children<H: Hasher>(&self) {
+    pub fn hash_children(&self) {
         match self {
-            Node::Full(full) => full.hash_children::<H>(),
-            Node::Short(short) => short.hash_children::<H>(),
+            Node::Full(full) => full.hash_children(),
+            Node::Short(short) => short.hash_children(),
             Node::Hash(_) | Node::Value(_) | Node::Empty => {}
         }
     }
 
-    pub fn as_short_mut(&mut self) -> Option<&mut Short<T>> {
-        if let Node::Short(short) = self {
-            Some(short)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_full_mut(&mut self) -> Option<&mut Full<T>> {
+    pub fn as_full_mut(&mut self) -> Option<&mut Full> {
         if let Node::Full(full) = self {
             Some(full)
         } else {
@@ -218,23 +183,4 @@ fn deserialize_key<R: std::io::Read>(reader: &mut R) -> Result<Vec<u8>, civita_s
     }
 
     Ok(hex_nibbles)
-}
-
-impl<T: Record> From<Full<T>> for Node<T> {
-    fn from(full: Full<T>) -> Self {
-        Node::Full(full)
-    }
-}
-
-impl<T: Record> Default for Full<T> {
-    fn default() -> Self {
-        let children = std::array::from_fn(|_| Node::Empty);
-        let children = Box::new(children);
-
-        Full {
-            children,
-            hash_cache: OnceLock::new(),
-            weight_cache: OnceLock::new(),
-        }
-    }
 }
