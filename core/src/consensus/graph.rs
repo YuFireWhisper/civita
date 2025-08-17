@@ -189,7 +189,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
             (&mut l[idx], &mut r[0])
         } else {
             let (l, r) = self.entries.split_at_mut(idx);
-            (&mut r[0], &mut l[idx])
+            (&mut r[0], &mut l[pidx])
         };
 
         let trie = parent.trie.as_mut().expect("Parent must have a trie");
