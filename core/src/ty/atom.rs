@@ -25,6 +25,7 @@ pub trait Command: Clone + Serialize + Send + Sync + Sized + 'static {
         -> Result<HashMap<Key, Self::Value>, String>;
 }
 
+#[derive(Clone)]
 #[derive(Serialize)]
 pub struct Atom<C> {
     pub height: Height,
@@ -40,11 +41,30 @@ pub struct Atom<C> {
     cache: OnceLock<Multihash>,
 }
 
+#[derive(Clone)]
+#[derive(Serialize)]
 pub struct Witness {
     pub trie_proofs: HashMap<Multihash, Vec<u8>>,
 }
 
 impl<C: Serialize> Atom<C> {
+    pub fn new(
+        height: Height,
+        cmd: Option<C>,
+        timestamp: u64,
+        vdf_proof: Vec<u8>,
+        atoms: BTreeSet<Multihash>,
+    ) -> Self {
+        Atom {
+            height,
+            cmd,
+            timestamp,
+            vdf_proof,
+            atoms,
+            cache: OnceLock::new(),
+        }
+    }
+
     pub fn hash(&self) -> Multihash {
         *self.cache.get_or_init(|| Hasher::digest(&self.to_vec()))
     }
