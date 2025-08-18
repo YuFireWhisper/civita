@@ -1,41 +1,20 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use civita_serialize::Serialize;
-use derivative::Derivative;
 
 use crate::{
+    consensus::graph::entry::Entry,
     crypto::Multihash,
     ty::atom::{Atom, Command, Height, Key, MergeStrategy, Version, Witness},
-    utils::Trie,
 };
+
+mod entry;
 
 #[derive(Clone)]
 #[derive(Default)]
 pub struct UpdateResult {
     pub invalidated: Vec<Multihash>,
     pub missing: Vec<Multihash>,
-}
-
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
-struct Entry<C: Command> {
-    atom: Option<Atom<C>>,
-    witness: Option<Witness>,
-
-    trie: Option<Trie>,
-
-    remaining_input: HashMap<Key, Option<Version>>,
-    input: HashMap<Key, (C::Value, Version)>,
-    output: HashMap<Key, (C::Value, Version)>,
-
-    existing: HashSet<(Key, Version)>,
-
-    parents: HashSet<usize>,
-    children: HashSet<usize>,
-    block_parent: Option<usize>,
-
-    pending_parent_count: usize,
-    weight: usize,
 }
 
 pub struct Graph<C: Command, M: MergeStrategy<C::Value>> {
@@ -46,37 +25,16 @@ pub struct Graph<C: Command, M: MergeStrategy<C::Value>> {
     checkpoint: Option<usize>,
 
     block_witness_threshold: usize,
-    checkpoint_distance: usize,
+    checkpoint_distance: u32,
 
     merge_strategy: M,
-}
-
-impl<C: Command> Entry<C> {
-    pub fn new(atom: Atom<C>, witness: Witness) -> Self {
-        let remaining_input = atom.cmd.as_ref().map(|c| c.input()).unwrap_or_default();
-
-        Self {
-            atom: Some(atom),
-            witness: Some(witness),
-            remaining_input,
-            ..Default::default()
-        }
-    }
-
-    pub fn atom_unchecked(&self) -> &Atom<C> {
-        self.atom.as_ref().expect("Entry must have atom")
-    }
-
-    pub fn hash(&self) -> Multihash {
-        self.atom_unchecked().hash()
-    }
 }
 
 impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
     pub fn new(
         merge_strategy: M,
         block_witness_threshold: usize,
-        checkpoint_distance: usize,
+        checkpoint_distance: u32,
     ) -> Self {
         Self {
             index: HashMap::new(),
@@ -104,7 +62,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
             return result;
         }
 
-        if self.entries[idx].pending_parent_count == 0 {
+        if self.entries[idx].as_pending().pending_parent_count == 0 {
             self.on_all_parent_valid(idx, &mut result);
         }
 
@@ -113,7 +71,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
 
     fn checkpoint_height(&self) -> Height {
         self.checkpoint
-            .map(|i| self.entries[i].atom_unchecked().height)
+            .map(|i| self.entries[i].as_block().atom.height)
             .unwrap_or(0)
     }
 
@@ -121,30 +79,30 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
         self.index
             .get(h)
             .and_then(|&i| self.entries.get(i))
-            .is_some_and(|e| e.atom.is_some())
+            .is_some_and(|e| !e.is_missing())
     }
 
     fn insert_entry(&mut self, atom: Atom<C>, witness: Witness) -> usize {
         let idx = self.entries.len();
         self.index.insert(atom.hash(), idx);
-        let entry = Entry::new(atom, witness);
+        let entry = Entry::new_pending(atom, witness);
         debug_assert!(self.validate_entry_inputs(&entry));
         self.entries.push(entry);
         idx
     }
 
     fn validate_entry_inputs(&self, entry: &Entry<C>) -> bool {
-        entry.remaining_input.is_empty()
-            || entry
-                .remaining_input
-                .iter()
-                .all(|(k, v)| self.merge_strategy.is_mergeable(k) == v.is_none())
+        entry
+            .as_pending()
+            .remaining_inputs
+            .iter()
+            .all(|(k, v)| self.merge_strategy.is_mergeable(k) == v.is_none())
     }
 
     fn link_parents(&mut self, idx: usize, result: &mut UpdateResult) -> bool {
-        let parents = self.entries[idx].atom_unchecked().atoms.clone();
+        let parents = self.entries[idx].as_pending().atom.atoms.clone();
 
-        parents.into_iter().all(|h| {
+        for h in parents {
             let pidx = self.index.get(&h).copied().unwrap_or_else(|| {
                 let idx = self.entries.len();
                 self.index.insert(h, idx);
@@ -153,59 +111,60 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
                 idx
             });
 
-            self.entries[idx].parents.insert(pidx);
-            self.entries[pidx].children.insert(idx);
+            self.entries[idx].as_pending_mut().parents.insert(pidx);
+            self.entries[pidx].add_child(idx);
 
-            if self.entries[pidx].pending_parent_count != 0 {
-                self.entries[pidx].pending_parent_count += 1;
-                true
-            } else {
-                self.on_parent_valid(idx, pidx)
+            if !self.entries[pidx].is_valid() {
+                self.entries[idx].as_pending_mut().pending_parent_count += 1;
+                continue;
             }
-        })
+
+            if !self.on_parent_valid(idx, pidx) {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn on_parent_valid(&mut self, idx: usize, pidx: usize) -> bool {
-        if self.entries[pidx].trie.is_some() {
+        if self.entries[pidx].is_block() {
             self.process_block_parent(idx, pidx)
         } else {
-            self.process_basic_parent(idx, pidx)
+            self.process_basic_parent(idx, pidx);
+            true
         }
     }
 
     fn process_block_parent(&mut self, idx: usize, pidx: usize) -> bool {
-        if self.entries[idx].block_parent.replace(pidx).is_some() {
-            return false;
-        }
+        let (cur, parent) = if idx < pidx {
+            let (l, r) = self.entries.split_at_mut(pidx);
+            (l[idx].as_pending_mut(), r[0].as_block_mut())
+        } else {
+            let (l, r) = self.entries.split_at_mut(idx);
+            (r[0].as_pending_mut(), l[pidx].as_block_mut())
+        };
 
-        if self.entries[idx].atom_unchecked().height
-            != self.entries[pidx].atom_unchecked().height + 1
+        if !cur.atom.atoms.contains(&parent.atom.hash())
+            || cur.block_parent.replace(pidx).is_some()
+            || cur.atom.height != parent.atom.height + 1
         {
             return false;
         }
 
-        let (cur, parent) = if idx < pidx {
-            let (l, r) = self.entries.split_at_mut(pidx);
-            (&mut l[idx], &mut r[0])
-        } else {
-            let (l, r) = self.entries.split_at_mut(idx);
-            (&mut r[0], &mut l[pidx])
-        };
-
-        let trie = parent.trie.as_mut().expect("Parent must have a trie");
         let keys = cur
-            .remaining_input
+            .remaining_inputs
             .extract_if(|_, v| v.is_none())
             .map(|(k, _)| k)
             .collect::<Vec<_>>();
-        let proofs = &cur.witness.as_mut().unwrap().trie_proofs;
 
-        if !trie.resolve(&keys, proofs) {
+        if !parent.trie.resolve(&keys, &cur.witness.trie_proofs) {
             return false;
         }
 
         cur.input.extend(keys.into_iter().map(|k| {
-            let val = trie
+            let val = parent
+                .trie
                 .get(k.as_slice())
                 .map(|v| C::Value::from_slice(&v).expect("Value must valid"))
                 .unwrap_or_default();
@@ -215,35 +174,35 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
         true
     }
 
-    fn process_basic_parent(&mut self, idx: usize, pidx: usize) -> bool {
+    fn process_basic_parent(&mut self, idx: usize, pidx: usize) {
+        let block_parent_idx = self.entries[pidx].as_basic().block_parent;
+
+        if self.entries[idx].as_pending().block_parent.is_none() {
+            self.process_block_parent(idx, block_parent_idx);
+        }
+
         let (cur, parent) = if idx < pidx {
             let (l, r) = self.entries.split_at_mut(pidx);
-            (&mut l[idx], &mut r[0])
+            (l[idx].as_pending_mut(), r[0].as_basic_mut())
         } else {
             let (l, r) = self.entries.split_at_mut(idx);
-            (&mut r[0], &mut l[pidx])
+            (r[0].as_pending_mut(), l[pidx].as_basic_mut())
         };
 
         parent
             .output
             .iter()
             .filter(|(_, (_, ver))| ver != &0)
-            .all(|(k, (v, ver))| {
-                if !cur.existing.insert((k.clone(), *ver)) {
-                    return false;
-                }
-
+            .for_each(|(k, (v, ver))| {
                 if cur
-                    .remaining_input
+                    .remaining_inputs
                     .get(k)
                     .is_some_and(|v| v.is_some_and(|c| &c == ver))
                 {
                     cur.input.insert(k.clone(), (v.clone(), *ver));
-                    cur.remaining_input.remove(k);
+                    cur.remaining_inputs.remove(k);
                 }
-
-                true
-            })
+            });
     }
 
     fn remove_subgraph(&mut self, idx: usize, result: &mut UpdateResult) {
@@ -255,13 +214,22 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
                 continue;
             }
 
-            let entry = std::mem::take(&mut self.entries[u]);
-            let hash = entry.atom_unchecked().hash();
+            let mut entry = std::mem::take(&mut self.entries[u]);
 
-            stk.extend(entry.children.into_iter());
-            entry.parents.into_iter().for_each(|p| {
-                self.entries[p].children.remove(&u);
-            });
+            let Some(hash) = entry.hash() else {
+                continue;
+            };
+
+            stk.extend(entry.children_take().into_iter());
+
+            if let Some(parents) = entry
+                .as_pending_mut_opt()
+                .map(|e| std::mem::take(&mut e.parents))
+            {
+                parents.into_iter().for_each(|p| {
+                    self.entries[p].remove_child(u);
+                });
+            }
 
             result.invalidated.push(hash);
             self.index.remove(&hash);
@@ -269,21 +237,16 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
     }
 
     fn on_all_parent_valid(&mut self, idx: usize, result: &mut UpdateResult) {
-        let entry = &mut self.entries[idx];
+        let entry = self.entries[idx].as_pending_mut();
 
-        if entry.block_parent.is_none() {
-            self.remove_subgraph(idx, result);
-            return;
-        }
-
-        if !entry.remaining_input.is_empty() {
+        if entry.block_parent.is_none() || !entry.remaining_inputs.is_empty() {
             self.remove_subgraph(idx, result);
             return;
         }
 
         let input_raw = std::mem::take(&mut entry.input);
 
-        if let Some(cmd) = &entry.atom_unchecked().cmd {
+        if let Some(cmd) = &entry.atom.cmd {
             let mut versions = HashMap::new();
             let mut input = HashMap::new();
 
@@ -306,96 +269,106 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
 
         self.try_execute(idx);
 
-        let children = self.entries[idx].children.clone();
-        children.iter().for_each(|&cidx| {
+        let children = self.entries[idx].children().clone();
+        children.into_iter().for_each(|cidx| {
             if !self.on_parent_valid(cidx, idx) {
                 self.remove_subgraph(cidx, result);
             }
-            self.entries[cidx].pending_parent_count -= 1;
-            if self.entries[cidx].pending_parent_count == 0 {
+            self.entries[cidx].as_pending_mut().pending_parent_count -= 1;
+            if self.entries[cidx].as_pending().pending_parent_count == 0 {
                 self.on_all_parent_valid(cidx, result);
             }
         });
     }
 
-    fn try_execute(&mut self, idx: usize) {
+    fn try_execute(&mut self, idx: usize) -> bool {
         let mut max: BTreeMap<&Key, &Version> = BTreeMap::new();
         let mut not_specified_state: BTreeMap<&Key, C::Value> = BTreeMap::new();
         let mut specified_state: BTreeMap<&Key, &C::Value> = BTreeMap::new();
+        let mut conflicting: HashSet<usize> = HashSet::new();
 
-        self.entries[idx]
-            .atom_unchecked()
+        let entry = self.entries[idx].as_pending();
+        let block_parent = entry.block_parent.expect("Block parent must exist");
+        let block_parent_outputs = &self.entries[block_parent].as_block().outputs;
+
+        for idx in entry
+            .atom
             .atoms
             .iter()
             .map(|h| *self.index.get(h).expect("Atom must exist"))
             .chain(std::iter::once(idx))
-            .for_each(|idx| {
-                self.entries[idx].output.iter().for_each(|(k, (v, ver))| {
-                    if ver == &0 {
-                        let v = not_specified_state
-                            .remove(k)
-                            .map(|p| self.merge_strategy.merge(k, &p, v))
-                            .unwrap_or_else(|| v.clone());
-                        not_specified_state.insert(k, v);
-                    } else if max.get(k).is_none_or(|o| o < &ver) {
-                        max.insert(k, ver);
-                        specified_state.insert(k, v);
-                    } else {
-                        // nothing
-                    }
-                });
-            });
+            .filter(|&i| i != block_parent)
+        {
+            if conflicting.contains(&idx) {
+                return false;
+            }
 
-        if self.entries[idx].atom_unchecked().atoms.len() < self.block_witness_threshold {
-            return;
+            for (k, (v, ver)) in self.entries[idx].as_basic().output.iter() {
+                if let Some(con) = block_parent_outputs.get(k).and_then(|vm| vm.get(ver)) {
+                    conflicting.extend(con.iter().copied());
+                }
+
+                if ver == &0 {
+                    let v = not_specified_state
+                        .remove(k)
+                        .map(|p| self.merge_strategy.merge(k, &p, v))
+                        .unwrap_or_else(|| v.clone());
+                    not_specified_state.insert(k, v);
+                    continue;
+                }
+
+                if max.get(k).is_none_or(|o| o < &ver) {
+                    max.insert(k, ver);
+                    specified_state.insert(k, v);
+                }
+            }
         }
 
-        let parent_idx = self.entries[idx]
-            .block_parent
-            .expect("Block parent must exist");
+        if entry.atom.atoms.len() >= self.block_witness_threshold {
+            let mut trie = self.entries[block_parent].as_block().trie.clone();
 
-        let mut trie = self.entries[parent_idx]
-            .trie
-            .as_ref()
-            .expect("Parent trie must exist")
-            .clone();
+            let iter = specified_state
+                .into_iter()
+                .map(|(k, v)| (k, v.to_vec()))
+                .chain(
+                    not_specified_state
+                        .into_iter()
+                        .map(|(k, v)| (k, v.to_vec())),
+                );
 
-        let iter = specified_state
-            .into_iter()
-            .map(|(k, v)| (k, v.to_vec()))
-            .chain(
-                not_specified_state
-                    .into_iter()
-                    .map(|(k, v)| (k, v.to_vec())),
-            );
+            trie.extend(iter);
 
-        trie.extend(iter);
+            let entry = std::mem::take(&mut self.entries[idx]);
+            self.entries[idx] = entry.into_block(trie);
+        } else {
+            let entry = std::mem::take(&mut self.entries[idx]);
+            self.entries[idx] = entry.into_basic();
+        }
 
-        self.entries[idx].trie = Some(trie);
         self.update_weight(idx);
-        self.recompute_main_chain_and_checkpoint(idx);
+        self.recompute_main_chain_and_checkpoint();
+
+        true
     }
 
     fn update_weight(&mut self, idx: usize) {
-        let is_block = self.entries[idx].trie.is_some();
+        let mut cur = self.entries[idx]
+            .block_parent()
+            .expect("Block parent must exist");
 
-        let mut cur = if is_block {
-            Some(idx)
-        } else {
-            self.entries[idx].block_parent
-        };
+        loop {
+            if cur == 0 {
+                break; // root block
+            }
 
-        while let Some(i) = cur {
-            self.entries[i].weight += 1;
-            cur = self.entries[i].block_parent;
+            let entry = self.entries[cur].as_block_mut();
+            entry.weight += 1;
+            cur = entry.parent;
         }
     }
 
-    fn recompute_main_chain_and_checkpoint(&mut self, last_updated: usize) {
-        let start = self
-            .checkpoint
-            .as_ref()
-            .map_or(self.root_of(last_updated), |cp| *cp);
+    fn recompute_main_chain_and_checkpoint(&mut self) {
+        let start = self.checkpoint.unwrap_or_default();
 
         let new_head = self.ghost_select(start);
         self.main_head = Some(new_head);
@@ -403,61 +376,46 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
         self.maybe_advance_checkpoint(new_head);
     }
 
-    fn root_of(&self, mut i: usize) -> usize {
-        while let Some(p) = self.entries[i].block_parent {
-            i = p;
-        }
-        i
-    }
-
     fn ghost_select(&self, start: usize) -> usize {
         let mut cur = start;
-        loop {
-            let mut best: Option<(usize, Multihash, usize)> = None; // (weight, hash, idx)
 
-            for &child in &self.entries[cur].children {
-                if self.entries[child].trie.is_some()
-                    && self.entries[child].block_parent == Some(cur)
-                {
-                    let w = self.entries[child].weight;
-                    let h = self.entries[child].hash();
-                    match &mut best {
-                        None => best = Some((w, h, child)),
-                        Some((bw, bh, bi)) => {
-                            if w > *bw || (w == *bw && h < *bh) {
-                                *bw = w;
-                                *bh = h;
-                                *bi = child;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some((_, _, nxt)) = best {
-                cur = nxt;
-            } else {
-                break;
-            }
+        while let Some((_, _, next_idx)) = self.entries[cur]
+            .children()
+            .iter()
+            .filter_map(|&idx| {
+                self.entries[idx]
+                    .as_block_opt()
+                    .map(|block| (block.weight, block.atom.hash(), idx))
+            })
+            .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+        {
+            cur = next_idx;
         }
+
         cur
     }
 
     fn maybe_advance_checkpoint(&mut self, head_idx: usize) {
-        let head_h = self.entries[head_idx].atom_unchecked().height;
+        let head_h = self.entries[head_idx].as_block().atom.height;
         let cur_cp_h = self.checkpoint_height();
 
-        if head_h > cur_cp_h && (head_h - cur_cp_h) as usize > self.checkpoint_distance {
+        if cur_cp_h == 0 {
+            self.checkpoint = Some(head_idx);
+            return;
+        }
+
+        if head_h - cur_cp_h > self.checkpoint_distance {
             let target_h = head_h.saturating_sub(self.checkpoint_distance as Height);
 
-            let mut cur = head_idx;
-            while self.entries[cur].atom_unchecked().height > target_h {
-                cur = self.entries[cur]
-                    .block_parent
-                    .expect("Block parent must exist while seeking checkpoint");
+            let mut cur_idx = head_idx;
+            let mut cur = self.entries[cur_idx].as_block();
+
+            while cur.atom.height > target_h {
+                cur_idx = cur.parent;
+                cur = self.entries[cur.parent].as_block();
             }
 
-            self.checkpoint = Some(cur);
+            self.checkpoint = Some(cur_idx);
         }
     }
 }
