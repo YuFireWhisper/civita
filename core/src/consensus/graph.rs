@@ -96,7 +96,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
             .as_pending()
             .remaining_inputs
             .iter()
-            .all(|(k, v)| self.merge_strategy.is_mergeable(k) == v.is_none())
+            .all(|(k, v)| self.merge_strategy.is_mergeable(k) == (v == &0))
     }
 
     fn link_parents(&mut self, idx: usize, result: &mut UpdateResult) -> bool {
@@ -131,8 +131,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
         if self.entries[pidx].is_block() {
             self.process_block_parent(idx, pidx)
         } else {
-            self.process_basic_parent(idx, pidx);
-            true
+            self.process_basic_parent(idx, pidx)
         }
     }
 
@@ -154,7 +153,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
 
         let keys = cur
             .remaining_inputs
-            .extract_if(|_, v| v.is_none())
+            .extract_if(|(_, v)| v == &0)
             .map(|(k, _)| k)
             .collect::<Vec<_>>();
 
@@ -168,13 +167,13 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
                 .get(k.as_slice())
                 .map(|v| C::Value::from_slice(&v).expect("Value must valid"))
                 .unwrap_or_default();
-            (k, (val, 0))
+            ((k, 0), val)
         }));
 
         true
     }
 
-    fn process_basic_parent(&mut self, idx: usize, pidx: usize) {
+    fn process_basic_parent(&mut self, idx: usize, pidx: usize) -> bool {
         let block_parent_idx = self.entries[pidx].as_basic().block_parent;
 
         if self.entries[idx].as_pending().block_parent.is_none() {
@@ -189,20 +188,21 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
             (r[0].as_pending_mut(), l[pidx].as_basic_mut())
         };
 
-        parent
-            .output
-            .iter()
-            .filter(|(_, (_, ver))| ver != &0)
-            .for_each(|(k, (v, ver))| {
-                if cur
-                    .remaining_inputs
-                    .get(k)
-                    .is_some_and(|v| v.is_some_and(|c| &c == ver))
-                {
-                    cur.input.insert(k.clone(), (v.clone(), *ver));
-                    cur.remaining_inputs.remove(k);
-                }
-            });
+        for (iden, v) in parent.output.iter() {
+            if iden.1 == 0 {
+                continue;
+            }
+
+            if cur.existing_output.insert(iden.clone()) {
+                return false;
+            }
+
+            if let Some(iden) = cur.remaining_inputs.take(iden) {
+                cur.input.insert(iden, v.clone());
+            }
+        }
+
+        true
     }
 
     fn remove_subgraph(&mut self, idx: usize, result: &mut UpdateResult) {
@@ -250,7 +250,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
             let mut versions = HashMap::new();
             let mut input = HashMap::new();
 
-            input_raw.into_iter().for_each(|(k, (v, ver))| {
+            input_raw.into_iter().for_each(|((k, ver), v)| {
                 let ver = if ver == 0 { ver } else { ver + 1 };
                 input.insert(k.clone(), v);
                 versions.insert(k, ver);
@@ -263,7 +263,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
 
             output.into_iter().for_each(|(k, v)| {
                 let ver = versions.remove(&k).unwrap_or_default();
-                entry.output.insert(k, (v, ver));
+                entry.output.insert((k, ver), v);
             });
         }
 
@@ -285,11 +285,9 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
         let mut max: BTreeMap<&Key, &Version> = BTreeMap::new();
         let mut not_specified_state: BTreeMap<&Key, C::Value> = BTreeMap::new();
         let mut specified_state: BTreeMap<&Key, &C::Value> = BTreeMap::new();
-        let mut conflicting: HashSet<usize> = HashSet::new();
 
         let entry = self.entries[idx].as_pending();
         let block_parent = entry.block_parent.expect("Block parent must exist");
-        let block_parent_outputs = &self.entries[block_parent].as_block().outputs;
 
         for idx in entry
             .atom
@@ -299,15 +297,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
             .chain(std::iter::once(idx))
             .filter(|&i| i != block_parent)
         {
-            if conflicting.contains(&idx) {
-                return false;
-            }
-
-            for (k, (v, ver)) in self.entries[idx].as_basic().output.iter() {
-                if let Some(con) = block_parent_outputs.get(k).and_then(|vm| vm.get(ver)) {
-                    conflicting.extend(con.iter().copied());
-                }
-
+            for ((k, ver), v) in self.entries[idx].as_basic().output.iter() {
                 if ver == &0 {
                     let v = not_specified_state
                         .remove(k)
@@ -317,7 +307,7 @@ impl<C: Command, M: MergeStrategy<C::Value>> Graph<C, M> {
                     continue;
                 }
 
-                if max.get(k).is_none_or(|o| o < &ver) {
+                if max.get(k).is_none_or(|&v| v < ver) {
                     max.insert(k, ver);
                     specified_state.insert(k, v);
                 }

@@ -15,7 +15,6 @@ pub struct BlockEntry<C> {
     pub parent: usize,
     pub children: HashSet<usize>,
 
-    pub outputs: HashMap<Key, HashMap<Version, HashSet<usize>>>,
     pub weight: usize,
 }
 
@@ -23,9 +22,10 @@ pub struct PendingEntry<C: Command> {
     pub atom: Atom<C>,
     pub witness: Witness,
 
-    pub remaining_inputs: HashMap<Key, Option<Version>>,
-    pub input: HashMap<Key, (C::Value, Version)>,
-    pub output: HashMap<Key, (C::Value, Version)>,
+    pub remaining_inputs: HashSet<(Key, Version)>,
+    pub input: HashMap<(Key, Version), C::Value>,
+    pub output: HashMap<(Key, Version), C::Value>,
+    pub existing_output: HashSet<(Key, Version)>,
 
     pub block_parent: Option<usize>,
     pub parents: HashSet<usize>,
@@ -38,7 +38,7 @@ pub struct BasicEntry<C: Command> {
     pub atom: Atom<C>,
     pub witness: Witness,
 
-    pub output: HashMap<Key, (C::Value, Version)>,
+    pub output: HashMap<(Key, Version), C::Value>,
 
     pub block_parent: usize,
     pub children: HashSet<usize>,
@@ -58,7 +58,16 @@ pub enum Entry<C: Command> {
 
 impl<C: Command> PendingEntry<C> {
     pub fn new(atom: Atom<C>, witness: Witness) -> Self {
-        let remaining_inputs = atom.cmd.as_ref().map(|c| c.input()).unwrap_or_default();
+        let remaining_inputs = atom
+            .cmd
+            .as_ref()
+            .map(|c| {
+                c.input()
+                    .into_iter()
+                    .map(|(k, v)| (k, v.unwrap_or_default()))
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
 
         Self {
             atom,
@@ -66,6 +75,7 @@ impl<C: Command> PendingEntry<C> {
             remaining_inputs,
             input: HashMap::new(),
             output: HashMap::new(),
+            existing_output: HashSet::new(),
             block_parent: None,
             parents: HashSet::new(),
             children: HashSet::new(),
@@ -87,7 +97,6 @@ impl<C: Command> Entry<C> {
                 trie,
                 parent: entry.block_parent.expect("Block parent must be set"),
                 children: entry.children,
-                outputs: HashMap::new(),
                 weight: 0,
             }))
         } else {
