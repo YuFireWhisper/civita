@@ -57,6 +57,8 @@ pub struct Graph<C: Command> {
     index: HashMap<Multihash, usize>,
     entries: Vec<Entry<C>>,
 
+    nonce_used: HashMap<usize, HashMap<PublicKey, HashSet<Nonce>>>,
+
     main_head: Option<usize>,
     checkpoint: Option<usize>,
 
@@ -161,6 +163,7 @@ impl<C: Command> Graph<C> {
             entries: Vec::new(),
             main_head: None,
             checkpoint: None,
+            nonce_used: HashMap::new(),
             block_threshold,
             checkpoint_distance,
         }
@@ -296,6 +299,12 @@ impl<C: Command> Graph<C> {
             let mut entry = std::mem::take(&mut self.entries[u]);
             let hash = entry.hash();
 
+            if !entry.is_missing {
+                if let Some(bpidx) = entry.block_parent {
+                    self.remove_nonce(bpidx, &entry.public_key, &entry.atom.nonce);
+                }
+            }
+
             stk.extend(entry.children);
             entry.parents.drain().for_each(|p| {
                 self.entries[p].children.remove(&u);
@@ -303,6 +312,26 @@ impl<C: Command> Graph<C> {
 
             self.index.remove(&hash);
             result.invalidated.push(hash);
+        }
+    }
+
+    fn remove_nonce(&mut self, bpidx: usize, public_key: &PublicKey, nonce: &Nonce) {
+        let Some(by_pk) = self.nonce_used.get_mut(&bpidx) else {
+            return;
+        };
+
+        let Some(set) = by_pk.get_mut(public_key) else {
+            return;
+        };
+
+        set.remove(nonce);
+
+        if set.is_empty() {
+            by_pk.remove(public_key);
+        }
+
+        if by_pk.is_empty() {
+            self.nonce_used.remove(&bpidx);
         }
     }
 
@@ -316,6 +345,17 @@ impl<C: Command> Graph<C> {
             self.remove_subgraph(idx, result);
             return;
         };
+
+        {
+            let pk = self.entries[idx].public_key.clone();
+            let nonce = self.entries[idx].atom.nonce;
+            let by_pk = self.nonce_used.entry(bpidx).or_default();
+            let set = by_pk.entry(pk).or_default();
+            if !set.insert(nonce) {
+                self.remove_subgraph(idx, result);
+                return;
+            }
+        }
 
         let block_stats = self.entries[bpidx]
             .block_stats
