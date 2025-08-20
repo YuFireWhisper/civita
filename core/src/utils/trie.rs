@@ -19,6 +19,7 @@ enum TraverseResult<'a> {
     NotFound,
 }
 
+#[derive(Debug)]
 pub struct InvalidProof;
 
 #[derive(Clone)]
