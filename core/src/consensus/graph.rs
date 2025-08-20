@@ -224,7 +224,7 @@ impl<C: Command> Graph<C> {
             .copied()
             .collect::<Vec<_>>();
 
-        for h in parents {
+        parents.into_iter().all(|h| {
             let pidx = self.index.get(&h).copied().unwrap_or_else(|| {
                 let idx = self.entries.len();
                 self.index.insert(h, idx);
@@ -234,13 +234,8 @@ impl<C: Command> Graph<C> {
             });
 
             self.add_edge(idx, pidx);
-
-            if !self.on_parent_valid(idx, pidx) {
-                return false;
-            }
-        }
-
-        true
+            self.on_parent_valid(idx, pidx)
+        })
     }
 
     fn add_edge(&mut self, idx: usize, pidx: usize) {
