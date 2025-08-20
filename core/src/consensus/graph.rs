@@ -443,4 +443,64 @@ impl<C: Command> Graph<C> {
             self.checkpoint = Some(cur_idx);
         }
     }
+
+    pub fn subgraph_leaves(&self) -> Option<HashMap<PublicKey, Multihash>> {
+        let mut stk: Vec<usize> = self.entries[self.main_head?]
+            .children
+            .iter()
+            .copied()
+            .filter(|&child| {
+                let e = &self.entries[child];
+                !e.is_missing && e.block_stats.is_none()
+            })
+            .collect();
+
+        if stk.is_empty() {
+            return None;
+        }
+
+        let mut result: HashMap<PublicKey, (Nonce, Multihash)> = HashMap::new();
+        let mut visited = HashSet::new();
+
+        while let Some(u) = stk.pop() {
+            if visited.insert(u) {
+                continue;
+            }
+
+            let entry = &self.entries[u];
+
+            let is_leaf = entry
+                .children
+                .iter()
+                .filter(|c| {
+                    let ce = &self.entries[**c];
+                    !ce.is_missing && ce.block_stats.is_none()
+                })
+                .inspect(|&c| stk.push(*c))
+                .count()
+                == 0;
+
+            if !is_leaf {
+                let pk = entry.public_key.clone();
+                let nonce = entry.atom.nonce;
+                let h = entry.atom.hash();
+
+                result
+                    .entry(pk)
+                    .and_modify(|(best_nonce, best_hash)| {
+                        if nonce > *best_nonce {
+                            *best_nonce = nonce;
+                            *best_hash = h;
+                        }
+                    })
+                    .or_insert((nonce, h));
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result.into_iter().map(|(pk, (_, h))| (pk, h)).collect())
+        }
+    }
 }
