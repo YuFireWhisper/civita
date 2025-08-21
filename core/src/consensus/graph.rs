@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
+    sync::atomic::AtomicU64,
 };
 
 use civita_serialize::Serialize;
@@ -69,6 +70,15 @@ pub struct Config {
 
     #[derivative(Default(value = "10"))]
     pub checkpoint_distance: u32,
+
+    #[derivative(Default(value = "60_000"))]
+    pub target_block_time_ms: u64,
+
+    #[derivative(Default(value = "50000"))]
+    pub init_vdf_difficulty: u64,
+
+    #[derivative(Default(value = "0.1"))]
+    pub max_difficulty_adjustment: f32,
 }
 
 #[derive(Derivative)]
@@ -79,6 +89,9 @@ pub struct Graph<C: Command> {
 
     main_head: ParkingLock<Option<Multihash>>,
     checkpoint: ParkingLock<Option<Multihash>>,
+
+    #[derivative(Default(value = "AtomicU64::new(50000)"))]
+    difficulty: AtomicU64,
 
     config: Config,
 }
@@ -96,10 +109,6 @@ impl<C: Command> Entry<C> {
 
     pub fn hash(&self) -> Multihash {
         self.atom.hash()
-    }
-
-    pub fn is_valid(&self) -> bool {
-        !self.is_missing && self.block_stats.is_some()
     }
 }
 
@@ -176,6 +185,7 @@ impl<C: Command> AtomExecuter<C> {
 impl<C: Command> Graph<C> {
     pub fn new(config: Config) -> Self {
         Self {
+            difficulty: AtomicU64::new(config.init_vdf_difficulty),
             config,
             ..Default::default()
         }
@@ -297,7 +307,7 @@ impl<C: Command> Graph<C> {
     }
 
     fn remove_nonce(&self, bp: &Multihash, public_key: &PublicKey, nonce: &Nonce) {
-        let Some(mut pks) = self.nonce_used.get_mut(&bp) else {
+        let Some(mut pks) = self.nonce_used.get_mut(bp) else {
             return;
         };
 
@@ -312,7 +322,7 @@ impl<C: Command> Graph<C> {
         }
 
         if pks.is_empty() {
-            self.nonce_used.remove(&bp);
+            self.nonce_used.remove(bp);
         }
     }
 
@@ -438,10 +448,9 @@ impl<C: Command> Graph<C> {
         }
 
         let start = self.checkpoint.read().unwrap();
-
         let new_head = self.ghost_select(start);
         self.main_head.write().replace(new_head);
-        self.maybe_advance_checkpoint(new_head);
+        self.maybe_advance_checkpoint(new_head, start);
     }
 
     fn ghost_select(&self, start: Multihash) -> Multihash {
@@ -472,7 +481,7 @@ impl<C: Command> Graph<C> {
         cur
     }
 
-    fn maybe_advance_checkpoint(&self, head_hash: Multihash) {
+    fn maybe_advance_checkpoint(&self, head_hash: Multihash, old_cp: Multihash) {
         let head_height = self
             .entries
             .get(&head_hash)
@@ -481,18 +490,66 @@ impl<C: Command> Graph<C> {
             .height;
         let checkpoint_height = self.checkpoint_height();
 
-        if head_height - checkpoint_height > self.config.checkpoint_distance {
-            let target_h = head_height.saturating_sub(self.config.checkpoint_distance);
-
-            let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
-
-            while cur.atom.height > target_h {
-                let next = &cur.block_parent.expect("Block parent must exist");
-                cur = self.entries.get(&next).expect("Entry must exist");
-            }
-
-            self.checkpoint.write().replace(*cur.key());
+        if head_height - checkpoint_height <= self.config.checkpoint_distance {
+            return;
         }
+
+        let target_h = head_height.saturating_sub(self.config.checkpoint_distance);
+        let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
+
+        while cur.atom.height > target_h {
+            let next = &cur.block_parent.expect("Block parent must exist");
+            cur = self.entries.get(next).expect("Entry must exist");
+        }
+
+        let new_cp = *cur.key();
+
+        self.checkpoint.write().replace(new_cp);
+        self.adjust_difficulty(old_cp, new_cp);
+    }
+
+    fn adjust_difficulty(&self, prev_cp: Multihash, new_cp: Multihash) {
+        use std::sync::atomic::Ordering;
+
+        let mut times: Vec<u64> = Vec::new();
+        let mut cur = new_cp;
+
+        while cur != prev_cp {
+            let cur_e = self.entries.get(&cur).expect("Entry must exist");
+            cur = cur_e.block_parent.expect("Block parent must exist");
+            let p_e = self.entries.get(&cur).expect("Parent entry must exist");
+
+            if cur_e.block_stats.is_some() && p_e.block_stats.is_some() {
+                let dt = cur_e.atom.timestamp.saturating_sub(p_e.atom.timestamp);
+                if dt > 0 {
+                    times.push(dt);
+                }
+            }
+        }
+
+        if times.is_empty() {
+            return;
+        }
+
+        times.sort_unstable();
+
+        let median = times[times.len() / 2] as f32;
+        let target = self.config.target_block_time_ms as f32;
+
+        if median == 0.0 {
+            return;
+        }
+
+        let ratio_raw = target / median;
+        let ratio = ratio_raw.clamp(
+            1.0 / self.config.max_difficulty_adjustment,
+            self.config.max_difficulty_adjustment,
+        );
+
+        let old = self.difficulty.load(Ordering::Relaxed) as f32;
+        let new = ((old * ratio) as u64).max(1);
+
+        self.difficulty.store(new, Ordering::Relaxed);
     }
 
     pub fn subgraph_leaves(&self) -> Option<HashMap<PublicKey, Multihash>> {
@@ -570,5 +627,9 @@ impl<C: Command> Graph<C> {
                 ))
             }
         })
+    }
+
+    pub fn difficulty(&self) -> u64 {
+        self.difficulty.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
