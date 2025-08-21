@@ -543,4 +543,15 @@ impl<C: Command> Graph<C> {
             Some(result.into_iter().map(|(pk, (_, h))| (pk, h)).collect())
         }
     }
+
+    pub fn get(&self, h: &Multihash) -> Option<(&Atom<C>, &Witness, &PublicKey)> {
+        self.index.get(h).and_then(|&idx| {
+            let entry = &self.entries[idx];
+            if entry.is_missing {
+                None
+            } else {
+                Some((&entry.atom, &entry.witness, &entry.public_key))
+            }
+        })
+    }
 }
