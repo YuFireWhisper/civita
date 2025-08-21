@@ -62,6 +62,16 @@ struct AtomExecuter<C: Command> {
 }
 
 #[derive(Derivative)]
+#[derivative(Default)]
+pub struct Config {
+    #[derivative(Default(value = "1000"))]
+    pub block_threshold: u32,
+
+    #[derivative(Default(value = "10"))]
+    pub checkpoint_distance: u32,
+}
+
+#[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct Graph<C: Command> {
     entries: DashMap<Multihash, Entry<C>>,
@@ -70,11 +80,7 @@ pub struct Graph<C: Command> {
     main_head: ParkingLock<Option<Multihash>>,
     checkpoint: ParkingLock<Option<Multihash>>,
 
-    #[derivative(Default(value = "1000"))]
-    block_threshold: u32,
-
-    #[derivative(Default(value = "10"))]
-    checkpoint_distance: u32,
+    config: Config,
 }
 
 impl<C: Command> Entry<C> {
@@ -168,10 +174,9 @@ impl<C: Command> AtomExecuter<C> {
 }
 
 impl<C: Command> Graph<C> {
-    pub fn new(block_threshold: u32, checkpoint_distance: u32) -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
-            block_threshold,
-            checkpoint_distance,
+            config,
             ..Default::default()
         }
     }
@@ -380,7 +385,7 @@ impl<C: Command> Graph<C> {
             return false;
         }
 
-        if executer.atom_count >= self.block_threshold {
+        if executer.atom_count >= self.config.block_threshold {
             let trie = {
                 let bp_e = self.entries.get(&bp).expect("Block parent must exist");
                 bp_e.block_stats
@@ -476,8 +481,8 @@ impl<C: Command> Graph<C> {
             .height;
         let checkpoint_height = self.checkpoint_height();
 
-        if head_height - checkpoint_height > self.checkpoint_distance {
-            let target_h = head_height.saturating_sub(self.checkpoint_distance as Height);
+        if head_height - checkpoint_height > self.config.checkpoint_distance {
+            let target_h = head_height.saturating_sub(self.config.checkpoint_distance);
 
             let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
 
