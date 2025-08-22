@@ -116,7 +116,7 @@ impl<C: Command> Graph<C> {
         }
     }
 
-    pub fn upsert(&mut self, atom: Atom<C>, witness: Witness, pk: PublicKey) -> UpdateResult {
+    pub fn upsert(&self, atom: Atom<C>, witness: Witness, pk: PublicKey) -> UpdateResult {
         let mut result = UpdateResult::default();
         let hash = atom.hash();
 
@@ -149,7 +149,7 @@ impl<C: Command> Graph<C> {
         self.entries.get(h).is_some_and(|e| !e.is_missing)
     }
 
-    fn link_parents(&mut self, hash: Multihash, result: &mut UpdateResult) -> bool {
+    fn link_parents(&self, hash: Multihash, result: &mut UpdateResult) -> bool {
         let mut cur = self.entries.get_mut(&hash).expect("Entry must exist");
         let parents = cur.witness.parents.values().copied().collect::<Vec<_>>();
 
