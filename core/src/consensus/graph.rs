@@ -55,13 +55,6 @@ struct Entry<C: Command> {
     pub is_missing: bool,
 }
 
-struct AtomExecuter<C: Command> {
-    state: HashMap<Vec<u8>, C::Value>,
-    publishers: HashSet<PublicKey>,
-    cmd_count: u32,
-    atom_count: u32,
-}
-
 #[derive(Derivative)]
 #[derivative(Default)]
 pub struct Config {
@@ -117,76 +110,6 @@ impl<C: Command> Entry<C> {
 
     pub fn hash(&self) -> Multihash {
         self.atom.hash()
-    }
-}
-
-impl<C: Command> AtomExecuter<C> {
-    pub fn new() -> Self {
-        Self {
-            state: HashMap::new(),
-            publishers: HashSet::new(),
-            cmd_count: 0,
-            atom_count: 0,
-        }
-    }
-
-    pub fn execute<'a, I>(&mut self, order: I, trie_root: Multihash) -> bool
-    where
-        I: IntoIterator<Item = RefEntry<'a, C>>,
-    {
-        order
-            .into_iter()
-            .all(|entry| self.execute_single(entry, trie_root))
-    }
-
-    fn execute_single(&mut self, entry: RefEntry<C>, trie_root: Multihash) -> bool {
-        self.publishers.insert(entry.public_key.clone());
-        self.atom_count += 1;
-
-        let Some(cmd) = &entry.atom.cmd else {
-            return true;
-        };
-
-        let input = self.prepare_command_input(cmd, &entry.witness.trie_proofs, trie_root);
-        let Ok(output) = cmd.execute(input) else {
-            return false;
-        };
-
-        self.cmd_count += 1;
-        self.state.extend(output);
-
-        true
-    }
-
-    fn prepare_command_input(
-        &mut self,
-        cmd: &C,
-        proof: &HashMap<Multihash, Vec<u8>>,
-        trie_root: Multihash,
-    ) -> HashMap<Vec<u8>, C::Value> {
-        cmd.keys()
-            .into_iter()
-            .map(|k| {
-                let value = self.state.remove(&k).unwrap_or_else(|| {
-                    Trie::verify_proof(trie_root, &k, proof)
-                        .expect("Proof should be valid")
-                        .map(|v| C::Value::from_slice(&v).expect("Value should be valid"))
-                        .unwrap_or_default()
-                });
-                (k, value)
-            })
-            .collect()
-    }
-
-    pub fn into_block_stats(self, mut trie: Trie) -> BlockStats {
-        trie.extend(self.state.into_iter().map(|(k, v)| (k, v.to_vec())));
-
-        BlockStats {
-            trie,
-            distinct_publishers: self.publishers.len() as u32,
-            cmd_count: self.cmd_count,
-            atom_count: self.atom_count,
-        }
     }
 }
 
@@ -392,19 +315,34 @@ impl<C: Command> Graph<C> {
             (order, stats.trie.root_hash())
         };
 
-        let mut executer = AtomExecuter::new();
-        if !executer.execute(
-            order
-                .into_iter()
-                .rev()
-                .map(|h| self.entries.get(&h).expect("Entry must exist")),
-            root_hash,
-        ) {
-            return false;
-        }
+        let (state, distinct_publishers, cmd_count) = {
+            let mut state = HashMap::new();
+            let mut publishers = HashSet::new();
+            let mut cmd_count = 0u32;
 
-        if executer.atom_count >= self.config.block_threshold {
-            let trie = {
+            for h in order.iter().rev() {
+                let e = self.entries.get(h).expect("Entry must exist");
+                publishers.insert(e.public_key.clone());
+
+                if let Some(cmd) = &e.atom.cmd {
+                    let input = self.prepare_command_input(cmd, &e.witness.trie_proofs, root_hash);
+
+                    let Ok(output) = cmd.execute(input) else {
+                        return false;
+                    };
+
+                    state.extend(output);
+                    cmd_count += 1;
+                }
+            }
+
+            (state, publishers.len() as u32, cmd_count)
+        };
+
+        let atom_count = order.len() as u32;
+
+        if atom_count >= self.config.block_threshold {
+            let mut trie = {
                 let bp_e = self.entries.get(&bp).expect("Block parent must exist");
                 bp_e.block_stats
                     .as_ref()
@@ -412,8 +350,15 @@ impl<C: Command> Graph<C> {
                     .trie
                     .clone()
             };
-            let block_stats = executer.into_block_stats(trie);
-            entry.block_stats = Some(block_stats);
+
+            trie.extend(state.into_iter().map(|(k, v)| (k, v.to_vec())));
+
+            entry.block_stats = Some(BlockStats {
+                trie,
+                distinct_publishers,
+                cmd_count,
+                atom_count,
+            });
         }
 
         self.recompute_main_chain_and_checkpoint();
@@ -442,6 +387,24 @@ impl<C: Command> Graph<C> {
         heap.into_sorted_vec()
             .into_iter()
             .map(|Reverse((_, idx))| idx)
+            .collect()
+    }
+
+    fn prepare_command_input(
+        &self,
+        cmd: &C,
+        proof: &HashMap<Multihash, Vec<u8>>,
+        trie_root: Multihash,
+    ) -> HashMap<Vec<u8>, C::Value> {
+        cmd.keys()
+            .into_iter()
+            .map(|k| {
+                let value = Trie::verify_proof(trie_root, &k, proof)
+                    .expect("Proof should be valid")
+                    .map(|v| C::Value::from_slice(&v).expect("Value should be valid"))
+                    .unwrap_or_default();
+                (k, value)
+            })
             .collect()
     }
 
