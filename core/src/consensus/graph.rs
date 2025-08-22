@@ -602,7 +602,7 @@ impl<C: Command> Graph<C> {
             == 0
     }
 
-    fn difficulty(&self) -> u64 {
+    pub fn difficulty(&self) -> u64 {
         self.difficulty.load(std::sync::atomic::Ordering::Relaxed)
     }
 
