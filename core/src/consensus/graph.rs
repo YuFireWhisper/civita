@@ -640,4 +640,18 @@ impl<C: Command> Graph<C> {
             }
         })
     }
+
+    pub fn get_vec(&self, hash: &Multihash) -> Option<Vec<u8>> {
+        self.entries.get(hash).and_then(|entry| {
+            if entry.is_missing {
+                None
+            } else {
+                let mut buf = Vec::new();
+                entry.atom.to_writer(&mut buf);
+                entry.witness.to_writer(&mut buf);
+                entry.public_key.to_writer(&mut buf);
+                Some(buf)
+            }
+        })
+    }
 }
