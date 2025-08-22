@@ -439,23 +439,32 @@ impl<C: Command> Graph<C> {
         let head_height = self
             .entries
             .get(&head_hash)
-            .expect("Head entry must exist")
+            .expect("Entry must exist")
             .atom
             .height;
-        let checkpoint_height = self.checkpoint_height();
 
-        if head_height - checkpoint_height <= self.config.checkpoint_distance {
+        let n = self.config.checkpoint_distance as Height;
+        debug_assert!(n > 0);
+
+        let head_div = head_height / n;
+        if head_div < 2 {
             return;
         }
 
-        let target_h = head_height.saturating_sub(self.config.checkpoint_distance);
-        let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
+        let desired_cp_height = (head_div - 1) * n;
 
-        while cur.atom.height > target_h {
+        let checkpoint_height = self.checkpoint_height();
+        if checkpoint_height >= desired_cp_height {
+            return;
+        }
+
+        let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
+        while cur.atom.height > desired_cp_height {
             let next = &cur.block_parent.expect("Block parent must exist");
             cur = self.entries.get(next).expect("Entry must exist");
         }
 
+        debug_assert_eq!(cur.atom.height, desired_cp_height);
         let new_cp = *cur.key();
 
         self.checkpoint.write().replace(new_cp);
