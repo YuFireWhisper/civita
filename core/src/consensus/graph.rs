@@ -5,10 +5,7 @@ use std::{
 };
 
 use civita_serialize::Serialize;
-use dashmap::{
-    mapref::one::{Ref, RefMut},
-    DashMap,
-};
+use dashmap::DashMap;
 use derivative::Derivative;
 use parking_lot::RwLock as ParkingLock;
 
@@ -17,9 +14,6 @@ use crate::{
     ty::atom::{Atom, Command, Height, Nonce, Witness},
     utils::Trie,
 };
-
-type RefMutEntry<'a, C> = RefMut<'a, Multihash, Entry<C>>;
-type RefEntry<'a, C> = Ref<'a, Multihash, Entry<C>>;
 
 #[derive(Clone)]
 #[derive(Default)]
@@ -38,19 +32,21 @@ struct BlockStats {
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 struct Entry<C: Command> {
+    // Basic information
     pub atom: Atom<C>,
     pub witness: Witness,
     pub public_key: PublicKey,
 
+    // General
+    pub block_parent: Option<Multihash>,
+
+    // Block only
     pub block_stats: Option<BlockStats>,
 
-    pub block_parent: Option<Multihash>,
-    pub parents: HashSet<Multihash>,
+    // Pending only
+    pub pending_parents: u32,
     pub children: HashSet<Multihash>,
-
-    pub pending_parents: usize,
     pub max_nonce: Nonce,
-
     #[derivative(Default(value = "true"))]
     pub is_missing: bool,
 }
@@ -99,10 +95,13 @@ pub struct Graph<C: Command> {
 
 impl<C: Command> Entry<C> {
     pub fn new(atom: Atom<C>, witness: Witness, pk: PublicKey) -> Self {
+        let pending_parents = witness.parents.len() as u32;
+
         Self {
             atom,
             witness,
             public_key: pk,
+            pending_parents,
             is_missing: false,
             ..Default::default()
         }
@@ -167,40 +166,38 @@ impl<C: Command> Graph<C> {
                 Entry::default()
             });
 
-            cur.parents.insert(ph);
-            parent.children.insert(hash);
-
             if !parent.is_missing && parent.pending_parents == 0 {
-                is_valid &= Self::on_parent_valid(&mut cur, &parent.downgrade());
+                cur.pending_parents -= 1;
+                is_valid &= Self::on_parent_valid(&mut cur, &parent);
             } else {
-                cur.pending_parents += 1;
+                parent.children.insert(hash);
             }
         });
 
         is_valid
     }
 
-    fn on_parent_valid(cur: &mut RefMutEntry<C>, parent: &RefEntry<C>) -> bool {
-        if cur.atom.height != parent.atom.height + 1
-            || !cur.witness.parents.contains_key(&parent.public_key)
-        {
+    fn on_parent_valid(cur: &mut Entry<C>, parent: &Entry<C>) -> bool {
+        if !cur.witness.parents.contains_key(&parent.public_key) {
             return false;
         }
 
-        if parent.block_stats.is_none() {
-            if cur.atom.nonce <= parent.atom.nonce {
+        let bp = if parent.block_stats.is_some() {
+            if cur.atom.height != parent.atom.height + 1 {
                 return false;
             }
-            cur.value_mut().max_nonce = cur.max_nonce.max(parent.atom.nonce);
-        }
 
-        let bp = if parent.block_stats.is_some() {
-            *parent.key()
+            parent.hash()
         } else {
+            if cur.atom.height != parent.atom.height || cur.atom.nonce <= parent.atom.nonce {
+                return false;
+            }
+
+            cur.max_nonce = cur.max_nonce.max(parent.atom.nonce);
             parent.block_parent.expect("Block parent must exist")
         };
 
-        cur.block_parent.replace(bp).is_none_or(|pre| pre == bp)
+        cur.block_parent.replace(bp).is_none_or(|prev| prev == bp)
     }
 
     fn remove_subgraph(&self, hash: Multihash, result: &mut UpdateResult) {
@@ -212,7 +209,7 @@ impl<C: Command> Graph<C> {
                 continue;
             }
 
-            let Some((_, mut entry)) = self.entries.remove(&u) else {
+            let Some((_, entry)) = self.entries.remove(&u) else {
                 continue;
             };
 
@@ -225,14 +222,6 @@ impl<C: Command> Graph<C> {
             }
 
             stk.extend(entry.children);
-            entry
-                .parents
-                .drain()
-                .filter_map(|h| self.entries.get_mut(&h))
-                .for_each(|mut p| {
-                    p.children.remove(&hash);
-                });
-
             result.invalidated.push(hash);
         }
     }
@@ -267,19 +256,24 @@ impl<C: Command> Graph<C> {
                 continue;
             }
 
-            let e = self.entries.get(&h).expect("Entry must exist");
+            let (e, mut children) = {
+                let mut e = self.entries.get_mut(&h).expect("Entry must exist");
+                // We don't need to keep children in the entry anymore
+                let c = std::mem::take(&mut e.children);
+                (e.downgrade(), c)
+            };
 
-            e.children.iter().for_each(|ch| {
-                let mut c = self.entries.get_mut(ch).expect("Child entry must exist");
+            children.drain().for_each(|ch| {
+                let mut c = self.entries.get_mut(&ch).expect("Child entry must exist");
 
                 if !Self::on_parent_valid(&mut c, &e) {
-                    self.remove_subgraph(*ch, result);
+                    self.remove_subgraph(ch, result);
                     return;
                 }
 
                 c.pending_parents -= 1;
                 if c.pending_parents == 0 {
-                    queue.push_back(*ch);
+                    queue.push_back(ch);
                 }
             });
         }
@@ -381,7 +375,7 @@ impl<C: Command> Graph<C> {
             }
 
             heap.push(Reverse((e.atom.nonce, h)));
-            queue.extend(e.parents.iter().filter(|&&p| visited.insert(p)));
+            queue.extend(e.witness.parents.values().filter(|&&p| visited.insert(p)));
         }
 
         heap.into_sorted_vec()
