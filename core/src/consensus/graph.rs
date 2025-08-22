@@ -22,13 +22,6 @@ pub struct UpdateResult {
     pub missing: Vec<Multihash>,
 }
 
-struct BlockStats {
-    trie: Trie,
-    distinct_publishers: u32,
-    cmd_count: u32,
-    atom_count: u32,
-}
-
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 struct Entry<C: Command> {
@@ -41,7 +34,9 @@ struct Entry<C: Command> {
     pub block_parent: Option<Multihash>,
 
     // Block only
-    pub block_stats: Option<BlockStats>,
+    pub is_block: bool,
+    pub trie: Trie,
+    pub publishers: HashSet<PublicKey>,
     pub nonce_used: HashMap<PublicKey, HashSet<Nonce>>,
 
     // Pending only
@@ -182,7 +177,7 @@ impl<C: Command> Graph<C> {
             return false;
         }
 
-        let bp = if parent.block_stats.is_some() {
+        let bp = if parent.is_block {
             if cur.atom.height != parent.atom.height + 1 {
                 return false;
             }
@@ -295,14 +290,12 @@ impl<C: Command> Graph<C> {
 
         let (order, root_hash) = {
             let order = self.topo_parents(*entry.key(), bp_e.key());
-            let stats = bp_e.block_stats.as_ref().expect("Block stats must exist");
-            (order, stats.trie.root_hash())
+            (order, bp_e.trie.root_hash())
         };
 
-        let (state, distinct_publishers, cmd_count) = {
+        let (state, publishers) = {
             let mut state = HashMap::new();
             let mut publishers = HashSet::new();
-            let mut cmd_count = 0u32;
 
             for h in order.iter().rev() {
                 let e = self.entries.get(h).expect("Entry must exist");
@@ -316,38 +309,28 @@ impl<C: Command> Graph<C> {
                     };
 
                     state.extend(output);
-                    cmd_count += 1;
                 }
             }
 
-            (state, publishers.len() as u32, cmd_count)
+            (state, publishers)
         };
 
         let atom_count = order.len() as u32;
 
         if atom_count >= self.config.block_threshold {
-            let mut trie = {
-                bp_e.block_stats
-                    .as_ref()
-                    .expect("Block stats must exist")
-                    .trie
-                    .clone()
-            };
-
+            let mut trie = bp_e.trie.clone();
             trie.extend(state.into_iter().map(|(k, v)| (k, v.to_vec())));
+            entry.is_block = true;
+            entry.trie = trie;
 
-            entry.block_stats = Some(BlockStats {
-                trie,
-                distinct_publishers,
-                cmd_count,
-                atom_count,
-            });
+            let bp = *bp_e.key();
+
+            drop(bp_e);
+            drop(entry);
+
+            self.update_publishers(bp, &publishers);
+            self.recompute_main_chain_and_checkpoint();
         }
-
-        drop(entry);
-        drop(bp_e);
-
-        self.recompute_main_chain_and_checkpoint();
 
         true
     }
@@ -395,6 +378,25 @@ impl<C: Command> Graph<C> {
             .collect()
     }
 
+    fn update_publishers(&self, mut cur: Multihash, publishers: &HashSet<PublicKey>) {
+        let cp = *self.checkpoint.read();
+
+        loop {
+            let mut e = self.entries.get_mut(&cur).expect("Entry must exist");
+            e.publishers.extend(publishers.iter().cloned());
+
+            if cp.is_some_and(|cp| cp == cur) {
+                break;
+            }
+
+            let Some(next) = e.block_parent else {
+                break;
+            };
+
+            cur = next;
+        }
+    }
+
     fn recompute_main_chain_and_checkpoint(&self) {
         debug_assert!(!self.entries.is_empty());
 
@@ -420,15 +422,9 @@ impl<C: Command> Graph<C> {
             .expect("Entry must exist")
             .children
             .iter()
-            .filter_map(|h| {
+            .map(|h| {
                 let c = self.entries.get(h).expect("Child entry must exist");
-                let stats = c.block_stats.as_ref()?;
-                Some((
-                    stats.distinct_publishers,
-                    stats.cmd_count,
-                    stats.atom_count,
-                    h,
-                ))
+                (c.publishers.len(), h)
             })
             .max()
             .map(|(.., h)| h)
@@ -477,11 +473,10 @@ impl<C: Command> Graph<C> {
             cur = cur_e.block_parent.expect("Block parent must exist");
             let p_e = self.entries.get(&cur).expect("Parent entry must exist");
 
-            if cur_e.block_stats.is_some() && p_e.block_stats.is_some() {
-                let dt = cur_e.atom.timestamp.saturating_sub(p_e.atom.timestamp);
-                if dt > 0 {
-                    times.push(dt);
-                }
+            let dt = cur_e.atom.timestamp.saturating_sub(p_e.atom.timestamp);
+
+            if dt > 0 {
+                times.push(dt);
             }
         }
 
@@ -516,8 +511,7 @@ impl<C: Command> Graph<C> {
         let (parents, nonce) = self.get_subgraph_leaves_and_nonce(&head);
         let (height, unknown_keys) = {
             let e = self.entries.get(&head).expect("Main head entry must exist");
-            let trie = &e.block_stats.as_ref().expect("Block stats must exist").trie;
-            keys.retain(|k| trie.get(k.as_ref()).is_none());
+            keys.retain(|k| e.trie.get(k.as_ref()).is_none());
             (e.atom.height + 1, keys)
         };
 
@@ -543,7 +537,7 @@ impl<C: Command> Graph<C> {
             .copied()
             .filter(|ch| {
                 let e = self.entries.get(ch).expect("Child entry must exist");
-                !e.is_missing && e.block_stats.is_none()
+                !e.is_missing && !e.is_block
             })
             .collect();
 
@@ -592,7 +586,7 @@ impl<C: Command> Graph<C> {
             .iter()
             .filter(|ch| {
                 let ce = self.entries.get(ch).expect("Child entry must exist");
-                !ce.is_missing && ce.block_stats.is_none()
+                !ce.is_missing && !ce.is_block
             })
             .inspect(|c| stk.push(**c))
             .count()
@@ -619,13 +613,7 @@ impl<C: Command> Graph<C> {
             self.entries.get(h).expect("Main head entry must exist")
         };
 
-        let trie = &head
-            .block_stats
-            .as_ref()
-            .expect("Block stats must exist")
-            .trie;
-
-        keys.retain(|k| trie.get(k.as_ref()).is_none());
+        keys.retain(|k| head.trie.get(k.as_ref()).is_none());
 
         keys
     }
