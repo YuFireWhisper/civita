@@ -81,6 +81,14 @@ pub struct Config {
     pub max_difficulty_adjustment: f32,
 }
 
+pub struct NextInfo {
+    pub height: Height,
+    pub nonce: Nonce,
+    pub vdf_difficulty: u64,
+    pub parents: HashMap<PublicKey, Multihash>,
+    pub unknown_keys: HashSet<Vec<u8>>,
+}
+
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct Graph<C: Command> {
@@ -552,10 +560,33 @@ impl<C: Command> Graph<C> {
         self.difficulty.store(new, Ordering::Relaxed);
     }
 
-    pub fn subgraph_leaves(&self) -> Option<HashMap<PublicKey, Multihash>> {
+    pub fn next_info(&self, mut keys: HashSet<Vec<u8>>) -> Option<NextInfo> {
+        let head = *self.main_head.read().as_ref()?;
+
+        let (parents, nonce) = self.get_subgraph_leaves_and_nonce(&head);
+        let (height, unknown_keys) = {
+            let e = self.entries.get(&head).expect("Main head entry must exist");
+            let trie = &e.block_stats.as_ref().expect("Block stats must exist").trie;
+            keys.retain(|k| trie.get(k.as_ref()).is_none());
+            (e.atom.height + 1, keys)
+        };
+
+        Some(NextInfo {
+            height,
+            nonce,
+            vdf_difficulty: self.difficulty(),
+            parents,
+            unknown_keys,
+        })
+    }
+
+    fn get_subgraph_leaves_and_nonce(
+        &self,
+        root: &Multihash,
+    ) -> (HashMap<PublicKey, Multihash>, Nonce) {
         let mut stk: Vec<_> = self
             .entries
-            .get(self.main_head.read().as_ref()?)
+            .get(root)
             .expect("Main head must exist")
             .children
             .iter()
@@ -567,52 +598,86 @@ impl<C: Command> Graph<C> {
             .collect();
 
         if stk.is_empty() {
-            return None;
+            return (HashMap::new(), Nonce::default());
         }
 
         let mut result: HashMap<PublicKey, (Nonce, Multihash)> = HashMap::new();
+        let mut max_nonce = Nonce::default();
         let mut visited = HashSet::new();
 
         while let Some(u) = stk.pop() {
-            if visited.insert(u) {
+            if !visited.insert(u) || !self.is_leaf_and_enqueue(&u, &mut stk) {
                 continue;
             }
 
-            let e = self.entries.get(&u).expect("Entry must exist");
+            let (pk, nonce) = {
+                let e = self.entries.get(&u).expect("Entry must exist");
+                (e.public_key.clone(), e.atom.nonce)
+            };
 
-            let is_leaf = e
-                .children
-                .iter()
-                .filter(|ch| {
-                    let ce = self.entries.get(ch).expect("Child entry must exist");
-                    !ce.is_missing && ce.block_stats.is_none()
+            max_nonce = max_nonce.max(nonce);
+
+            result
+                .entry(pk)
+                .and_modify(|(best_nonce, best_hash)| {
+                    if nonce > *best_nonce {
+                        *best_nonce = nonce;
+                        *best_hash = u;
+                    }
                 })
-                .inspect(|c| stk.push(**c))
-                .count()
-                == 0;
-
-            if !is_leaf {
-                let pk = e.public_key.clone();
-                let nonce = e.atom.nonce;
-                let h = *e.key();
-
-                result
-                    .entry(pk)
-                    .and_modify(|(best_nonce, best_hash)| {
-                        if nonce > *best_nonce {
-                            *best_nonce = nonce;
-                            *best_hash = h;
-                        }
-                    })
-                    .or_insert((nonce, h));
-            }
+                .or_insert((nonce, u));
         }
 
-        if result.is_empty() {
-            None
-        } else {
-            Some(result.into_iter().map(|(pk, (_, h))| (pk, h)).collect())
-        }
+        (
+            result.into_iter().map(|(pk, (_, h))| (pk, h)).collect(),
+            max_nonce,
+        )
+    }
+
+    fn is_leaf_and_enqueue(&self, hash: &Multihash, stk: &mut Vec<Multihash>) -> bool {
+        self.entries
+            .get(hash)
+            .expect("Entry must exist")
+            .children
+            .iter()
+            .filter(|ch| {
+                let ce = self.entries.get(ch).expect("Child entry must exist");
+                !ce.is_missing && ce.block_stats.is_none()
+            })
+            .inspect(|c| stk.push(**c))
+            .count()
+            == 0
+    }
+
+    fn difficulty(&self) -> u64 {
+        self.difficulty.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn next_height(&self) -> Height {
+        self.main_head
+            .read()
+            .and_then(|h| self.entries.get(&h))
+            .map_or(0, |e| e.atom.height + 1)
+    }
+
+    pub fn unknow_keys(&self, mut keys: HashSet<Vec<u8>>) -> HashSet<Vec<u8>> {
+        let head = {
+            let g = self.main_head.read();
+            let Some(h) = g.as_ref() else {
+                return keys;
+            };
+            self.entries.get(h).expect("Main head entry must exist")
+        };
+
+        let trie = &head
+            .block_stats
+            .as_ref()
+            .expect("Block stats must exist")
+            .trie;
+
+        keys.retain(|k| trie.get(k.as_ref()).is_none());
+
+        keys
     }
 
     pub fn get_clone(&self, h: &Multihash) -> Option<(Atom<C>, Witness, PublicKey)> {
@@ -627,9 +692,5 @@ impl<C: Command> Graph<C> {
                 ))
             }
         })
-    }
-
-    pub fn difficulty(&self) -> u64 {
-        self.difficulty.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
