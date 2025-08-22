@@ -42,6 +42,7 @@ struct Entry<C: Command> {
 
     // Block only
     pub block_stats: Option<BlockStats>,
+    pub nonce_used: HashMap<PublicKey, HashSet<Nonce>>,
 
     // Pending only
     pub pending_parents: u32,
@@ -82,7 +83,6 @@ pub struct NextInfo {
 #[derivative(Default(bound = ""))]
 pub struct Graph<C: Command> {
     entries: DashMap<Multihash, Entry<C>>,
-    nonce_used: DashMap<Multihash, HashMap<PublicKey, HashSet<Nonce>>>,
 
     main_head: ParkingLock<Option<Multihash>>,
     checkpoint: ParkingLock<Option<Multihash>>,
@@ -215,34 +215,23 @@ impl<C: Command> Graph<C> {
 
             let hash = entry.hash();
 
-            if !entry.is_missing {
-                if let Some(bp) = &entry.block_parent {
-                    self.remove_nonce(bp, &entry.public_key, &entry.atom.nonce);
+            if let Some(bp) = &entry.block_parent {
+                let mut bp_e = self.entries.get_mut(bp).expect("Block parent must exist");
+                bp_e.nonce_used
+                    .get_mut(&entry.public_key)
+                    .map(|set| set.remove(&entry.atom.nonce));
+
+                if bp_e
+                    .nonce_used
+                    .get(&entry.public_key)
+                    .is_some_and(|set| set.is_empty())
+                {
+                    bp_e.nonce_used.remove(&entry.public_key);
                 }
             }
 
             stk.extend(entry.children);
             result.invalidated.push(hash);
-        }
-    }
-
-    fn remove_nonce(&self, bp: &Multihash, public_key: &PublicKey, nonce: &Nonce) {
-        let Some(mut pks) = self.nonce_used.get_mut(bp) else {
-            return;
-        };
-
-        let Some(set) = pks.get_mut(public_key) else {
-            return;
-        };
-
-        set.remove(nonce);
-
-        if set.is_empty() {
-            pks.remove(public_key);
-        }
-
-        if pks.is_empty() {
-            self.nonce_used.remove(bp);
         }
     }
 
@@ -286,25 +275,26 @@ impl<C: Command> Graph<C> {
             return false;
         }
 
-        let Some(bp) = entry.block_parent else {
-            return false;
+        let mut bp_e = {
+            let Some(bp) = entry.block_parent else {
+                return false;
+            };
+
+            self.entries.get_mut(&bp).expect("Block parent must exist")
         };
 
-        let exist = !self
+        if !bp_e
             .nonce_used
-            .entry(bp)
-            .or_default()
             .entry(entry.public_key.clone())
             .or_default()
-            .insert(entry.atom.nonce);
-
-        if exist {
+            .insert(entry.atom.nonce)
+        {
+            // Nonce already used by this publisher
             return false;
         }
 
         let (order, root_hash) = {
-            let bp_e = self.entries.get(&bp).expect("Block parent must exist");
-            let order = self.topo_parents(*entry.key());
+            let order = self.topo_parents(*entry.key(), bp_e.key());
             let stats = bp_e.block_stats.as_ref().expect("Block stats must exist");
             (order, stats.trie.root_hash())
         };
@@ -337,7 +327,6 @@ impl<C: Command> Graph<C> {
 
         if atom_count >= self.config.block_threshold {
             let mut trie = {
-                let bp_e = self.entries.get(&bp).expect("Block parent must exist");
                 bp_e.block_stats
                     .as_ref()
                     .expect("Block stats must exist")
@@ -355,12 +344,15 @@ impl<C: Command> Graph<C> {
             });
         }
 
+        drop(entry);
+        drop(bp_e);
+
         self.recompute_main_chain_and_checkpoint();
 
         true
     }
 
-    fn topo_parents(&self, hash: Multihash) -> Vec<Multihash> {
+    fn topo_parents(&self, hash: Multihash, bp: &Multihash) -> Vec<Multihash> {
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
         let mut heap = BinaryHeap::new();
@@ -369,10 +361,11 @@ impl<C: Command> Graph<C> {
         visited.insert(hash);
 
         while let Some(h) = queue.pop_front() {
-            let e = self.entries.get(&h).expect("Entry must exist");
-            if e.block_stats.is_some() {
+            if &h == bp {
                 continue;
             }
+
+            let e = self.entries.get(&h).expect("Entry must exist");
 
             heap.push(Reverse((e.atom.nonce, h)));
             queue.extend(e.witness.parents.values().filter(|&&p| visited.insert(p)));
