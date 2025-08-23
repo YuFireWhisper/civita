@@ -64,6 +64,11 @@ pub struct Config {
 
     #[derivative(Default(value = "0.1"))]
     pub max_difficulty_adjustment: f32,
+
+    /// Keys to retain in the trie at checkpoint.
+    /// If `None`, all keys will be retained.
+    /// If `Some`, only the keys in the vector will be retained.
+    pub retain_keys: Option<Vec<Vec<u8>>>,
 }
 
 pub struct NextInfo {
@@ -462,6 +467,7 @@ impl<C: Command> Graph<C> {
 
         *self.checkpoint.write() = new_cp;
         self.adjust_difficulty(old_cp, new_cp);
+        self.prune_trie_at_checkpoint(new_cp);
     }
 
     fn adjust_difficulty(&self, prev_cp: Multihash, new_cp: Multihash) {
@@ -505,6 +511,16 @@ impl<C: Command> Graph<C> {
         let new = ((old * ratio) as u64).max(1);
 
         self.difficulty.store(new, Ordering::Relaxed);
+    }
+
+    fn prune_trie_at_checkpoint(&self, cp: Multihash) {
+        let Some(keys) = self.config.retain_keys.as_ref() else {
+            return;
+        };
+
+        if let Some(mut e) = self.entries.get_mut(&cp) {
+            let _ = e.trie.retain(keys);
+        }
     }
 
     pub fn next_info(&self, mut keys: HashSet<Vec<u8>>) -> Option<NextInfo> {
