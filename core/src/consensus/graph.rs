@@ -74,15 +74,12 @@ pub struct NextInfo {
     pub unknown_keys: HashSet<Vec<u8>>,
 }
 
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
 pub struct Graph<C: Command> {
     entries: DashMap<Multihash, Entry<C>>,
 
-    main_head: ParkingLock<Option<Multihash>>,
-    checkpoint: ParkingLock<Option<Multihash>>,
+    main_head: ParkingLock<Multihash>,
+    checkpoint: ParkingLock<Multihash>,
 
-    #[derivative(Default(value = "AtomicU64::new(50000)"))]
     difficulty: AtomicU64,
 
     config: Config,
@@ -102,20 +99,21 @@ impl<C: Command> Entry<C> {
         }
     }
 
+    pub fn genesis() -> Self {
+        Self {
+            is_block: true,
+            trie: Trie::default(),
+            is_missing: false,
+            ..Default::default()
+        }
+    }
+
     pub fn hash(&self) -> Multihash {
         self.atom.hash()
     }
 }
 
 impl<C: Command> Graph<C> {
-    pub fn new(config: Config) -> Self {
-        Self {
-            difficulty: AtomicU64::new(config.init_vdf_difficulty),
-            config,
-            ..Default::default()
-        }
-    }
-
     pub fn upsert(&self, atom: Atom<C>, witness: Witness, pk: PublicKey) -> UpdateResult {
         let mut result = UpdateResult::default();
         let hash = atom.hash();
@@ -139,10 +137,9 @@ impl<C: Command> Graph<C> {
     }
 
     fn checkpoint_height(&self) -> Height {
-        self.checkpoint
-            .read()
-            .map(|h| self.entries.get(&h).unwrap().atom.height)
-            .unwrap_or(0)
+        self.entries
+            .get(&self.checkpoint.read())
+            .map_or(0, |e| e.atom.height)
     }
 
     pub fn contains(&self, h: &Multihash) -> bool {
@@ -385,7 +382,7 @@ impl<C: Command> Graph<C> {
             let mut e = self.entries.get_mut(&cur).expect("Entry must exist");
             e.publishers.extend(publishers.iter().cloned());
 
-            if cp.is_some_and(|cp| cp == cur) {
+            if cp == cur {
                 break;
             }
 
@@ -398,18 +395,9 @@ impl<C: Command> Graph<C> {
     }
 
     fn recompute_main_chain_and_checkpoint(&self) {
-        debug_assert!(!self.entries.is_empty());
-
-        if self.entries.len() == 1 {
-            let h = *self.entries.iter().next().unwrap().key();
-            self.main_head.write().replace(h);
-            self.checkpoint.write().replace(h);
-            return;
-        }
-
-        let start = self.checkpoint.read().unwrap();
+        let start = *self.checkpoint.read();
         let new_head = self.ghost_select(start);
-        self.main_head.write().replace(new_head);
+        *self.main_head.write() = new_head;
         self.maybe_advance_checkpoint(new_head, start);
     }
 
@@ -467,7 +455,7 @@ impl<C: Command> Graph<C> {
         debug_assert_eq!(cur.atom.height, desired_cp_height);
         let new_cp = *cur.key();
 
-        self.checkpoint.write().replace(new_cp);
+        *self.checkpoint.write() = new_cp;
         self.adjust_difficulty(old_cp, new_cp);
     }
 
@@ -515,7 +503,7 @@ impl<C: Command> Graph<C> {
     }
 
     pub fn next_info(&self, mut keys: HashSet<Vec<u8>>) -> Option<NextInfo> {
-        let head = *self.main_head.read().as_ref()?;
+        let head = *self.main_head.read();
 
         let (parents, nonce) = self.get_subgraph_leaves_and_nonce(&head);
         let (height, unknown_keys) = {
@@ -607,19 +595,15 @@ impl<C: Command> Graph<C> {
     }
 
     pub fn next_height(&self) -> Height {
-        self.main_head
-            .read()
-            .and_then(|h| self.entries.get(&h))
+        self.entries
+            .get(&self.main_head.read())
             .map_or(0, |e| e.atom.height + 1)
     }
 
     pub fn unknow_keys(&self, mut keys: HashSet<Vec<u8>>) -> HashSet<Vec<u8>> {
         let head = {
             let g = self.main_head.read();
-            let Some(h) = g.as_ref() else {
-                return keys;
-            };
-            self.entries.get(h).expect("Main head entry must exist")
+            self.entries.get(&g).expect("Main head entry must exist")
         };
 
         keys.retain(|k| head.trie.get(k.as_ref()).is_none());
@@ -653,5 +637,22 @@ impl<C: Command> Graph<C> {
                 Some(buf)
             }
         })
+    }
+}
+
+impl<C: Command> Default for Graph<C> {
+    fn default() -> Self {
+        let entry = Entry::genesis();
+        let hash = entry.hash();
+        let config = Config::default();
+        let difficulty = AtomicU64::new(config.init_vdf_difficulty);
+
+        Self {
+            entries: DashMap::from_iter([(hash, entry)]),
+            main_head: ParkingLock::new(hash),
+            checkpoint: ParkingLock::new(hash),
+            difficulty,
+            config,
+        }
     }
 }
