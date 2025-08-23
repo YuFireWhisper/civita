@@ -148,25 +148,30 @@ impl<C: Command> Graph<C> {
 
     fn link_parents(&self, hash: Multihash, result: &mut UpdateResult) -> bool {
         let mut cur = self.entries.get_mut(&hash).expect("Entry must exist");
+
+        if cur.witness.parents.is_empty() {
+            // At least contain one parent(genesis)
+            return false;
+        }
+
         let parents = cur.witness.parents.values().copied().collect::<Vec<_>>();
-
-        let mut is_valid = true;
-
-        parents.into_iter().for_each(|ph| {
-            let mut parent = self.entries.entry(ph).or_insert_with(|| {
-                result.missing.push(ph);
-                Entry::default()
-            });
-
-            if !parent.is_missing && parent.pending_parents == 0 {
-                cur.pending_parents -= 1;
-                is_valid &= Self::on_parent_valid(&mut cur, &parent);
-            } else {
-                parent.children.insert(hash);
-            }
-        });
-
-        is_valid
+        parents
+            .into_iter()
+            .map(|h| {
+                self.entries.entry(h).or_insert_with(|| {
+                    result.missing.push(h);
+                    Entry::default()
+                })
+            })
+            .all(|mut p| {
+                if p.is_missing && p.pending_parents == 0 {
+                    cur.pending_parents -= 1;
+                    Self::on_parent_valid(&mut cur, &p)
+                } else {
+                    p.children.insert(hash);
+                    true
+                }
+            })
     }
 
     fn on_parent_valid(cur: &mut Entry<C>, parent: &Entry<C>) -> bool {
