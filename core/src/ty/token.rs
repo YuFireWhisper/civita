@@ -8,17 +8,17 @@ use crate::crypto::{hasher::Hasher, Multihash};
 #[derive(Serialize)]
 pub struct Token {
     pub value: Vec<u8>,
-    pub script_hash: Multihash,
+    pub script_pk: Vec<u8>,
 
     #[serialize(skip)]
     hash_cache: OnceLock<Multihash>,
 }
 
 impl Token {
-    pub fn new(value: Vec<u8>, script_hash: Multihash) -> Self {
+    pub fn new(value: Vec<u8>, script_pk: Vec<u8>) -> Self {
         Self {
             value,
-            script_hash,
+            script_pk,
             hash_cache: OnceLock::new(),
         }
     }
