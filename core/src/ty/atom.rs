@@ -23,6 +23,7 @@ pub struct Command {
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 #[derive(Serialize)]
 pub struct Atom {
     pub height: Height,
