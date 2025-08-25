@@ -5,6 +5,7 @@ use std::{
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
+use libp2p::PeerId;
 
 use crate::{
     crypto::{hasher::Hasher, Multihash},
@@ -23,10 +24,10 @@ pub struct Command {
 }
 
 #[derive(Clone)]
-#[derive(Default)]
 #[derive(Serialize)]
 pub struct Atom {
     pub height: Height,
+    pub peer: PeerId,
     pub cmd: Option<Command>,
     pub timestamp: u64,
 
@@ -47,5 +48,17 @@ pub struct Witness {
 impl Atom {
     pub fn hash(&self) -> Multihash {
         *self.cache.get_or_init(|| Hasher::digest(&self.to_vec()))
+    }
+}
+
+impl Default for Atom {
+    fn default() -> Self {
+        Self {
+            height: 0,
+            peer: PeerId::from_multihash(Multihash::default()).unwrap(),
+            cmd: None,
+            timestamp: 0,
+            cache: OnceLock::new(),
+        }
     }
 }
