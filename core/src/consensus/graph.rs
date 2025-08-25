@@ -34,9 +34,6 @@ struct Entry {
     pub atom: Atom,
     pub witness: Witness,
 
-    #[derivative(Default(value = "PeerId::from_multihash(Multihash::default()).unwrap()"))]
-    pub peer_id: PeerId,
-
     // General
     pub block_parent: Option<Multihash>,
     pub children: HashSet<Multihash>,
@@ -90,13 +87,12 @@ pub struct Graph<V> {
 }
 
 impl Entry {
-    pub fn new(atom: Atom, witness: Witness, peer_id: PeerId) -> Self {
+    pub fn new(atom: Atom, witness: Witness) -> Self {
         let pending_parents = witness.atoms.len() as u32;
 
         Self {
             atom,
             witness,
-            peer_id,
             pending_parents,
             is_missing: false,
             ..Default::default()
@@ -118,7 +114,7 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
-    pub fn upsert(&self, atom: Atom, witness: Witness, peer_id: PeerId) -> UpdateResult {
+    pub fn upsert(&self, atom: Atom, witness: Witness) -> UpdateResult {
         let mut result = UpdateResult::default();
         let hash = atom.hash();
 
@@ -126,8 +122,7 @@ impl<V: Validator> Graph<V> {
             return result;
         }
 
-        self.entries
-            .insert(hash, Entry::new(atom, witness, peer_id));
+        self.entries.insert(hash, Entry::new(atom, witness));
 
         if !self.link_parents(hash, &mut result) {
             self.remove_subgraph(hash, &mut result);
@@ -209,7 +204,10 @@ impl<V: Validator> Graph<V> {
             };
 
             stk.extend(entry.children);
-            result.invalidated.push(entry.peer_id);
+
+            if !entry.is_missing {
+                result.invalidated.push(entry.atom.peer);
+            }
         }
     }
 
@@ -377,7 +375,7 @@ impl<V: Validator> Graph<V> {
         publishers: &mut HashSet<PeerId>,
     ) -> bool {
         let e = self.entries.get_mut(hash).expect("Entry must exist");
-        publishers.insert(e.peer_id);
+        publishers.insert(e.atom.peer);
 
         let Some(cmd) = &e.atom.cmd else {
             return true;
