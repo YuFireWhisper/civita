@@ -23,7 +23,7 @@ use crate::{
 #[derive(Clone)]
 #[derive(Default)]
 pub struct UpdateResult {
-    pub invalidated: Vec<Multihash>,
+    pub invalidated: Vec<PeerId>,
     pub missing: Vec<Multihash>,
 }
 
@@ -208,10 +208,8 @@ impl<V: Validator> Graph<V> {
                 continue;
             };
 
-            let hash = entry.hash();
-
             stk.extend(entry.children);
-            result.invalidated.push(hash);
+            result.invalidated.push(entry.peer_id);
         }
     }
 
