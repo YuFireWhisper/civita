@@ -420,7 +420,8 @@ impl<V: Validator> Graph<V> {
         }));
 
         cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
-            let data = (e.witness.vdf_proof.clone(), i).to_vec();
+            // Token Id = H(AtomHash || Index)
+            let data = (hash.to_vec(), i as u32).to_vec();
             let hash = Hasher::digest(&data);
             state.insert(hash, Some(t));
         });
