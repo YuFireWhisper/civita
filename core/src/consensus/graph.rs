@@ -189,10 +189,6 @@ impl<V: Validator> Graph<V> {
 
             parent.hash()
         } else {
-            if cur.atom.height != parent.atom.height {
-                return false;
-            }
-
             parent.block_parent.expect("Block parent must exist")
         };
 
