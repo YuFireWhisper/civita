@@ -5,6 +5,7 @@ use civita_serialize_derive::Serialize;
 
 use crate::crypto::{hasher::Hasher, Multihash};
 
+#[derive(Clone)]
 #[derive(Serialize)]
 pub struct Token {
     pub value: Vec<u8>,
