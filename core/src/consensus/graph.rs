@@ -570,6 +570,13 @@ impl<V: Validator> Graph<V> {
     pub fn difficulty(&self) -> u64 {
         self.difficulty.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    pub fn get(&self, h: &Multihash) -> Option<(Atom, Witness)> {
+        self.entries.get(h).is_some_and(|e| !e.is_missing).then(|| {
+            let e = self.entries.get(h).expect("Entry must exist");
+            (e.atom.clone(), e.witness.clone())
+        })
+    }
 }
 
 impl<V> Default for Graph<V> {
