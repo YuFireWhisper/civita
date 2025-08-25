@@ -7,11 +7,16 @@ use std::{
 use civita_serialize::Serialize;
 use dashmap::DashMap;
 use derivative::Derivative;
+use libp2p::PeerId;
 use parking_lot::RwLock as ParkingLock;
 
 use crate::{
-    crypto::{Multihash, PublicKey},
-    ty::atom::{Atom, Command, Height, Nonce, Witness},
+    consensus::validator::Validator,
+    crypto::{hasher::Hasher, Multihash},
+    ty::{
+        atom::{Atom, Height, Witness},
+        token::Token,
+    },
     utils::Trie,
 };
 
@@ -24,25 +29,25 @@ pub struct UpdateResult {
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
-struct Entry<C: Command> {
+struct Entry {
     // Basic information
-    pub atom: Atom<C>,
+    pub atom: Atom,
     pub witness: Witness,
-    pub public_key: PublicKey,
+
+    #[derivative(Default(value = "PeerId::from_multihash(Multihash::default()).unwrap()"))]
+    pub peer_id: PeerId,
 
     // General
     pub block_parent: Option<Multihash>,
+    pub children: HashSet<Multihash>,
 
     // Block only
     pub is_block: bool,
     pub trie: Trie,
-    pub publishers: HashSet<PublicKey>,
-    pub nonce_used: HashMap<PublicKey, HashSet<Nonce>>,
+    pub publishers: HashSet<PeerId>,
 
     // Pending only
     pub pending_parents: u32,
-    pub children: HashSet<Multihash>,
-    pub max_nonce: Nonce,
     #[derivative(Default(value = "true"))]
     pub is_missing: bool,
 }
@@ -71,16 +76,8 @@ pub struct Config {
     pub retain_keys: Option<Vec<Vec<u8>>>,
 }
 
-pub struct NextInfo {
-    pub height: Height,
-    pub nonce: Nonce,
-    pub vdf_difficulty: u64,
-    pub parents: HashMap<PublicKey, Multihash>,
-    pub unknown_keys: HashSet<Vec<u8>>,
-}
-
-pub struct Graph<C: Command> {
-    entries: DashMap<Multihash, Entry<C>>,
+pub struct Graph<V> {
+    entries: DashMap<Multihash, Entry>,
 
     main_head: ParkingLock<Multihash>,
     checkpoint: ParkingLock<Multihash>,
@@ -88,16 +85,18 @@ pub struct Graph<C: Command> {
     difficulty: AtomicU64,
 
     config: Config,
+
+    _marker: std::marker::PhantomData<V>,
 }
 
-impl<C: Command> Entry<C> {
-    pub fn new(atom: Atom<C>, witness: Witness, pk: PublicKey) -> Self {
-        let pending_parents = witness.parents.len() as u32;
+impl Entry {
+    pub fn new(atom: Atom, witness: Witness, peer_id: PeerId) -> Self {
+        let pending_parents = witness.atoms.len() as u32;
 
         Self {
             atom,
             witness,
-            public_key: pk,
+            peer_id,
             pending_parents,
             is_missing: false,
             ..Default::default()
@@ -118,8 +117,8 @@ impl<C: Command> Entry<C> {
     }
 }
 
-impl<C: Command> Graph<C> {
-    pub fn upsert(&self, atom: Atom<C>, witness: Witness, pk: PublicKey) -> UpdateResult {
+impl<V: Validator> Graph<V> {
+    pub fn upsert(&self, atom: Atom, witness: Witness, peer_id: PeerId) -> UpdateResult {
         let mut result = UpdateResult::default();
         let hash = atom.hash();
 
@@ -127,7 +126,8 @@ impl<C: Command> Graph<C> {
             return result;
         }
 
-        self.entries.insert(hash, Entry::new(atom, witness, pk));
+        self.entries
+            .insert(hash, Entry::new(atom, witness, peer_id));
 
         if !self.link_parents(hash, &mut result) {
             self.remove_subgraph(hash, &mut result);
@@ -154,12 +154,12 @@ impl<C: Command> Graph<C> {
     fn link_parents(&self, hash: Multihash, result: &mut UpdateResult) -> bool {
         let mut cur = self.entries.get_mut(&hash).expect("Entry must exist");
 
-        if cur.witness.parents.is_empty() {
-            // At least contain one parent(genesis)
+        if cur.witness.atoms.is_empty() {
+            // At least contain one parent(block parent)
             return false;
         }
 
-        let parents = cur.witness.parents.values().copied().collect::<Vec<_>>();
+        let parents = cur.witness.atoms.clone();
         parents
             .into_iter()
             .map(|h| {
@@ -169,6 +169,8 @@ impl<C: Command> Graph<C> {
                 })
             })
             .all(|mut p| {
+                p.children.insert(hash);
+
                 if p.is_missing && p.pending_parents == 0 {
                     cur.pending_parents -= 1;
                     Self::on_parent_valid(&mut cur, &p)
@@ -179,11 +181,7 @@ impl<C: Command> Graph<C> {
             })
     }
 
-    fn on_parent_valid(cur: &mut Entry<C>, parent: &Entry<C>) -> bool {
-        if !cur.witness.parents.contains_key(&parent.public_key) {
-            return false;
-        }
-
+    fn on_parent_valid(cur: &mut Entry, parent: &Entry) -> bool {
         let bp = if parent.is_block {
             if cur.atom.height != parent.atom.height + 1 {
                 return false;
@@ -191,11 +189,10 @@ impl<C: Command> Graph<C> {
 
             parent.hash()
         } else {
-            if cur.atom.height != parent.atom.height || cur.atom.nonce <= parent.atom.nonce {
+            if cur.atom.height != parent.atom.height {
                 return false;
             }
 
-            cur.max_nonce = cur.max_nonce.max(parent.atom.nonce);
             parent.block_parent.expect("Block parent must exist")
         };
 
@@ -217,21 +214,6 @@ impl<C: Command> Graph<C> {
 
             let hash = entry.hash();
 
-            if let Some(bp) = &entry.block_parent {
-                let mut bp_e = self.entries.get_mut(bp).expect("Block parent must exist");
-                bp_e.nonce_used
-                    .get_mut(&entry.public_key)
-                    .map(|set| set.remove(&entry.atom.nonce));
-
-                if bp_e
-                    .nonce_used
-                    .get(&entry.public_key)
-                    .is_some_and(|set| set.is_empty())
-                {
-                    bp_e.nonce_used.remove(&entry.public_key);
-                }
-            }
-
             stk.extend(entry.children);
             result.invalidated.push(hash);
         }
@@ -247,24 +229,19 @@ impl<C: Command> Graph<C> {
                 continue;
             }
 
-            let (e, mut children) = {
-                let mut e = self.entries.get_mut(&h).expect("Entry must exist");
-                // We don't need to keep children in the entry anymore
-                let c = std::mem::take(&mut e.children);
-                (e.downgrade(), c)
-            };
+            let entry = self.entries.get(&h).expect("Entry must exist");
 
-            children.drain().for_each(|ch| {
-                let mut c = self.entries.get_mut(&ch).expect("Child entry must exist");
+            entry.children.iter().for_each(|ch| {
+                let mut c = self.entries.get_mut(ch).expect("Child entry must exist");
 
-                if !Self::on_parent_valid(&mut c, &e) {
-                    self.remove_subgraph(ch, result);
+                if !Self::on_parent_valid(&mut c, &entry) {
+                    self.remove_subgraph(*ch, result);
                     return;
                 }
 
                 c.pending_parents -= 1;
                 if c.pending_parents == 0 {
-                    queue.push_back(ch);
+                    queue.push_back(*ch);
                 }
             });
         }
@@ -273,60 +250,34 @@ impl<C: Command> Graph<C> {
     fn try_final_validate(&self, hash: &Multihash) -> bool {
         let mut entry = self.entries.get_mut(hash).expect("Entry must exist");
 
-        if entry.atom.nonce != entry.max_nonce + 1 {
+        let Some(bp_e) = entry
+            .block_parent
+            .map(|bp| self.entries.get_mut(&bp).expect("Block parent must exist"))
+        else {
             return false;
-        }
-
-        let mut bp_e = {
-            let Some(bp) = entry.block_parent else {
-                return false;
-            };
-
-            self.entries.get_mut(&bp).expect("Block parent must exist")
         };
 
-        if !bp_e
-            .nonce_used
-            .entry(entry.public_key.clone())
-            .or_default()
-            .insert(entry.atom.nonce)
-        {
-            // Nonce already used by this publisher
-            return false;
-        }
+        let root_hash = bp_e.trie.root_hash();
+        let order = self.topo_sort(*hash, bp_e.key());
 
-        let (order, root_hash) = {
-            let order = self.topo_parents(*entry.key(), bp_e.key());
-            (order, bp_e.trie.root_hash())
-        };
-
-        let (state, publishers) = {
-            let mut state = HashMap::new();
-            let mut publishers = HashSet::new();
-
-            for h in order.iter().rev() {
-                let e = self.entries.get(h).expect("Entry must exist");
-                publishers.insert(e.public_key.clone());
-
-                if let Some(cmd) = &e.atom.cmd {
-                    let input = self.prepare_command_input(cmd, &e.witness.trie_proofs, root_hash);
-
-                    let Ok(output) = cmd.execute(input) else {
-                        return false;
-                    };
-
-                    state.extend(output);
+        let Some((state, publishers)) = order.iter().rev().try_fold(
+            (HashMap::new(), HashSet::new()),
+            |(mut state, mut publishers), h| {
+                if self.execute_atom(h, root_hash, &mut state, &mut publishers) {
+                    Some((state, publishers))
+                } else {
+                    None
                 }
-            }
-
-            (state, publishers)
+            },
+        ) else {
+            return false;
         };
 
         let atom_count = order.len() as u32;
 
         if atom_count >= self.config.block_threshold {
             let mut trie = bp_e.trie.clone();
-            trie.extend(state.into_iter().map(|(k, v)| (k, v.to_vec())));
+            trie.extend(state.into_iter().map(|(k, v)| (k.to_vec(), v.to_vec())));
             entry.is_block = true;
             entry.trie = trie;
 
@@ -342,50 +293,150 @@ impl<C: Command> Graph<C> {
         true
     }
 
-    fn topo_parents(&self, hash: Multihash, bp: &Multihash) -> Vec<Multihash> {
-        let mut queue = VecDeque::new();
-        let mut visited = HashSet::new();
-        let mut heap = BinaryHeap::new();
+    fn topo_sort(&self, hash: Multihash, bp: &Multihash) -> Vec<Multihash> {
+        debug_assert!(hash != *bp);
 
-        queue.push_back(hash);
-        visited.insert(hash);
+        let hashes = {
+            let mut queue = VecDeque::new();
+            let mut visited = HashSet::new();
+            let mut hashes = Vec::new();
 
-        while let Some(h) = queue.pop_front() {
-            if &h == bp {
-                continue;
+            queue.push_back(hash);
+
+            while let Some(h) = queue.pop_front() {
+                hashes.push(h);
+
+                self.entries
+                    .get(&h)
+                    .expect("Entry must exist")
+                    .witness
+                    .atoms
+                    .iter()
+                    .filter(|&&p| p != *bp && visited.insert(p))
+                    .for_each(|p| queue.push_back(*p));
             }
 
-            let e = self.entries.get(&h).expect("Entry must exist");
+            hashes
+        };
 
-            heap.push(Reverse((e.atom.nonce, h)));
-            queue.extend(e.witness.parents.values().filter(|&&p| visited.insert(p)));
+        let (mut indeg, adj) = hashes.iter().fold(
+            (HashMap::<_, u32>::new(), HashMap::<_, Vec<_>>::new()),
+            |(mut indeg, mut adj), &h| {
+                self.entries
+                    .get(&h)
+                    .expect("Entry must exist")
+                    .witness
+                    .atoms
+                    .iter()
+                    .filter(|&&p| p != *bp && hashes.contains(&p))
+                    .for_each(|p| {
+                        *indeg.entry(h).or_default() += 1;
+                        adj.entry(*p).or_default().push(h);
+                    });
+                (indeg, adj)
+            },
+        );
+
+        let key = |x: Multihash| {
+            let h = self.entries.get(&x).expect("Entry must exist").atom.height;
+            (h, x)
+        };
+
+        let topo = {
+            let mut topo = Vec::with_capacity(hashes.len());
+            let mut heap = BinaryHeap::from_iter(
+                indeg
+                    .iter()
+                    .filter(|(_, d)| d == &&0)
+                    .map(|(h, _)| Reverse(key(*h))),
+            );
+
+            while let Some(Reverse((_, u))) = heap.pop() {
+                topo.push(u);
+
+                let Some(children) = adj.get(&u) else {
+                    continue;
+                };
+
+                children.iter().for_each(|ch| {
+                    let d = indeg.get_mut(ch).expect("Indegree must exist");
+                    *d -= 1;
+                    if *d == 0 {
+                        heap.push(Reverse(key(*ch)));
+                    }
+                });
+            }
+
+            topo
+        };
+
+        debug_assert_eq!(topo.len(), hashes.len());
+
+        topo
+    }
+
+    fn execute_atom(
+        &self,
+        hash: &Multihash,
+        root_hash: Multihash,
+        state: &mut HashMap<Multihash, Option<Token>>,
+        publishers: &mut HashSet<PeerId>,
+    ) -> bool {
+        let e = self.entries.get_mut(hash).expect("Entry must exist");
+        publishers.insert(e.peer_id);
+
+        let Some(cmd) = &e.atom.cmd else {
+            return true;
+        };
+
+        let mut inputs = HashMap::new();
+
+        for input_hash in cmd.input.iter() {
+            let input = state.remove(input_hash).unwrap_or_else(|| {
+                Trie::verify_proof(root_hash, &input_hash.to_vec(), &e.witness.trie_proofs)
+                    .ok()
+                    .flatten()
+                    .map(|b| Token::from_slice(&b).expect("Value should be valid"))
+            });
+
+            let Some(input) = input else {
+                return false;
+            };
+
+            if !e
+                .witness
+                .script_sigs
+                .get(input_hash)
+                .is_none_or(|sig| V::validate_script_sig(&input.script_pk, sig))
+            {
+                return false;
+            }
+
+            inputs.insert(*input_hash, input);
         }
 
-        heap.into_sorted_vec()
-            .into_iter()
-            .map(|Reverse((_, idx))| idx)
-            .collect()
+        if !V::validate_conversion(cmd.code, inputs.values(), cmd.consumed.iter(), &cmd.created) {
+            return false;
+        }
+
+        state.extend(inputs.into_iter().map(|(k, v)| {
+            if cmd.consumed.contains(&k) {
+                (k, None)
+            } else {
+                (k, Some(v))
+            }
+        }));
+
+        cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
+            let data = (e.witness.vdf_proof.clone(), i).to_vec();
+            let hash = Hasher::digest(&data);
+            state.insert(hash, Some(t));
+        });
+
+        true
     }
 
-    fn prepare_command_input(
-        &self,
-        cmd: &C,
-        proof: &HashMap<Multihash, Vec<u8>>,
-        trie_root: Multihash,
-    ) -> HashMap<Vec<u8>, C::Value> {
-        cmd.keys()
-            .into_iter()
-            .map(|k| {
-                let value = Trie::verify_proof(trie_root, &k, proof)
-                    .expect("Proof should be valid")
-                    .map(|v| C::Value::from_slice(&v).expect("Value should be valid"))
-                    .unwrap_or_default();
-                (k, value)
-            })
-            .collect()
-    }
-
-    fn update_publishers(&self, mut cur: Multihash, publishers: &HashSet<PublicKey>) {
+    fn update_publishers(&self, mut cur: Multihash, publishers: &HashSet<PeerId>) {
         let cp = *self.checkpoint.read();
 
         loop {
@@ -523,145 +574,12 @@ impl<C: Command> Graph<C> {
         }
     }
 
-    pub fn next_info(&self, mut keys: HashSet<Vec<u8>>) -> Option<NextInfo> {
-        let head = *self.main_head.read();
-
-        let (parents, nonce) = self.get_subgraph_leaves_and_nonce(&head);
-        let (height, unknown_keys) = {
-            let e = self.entries.get(&head).expect("Main head entry must exist");
-            keys.retain(|k| e.trie.get(k.as_ref()).is_none());
-            (e.atom.height + 1, keys)
-        };
-
-        Some(NextInfo {
-            height,
-            nonce,
-            vdf_difficulty: self.difficulty(),
-            parents,
-            unknown_keys,
-        })
-    }
-
-    fn get_subgraph_leaves_and_nonce(
-        &self,
-        root: &Multihash,
-    ) -> (HashMap<PublicKey, Multihash>, Nonce) {
-        let mut stk: Vec<_> = self
-            .entries
-            .get(root)
-            .expect("Main head must exist")
-            .children
-            .iter()
-            .copied()
-            .filter(|ch| {
-                let e = self.entries.get(ch).expect("Child entry must exist");
-                !e.is_missing && !e.is_block
-            })
-            .collect();
-
-        if stk.is_empty() {
-            return (HashMap::new(), Nonce::default());
-        }
-
-        let mut result: HashMap<PublicKey, (Nonce, Multihash)> = HashMap::new();
-        let mut max_nonce = Nonce::default();
-        let mut visited = HashSet::new();
-
-        while let Some(u) = stk.pop() {
-            if !visited.insert(u) || !self.is_leaf_and_enqueue(&u, &mut stk) {
-                continue;
-            }
-
-            let (pk, nonce) = {
-                let e = self.entries.get(&u).expect("Entry must exist");
-                (e.public_key.clone(), e.atom.nonce)
-            };
-
-            max_nonce = max_nonce.max(nonce);
-
-            result
-                .entry(pk)
-                .and_modify(|(best_nonce, best_hash)| {
-                    if nonce > *best_nonce {
-                        *best_nonce = nonce;
-                        *best_hash = u;
-                    }
-                })
-                .or_insert((nonce, u));
-        }
-
-        (
-            result.into_iter().map(|(pk, (_, h))| (pk, h)).collect(),
-            max_nonce,
-        )
-    }
-
-    fn is_leaf_and_enqueue(&self, hash: &Multihash, stk: &mut Vec<Multihash>) -> bool {
-        self.entries
-            .get(hash)
-            .expect("Entry must exist")
-            .children
-            .iter()
-            .filter(|ch| {
-                let ce = self.entries.get(ch).expect("Child entry must exist");
-                !ce.is_missing && !ce.is_block
-            })
-            .inspect(|c| stk.push(**c))
-            .count()
-            == 0
-    }
-
     pub fn difficulty(&self) -> u64 {
         self.difficulty.load(std::sync::atomic::Ordering::Relaxed)
     }
-
-    pub fn next_height(&self) -> Height {
-        self.entries
-            .get(&self.main_head.read())
-            .map_or(0, |e| e.atom.height + 1)
-    }
-
-    pub fn unknow_keys(&self, mut keys: HashSet<Vec<u8>>) -> HashSet<Vec<u8>> {
-        let head = {
-            let g = self.main_head.read();
-            self.entries.get(&g).expect("Main head entry must exist")
-        };
-
-        keys.retain(|k| head.trie.get(k.as_ref()).is_none());
-
-        keys
-    }
-
-    pub fn get_clone(&self, h: &Multihash) -> Option<(Atom<C>, Witness, PublicKey)> {
-        self.entries.get(h).and_then(|entry| {
-            if entry.is_missing {
-                None
-            } else {
-                Some((
-                    entry.atom.clone(),
-                    entry.witness.clone(),
-                    entry.public_key.clone(),
-                ))
-            }
-        })
-    }
-
-    pub fn get_vec(&self, hash: &Multihash) -> Option<Vec<u8>> {
-        self.entries.get(hash).and_then(|entry| {
-            if entry.is_missing {
-                None
-            } else {
-                let mut buf = Vec::new();
-                entry.atom.to_writer(&mut buf);
-                entry.witness.to_writer(&mut buf);
-                entry.public_key.to_writer(&mut buf);
-                Some(buf)
-            }
-        })
-    }
 }
 
-impl<C: Command> Default for Graph<C> {
+impl<V> Default for Graph<V> {
     fn default() -> Self {
         let entry = Entry::genesis();
         let hash = entry.hash();
@@ -674,6 +592,7 @@ impl<C: Command> Default for Graph<C> {
             checkpoint: ParkingLock::new(hash),
             difficulty,
             config,
+            _marker: std::marker::PhantomData,
         }
     }
 }
