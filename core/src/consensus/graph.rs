@@ -154,6 +154,10 @@ impl<V: Validator> Graph<V> {
             return false;
         }
 
+        if cur.witness.atoms.contains(&hash) {
+            return false;
+        }
+
         let parents = cur.witness.atoms.clone();
         parents
             .into_iter()
