@@ -21,10 +21,10 @@ use crate::{
 };
 
 #[derive(Clone)]
-#[derive(Default)]
-pub struct UpdateResult {
-    pub invalidated: Vec<PeerId>,
-    pub missing: Vec<Multihash>,
+pub enum UpdateResult {
+    Noop,
+    Missing(Vec<Multihash>),
+    Invalidated(Vec<PeerId>),
 }
 
 #[derive(Derivative)]
@@ -86,6 +86,24 @@ pub struct Graph<V> {
     _marker: std::marker::PhantomData<V>,
 }
 
+impl UpdateResult {
+    pub fn from_invalidated(invalidated: Vec<PeerId>) -> Self {
+        if invalidated.is_empty() {
+            UpdateResult::Noop
+        } else {
+            UpdateResult::Invalidated(invalidated)
+        }
+    }
+
+    pub fn from_missing(missing: Vec<Multihash>) -> Self {
+        if missing.is_empty() {
+            UpdateResult::Noop
+        } else {
+            UpdateResult::Missing(missing)
+        }
+    }
+}
+
 impl Entry {
     pub fn new(atom: Atom, witness: Witness) -> Self {
         let pending_parents = witness.atoms.len() as u32;
@@ -115,25 +133,32 @@ impl Entry {
 
 impl<V: Validator> Graph<V> {
     pub fn upsert(&self, atom: Atom, witness: Witness) -> UpdateResult {
-        let mut result = UpdateResult::default();
         let hash = atom.hash();
 
         if self.contains(&hash) || atom.height <= self.checkpoint_height() {
-            return result;
+            return UpdateResult::Noop;
         }
 
         self.entries.insert(hash, Entry::new(atom, witness));
 
-        if !self.link_parents(hash, &mut result) {
-            self.remove_subgraph(hash, &mut result);
-            return result;
+        let mut missing = Vec::new();
+        if !self.link_parents(hash, &mut missing) {
+            let mut invalidated = Vec::new();
+            self.remove_subgraph(hash, &mut invalidated);
+            return UpdateResult::from_invalidated(invalidated);
+        }
+
+        if !missing.is_empty() {
+            return UpdateResult::from_missing(missing);
         }
 
         if self.entries.get(&hash).unwrap().pending_parents == 0 {
-            self.on_all_parent_valid(hash, &mut result);
+            let mut invalidated = Vec::new();
+            self.on_all_parent_valid(hash, &mut invalidated);
+            return UpdateResult::from_invalidated(invalidated);
         }
 
-        result
+        UpdateResult::Noop
     }
 
     fn checkpoint_height(&self) -> Height {
@@ -146,7 +171,7 @@ impl<V: Validator> Graph<V> {
         self.entries.get(h).is_some_and(|e| !e.is_missing)
     }
 
-    fn link_parents(&self, hash: Multihash, result: &mut UpdateResult) -> bool {
+    fn link_parents(&self, hash: Multihash, missing: &mut Vec<Multihash>) -> bool {
         let mut cur = self.entries.get_mut(&hash).expect("Entry must exist");
 
         if cur.witness.atoms.is_empty() {
@@ -163,7 +188,7 @@ impl<V: Validator> Graph<V> {
             .into_iter()
             .map(|h| {
                 self.entries.entry(h).or_insert_with(|| {
-                    result.missing.push(h);
+                    missing.push(h);
                     Entry::default()
                 })
             })
@@ -194,7 +219,7 @@ impl<V: Validator> Graph<V> {
         cur.block_parent.replace(bp).is_none_or(|prev| prev == bp)
     }
 
-    fn remove_subgraph(&self, hash: Multihash, result: &mut UpdateResult) {
+    fn remove_subgraph(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
         let mut stk = vec![hash];
         let mut visited = HashSet::new();
 
@@ -210,18 +235,18 @@ impl<V: Validator> Graph<V> {
             stk.extend(entry.children);
 
             if !entry.is_missing {
-                result.invalidated.push(entry.atom.peer);
+                invalidated.extend(entry.publishers);
             }
         }
     }
 
-    fn on_all_parent_valid(&self, hash: Multihash, result: &mut UpdateResult) {
+    fn on_all_parent_valid(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
         let mut queue = VecDeque::new();
         queue.push_back(hash);
 
         while let Some(h) = queue.pop_front() {
             if !self.try_final_validate(&h) {
-                self.remove_subgraph(h, result);
+                self.remove_subgraph(h, invalidated);
                 continue;
             }
 
@@ -231,7 +256,7 @@ impl<V: Validator> Graph<V> {
                 let mut c = self.entries.get_mut(ch).expect("Child entry must exist");
 
                 if !Self::on_parent_valid(&mut c, &entry) {
-                    self.remove_subgraph(*ch, result);
+                    self.remove_subgraph(*ch, invalidated);
                     return;
                 }
 
