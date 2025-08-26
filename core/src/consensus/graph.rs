@@ -271,7 +271,11 @@ impl<V: Validator> Graph<V> {
 
         if count >= self.config.block_threshold {
             let mut trie = trie.clone();
-            trie.extend(state.into_iter().map(|(k, v)| (k.to_vec(), v.to_vec())));
+            trie.update(
+                state
+                    .into_iter()
+                    .map(|(k, v)| (k.to_vec(), v.map(|t| t.to_vec()))),
+            );
 
             let mut e = self.entries.get_mut(&bp).expect("Entry must exist");
             e.is_block = true;
