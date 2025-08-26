@@ -67,11 +67,6 @@ pub struct Config {
 
     #[derivative(Default(value = "0.1"))]
     pub max_difficulty_adjustment: f32,
-
-    /// Keys to retain in the trie at checkpoint.
-    /// If `None`, all keys will be retained.
-    /// If `Some`, only the keys in the vector will be retained.
-    pub retain_keys: Option<Vec<Vec<u8>>>,
 }
 
 pub struct Graph<V> {
