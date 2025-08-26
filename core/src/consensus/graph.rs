@@ -254,7 +254,7 @@ impl<V: Validator> Graph<V> {
         };
 
         let root_hash = bp_e.trie.root_hash();
-        let order = self.topo_sort(*hash, bp_e.key());
+        let order = self.topo_parents(*hash);
 
         let Some((state, publishers)) = order.iter().rev().try_fold(
             (HashMap::new(), HashSet::new()),
@@ -289,26 +289,17 @@ impl<V: Validator> Graph<V> {
         true
     }
 
-    fn topo_sort(&self, hash: Multihash, bp: &Multihash) -> Vec<Multihash> {
-        debug_assert_ne!(&hash, bp);
-
+    fn topo_parents(&self, hash: Multihash) -> Vec<Multihash> {
         let hashes = {
-            let mut atoms = self
-                .entries
-                .get(&hash)
-                .expect("Entry must exist")
-                .witness
-                .atoms
-                .clone();
-
-            atoms.insert(hash);
-            atoms.remove(bp);
-
+            let e = self.entries.get(&hash).expect("Entry must exist");
+            let bp = e.block_parent.unwrap();
+            let mut atoms = e.witness.atoms.clone();
+            atoms.remove(&bp);
             atoms
         };
 
-        if hashes.len() == 1 {
-            return vec![hash];
+        if hashes.is_empty() {
+            return Vec::new();
         }
 
         let (mut indeg, adj) = hashes.iter().fold(
@@ -320,7 +311,7 @@ impl<V: Validator> Graph<V> {
                     .witness
                     .atoms
                     .iter()
-                    .filter(|p| p != &bp && hashes.contains(p))
+                    .filter(|p| hashes.contains(p))
                     .for_each(|p| {
                         *indeg.entry(h).or_default() += 1;
                         adj.entry(*p).or_default().push(h);
