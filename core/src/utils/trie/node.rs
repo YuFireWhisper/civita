@@ -134,6 +134,10 @@ impl Node {
         matches!(self, Node::Empty)
     }
 
+    pub fn is_short(&self) -> bool {
+        matches!(self, Node::Short(_))
+    }
+
     pub fn hash(&self) -> Multihash {
         match self {
             Node::Full(full) => full.hash(),
@@ -155,6 +159,14 @@ impl Node {
     pub fn as_full_mut(&mut self) -> Option<&mut Full> {
         if let Node::Full(full) = self {
             Some(full)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_short(&self) -> Option<&Short> {
+        if let Node::Short(short) = self {
+            Some(short)
         } else {
             None
         }

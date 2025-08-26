@@ -254,6 +254,85 @@ impl Trie {
         dirty
     }
 
+    pub fn remove(&mut self, key: &[u8]) -> bool {
+        let key_nibble = slice_to_hex(key);
+        Self::remove_node(&mut self.root, &key_nibble)
+    }
+
+    fn remove_node(node: &mut Node, key: &[u8]) -> bool {
+        match node {
+            Node::Empty => false,
+            Node::Value(_) => {
+                *node = Node::Empty;
+                true
+            }
+            Node::Short(short) => {
+                if !key.starts_with(&short.key) {
+                    return false;
+                }
+
+                if key.len() == short.key.len() {
+                    *node = Node::Empty;
+                    return true;
+                }
+
+                if !Self::remove_node(&mut short.val, &key[short.key.len()..]) {
+                    return false;
+                }
+
+                short.clear_cache();
+
+                if short.val.is_short() {
+                    short.key = [
+                        short.key.as_slice(),
+                        short.val.as_short().unwrap().key.as_slice(),
+                    ]
+                    .concat();
+                }
+
+                true
+            }
+            Node::Full(full) => {
+                let idx = key[0] as usize;
+
+                if !Self::remove_node(&mut full.children[idx], &key[1..]) {
+                    return false;
+                }
+
+                full.clear_caches();
+
+                // Still is a full node
+                if !full.children[idx].is_empty() {
+                    return true;
+                }
+
+                let mut pos = -1;
+
+                for (i, child) in full.children.iter().enumerate() {
+                    if !child.is_empty() {
+                        if pos == -1 {
+                            pos = i as isize;
+                        } else {
+                            pos = -2;
+                            break;
+                        }
+                    }
+                }
+
+                // Only one child left, compress
+                if pos >= 0 {
+                    let child = std::mem::take(&mut full.children[pos as usize]);
+                    *node = Node::new_short(vec![pos as u8], child);
+                }
+
+                true
+            }
+            Node::Hash(h) => {
+                panic!("Unexpected hash node in remove: {h:?}");
+            }
+        }
+    }
+
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let key = slice_to_hex(key);
         Self::get_node(&self.root, &key, 0)
