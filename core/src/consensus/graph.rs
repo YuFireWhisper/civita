@@ -320,6 +320,7 @@ impl<V: Validator> Graph<V> {
                     .witness
                     .atoms
                     .iter()
+                    .filter(|p| p != &bp && hashes.contains(p))
                     .for_each(|p| {
                         *indeg.entry(h).or_default() += 1;
                         adj.entry(*p).or_default().push(h);
