@@ -244,43 +244,41 @@ impl<V: Validator> Graph<V> {
     }
 
     fn try_final_validate(&self, hash: &Multihash) -> bool {
-        let mut entry = self.entries.get_mut(hash).expect("Entry must exist");
-
-        let Some(bp_e) = entry
-            .block_parent
-            .map(|bp| self.entries.get_mut(&bp).expect("Block parent must exist"))
-        else {
-            return false;
+        let (bp, count) = {
+            let e = self.entries.get(hash).expect("Entry must exist");
+            let bp = e.block_parent.expect("Block parent must exist");
+            let count = e.witness.atoms.len() as u32;
+            (bp, count)
         };
 
-        let root_hash = bp_e.trie.root_hash();
-        let order = self.topo_parents(*hash);
+        let mut bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
+        let trie = &mut bp_e.trie;
 
-        let Some((state, publishers)) = order.iter().rev().try_fold(
-            (HashMap::new(), HashSet::new()),
-            |(mut state, mut publishers), h| {
-                if self.execute_atom(h, root_hash, &mut state, &mut publishers) {
-                    Some((state, publishers))
-                } else {
-                    None
-                }
-            },
-        ) else {
+        let parents_order = self.topo_parents(*hash);
+        let mut state = HashMap::new();
+        let mut publishers = HashSet::new();
+
+        if !parents_order
+            .iter()
+            .all(|h| self.execute_atom(h, trie, &mut state, &mut publishers, true))
+        {
             return false;
-        };
+        }
 
-        let atom_count = order.len() as u32;
+        if !self.execute_atom(hash, trie, &mut state, &mut publishers, false) {
+            return false;
+        }
 
-        if atom_count >= self.config.block_threshold {
-            let mut trie = bp_e.trie.clone();
+        if count >= self.config.block_threshold {
+            let mut trie = trie.clone();
             trie.extend(state.into_iter().map(|(k, v)| (k.to_vec(), v.to_vec())));
-            entry.is_block = true;
-            entry.trie = trie;
 
-            let bp = *bp_e.key();
+            let mut e = self.entries.get_mut(&bp).expect("Entry must exist");
+            e.is_block = true;
+            e.trie = trie;
 
+            drop(e);
             drop(bp_e);
-            drop(entry);
 
             self.update_publishers(bp, &publishers);
             self.recompute_main_chain_and_checkpoint();
@@ -357,9 +355,10 @@ impl<V: Validator> Graph<V> {
     fn execute_atom(
         &self,
         hash: &Multihash,
-        root_hash: Multihash,
+        trie: &mut Trie,
         state: &mut HashMap<Multihash, Option<Token>>,
         publishers: &mut HashSet<PeerId>,
+        is_parent: bool,
     ) -> bool {
         let e = self.entries.get_mut(hash).expect("Entry must exist");
         publishers.insert(e.atom.peer);
@@ -368,33 +367,33 @@ impl<V: Validator> Graph<V> {
             return true;
         };
 
-        let mut inputs = HashMap::new();
+        let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
+            let input = state.remove(hash).unwrap_or_else(|| {
+                let key = hash.to_vec();
+                trie.resolve(std::iter::once(&key), &e.witness.trie_proofs)
+                    .then_some(Token::from_slice(&trie.get(&key).unwrap()).unwrap())
+            })?;
 
-        for input_hash in cmd.input.iter() {
-            let input = state.remove(input_hash).unwrap_or_else(|| {
-                Trie::verify_proof(root_hash, &input_hash.to_vec(), &e.witness.trie_proofs)
-                    .ok()
-                    .flatten()
-                    .map(|b| Token::from_slice(&b).expect("Value should be valid"))
-            });
-
-            let Some(input) = input else {
-                return false;
-            };
-
-            if !e
-                .witness
-                .script_sigs
-                .get(input_hash)
-                .is_none_or(|sig| V::validate_script_sig(&input.script_pk, sig))
+            if !is_parent
+                && e.witness
+                    .script_sigs
+                    .get(hash)
+                    .is_none_or(|sig| V::validate_script_sig(&input.script_pk, sig))
             {
-                return false;
+                return None;
             }
 
-            inputs.insert(*input_hash, input);
-        }
+            acc.insert(*hash, input);
+            Some(acc)
+        });
 
-        if !V::validate_conversion(cmd.code, inputs.values(), cmd.consumed.iter(), &cmd.created) {
+        let Some(inputs) = inputs else {
+            return false;
+        };
+
+        if !is_parent
+            && !V::validate_conversion(cmd.code, inputs.values(), cmd.consumed.iter(), &cmd.created)
+        {
             return false;
         }
 
