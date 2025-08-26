@@ -286,30 +286,26 @@ impl<V: Validator> Graph<V> {
     }
 
     fn topo_sort(&self, hash: Multihash, bp: &Multihash) -> Vec<Multihash> {
-        debug_assert!(hash != *bp);
+        debug_assert_ne!(&hash, bp);
 
         let hashes = {
-            let mut queue = VecDeque::new();
-            let mut visited = HashSet::new();
-            let mut hashes = Vec::new();
+            let mut atoms = self
+                .entries
+                .get(&hash)
+                .expect("Entry must exist")
+                .witness
+                .atoms
+                .clone();
 
-            queue.push_back(hash);
+            atoms.insert(hash);
+            atoms.remove(bp);
 
-            while let Some(h) = queue.pop_front() {
-                hashes.push(h);
-
-                self.entries
-                    .get(&h)
-                    .expect("Entry must exist")
-                    .witness
-                    .atoms
-                    .iter()
-                    .filter(|&&p| p != *bp && visited.insert(p))
-                    .for_each(|p| queue.push_back(*p));
-            }
-
-            hashes
+            atoms
         };
+
+        if hashes.len() == 1 {
+            return vec![hash];
+        }
 
         let (mut indeg, adj) = hashes.iter().fold(
             (HashMap::<_, u32>::new(), HashMap::<_, Vec<_>>::new()),
@@ -320,7 +316,6 @@ impl<V: Validator> Graph<V> {
                     .witness
                     .atoms
                     .iter()
-                    .filter(|&&p| p != *bp && hashes.contains(&p))
                     .for_each(|p| {
                         *indeg.entry(h).or_default() += 1;
                         adj.entry(*p).or_default().push(h);
@@ -334,33 +329,29 @@ impl<V: Validator> Graph<V> {
             (h, x)
         };
 
-        let topo = {
-            let mut topo = Vec::with_capacity(hashes.len());
-            let mut heap = BinaryHeap::from_iter(
-                indeg
-                    .iter()
-                    .filter(|(_, d)| d == &&0)
-                    .map(|(h, _)| Reverse(key(*h))),
-            );
+        let mut topo = Vec::with_capacity(hashes.len());
+        let mut heap = BinaryHeap::from_iter(
+            indeg
+                .iter()
+                .filter(|(_, d)| d == &&0)
+                .map(|(h, _)| Reverse(key(*h))),
+        );
 
-            while let Some(Reverse((_, u))) = heap.pop() {
-                topo.push(u);
+        while let Some(Reverse((_, u))) = heap.pop() {
+            topo.push(u);
 
-                let Some(children) = adj.get(&u) else {
-                    continue;
-                };
+            let Some(children) = adj.get(&u) else {
+                continue;
+            };
 
-                children.iter().for_each(|ch| {
-                    let d = indeg.get_mut(ch).expect("Indegree must exist");
-                    *d -= 1;
-                    if *d == 0 {
-                        heap.push(Reverse(key(*ch)));
-                    }
-                });
-            }
-
-            topo
-        };
+            children.iter().for_each(|ch| {
+                let d = indeg.get_mut(ch).expect("Indegree must exist");
+                *d -= 1;
+                if *d == 0 {
+                    heap.push(Reverse(key(*ch)));
+                }
+            });
+        }
 
         debug_assert_eq!(topo.len(), hashes.len());
 
