@@ -125,6 +125,24 @@ impl Trie {
         }
     }
 
+    pub fn update<'a, I, K>(&mut self, items: I) -> bool
+    where
+        I: IntoIterator<Item = (K, Option<Vec<u8>>)>,
+        K: AsRef<[u8]> + 'a,
+    {
+        let mut dirty = false;
+
+        items.into_iter().for_each(|(key, value)| {
+            dirty |= if let Some(value) = value {
+                self.insert(key.as_ref(), value)
+            } else {
+                self.remove(key.as_ref())
+            };
+        });
+
+        dirty
+    }
+
     pub fn extend<'a, I, K>(&mut self, items: I) -> bool
     where
         I: IntoIterator<Item = (K, Vec<u8>)>,
