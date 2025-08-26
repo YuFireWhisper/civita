@@ -42,6 +42,7 @@ struct Entry {
     pub is_block: bool,
     pub trie: Trie,
     pub publishers: HashSet<PeerId>,
+    pub related_keys: HashSet<Multihash>,
 
     // Pending only
     pub pending_parents: u32,
@@ -81,6 +82,7 @@ pub struct Graph<V> {
 
     difficulty: AtomicU64,
 
+    peer: PeerId,
     config: Config,
 
     _marker: std::marker::PhantomData<V>,
@@ -132,6 +134,22 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
+    pub fn empty(peer: PeerId, config: Config) -> Self {
+        let entry = Entry::genesis();
+        let hash = entry.hash();
+        let difficulty = AtomicU64::new(config.init_vdf_difficulty);
+
+        Self {
+            entries: DashMap::from_iter([(hash, entry)]),
+            main_head: ParkingLock::new(hash),
+            checkpoint: ParkingLock::new(hash),
+            difficulty,
+            peer,
+            config,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
     pub fn upsert(&self, atom: Atom, witness: Witness) -> UpdateResult {
         let hash = atom.hash();
 
@@ -298,16 +316,33 @@ impl<V: Validator> Graph<V> {
             let mut trie = trie.clone();
             trie.update(
                 state
-                    .into_iter()
-                    .map(|(k, v)| (k.to_vec(), v.map(|t| t.to_vec()))),
+                    .iter()
+                    .map(|(k, v)| (k.to_vec(), v.as_ref().map(|t| t.to_vec()))),
             );
+
+            let mut related: HashSet<Multihash> = bp_e
+                .block_parent
+                .and_then(|pp| self.entries.get(&pp).map(|pe| pe.related_keys.clone()))
+                .unwrap_or_default();
+
+            drop(bp_e);
+
+            state.iter().for_each(|(k, v)| {
+                if v.as_ref()
+                    .is_some_and(|t| V::is_related(&t.script_pk, &self.peer))
+                {
+                    related.insert(*k);
+                } else {
+                    related.remove(k);
+                }
+            });
 
             let mut e = self.entries.get_mut(&bp).expect("Entry must exist");
             e.is_block = true;
             e.trie = trie;
+            e.related_keys = related;
 
             drop(e);
-            drop(bp_e);
 
             self.update_publishers(bp, &publishers);
             self.recompute_main_chain_and_checkpoint();
@@ -573,13 +608,18 @@ impl<V: Validator> Graph<V> {
     }
 
     fn prune_trie_at_checkpoint(&self, cp: Multihash) {
-        let Some(keys) = self.config.retain_keys.as_ref() else {
-            return;
-        };
+        let mut e = self
+            .entries
+            .get_mut(&cp)
+            .expect("Checkpoint entry must exist");
 
-        if let Some(mut e) = self.entries.get_mut(&cp) {
-            let _ = e.trie.retain(keys);
-        }
+        let keys = e
+            .related_keys
+            .iter()
+            .map(|k| k.to_vec())
+            .collect::<Vec<_>>();
+
+        e.trie.retain(keys.iter());
     }
 
     pub fn difficulty(&self) -> u64 {
@@ -592,22 +632,21 @@ impl<V: Validator> Graph<V> {
             (e.atom.clone(), e.witness.clone())
         })
     }
-}
 
-impl<V> Default for Graph<V> {
-    fn default() -> Self {
-        let entry = Entry::genesis();
-        let hash = entry.hash();
-        let config = Config::default();
-        let difficulty = AtomicU64::new(config.init_vdf_difficulty);
-
-        Self {
-            entries: DashMap::from_iter([(hash, entry)]),
-            main_head: ParkingLock::new(hash),
-            checkpoint: ParkingLock::new(hash),
-            difficulty,
-            config,
-            _marker: std::marker::PhantomData,
-        }
+    pub fn tokens(&self) -> Vec<(Multihash, Token)> {
+        let h = *self.main_head.read();
+        self.entries
+            .get(&h)
+            .expect("Entry must exist")
+            .related_keys
+            .iter()
+            .map(|k| {
+                let e = self.entries.get(k).expect("Token entry must exist");
+                (
+                    *k,
+                    Token::from_slice(&e.trie.get(&k.to_vec()).unwrap()).unwrap(),
+                )
+            })
+            .collect()
     }
 }

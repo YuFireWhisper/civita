@@ -1,3 +1,5 @@
+use libp2p::PeerId;
+
 use crate::{crypto::Multihash, ty::token::Token};
 
 pub trait Validator {
@@ -8,4 +10,5 @@ pub trait Validator {
         consumed: impl Iterator<Item = &'a Multihash>,
         created: &[Token],
     ) -> bool;
+    fn is_related(script_pk: &[u8], peer_id: &PeerId) -> bool;
 }
