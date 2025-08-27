@@ -49,6 +49,8 @@ struct Entry {
 
     // Pending only
     pub pending_parents: u32,
+    #[derivative(Default(value = "PeerId::from_multihash(Multihash::default()).unwrap()"))]
+    pub source: PeerId,
     #[derivative(Default(value = "true"))]
     pub is_missing: bool,
 }
@@ -109,7 +111,7 @@ impl UpdateResult {
 }
 
 impl Entry {
-    pub fn new(atom: Atom, witness: Witness) -> Self {
+    pub fn new(atom: Atom, witness: Witness, source: PeerId) -> Self {
         let pending_parents = witness.atoms.len() as u32;
 
         Self {
@@ -117,6 +119,7 @@ impl Entry {
             witness,
             pending_parents,
             is_missing: false,
+            source,
             ..Default::default()
         }
     }
@@ -152,14 +155,14 @@ impl<V: Validator> Graph<V> {
         }
     }
 
-    pub fn upsert(&self, atom: Atom, witness: Witness) -> UpdateResult {
+    pub fn upsert(&self, atom: Atom, witness: Witness, source: PeerId) -> UpdateResult {
         let hash = atom.hash();
 
         if self.contains(&hash) {
             return UpdateResult::Noop;
         }
 
-        self.entries.insert(hash, Entry::new(atom, witness));
+        self.entries.insert(hash, Entry::new(atom, witness, source));
 
         let mut missing = Vec::new();
         if !self.link_parents(hash, &mut missing) {
@@ -261,7 +264,7 @@ impl<V: Validator> Graph<V> {
             stk.extend(entry.children);
 
             if !entry.is_missing {
-                invalidated.extend(entry.publishers);
+                invalidated.push(entry.source);
             }
         }
     }
