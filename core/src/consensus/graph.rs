@@ -37,12 +37,14 @@ struct Entry {
     // General
     pub block_parent: Option<Multihash>,
     pub children: HashSet<Multihash>,
+    pub is_conflict_marked: bool,
 
     // Block only
     pub is_block: bool,
     pub trie: Trie,
     pub publishers: HashSet<PeerId>,
     pub related_keys: HashSet<Multihash>,
+    pub consumed_tokens: HashSet<Multihash>,
 
     // Pending only
     pub pending_parents: u32,
@@ -290,7 +292,6 @@ impl<V: Validator> Graph<V> {
         };
 
         let mut bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
-        let trie = &mut bp_e.trie;
 
         let parents_order = self.topo_parents(*hash);
         let mut state = HashMap::new();
@@ -298,17 +299,27 @@ impl<V: Validator> Graph<V> {
 
         if !parents_order
             .iter()
-            .all(|h| self.execute_atom(h, trie, &mut state, &mut publishers, true))
+            .all(|h| self.execute_atom(h, &mut bp_e.trie, &mut state, &mut publishers, true))
         {
             return false;
         }
 
-        if !self.execute_atom(hash, trie, &mut state, &mut publishers, false) {
+        if !self.execute_atom(hash, &mut bp_e.trie, &mut state, &mut publishers, false) {
             return false;
         }
 
+        {
+            let mut e = self.entries.get_mut(hash).expect("Entry must exist");
+            e.is_conflict_marked = e.atom.cmd.as_ref().is_some_and(|cmd| {
+                #[allow(clippy::unnecessary_fold)]
+                cmd.consumed
+                    .iter()
+                    .fold(false, |acc, t| acc || bp_e.consumed_tokens.insert(*t))
+            });
+        }
+
         if count >= self.config.block_threshold {
-            let mut trie = trie.clone();
+            let mut trie = bp_e.trie.clone();
             trie.update(
                 state
                     .iter()
@@ -641,6 +652,24 @@ impl<V: Validator> Graph<V> {
                     *k,
                     Token::from_slice(&e.trie.get(&k.to_vec()).unwrap()).unwrap(),
                 )
+            })
+            .collect()
+    }
+
+    pub fn head_children(&self) -> Vec<Multihash> {
+        let head_e = self
+            .entries
+            .get(&*self.main_head.read())
+            .expect("Head entry must exist");
+
+        head_e
+            .children
+            .iter()
+            .filter_map(|h| {
+                self.entries
+                    .get(h)
+                    .is_some_and(|e| !e.is_missing && !e.is_block && !e.is_conflict_marked)
+                    .then_some(*h)
             })
             .collect()
     }
