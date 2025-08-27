@@ -102,6 +102,10 @@ impl UpdateResult {
             UpdateResult::Missing(missing)
         }
     }
+
+    pub fn is_noop(&self) -> bool {
+        matches!(self, UpdateResult::Noop)
+    }
 }
 
 impl Entry {
@@ -667,14 +671,16 @@ impl<V: Validator> Graph<V> {
         related
     }
 
-    pub fn head_children(&self) -> Vec<Multihash> {
-        let head_e = self
-            .entries
-            .get(&*self.main_head.read())
-            .expect("Head entry must exist");
+    pub fn head(&self) -> Multihash {
+        *self.main_head.read()
+    }
 
-        head_e
-            .children
+    pub fn get_children(&self, h: &Multihash) -> HashSet<Multihash> {
+        let e = self.entries.get(h).expect("Entry must exist");
+
+        debug_assert!(e.is_block);
+
+        e.children
             .iter()
             .filter_map(|h| {
                 self.entries
@@ -683,5 +689,16 @@ impl<V: Validator> Graph<V> {
                     .then_some(*h)
             })
             .collect()
+    }
+
+    pub fn generate_proofs<'a>(
+        &self,
+        token_ids: impl Iterator<Item = &'a Multihash>,
+        h: &Multihash,
+    ) -> HashMap<Multihash, Vec<u8>> {
+        let e = self.entries.get(h).expect("Entry must exist");
+        e.trie
+            .generate_guide(token_ids.map(|id| id.to_vec()))
+            .expect("Proofs must be generated")
     }
 }
