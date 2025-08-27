@@ -50,12 +50,3 @@ rstest = "0.25"
 num-bigint = "0.4"
 num-traits = "0.2"
 hex = "0.4"
-criterion = { version = "0.7", features = ["html_reports"] }
-
-[[bench]]
-name = "trie_benchmark"
-harness = false
-
-[[bench]]
-name = "dag_benchmark"
-harness = false
