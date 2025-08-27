@@ -45,6 +45,15 @@ pub struct Witness {
 }
 
 impl Atom {
+    pub fn new(peer: PeerId, cmd: Option<Command>, timestamp: u64) -> Self {
+        Self {
+            peer,
+            cmd,
+            timestamp,
+            cache: OnceLock::new(),
+        }
+    }
+
     pub fn hash(&self) -> Multihash {
         *self.cache.get_or_init(|| Hasher::digest(&self.to_vec()))
     }
