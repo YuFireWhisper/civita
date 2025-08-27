@@ -43,8 +43,8 @@ struct Entry {
     pub is_block: bool,
     pub trie: Trie,
     pub publishers: HashSet<PeerId>,
-    pub related_keys: HashSet<Multihash>,
-    pub consumed_tokens: HashSet<Multihash>,
+    pub related_token: HashMap<Multihash, Token>,
+    pub unconflicted_tokens: HashMap<Multihash, Option<Token>>,
 
     // Pending only
     pub pending_parents: u32,
@@ -260,10 +260,15 @@ impl<V: Validator> Graph<V> {
         queue.push_back(hash);
 
         while let Some(h) = queue.pop_front() {
-            if !self.try_final_validate(&h) {
+            let mut state = HashMap::new();
+            let mut publishers = HashSet::new();
+
+            if !self.try_final_validate(h, &mut state, &mut publishers) {
                 self.remove_subgraph(h, invalidated);
                 continue;
             }
+
+            self.on_valid(h, state, publishers);
 
             let entry = self.entries.get(&h).expect("Entry must exist");
 
@@ -283,78 +288,22 @@ impl<V: Validator> Graph<V> {
         }
     }
 
-    fn try_final_validate(&self, hash: &Multihash) -> bool {
-        let (bp, count) = {
-            let e = self.entries.get(hash).expect("Entry must exist");
+    fn try_final_validate(
+        &self,
+        hash: Multihash,
+        state: &mut HashMap<Multihash, Option<Token>>,
+        publishers: &mut HashSet<PeerId>,
+    ) -> bool {
+        let mut bp_e = {
+            let e = self.entries.get(&hash).expect("Entry must exist");
             let bp = e.block_parent.expect("Block parent must exist");
-            let count = e.witness.atoms.len() as u32;
-            (bp, count)
+            self.entries.get_mut(&bp).expect("Block parent must exist")
         };
 
-        let mut bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
-
-        let parents_order = self.topo_parents(*hash);
-        let mut state = HashMap::new();
-        let mut publishers = HashSet::new();
-
-        if !parents_order
+        self.topo_parents(hash)
             .iter()
-            .all(|h| self.execute_atom(h, &mut bp_e.trie, &mut state, &mut publishers, true))
-        {
-            return false;
-        }
-
-        if !self.execute_atom(hash, &mut bp_e.trie, &mut state, &mut publishers, false) {
-            return false;
-        }
-
-        {
-            let mut e = self.entries.get_mut(hash).expect("Entry must exist");
-            e.is_conflict_marked = e.atom.cmd.as_ref().is_some_and(|cmd| {
-                #[allow(clippy::unnecessary_fold)]
-                cmd.consumed
-                    .iter()
-                    .fold(false, |acc, t| acc || bp_e.consumed_tokens.insert(*t))
-            });
-        }
-
-        if count >= self.config.block_threshold {
-            let mut trie = bp_e.trie.clone();
-            trie.update(
-                state
-                    .iter()
-                    .map(|(k, v)| (k.to_vec(), v.as_ref().map(|t| t.to_vec()))),
-            );
-
-            let mut related: HashSet<Multihash> = bp_e
-                .block_parent
-                .and_then(|pp| self.entries.get(&pp).map(|pe| pe.related_keys.clone()))
-                .unwrap_or_default();
-
-            drop(bp_e);
-
-            state.iter().for_each(|(k, v)| {
-                if v.as_ref()
-                    .is_some_and(|t| V::is_related(&t.script_pk, &self.peer))
-                {
-                    related.insert(*k);
-                } else {
-                    related.remove(k);
-                }
-            });
-
-            let mut e = self.entries.get_mut(&bp).expect("Entry must exist");
-            e.is_block = true;
-            e.trie = trie;
-            e.related_keys = related;
-
-            drop(e);
-
-            self.update_publishers(bp, &publishers);
-            self.recompute_main_chain_and_checkpoint();
-        }
-
-        true
+            .all(|h| self.execute_atom(h, &mut bp_e.trie, state, publishers, true))
+            && self.execute_atom(&hash, &mut bp_e.trie, state, publishers, false)
     }
 
     fn topo_parents(&self, hash: Multihash) -> Vec<Multihash> {
@@ -483,6 +432,49 @@ impl<V: Validator> Graph<V> {
         });
 
         true
+    }
+
+    fn on_valid(
+        &self,
+        hash: Multihash,
+        state: HashMap<Multihash, Option<Token>>,
+        publishers: HashSet<PeerId>,
+    ) {
+        let mut e = self.entries.get_mut(&hash).expect("Entry must exist");
+        let bp = e.block_parent.expect("Block parent must exist");
+        let mut bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
+
+        if (e.witness.atoms.len() as u32) < self.config.block_threshold {
+            e.is_conflict_marked = state.into_iter().fold(false, |acc, (k, t)| {
+                acc || bp_e.unconflicted_tokens.insert(k, t).is_some()
+            });
+            return;
+        }
+
+        let mut trie = bp_e.trie.clone();
+        let mut related = bp_e.related_token.clone();
+
+        state.into_iter().for_each(|(k, t)| {
+            if let Some(t) = t.as_ref() {
+                trie.insert(&k.to_vec(), t.to_vec());
+                if V::is_related(&t.script_pk, &self.peer) {
+                    related.insert(k, t.clone());
+                }
+            } else {
+                trie.remove(&k.to_vec());
+                related.remove(&k);
+            }
+        });
+
+        e.is_block = true;
+        e.trie = trie;
+        e.related_token = related;
+
+        drop(e);
+        drop(bp_e);
+
+        self.update_publishers(bp, &publishers);
+        self.recompute_main_chain_and_checkpoint();
     }
 
     fn update_publishers(&self, mut cur: Multihash, publishers: &HashSet<PeerId>) {
@@ -620,8 +612,8 @@ impl<V: Validator> Graph<V> {
             .expect("Checkpoint entry must exist");
 
         let keys = e
-            .related_keys
-            .iter()
+            .related_token
+            .keys()
             .map(|k| k.to_vec())
             .collect::<Vec<_>>();
 
@@ -639,21 +631,22 @@ impl<V: Validator> Graph<V> {
         })
     }
 
-    pub fn tokens(&self) -> Vec<(Multihash, Token)> {
+    pub fn tokens(&self) -> HashMap<Multihash, Token> {
         let h = *self.main_head.read();
-        self.entries
-            .get(&h)
-            .expect("Entry must exist")
-            .related_keys
-            .iter()
-            .map(|k| {
-                let e = self.entries.get(k).expect("Token entry must exist");
-                (
-                    *k,
-                    Token::from_slice(&e.trie.get(&k.to_vec()).unwrap()).unwrap(),
-                )
-            })
-            .collect()
+        let e = self.entries.get(&h).expect("Head entry must exist");
+
+        let mut related = e.related_token.clone();
+        e.unconflicted_tokens.iter().for_each(|(k, v)| {
+            if let Some(t) = v.as_ref() {
+                if V::is_related(&t.script_pk, &self.peer) {
+                    related.insert(*k, t.clone());
+                }
+            } else {
+                related.remove(k);
+            }
+        });
+
+        related
     }
 
     pub fn head_children(&self) -> Vec<Multihash> {
