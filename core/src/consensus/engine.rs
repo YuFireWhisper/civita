@@ -1,22 +1,23 @@
 use std::{collections::HashMap, sync::Arc};
 
 use civita_serialize::Serialize;
+use dashmap::DashMap;
 use libp2p::PeerId;
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc::{Receiver, Sender};
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
     consensus::{
-        block::{self, tree::Tree, Block},
-        proposal::{self, Proposal},
+        graph::{Graph, UpdateResult},
+        validator::Validator,
     },
-    crypto::{Hasher, Multihash, SecretKey},
+    crypto::Multihash,
     network::{
         gossipsub,
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    utils::{trie::Trie, Record},
+    ty::atom::{Atom, Command, Witness},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -26,220 +27,165 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error(transparent)]
     Gossipsub(#[from] gossipsub::Error),
-
-    #[error(transparent)]
-    Proposal(#[from] proposal::Error),
 }
 
 #[derive(Clone, Copy)]
 pub struct Config {
-    pub proposal_topic: u8,
-    pub block_topic: u8,
+    pub gossip_topic: u8,
     pub request_response_topic: u8,
     pub vdf_params: u16,
     pub vdf_difficulty: u64,
 }
 
-pub struct Engine<H: Hasher, T: Record> {
+pub struct Engine<V> {
     transport: Arc<Transport>,
     gossipsub: Arc<Gossipsub>,
     request_response: Arc<RequestResponse>,
-    proposal_topic: u8,
-    block_topic: u8,
+
+    gossip_topic: u8,
     req_resp_topic: u8,
-    block_tree: Tree<H, T>,
-    sk: SecretKey,
+
+    graph: Graph<V>,
+    pending_tasks: DashMap<Multihash, (Atom, HashMap<Multihash, Vec<u8>>)>,
+    vdf_result_tx: Sender<(Multihash, u64, Vec<u8>)>,
+
     vdf: WesolowskiVDF,
-    vdf_difficulty: u64,
 }
 
-impl<H: Hasher, T: Record> Engine<H, T> {
-    pub fn new(transport: Arc<Transport>, block_tree: Tree<H, T>, config: Config) -> Self {
+impl<V: Validator> Engine<V> {
+    pub async fn new(
+        transport: Arc<Transport>,
+        graph: Graph<V>,
+        config: Config,
+    ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
-        let sk = transport.secret_key().clone();
         let vdf = WesolowskiVDFParams(config.vdf_params).new();
-        let vdf_difficulty = config.vdf_difficulty;
+        let (vdf_result_tx, vdf_result_rx) = tokio::sync::mpsc::channel(100);
 
-        Self {
-            transport,
-            gossipsub,
-            request_response,
-            proposal_topic: config.proposal_topic,
-            block_topic: config.block_topic,
+        let engine = Arc::new(Self {
+            transport: transport.clone(),
+            gossipsub: gossipsub.clone(),
+            request_response: request_response.clone(),
+
+            gossip_topic: config.gossip_topic,
             req_resp_topic: config.request_response_topic,
-            block_tree,
-            sk,
+
+            graph,
+            pending_tasks: DashMap::new(),
+
             vdf,
-            vdf_difficulty,
-        }
+            vdf_result_tx,
+        });
+
+        let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
+
+        let engine_clone = engine.clone();
+
+        tokio::spawn(async move {
+            engine_clone.run(gossip_rx, vdf_result_rx).await;
+        });
+
+        Ok(engine)
     }
 
     pub async fn propose(
         &self,
-        prop: Proposal<T>,
-        proofs: HashMap<Multihash, Vec<u8>>,
+        cmd: Command,
+        script_sigs: HashMap<Multihash, Vec<u8>>,
     ) -> Result<()> {
-        let witness =
-            prop.generate_witness::<H>(&self.sk, proofs, &self.vdf, self.vdf_difficulty)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let atom = Atom::new(self.transport.local_peer_id(), Some(cmd), now);
 
-        let mut bytes = Vec::new();
-        prop.to_writer(&mut bytes);
-        witness.to_writer(&mut bytes);
-
-        let source = self.transport.local_peer_id();
-        self.block_tree.update_proposal(prop, witness, source);
-        self.gossipsub.publish(self.proposal_topic, bytes).await?;
+        let hash = atom.hash();
+        self.pending_tasks.insert(hash, (atom, script_sigs));
+        self.start_vdf_task(hash);
 
         Ok(())
     }
 
-    pub async fn run(&self) -> Result<()> {
-        let mut prop_rx = self.gossipsub.subscribe(self.proposal_topic).await?;
-        let mut block_rx = self.gossipsub.subscribe(self.block_topic).await?;
+    async fn run(
+        &self,
+        mut gossip_rx: Receiver<gossipsub::Message>,
+        mut vdf_result_rx: Receiver<(Multihash, u64, Vec<u8>)>,
+    ) {
         let mut request_response_rx = self.request_response.subscribe(self.req_resp_topic);
-
-        let mut vdf_task = Some(self.start_vdf_task());
 
         loop {
             tokio::select! {
-                Some(msg) = prop_rx.recv() => {
-                    self.on_recv_proposal(msg).await;
-                }
-                Some(msg) = block_rx.recv() => {
-                    self.on_recv_block(msg).await;
+                Some(msg) = gossip_rx.recv() => {
+                    type Pair = (Atom, Witness);
+
+                    let Ok((atom, witness)) = Pair::from_slice(msg.data.as_slice()) else {
+                        self.disconnect_peer(msg.propagation_source).await;
+                        continue;
+                    };
+
+                    self.on_recv_atom(atom, witness, msg.propagation_source).await;
                 }
                 Some(msg) = request_response_rx.recv() => {
                     self.on_recv_reqeust_response(msg).await;
                 }
-                result = vdf_task.as_mut().unwrap() => {
-                    match result {
-                        Ok((tip, vdf_proof)) => {
-                            if let Some(pair) = self.block_tree.create_and_update_block(
-                                tip,
-                                vdf_proof,
-                            ) {
-                                let bytes = pair.to_vec();
-
-                                if let Err(e) = self.gossipsub.publish(self.block_topic, bytes).await {
-                                    log::error!("Failed to publish block: {e}");
-                                }
-
-                                log::debug!("Block created and published");
-                            }
-
-                            vdf_task = Some(self.start_vdf_task());
-                        }
-                        Err(e) => {
-                            log::error!("VDF task failed: {e}");
-                            vdf_task = Some(self.start_vdf_task());
-                        }
-                    }
+                Some((hash, difficulty, result)) = vdf_result_rx.recv() => {
+                    self.on_vdf_complete(hash, difficulty, result).await;
                 }
             }
         }
     }
 
-    fn start_vdf_task(&self) -> JoinHandle<(Multihash, Vec<u8>)> {
-        let tip = self.block_tree.tip_hash();
-
-        let pk_bytes = self.sk.public_key().to_hash::<H>().to_bytes();
-        let challenge_bytes = [pk_bytes, tip.to_bytes()].concat();
-        let challenge = H::hash(&challenge_bytes).to_bytes();
-
+    fn start_vdf_task(&self, hash: Multihash) {
         let vdf = self.vdf.clone();
-        let difficulty = self.vdf_difficulty;
+        let difficulty = self.graph.difficulty();
+        let tx = self.vdf_result_tx.clone();
+
         tokio::spawn(async move {
-            (
-                tip,
-                vdf.solve(&challenge, difficulty)
-                    .expect("Failed to solve VDF"),
+            let vdf_proof = vdf
+                .solve(&hash.to_bytes(), difficulty)
+                .expect("VDF solve failed");
+            if let Err(e) = tx.send((hash, difficulty, vdf_proof)).await {
+                log::error!("Failed to send VDF result: {e}");
+            }
+        });
+    }
+
+    async fn on_recv_atom(&self, atom: Atom, witness: Witness, source: PeerId) -> bool {
+        if self
+            .vdf
+            .verify(
+                &atom.hash().to_bytes(),
+                self.graph.difficulty(),
+                &witness.vdf_proof,
             )
-        })
-    }
-
-    async fn on_recv_proposal(&self, msg: gossipsub::Message) {
-        let source = msg.propagation_source;
-
-        let mut data = msg.data.as_slice();
-
-        let Ok(prop) = Proposal::from_reader(&mut data) else {
+            .is_err()
+        {
             self.disconnect_peer(source).await;
-            return;
-        };
-
-        let Ok(witness) = proposal::Witness::from_reader(&mut data) else {
-            self.disconnect_peer(source).await;
-            return;
-        };
-
-        self.verify_proposal(prop.clone(), witness, source).await;
-    }
-
-    async fn verify_proposal(&self, prop: Proposal<T>, witness: proposal::Witness, source: PeerId) {
-        if !prop.verify_signature::<H>(&witness) {
-            self.disconnect_peer(source).await;
-            return;
+            return true;
         }
 
-        if !prop.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
-            self.disconnect_peer(source).await;
-            return;
-        }
-
-        let res = self.block_tree.update_proposal(prop, witness, source);
-
-        for source in res.invalidated {
-            self.disconnect_peer(source).await;
+        match self.graph.upsert(atom, witness, source) {
+            UpdateResult::Missing(hashes) => {
+                let bytes = hashes.to_vec();
+                self.request_response
+                    .send_request(source, bytes, self.req_resp_topic)
+                    .await;
+                true
+            }
+            UpdateResult::Invalidated(peers) => {
+                for peer in peers {
+                    self.disconnect_peer(peer).await;
+                }
+                false
+            }
+            UpdateResult::Noop => true,
         }
     }
 
     async fn disconnect_peer(&self, source: PeerId) {
         if let Err(e) = self.transport.disconnect(source).await {
             log::error!("Failed to disconnect peer: {e}");
-        }
-    }
-
-    async fn on_recv_block(&self, msg: gossipsub::Message) {
-        let source = msg.propagation_source;
-
-        let mut data = msg.data.as_slice();
-
-        let Ok(block) = Block::from_reader(&mut data) else {
-            self.disconnect_peer(source).await;
-            return;
-        };
-
-        let Ok(witness) = block::Witness::from_reader(&mut data) else {
-            self.disconnect_peer(source).await;
-            return;
-        };
-
-        self.verify_block(block, witness, source).await;
-    }
-
-    async fn verify_block(&self, block: Block, witness: block::Witness, source: PeerId) {
-        if !block.verify_signature::<H>(&witness) {
-            self.disconnect_peer(source).await;
-            return;
-        }
-
-        if !block.verify_vdf::<H>(&witness, &self.vdf, self.vdf_difficulty) {
-            self.disconnect_peer(source).await;
-            return;
-        }
-
-        let res = self.block_tree.update_block(block, witness, source);
-
-        for source in res.invalidated {
-            self.disconnect_peer(source).await;
-        }
-
-        if !res.phantoms.is_empty() {
-            let bytes = res.phantoms.to_vec();
-            self.request_response
-                .send_request(source, bytes, self.req_resp_topic)
-                .await;
         }
     }
 
@@ -250,60 +196,94 @@ impl<H: Hasher, T: Record> Engine<H, T> {
                 request,
                 channel,
             } => {
-                let hashes = Vec::from_reader(&mut request.as_slice()).unwrap_or_default();
+                let hashes: Vec<Multihash> =
+                    Vec::from_slice(request.as_slice()).unwrap_or_default();
 
                 if hashes.is_empty() {
                     self.disconnect_peer(peer).await;
                     return;
                 }
 
-                let bytes = self.block_tree.get_proposals(hashes).to_vec();
+                let atoms = hashes.into_iter().try_fold(Vec::new(), |mut acc, hash| {
+                    if let Some((atom, witness)) = self.graph.get(&hash) {
+                        acc.push((atom, witness));
+                        Some(acc)
+                    } else {
+                        None
+                    }
+                });
 
-                if bytes.is_empty() {
+                let Some(atoms) = atoms else {
+                    self.disconnect_peer(peer).await;
                     return;
-                }
+                };
 
                 if let Err(e) = self
                     .request_response
-                    .send_response(channel, bytes, self.req_resp_topic)
+                    .send_response(channel, atoms.to_vec(), self.req_resp_topic)
                     .await
                 {
                     log::error!("Failed to send response: {e}");
                 }
             }
             Message::Response { peer, response } => {
-                let props = Vec::from_reader(&mut response.as_slice()).unwrap_or_default();
+                let atoms: Vec<(Atom, Witness)> =
+                    Vec::from_slice(response.as_slice()).unwrap_or_default();
 
-                if props.is_empty() {
+                if atoms.is_empty() {
                     self.disconnect_peer(peer).await;
                     return;
                 }
 
-                for (prop, witness) in props {
-                    self.verify_proposal(prop, witness, peer).await;
+                for (atom, witness) in atoms {
+                    if !self.on_recv_atom(atom, witness, peer).await {
+                        break;
+                    }
                 }
             }
         }
     }
 
-    pub fn get_self_record(&self) -> T {
-        let key = self.sk.public_key().to_hash::<H>().to_bytes();
-        self.block_tree.tip_trie().get(&key).unwrap_or_default()
-    }
+    async fn on_vdf_complete(&self, hash: Multihash, difficulty: u64, result: Vec<u8>) {
+        let Some((atom, sigs)) = self.pending_tasks.remove(&hash).map(|e| e.1) else {
+            return;
+        };
 
-    pub fn tip_hash(&self) -> Multihash {
-        self.block_tree.tip_hash()
-    }
+        if difficulty != self.graph.difficulty() {
+            self.start_vdf_task(hash);
+            return;
+        }
 
-    pub fn tip_trie(&self) -> Trie<H, T> {
-        self.block_tree.tip_trie()
-    }
+        let head = self.graph.head();
+        let trie_proofs = atom
+            .cmd
+            .as_ref()
+            .map(|cmd| self.graph.generate_proofs(cmd.input.iter(), &head))
+            .unwrap_or_default();
+        let atoms = self.graph.get_children(&head);
 
-    pub fn checkpoint_hash(&self) -> Multihash {
-        self.block_tree.checkpoint_hash()
-    }
+        let witness = Witness {
+            vdf_proof: result,
+            trie_proofs,
+            script_sigs: sigs,
+            atoms,
+        };
 
-    pub fn block_tree(&self) -> &Tree<H, T> {
-        &self.block_tree
+        let mut bytes = Vec::new();
+        atom.to_writer(&mut bytes);
+        witness.to_writer(&mut bytes);
+
+        if !self
+            .graph
+            .upsert(atom, witness, self.transport.local_peer_id())
+            .is_noop()
+        {
+            log::error!("Inconsistent state after VDF completion");
+            return;
+        }
+
+        if let Err(e) = self.gossipsub.publish(self.gossip_topic, bytes).await {
+            log::error!("Failed to publish atom after VDF completion: {e}");
+        }
     }
 }
