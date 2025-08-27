@@ -323,48 +323,44 @@ impl<V: Validator> Graph<V> {
         state: &mut HashMap<Multihash, Option<Token>>,
         publishers: &mut HashSet<PeerId>,
     ) -> bool {
-        let mut bp_e = {
+        let (mut bp_e, parents) = {
             let e = self.entries.get(&hash).expect("Entry must exist");
             let bp = e.block_parent.expect("Block parent must exist");
-            self.entries.get_mut(&bp).expect("Block parent must exist")
+            let bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
+            let mut parents = e.witness.atoms.clone();
+            parents.remove(&bp);
+            (bp_e, parents)
         };
 
-        self.topo_parents(hash)
-            .iter()
-            .all(|h| self.execute_atom(h, &mut bp_e.trie, state, publishers, true))
+        if parents.is_empty() {
+            return self.execute_atom(&hash, &mut bp_e.trie, state, publishers, false);
+        }
+
+        self.topological_sort(parents.into_iter())
+            .into_iter()
+            .all(|h| self.execute_atom(&h, &mut bp_e.trie, state, publishers, true))
             && self.execute_atom(&hash, &mut bp_e.trie, state, publishers, false)
     }
 
-    fn topo_parents(&self, hash: Multihash) -> Vec<Multihash> {
-        let hashes = {
-            let e = self.entries.get(&hash).expect("Entry must exist");
-            let bp = e.block_parent.unwrap();
-            let mut atoms = e.witness.atoms.clone();
-            atoms.remove(&bp);
-            atoms
-        };
+    fn topological_sort(&self, hashes: impl Iterator<Item = Multihash>) -> Vec<Multihash> {
+        let mut indeg = HashMap::<_, u32>::new();
+        let mut adj = HashMap::<_, Vec<_>>::new();
 
-        if hashes.is_empty() {
-            return Vec::new();
-        }
+        let hashes: HashSet<_> = hashes.collect();
 
-        let (mut indeg, adj) = hashes.iter().fold(
-            (HashMap::<_, u32>::new(), HashMap::<_, Vec<_>>::new()),
-            |(mut indeg, mut adj), &h| {
-                self.entries
-                    .get(&h)
-                    .expect("Entry must exist")
-                    .witness
-                    .atoms
-                    .iter()
-                    .filter(|p| hashes.contains(p))
-                    .for_each(|p| {
-                        *indeg.entry(h).or_default() += 1;
-                        adj.entry(*p).or_default().push(h);
-                    });
-                (indeg, adj)
-            },
-        );
+        hashes.iter().for_each(|&h| {
+            self.entries
+                .get(&h)
+                .expect("Entry must exist")
+                .witness
+                .atoms
+                .iter()
+                .filter(|p| hashes.contains(p))
+                .for_each(|p| {
+                    *indeg.entry(h).or_default() += 1;
+                    adj.entry(*p).or_default().push(h);
+                });
+        });
 
         let key = |x: Multihash| {
             let h = self.entries.get(&x).expect("Entry must exist").height;
