@@ -2,7 +2,7 @@ use libp2p::PeerId;
 
 use crate::{crypto::Multihash, ty::token::Token};
 
-pub trait Validator {
+pub trait Validator: Send + Sync + 'static {
     fn validate_script_sig(script_pk: &[u8], script_sig: &[u8]) -> bool;
     fn validate_conversion<'a>(
         code: u8,
