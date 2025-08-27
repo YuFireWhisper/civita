@@ -26,7 +26,6 @@ pub struct Command {
 #[derive(Clone)]
 #[derive(Serialize)]
 pub struct Atom {
-    pub height: Height,
     pub peer: PeerId,
     pub cmd: Option<Command>,
     pub timestamp: u64,
@@ -54,7 +53,6 @@ impl Atom {
 impl Default for Atom {
     fn default() -> Self {
         Self {
-            height: 0,
             peer: PeerId::from_multihash(Multihash::default()).unwrap(),
             cmd: None,
             timestamp: 0,

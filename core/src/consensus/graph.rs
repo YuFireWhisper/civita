@@ -33,6 +33,7 @@ struct Entry {
     // Basic information
     pub atom: Atom,
     pub witness: Witness,
+    pub height: Height,
 
     // General
     pub block_parent: Option<Multihash>,
@@ -150,7 +151,7 @@ impl<V: Validator> Graph<V> {
     pub fn upsert(&self, atom: Atom, witness: Witness) -> UpdateResult {
         let hash = atom.hash();
 
-        if self.contains(&hash) || atom.height <= self.checkpoint_height() {
+        if self.contains(&hash) {
             return UpdateResult::Noop;
         }
 
@@ -179,7 +180,7 @@ impl<V: Validator> Graph<V> {
     fn checkpoint_height(&self) -> Height {
         self.entries
             .get(&self.checkpoint.read())
-            .map_or(0, |e| e.atom.height)
+            .map_or(0, |e| e.height)
     }
 
     pub fn contains(&self, h: &Multihash) -> bool {
@@ -221,17 +222,23 @@ impl<V: Validator> Graph<V> {
     }
 
     fn on_parent_valid(cur: &mut Entry, parent: &Entry) -> bool {
-        let bp = if parent.is_block {
-            if cur.atom.height != parent.atom.height + 1 {
-                return false;
-            }
-
-            parent.hash()
+        let (bp, h) = if parent.is_block {
+            (parent.hash(), parent.height.saturating_add(1))
         } else {
-            parent.block_parent.expect("Block parent must exist")
+            let bp = parent.block_parent.expect("Block parent must exist");
+            (bp, parent.height)
         };
 
-        cur.block_parent.replace(bp).is_none_or(|prev| prev == bp)
+        if let Some(prev_bp) = cur.block_parent {
+            if prev_bp != bp || cur.height != h {
+                return false;
+            }
+        } else {
+            cur.block_parent = Some(bp);
+            cur.height = h;
+        }
+
+        true
     }
 
     fn remove_subgraph(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
@@ -260,6 +267,14 @@ impl<V: Validator> Graph<V> {
         queue.push_back(hash);
 
         while let Some(h) = queue.pop_front() {
+            let cp_h = self.checkpoint_height();
+            let e_h = self.atom_height(h);
+
+            if e_h <= cp_h {
+                self.remove_subgraph(h, invalidated);
+                continue;
+            }
+
             let mut state = HashMap::new();
             let mut publishers = HashSet::new();
 
@@ -286,6 +301,10 @@ impl<V: Validator> Graph<V> {
                 }
             });
         }
+    }
+
+    fn atom_height(&self, hash: Multihash) -> Height {
+        self.entries.get(&hash).expect("Entry must exist").height
     }
 
     fn try_final_validate(
@@ -338,7 +357,7 @@ impl<V: Validator> Graph<V> {
         );
 
         let key = |x: Multihash| {
-            let h = self.entries.get(&x).expect("Entry must exist").atom.height;
+            let h = self.entries.get(&x).expect("Entry must exist").height;
             (h, x)
         };
 
@@ -530,7 +549,6 @@ impl<V: Validator> Graph<V> {
             .entries
             .get(&head_hash)
             .expect("Entry must exist")
-            .atom
             .height;
 
         let n = self.config.checkpoint_distance as Height;
@@ -549,12 +567,12 @@ impl<V: Validator> Graph<V> {
         }
 
         let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
-        while cur.atom.height > desired_cp_height {
+        while cur.height > desired_cp_height {
             let next = &cur.block_parent.expect("Block parent must exist");
             cur = self.entries.get(next).expect("Entry must exist");
         }
 
-        debug_assert_eq!(cur.atom.height, desired_cp_height);
+        debug_assert_eq!(cur.height, desired_cp_height);
         let new_cp = *cur.key();
 
         *self.checkpoint.write() = new_cp;
