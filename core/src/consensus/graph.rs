@@ -47,6 +47,9 @@ struct Entry {
     pub related_token: HashMap<Multihash, Token>,
     pub unconflicted_tokens: HashMap<Multihash, Option<Token>>,
 
+    // Checkpoint only
+    pub checkpoint_parent: Option<Multihash>,
+
     // Pending only
     pub pending_parents: u32,
     #[derivative(Default(value = "PeerId::from_multihash(Multihash::default()).unwrap()"))]
@@ -581,6 +584,14 @@ impl<V: Validator> Graph<V> {
 
         debug_assert_eq!(cur.height, desired_cp_height);
         let new_cp = *cur.key();
+
+        {
+            let mut new_cp_e = self
+                .entries
+                .get_mut(&new_cp)
+                .expect("Checkpoint entry must exist");
+            new_cp_e.checkpoint_parent = Some(old_cp);
+        }
 
         *self.checkpoint.write() = new_cp;
         self.adjust_difficulty(old_cp, new_cp);
