@@ -5,7 +5,7 @@ use std::{
 };
 
 use civita_serialize::Serialize;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use derivative::Derivative;
 use libp2p::PeerId;
 use parking_lot::RwLock as ParkingLock;
@@ -76,6 +76,7 @@ pub struct Config {
 
 pub struct Graph<V> {
     entries: DashMap<Multihash, Entry>,
+    invalidated: DashSet<Multihash>,
 
     main_head: ParkingLock<Multihash>,
     checkpoint: ParkingLock<Multihash>,
@@ -145,6 +146,7 @@ impl<V: Validator> Graph<V> {
 
         Self {
             entries: DashMap::from_iter([(hash, entry)]),
+            invalidated: DashSet::new(),
             main_head: ParkingLock::new(hash),
             checkpoint: ParkingLock::new(hash),
             difficulty,
@@ -157,7 +159,7 @@ impl<V: Validator> Graph<V> {
     pub fn upsert(&self, atom: Atom, witness: Witness) -> UpdateResult {
         let hash = atom.hash();
 
-        if self.contains(&hash) {
+        if self.contains(&hash) || self.invalidated.contains(&hash) {
             return UpdateResult::Noop;
         }
 
@@ -249,10 +251,9 @@ impl<V: Validator> Graph<V> {
 
     fn remove_subgraph(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
         let mut stk = vec![hash];
-        let mut visited = HashSet::new();
 
         while let Some(u) = stk.pop() {
-            if !visited.insert(u) {
+            if !self.invalidated.insert(u) {
                 continue;
             }
 
