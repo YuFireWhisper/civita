@@ -163,6 +163,11 @@ impl<V: Validator> Graph<V> {
             return UpdateResult::Noop;
         }
 
+        // Parent should have one and only one block parent, and should not contain itself
+        if witness.atoms.is_empty() || witness.atoms.contains(&hash) {
+            return UpdateResult::from_invalidated(vec![atom.peer]);
+        }
+
         self.entries.insert(hash, Entry::new(atom, witness));
 
         let mut missing = Vec::new();
@@ -197,15 +202,6 @@ impl<V: Validator> Graph<V> {
 
     fn link_parents(&self, hash: Multihash, missing: &mut Vec<Multihash>) -> bool {
         let mut cur = self.entries.get_mut(&hash).expect("Entry must exist");
-
-        if cur.witness.atoms.is_empty() {
-            // At least contain one parent(block parent)
-            return false;
-        }
-
-        if cur.witness.atoms.contains(&hash) {
-            return false;
-        }
 
         let parents = cur.witness.atoms.clone();
         parents
