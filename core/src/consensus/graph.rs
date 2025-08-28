@@ -1,7 +1,7 @@
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
-    sync::atomic::AtomicU64,
+    collections::{BinaryHeap, HashMap, HashSet},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use civita_serialize::Serialize;
@@ -36,8 +36,9 @@ struct Entry {
     pub height: Height,
 
     // General
-    pub block_parent: Option<Multihash>,
+    pub block_parent: Multihash,
     pub children: HashSet<Multihash>,
+    pub validated: bool,
 
     // Block only
     pub is_block: bool,
@@ -50,7 +51,7 @@ struct Entry {
     pub checkpoint_parent: Option<Multihash>,
 
     // Pending only
-    pub pending_parents: u32,
+    pub pending_parents: AtomicU32,
     #[derivative(Default(value = "true"))]
     pub is_missing: bool,
 }
@@ -113,7 +114,7 @@ impl UpdateResult {
 
 impl Entry {
     pub fn new(atom: Atom, witness: Witness) -> Self {
-        let pending_parents = witness.atoms.len() as u32;
+        let pending_parents = AtomicU32::new(witness.atoms.len() as u32);
 
         Self {
             atom,
@@ -170,20 +171,22 @@ impl<V: Validator> Graph<V> {
 
         self.entries.insert(hash, Entry::new(atom, witness));
 
-        let mut missing = Vec::new();
-        if !self.link_parents(hash, &mut missing) {
-            let mut invalidated = Vec::new();
-            self.remove_subgraph(hash, &mut invalidated);
-            return UpdateResult::from_invalidated(invalidated);
+        let result = self.link_parents(hash);
+
+        if !result.is_noop() {
+            return result;
         }
 
-        if !missing.is_empty() {
-            return UpdateResult::from_missing(missing);
-        }
-
-        if self.entries.get(&hash).unwrap().pending_parents == 0 {
+        if self
+            .entries
+            .get(&hash)
+            .unwrap()
+            .pending_parents
+            .load(Ordering::Relaxed)
+            == 0
+        {
             let mut invalidated = Vec::new();
-            self.on_all_parent_valid(hash, &mut invalidated);
+            self.validate(hash, &mut invalidated);
             return UpdateResult::from_invalidated(invalidated);
         }
 
@@ -200,139 +203,85 @@ impl<V: Validator> Graph<V> {
         self.entries.get(h).is_some_and(|e| !e.is_missing)
     }
 
-    fn link_parents(&self, hash: Multihash, missing: &mut Vec<Multihash>) -> bool {
-        let mut cur = self.entries.get_mut(&hash).expect("Entry must exist");
+    fn link_parents(&self, hash: Multihash) -> UpdateResult {
+        let cur = self.entries.get_mut(&hash).expect("Entry must exist");
+        let mut missing = Vec::new();
 
-        let parents = cur.witness.atoms.clone();
-        parents
-            .into_iter()
-            .map(|h| {
-                self.entries.entry(h).or_insert_with(|| {
-                    missing.push(h);
-                    Entry::default()
-                })
-            })
-            .all(|mut p| {
-                p.children.insert(hash);
-
-                if p.is_missing && p.pending_parents == 0 {
-                    cur.pending_parents -= 1;
-                    Self::on_parent_valid(&mut cur, &p)
-                } else {
-                    p.children.insert(hash);
-                    true
-                }
-            })
-    }
-
-    fn on_parent_valid(cur: &mut Entry, parent: &Entry) -> bool {
-        let (bp, h) = if parent.is_block {
-            (parent.hash(), parent.height.saturating_add(1))
-        } else {
-            let bp = parent.block_parent.expect("Block parent must exist");
-            (bp, parent.height)
-        };
-
-        if let Some(prev_bp) = cur.block_parent {
-            if prev_bp != bp || cur.height != h {
+        if !cur.witness.atoms.iter().all(|h| {
+            if self.invalidated.contains(h) {
                 return false;
             }
-        } else {
-            cur.block_parent = Some(bp);
-            cur.height = h;
-        }
 
-        true
-    }
-
-    fn remove_subgraph(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
-        let mut stk = vec![hash];
-
-        while let Some(u) = stk.pop() {
-            if !self.invalidated.insert(u) {
-                continue;
-            }
-
-            let Some((_, entry)) = self.entries.remove(&u) else {
-                continue;
-            };
-
-            stk.extend(entry.children);
-
-            if !entry.is_missing {
-                invalidated.push(entry.atom.peer);
-            }
-        }
-    }
-
-    fn on_all_parent_valid(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
-        let mut queue = VecDeque::new();
-        queue.push_back(hash);
-
-        while let Some(h) = queue.pop_front() {
-            let cp_h = self.checkpoint_height();
-            let e_h = self.atom_height(h);
-
-            if e_h <= cp_h {
-                self.remove_subgraph(h, invalidated);
-                continue;
-            }
-
-            let mut state = HashMap::new();
-            let mut publishers = HashSet::new();
-
-            if !self.try_final_validate(h, &mut state, &mut publishers) {
-                self.remove_subgraph(h, invalidated);
-                continue;
-            }
-
-            self.on_valid(h, state, publishers);
-
-            let entry = self.entries.get(&h).expect("Entry must exist");
-
-            entry.children.iter().for_each(|ch| {
-                let mut c = self.entries.get_mut(ch).expect("Child entry must exist");
-
-                if !Self::on_parent_valid(&mut c, &entry) {
-                    self.remove_subgraph(*ch, invalidated);
-                    return;
-                }
-
-                c.pending_parents -= 1;
-                if c.pending_parents == 0 {
-                    queue.push_back(*ch);
-                }
+            let mut p = self.entries.entry(*h).or_insert_with(|| {
+                missing.push(*h);
+                Entry::default()
             });
+
+            p.children.insert(hash);
+
+            if !p.is_missing && p.pending_parents.load(Ordering::Relaxed) == 0 {
+                cur.pending_parents.fetch_sub(1, Ordering::Relaxed);
+            }
+
+            true
+        }) {
+            let mut invalidated = Vec::new();
+            self.remove_subgraph(hash, &mut invalidated);
+            return UpdateResult::from_invalidated(invalidated);
         }
+
+        UpdateResult::from_missing(missing)
     }
 
-    fn atom_height(&self, hash: Multihash) -> Height {
-        self.entries.get(&hash).expect("Entry must exist").height
-    }
+    fn validate(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
+        let e = self.entries.get(&hash).expect("Entry must exist");
 
-    fn try_final_validate(
-        &self,
-        hash: Multihash,
-        state: &mut HashMap<Multihash, Option<Token>>,
-        publishers: &mut HashSet<PeerId>,
-    ) -> bool {
-        let (mut bp_e, parents) = {
-            let e = self.entries.get(&hash).expect("Entry must exist");
-            let bp = e.block_parent.expect("Block parent must exist");
-            let bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
-            let mut parents = e.witness.atoms.clone();
-            parents.remove(&bp);
-            (bp_e, parents)
+        if e.validated || e.is_missing || e.pending_parents.load(Ordering::Relaxed) != 0 {
+            return;
+        }
+
+        let bp_h = e
+            .witness
+            .atoms
+            .iter()
+            .try_fold(None, |acc, h| {
+                let p = self.entries.get(h).unwrap();
+                let exp = if p.is_block { *h } else { p.block_parent };
+                match acc {
+                    None => Some(Some(exp)),
+                    Some(prev) if prev == exp => Some(Some(exp)),
+                    Some(_) => None,
+                }
+            })
+            .flatten();
+
+        let Some(bp) = bp_h else {
+            drop(e);
+            self.remove_subgraph(hash, invalidated);
+            return;
         };
 
-        if parents.is_empty() {
-            return self.execute_atom(&hash, &mut bp_e.trie, state, publishers, false);
+        let mut bp = self.entries.get_mut(&bp).expect("Block parent must exist");
+        let trie = &mut bp.trie;
+        let order = self.topological_sort(e.witness.atoms.iter().cloned());
+        let mut state = HashMap::new();
+        let mut publishers = HashSet::new();
+
+        if !self.try_execute_atoms(&order, trie, &mut state, &mut publishers) {
+            drop(e);
+            self.remove_subgraph(hash, invalidated);
+            return;
         }
 
-        self.topological_sort(parents.into_iter())
-            .into_iter()
-            .all(|h| self.execute_atom(&h, &mut bp_e.trie, state, publishers, true))
-            && self.execute_atom(&hash, &mut bp_e.trie, state, publishers, false)
+        drop(e);
+        self.update_validate_atom(hash, state, publishers);
+
+        let e = self.entries.get(&hash).unwrap();
+        e.children.iter().for_each(|ch| {
+            let c = self.entries.get_mut(ch).expect("Child entry must exist");
+            c.pending_parents.fetch_sub(1, Ordering::Relaxed);
+            self.validate(*ch, invalidated);
+        });
     }
 
     fn topological_sort(&self, hashes: impl Iterator<Item = Multihash>) -> Vec<Multihash> {
@@ -389,86 +338,94 @@ impl<V: Validator> Graph<V> {
         topo
     }
 
-    fn execute_atom(
+    fn try_execute_atoms(
         &self,
-        hash: &Multihash,
+        atoms: &[Multihash],
         trie: &mut Trie,
         state: &mut HashMap<Multihash, Option<Token>>,
         publishers: &mut HashSet<PeerId>,
-        is_parent: bool,
     ) -> bool {
-        let e = self.entries.get_mut(hash).expect("Entry must exist");
-        publishers.insert(e.atom.peer);
+        atoms.iter().all(|h| {
+            let e = self.entries.get(h).unwrap();
+            publishers.insert(e.atom.peer);
 
-        let Some(cmd) = &e.atom.cmd else {
-            return true;
-        };
+            let Some(cmd) = &e.atom.cmd else {
+                return true;
+            };
 
-        let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
-            let input = state.remove(hash).unwrap_or_else(|| {
-                let key = hash.to_vec();
-                trie.resolve(std::iter::once(&key), &e.witness.trie_proofs)
-                    .then_some(Token::from_slice(&trie.get(&key).unwrap()).unwrap())
-            })?;
+            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
+                let input = state.remove(hash).unwrap_or_else(|| {
+                    let key = hash.to_vec();
+                    trie.resolve(std::iter::once(&key), &e.witness.trie_proofs)
+                        .then_some(Token::from_slice(&trie.get(&key).unwrap()).unwrap())
+                })?;
 
-            if !is_parent
-                && e.witness
-                    .script_sigs
-                    .get(hash)
-                    .is_none_or(|sig| V::validate_script_sig(&input.script_pk, sig))
+                if !e.validated
+                    && e.witness
+                        .script_sigs
+                        .get(hash)
+                        .is_none_or(|sig| V::validate_script_sig(&input.script_pk, sig))
+                {
+                    return None;
+                }
+
+                acc.insert(*hash, input);
+                Some(acc)
+            });
+
+            let Some(inputs) = inputs else {
+                return false;
+            };
+
+            if !e.validated
+                && !V::validate_conversion(
+                    cmd.code,
+                    inputs.values(),
+                    cmd.consumed.iter(),
+                    &cmd.created,
+                )
             {
-                return None;
+                return false;
             }
 
-            acc.insert(*hash, input);
-            Some(acc)
-        });
+            state.extend(inputs.into_iter().map(|(k, v)| {
+                if cmd.consumed.contains(&k) {
+                    (k, None)
+                } else {
+                    (k, Some(v))
+                }
+            }));
 
-        let Some(inputs) = inputs else {
-            return false;
-        };
+            cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
+                // Token Id = H(AtomHash || Index)
+                let data = (h.to_vec(), i as u32).to_vec();
+                let hash = Hasher::digest(&data);
+                state.insert(hash, Some(t));
+            });
 
-        if !is_parent
-            && !V::validate_conversion(cmd.code, inputs.values(), cmd.consumed.iter(), &cmd.created)
-        {
-            return false;
-        }
-
-        state.extend(inputs.into_iter().map(|(k, v)| {
-            if cmd.consumed.contains(&k) {
-                (k, None)
-            } else {
-                (k, Some(v))
-            }
-        }));
-
-        cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
-            // Token Id = H(AtomHash || Index)
-            let data = (hash.to_vec(), i as u32).to_vec();
-            let hash = Hasher::digest(&data);
-            state.insert(hash, Some(t));
-        });
-
-        true
+            true
+        })
     }
 
-    fn on_valid(
+    fn update_validate_atom(
         &self,
         hash: Multihash,
         state: HashMap<Multihash, Option<Token>>,
         publishers: HashSet<PeerId>,
     ) {
-        let mut e = self.entries.get_mut(&hash).expect("Entry must exist");
-        let bp = e.block_parent.expect("Block parent must exist");
-        let mut bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
+        let mut e = self.entries.get_mut(&hash).unwrap();
+
+        e.validated = true;
 
         if (e.witness.atoms.len() as u32) < self.config.block_threshold {
+            let mut bp_e = self.entries.get_mut(&e.block_parent).unwrap();
+
             let is_conflict = state
                 .keys()
                 .any(|k| bp_e.unconflicted_tokens.contains_key(k));
 
             if is_conflict {
-                bp_e.children.remove(&hash);
+                bp_e.children.remove(e.key());
             } else {
                 bp_e.unconflicted_tokens.extend(state);
             }
@@ -476,8 +433,10 @@ impl<V: Validator> Graph<V> {
             return;
         }
 
-        let mut trie = bp_e.trie.clone();
-        let mut related = bp_e.related_token.clone();
+        let (mut trie, mut related) = {
+            let bp_e = self.entries.get(&e.block_parent).unwrap();
+            (bp_e.trie.clone(), bp_e.related_token.clone())
+        };
 
         state.into_iter().for_each(|(k, t)| {
             if let Some(t) = t.as_ref() {
@@ -495,11 +454,28 @@ impl<V: Validator> Graph<V> {
         e.trie = trie;
         e.related_token = related;
 
-        drop(e);
-        drop(bp_e);
-
-        self.update_publishers(bp, &publishers);
+        self.update_publishers(e.block_parent, &publishers);
         self.recompute_main_chain_and_checkpoint();
+    }
+
+    fn remove_subgraph(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
+        let mut stk = vec![hash];
+
+        while let Some(u) = stk.pop() {
+            if !self.invalidated.insert(u) {
+                continue;
+            }
+
+            let Some((_, entry)) = self.entries.remove(&u) else {
+                continue;
+            };
+
+            stk.extend(entry.children);
+
+            if !entry.is_missing {
+                invalidated.push(entry.atom.peer);
+            }
+        }
     }
 
     fn update_publishers(&self, mut cur: Multihash, publishers: &HashSet<PeerId>) {
@@ -513,11 +489,7 @@ impl<V: Validator> Graph<V> {
                 break;
             }
 
-            let Some(next) = e.block_parent else {
-                break;
-            };
-
-            cur = next;
+            cur = e.block_parent;
         }
     }
 
@@ -574,8 +546,7 @@ impl<V: Validator> Graph<V> {
 
         let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
         while cur.height > desired_cp_height {
-            let next = &cur.block_parent.expect("Block parent must exist");
-            cur = self.entries.get(next).expect("Entry must exist");
+            cur = self.entries.get(&cur.block_parent).unwrap();
         }
 
         debug_assert_eq!(cur.height, desired_cp_height);
@@ -602,7 +573,7 @@ impl<V: Validator> Graph<V> {
 
         while cur != prev_cp {
             let cur_e = self.entries.get(&cur).expect("Entry must exist");
-            cur = cur_e.block_parent.expect("Block parent must exist");
+            cur = cur_e.block_parent;
             let p_e = self.entries.get(&cur).expect("Parent entry must exist");
 
             let dt = cur_e.atom.timestamp.saturating_sub(p_e.atom.timestamp);
