@@ -165,7 +165,7 @@ impl<V: Validator> Engine<V> {
             return true;
         }
 
-        match self.graph.upsert(atom, witness, source) {
+        match self.graph.upsert(atom, witness) {
             UpdateResult::Missing(hashes) => {
                 let bytes = hashes.to_vec();
                 self.request_response
@@ -273,11 +273,7 @@ impl<V: Validator> Engine<V> {
         atom.to_writer(&mut bytes);
         witness.to_writer(&mut bytes);
 
-        if !self
-            .graph
-            .upsert(atom, witness, self.transport.local_peer_id())
-            .is_noop()
-        {
+        if !self.graph.upsert(atom, witness).is_noop() {
             log::error!("Inconsistent state after VDF completion");
             return;
         }
