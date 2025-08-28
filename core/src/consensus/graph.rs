@@ -38,7 +38,6 @@ struct Entry {
     // General
     pub block_parent: Option<Multihash>,
     pub children: HashSet<Multihash>,
-    pub is_conflict_marked: bool,
 
     // Block only
     pub is_block: bool,
@@ -467,9 +466,16 @@ impl<V: Validator> Graph<V> {
         let mut bp_e = self.entries.get_mut(&bp).expect("Block parent must exist");
 
         if (e.witness.atoms.len() as u32) < self.config.block_threshold {
-            e.is_conflict_marked = state.into_iter().fold(false, |acc, (k, t)| {
-                acc || bp_e.unconflicted_tokens.insert(k, t).is_some()
-            });
+            let is_conflict = state
+                .keys()
+                .any(|k| bp_e.unconflicted_tokens.contains_key(k));
+
+            if is_conflict {
+                bp_e.children.remove(&hash);
+            } else {
+                bp_e.unconflicted_tokens.extend(state);
+            }
+
             return;
         }
 
@@ -692,7 +698,7 @@ impl<V: Validator> Graph<V> {
             .filter_map(|h| {
                 self.entries
                     .get(h)
-                    .is_some_and(|e| !e.is_missing && !e.is_block && !e.is_conflict_marked)
+                    .is_some_and(|e| !e.is_missing && !e.is_block)
                     .then_some(*h)
             })
             .collect()
