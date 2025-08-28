@@ -27,6 +27,11 @@ pub enum UpdateResult {
     Invalidated(Vec<PeerId>),
 }
 
+pub enum StorageMode {
+    General { peer_id: PeerId },
+    Archive { retain_checkpoints: u32 },
+}
+
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 struct Entry {
@@ -44,7 +49,7 @@ struct Entry {
     pub is_block: bool,
     pub trie: Trie,
     pub publishers: HashSet<PeerId>,
-    pub related_token: HashMap<Multihash, Token>,
+    pub related_token: HashMap<PeerId, HashMap<Multihash, Token>>,
     pub unconflicted_tokens: HashMap<Multihash, Option<Token>>,
 
     // Checkpoint only
@@ -73,6 +78,9 @@ pub struct Config {
 
     #[derivative(Default(value = "0.1"))]
     pub max_difficulty_adjustment: f32,
+
+    #[derivative(Default(value = "StorageMode::Archive { retain_checkpoints: 1 }"))]
+    pub storage_mode: StorageMode,
 }
 
 pub struct Graph<V> {
@@ -84,7 +92,6 @@ pub struct Graph<V> {
 
     difficulty: AtomicU64,
 
-    peer: PeerId,
     config: Config,
 
     _marker: std::marker::PhantomData<V>,
@@ -140,7 +147,7 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
-    pub fn empty(peer: PeerId, config: Config) -> Self {
+    pub fn empty(config: Config) -> Self {
         let entry = Entry::genesis();
         let hash = entry.hash();
         let difficulty = AtomicU64::new(config.init_vdf_difficulty);
@@ -151,7 +158,6 @@ impl<V: Validator> Graph<V> {
             main_head: ParkingLock::new(hash),
             checkpoint: ParkingLock::new(hash),
             difficulty,
-            peer,
             config,
             _marker: std::marker::PhantomData,
         }
@@ -433,26 +439,62 @@ impl<V: Validator> Graph<V> {
             return;
         }
 
-        let (mut trie, mut related) = {
+        let (mut trie, mut related_by_peer) = {
             let bp_e = self.entries.get(&e.block_parent).unwrap();
             (bp_e.trie.clone(), bp_e.related_token.clone())
         };
 
+        fn remove_token_id(
+            k: &Multihash,
+            trie: &mut Trie,
+            related_by_peer: &mut HashMap<PeerId, HashMap<Multihash, Token>>,
+        ) {
+            trie.remove(&k.to_vec());
+            related_by_peer.values_mut().for_each(|m| {
+                m.remove(k);
+            });
+        }
+
+        fn insert_token_for_peer(
+            peer: &PeerId,
+            k: &Multihash,
+            t: &Token,
+            trie: &mut Trie,
+            related_by_peer: &mut HashMap<PeerId, HashMap<Multihash, Token>>,
+        ) {
+            trie.insert(&k.to_vec(), t.to_vec());
+            related_by_peer
+                .entry(*peer)
+                .or_default()
+                .insert(*k, t.clone());
+        }
+
         state.into_iter().for_each(|(k, t)| {
-            if let Some(t) = t.as_ref() {
-                trie.insert(&k.to_vec(), t.to_vec());
-                if V::is_related(&t.script_pk, &self.peer) {
-                    related.insert(k, t.clone());
+            let Some(token) = t.as_ref() else {
+                remove_token_id(&k, &mut trie, &mut related_by_peer);
+                return;
+            };
+
+            trie.insert(&k.to_vec(), t.to_vec());
+
+            match &self.config.storage_mode {
+                StorageMode::General { peer_id } => {
+                    if V::is_related(&token.script_pk, peer_id) {
+                        insert_token_for_peer(peer_id, &k, token, &mut trie, &mut related_by_peer);
+                    }
                 }
-            } else {
-                trie.remove(&k.to_vec());
-                related.remove(&k);
+                StorageMode::Archive { .. } => {
+                    let peers = V::related_peers(&token.script_pk);
+                    peers.iter().for_each(|p| {
+                        insert_token_for_peer(p, &k, token, &mut trie, &mut related_by_peer);
+                    });
+                }
             }
         });
 
         e.is_block = true;
         e.trie = trie;
-        e.related_token = related;
+        e.related_token = related_by_peer;
 
         self.update_publishers(e.block_parent, &publishers);
         self.recompute_main_chain_and_checkpoint();
@@ -563,6 +605,7 @@ impl<V: Validator> Graph<V> {
         *self.checkpoint.write() = new_cp;
         self.adjust_difficulty(old_cp, new_cp);
         self.prune_trie_at_checkpoint(new_cp);
+        self.prune_storage_after_new_checkpoint(new_cp);
     }
 
     fn adjust_difficulty(&self, prev_cp: Multihash, new_cp: Multihash) {
@@ -616,11 +659,62 @@ impl<V: Validator> Graph<V> {
 
         let keys = e
             .related_token
-            .keys()
+            .values()
+            .flat_map(|m| m.keys())
             .map(|k| k.to_vec())
             .collect::<Vec<_>>();
 
         e.trie.retain(keys.iter());
+    }
+
+    fn prune_storage_after_new_checkpoint(&self, new_cp: Multihash) {
+        let retain = match self.config.storage_mode {
+            StorageMode::General { .. } => 1,
+            StorageMode::Archive { retain_checkpoints } => retain_checkpoints,
+        };
+
+        if retain == 0 {
+            return;
+        }
+
+        let Some(height) = self.find_cutoff_height(new_cp, retain) else {
+            return;
+        };
+
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let h = e.value().height;
+                (h < height).then_some(*e.key())
+            })
+            .for_each(|h| {
+                self.entries.remove(&h);
+                self.invalidated.remove(&h);
+            });
+    }
+
+    fn find_cutoff_height(&self, mut cur: Multihash, retain: u32) -> Option<Height> {
+        let mut idx = 1u32;
+
+        loop {
+            if idx == retain {
+                let e = self.entries.get(&cur).unwrap();
+                return Some(e.height);
+            }
+
+            let e = self.entries.get(&cur).unwrap();
+
+            match e.checkpoint_parent {
+                Some(p) => {
+                    cur = p;
+                    idx += 1;
+                }
+                None => {
+                    let e = self.entries.get(&cur).unwrap();
+                    return Some(e.height);
+                }
+            }
+        }
     }
 
     pub fn difficulty(&self) -> u64 {
@@ -634,22 +728,63 @@ impl<V: Validator> Graph<V> {
         })
     }
 
-    pub fn tokens(&self) -> HashMap<Multihash, Token> {
+    pub fn tokens_for(&self, peer: &PeerId) -> HashMap<Multihash, Token> {
         let h = *self.main_head.read();
         let e = self.entries.get(&h).expect("Head entry must exist");
 
-        let mut related = e.related_token.clone();
-        e.unconflicted_tokens.iter().for_each(|(k, v)| {
-            if let Some(t) = v.as_ref() {
-                if V::is_related(&t.script_pk, &self.peer) {
-                    related.insert(*k, t.clone());
+        let mut related = e.related_token.get(peer).cloned().unwrap_or_default();
+
+        e.unconflicted_tokens.iter().for_each(|(k, v)| match v {
+            Some(t) => match self.config.storage_mode {
+                StorageMode::General { ref peer_id } => {
+                    if peer_id == peer && V::is_related(&t.script_pk, peer) {
+                        related.insert(*k, t.clone());
+                    }
                 }
-            } else {
+                StorageMode::Archive { .. } => {
+                    if V::related_peers(&t.script_pk)
+                        .into_iter()
+                        .any(|p| &p == peer)
+                    {
+                        related.insert(*k, t.clone());
+                    }
+                }
+            },
+            None => {
                 related.remove(k);
             }
         });
 
         related
+    }
+
+    pub fn tokens_all(&self) -> HashMap<PeerId, HashMap<Multihash, Token>> {
+        let h = *self.main_head.read();
+        let e = self.entries.get(&h).expect("Head entry must exist");
+
+        let mut by_peer = e.related_token.clone();
+
+        e.unconflicted_tokens.iter().for_each(|(k, v)| match v {
+            Some(t) => match self.config.storage_mode {
+                StorageMode::General { ref peer_id } => {
+                    if V::is_related(&t.script_pk, peer_id) {
+                        by_peer.entry(*peer_id).or_default().insert(*k, t.clone());
+                    }
+                }
+                StorageMode::Archive { .. } => {
+                    for p in V::related_peers(&t.script_pk) {
+                        by_peer.entry(p).or_default().insert(*k, t.clone());
+                    }
+                }
+            },
+            None => {
+                for (_, m) in by_peer.iter_mut() {
+                    m.remove(k);
+                }
+            }
+        });
+
+        by_peer
     }
 
     pub fn head(&self) -> Multihash {

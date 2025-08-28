@@ -11,4 +11,5 @@ pub trait Validator: Send + Sync + 'static {
         created: &[Token],
     ) -> bool;
     fn is_related(script_pk: &[u8], peer_id: &PeerId) -> bool;
+    fn related_peers(script_pk: &[u8]) -> Vec<PeerId>;
 }
