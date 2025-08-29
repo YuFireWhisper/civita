@@ -201,12 +201,6 @@ impl<V: Validator> Graph<V> {
         UpdateResult::Noop
     }
 
-    fn checkpoint_height(&self) -> Height {
-        self.entries
-            .get(&self.checkpoint.read())
-            .map_or(0, |e| e.height)
-    }
-
     pub fn contains(&self, h: &Multihash) -> bool {
         self.entries.get(h).is_some_and(|e| !e.is_missing)
     }
@@ -244,7 +238,11 @@ impl<V: Validator> Graph<V> {
     fn validate(&self, hash: Multihash, invalidated: &mut Vec<PeerId>) {
         let e = self.entries.get(&hash).expect("Entry must exist");
 
-        if e.validated || e.is_missing || e.pending_parents.load(Ordering::Relaxed) != 0 {
+        if e.validated
+            || e.is_missing
+            || e.pending_parents.load(Ordering::Relaxed) != 0
+            || e.height < self.checkpoint_height()
+        {
             return;
         }
 
@@ -290,6 +288,12 @@ impl<V: Validator> Graph<V> {
             c.pending_parents.fetch_sub(1, Ordering::Relaxed);
             self.validate(*ch, invalidated);
         });
+    }
+
+    fn checkpoint_height(&self) -> Height {
+        self.entries
+            .get(&self.checkpoint.read())
+            .map_or(0, |e| e.height)
     }
 
     fn topological_sort(&self, hashes: impl Iterator<Item = Multihash>) -> Vec<Multihash> {
