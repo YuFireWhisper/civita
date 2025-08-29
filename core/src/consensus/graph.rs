@@ -572,11 +572,7 @@ impl<V: Validator> Graph<V> {
 
     fn maybe_advance_checkpoint(&self, head_hash: Multihash, old_cp: Multihash) {
         let exp = self.entries.get(&old_cp).unwrap().next_height;
-        let height = self
-            .entries
-            .get(&head_hash)
-            .expect("Entry must exist")
-            .height;
+        let height = self.entries.get(&head_hash).unwrap().height;
 
         if height < exp {
             return;
@@ -598,43 +594,84 @@ impl<V: Validator> Graph<V> {
         }
 
         *self.checkpoint.write() = target;
-        self.adjust_difficulty(old_cp, target);
-        self.prune_graph(target);
+
+        let (target, block_times, keep) = self.scan_from_head(head_hash, old_cp, height);
+        self.adjust_difficulty(block_times);
         self.prune_trie(target);
-        self.prune_storage(target);
+        self.prune_graph(target, &keep);
     }
 
-    fn adjust_difficulty(&self, prev_cp: Multihash, new_cp: Multihash) {
-        use std::sync::atomic::Ordering;
-
+    fn scan_from_head(
+        &self,
+        hash: Multihash,
+        prev_cp: Multihash,
+        target_height: Height,
+    ) -> (Multihash, Vec<u64>, HashSet<Multihash>) {
+        let mut cur = hash;
+        let mut target = None;
         let mut times: Vec<u64> = Vec::new();
-        let mut cur = new_cp;
+        let mut keep: HashSet<Multihash> = HashSet::new();
+        let mut stop_keep = false;
 
-        while cur != prev_cp {
+        loop {
             let cur_e = self.entries.get(&cur).expect("Entry must exist");
-            cur = cur_e.block_parent;
-            let p_e = self.entries.get(&cur).expect("Parent entry must exist");
 
+            if target.is_none() && cur_e.height <= target_height {
+                target = Some(cur);
+            }
+
+            if !stop_keep {
+                keep.extend(cur_e.witness.atoms.iter());
+                if cur_e
+                    .checkpoint_parent
+                    .is_none_or(|p| p == cur_e.block_parent)
+                {
+                    stop_keep = true;
+                }
+            }
+
+            if cur == prev_cp {
+                break;
+            }
+
+            let parent = cur_e.block_parent;
+            let p_e = self.entries.get(&parent).expect("Parent entry must exist");
             let dt = cur_e.atom.timestamp.saturating_sub(p_e.atom.timestamp);
-
             if dt > 0 {
                 times.push(dt);
             }
+
+            cur = parent;
         }
+
+        (target.expect("Target must be found"), times, keep)
+    }
+
+    fn adjust_difficulty(&self, mut times: Vec<u64>) {
+        use std::sync::atomic::Ordering;
 
         if times.is_empty() {
             return;
         }
 
-        times.sort_unstable();
+        let median = {
+            let mid = times.len() / 2;
 
-        let median = times[times.len() / 2] as f32;
+            let median = if times.len() == 1 {
+                times[0] as f32
+            } else {
+                let (_, m, _) = times.select_nth_unstable(mid);
+                *m as f32
+            };
+
+            if median == 0.0 {
+                return;
+            }
+
+            median
+        };
+
         let target = self.config.target_block_time_ms as f32;
-
-        if median == 0.0 {
-            return;
-        }
-
         let ratio_raw = target / median;
         let ratio = ratio_raw.clamp(
             1.0 / self.config.max_difficulty_adjustment,
@@ -643,15 +680,48 @@ impl<V: Validator> Graph<V> {
 
         let old = self.difficulty.load(Ordering::Relaxed) as f32;
         let new = ((old * ratio) as u64).max(1);
-
         self.difficulty.store(new, Ordering::Relaxed);
     }
 
+    fn prune_graph(&self, new_cp: Multihash, keep: &HashSet<Multihash>) {
+        let cp_height = self.entries.get(&new_cp).unwrap().height;
+
+        let retain = match self.config.storage_mode {
+            StorageMode::General { .. } => 1,
+            StorageMode::Archive { retain_checkpoints } => retain_checkpoints,
+        };
+
+        let cutoff_height = if retain == 0 {
+            None
+        } else {
+            self.find_cutoff_height(new_cp, retain)
+        };
+
+        let last = cp_height.saturating_sub(self.config.checkpoint_distance);
+
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let h = e.value().height;
+                let key = *e.key();
+
+                let rm_by_storage = cutoff_height.is_some_and(|c| h < c);
+                let rm_by_graph = h < last && h <= cp_height && !keep.contains(&key);
+
+                (rm_by_storage || rm_by_graph).then_some(key)
+            })
+            .for_each(|k| {
+                self.entries.remove(&k);
+                self.invalidated.remove(&k);
+            });
+
+        self.entries.iter_mut().for_each(|mut e| {
+            e.children.retain(|ch| self.entries.contains_key(ch));
+        });
+    }
+
     fn prune_trie(&self, cp: Multihash) {
-        let mut e = self
-            .entries
-            .get_mut(&cp)
-            .expect("Checkpoint entry must exist");
+        let mut e = self.entries.get_mut(&cp).unwrap();
 
         let keys = e
             .related_token
@@ -661,69 +731,6 @@ impl<V: Validator> Graph<V> {
             .collect::<Vec<_>>();
 
         e.trie.retain(keys.iter());
-    }
-
-    fn prune_graph(&self, new_cp: Multihash) {
-        let cp_height = self
-            .entries
-            .get(&new_cp)
-            .expect("Checkpoint entry must exist")
-            .height;
-
-        let mut keep: HashSet<Multihash> = HashSet::new();
-        let mut cur = new_cp;
-
-        loop {
-            let e = self.entries.get(&cur).unwrap();
-            keep.extend(e.witness.atoms.iter());
-
-            if e.checkpoint_parent.is_none_or(|p| p == e.block_parent) {
-                break;
-            }
-
-            cur = e.block_parent;
-        }
-
-        self.entries
-            .iter()
-            .filter(|e| {
-                let last = cp_height.saturating_sub(self.config.checkpoint_distance);
-                e.height < last && e.height <= cp_height && !keep.contains(e.key())
-            })
-            .for_each(|e| {
-                self.entries.remove(e.key());
-                self.invalidated.remove(e.key());
-            });
-
-        self.entries.iter_mut().for_each(|mut e| {
-            e.children.retain(|ch| self.entries.contains_key(ch));
-        });
-    }
-
-    fn prune_storage(&self, new_cp: Multihash) {
-        let retain = match self.config.storage_mode {
-            StorageMode::General { .. } => 1,
-            StorageMode::Archive { retain_checkpoints } => retain_checkpoints,
-        };
-
-        if retain == 0 {
-            return;
-        }
-
-        let Some(height) = self.find_cutoff_height(new_cp, retain) else {
-            return;
-        };
-
-        self.entries
-            .iter()
-            .filter_map(|e| {
-                let h = e.value().height;
-                (h < height).then_some(*e.key())
-            })
-            .for_each(|h| {
-                self.entries.remove(&h);
-                self.invalidated.remove(&h);
-            });
     }
 
     fn find_cutoff_height(&self, mut cur: Multihash, retain: u32) -> Option<Height> {
