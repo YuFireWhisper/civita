@@ -54,6 +54,7 @@ struct Entry {
 
     // Checkpoint only
     pub checkpoint_parent: Option<Multihash>,
+    pub next_height: Height,
 
     // Pending only
     pub pending_parents: AtomicU32,
@@ -68,7 +69,7 @@ pub struct Config {
     pub block_threshold: u32,
 
     #[derivative(Default(value = "10"))]
-    pub checkpoint_distance: u32,
+    pub checkpoint_distance: Height,
 
     #[derivative(Default(value = "60_000"))]
     pub target_block_time_ms: u64,
@@ -132,11 +133,12 @@ impl Entry {
         }
     }
 
-    pub fn genesis() -> Self {
+    pub fn genesis(distance: Height) -> Self {
         Self {
             is_block: true,
             trie: Trie::default(),
             is_missing: false,
+            next_height: distance * 2,
             ..Default::default()
         }
     }
@@ -148,7 +150,7 @@ impl Entry {
 
 impl<V: Validator> Graph<V> {
     pub fn empty(config: Config) -> Self {
-        let entry = Entry::genesis();
+        let entry = Entry::genesis(config.checkpoint_distance as Height);
         let hash = entry.hash();
         let difficulty = AtomicU64::new(config.init_vdf_difficulty);
 
@@ -565,47 +567,37 @@ impl<V: Validator> Graph<V> {
     }
 
     fn maybe_advance_checkpoint(&self, head_hash: Multihash, old_cp: Multihash) {
-        let head_height = self
+        let exp = self.entries.get(&old_cp).unwrap().next_height;
+        let height = self
             .entries
             .get(&head_hash)
             .expect("Entry must exist")
             .height;
 
-        let n = self.config.checkpoint_distance as Height;
-        debug_assert!(n > 0);
-
-        let head_div = head_height / n;
-        if head_div < 2 {
+        if height < exp {
             return;
         }
 
-        let desired_cp_height = (head_div - 1) * n;
-
-        let checkpoint_height = self.checkpoint_height();
-        if checkpoint_height >= desired_cp_height {
-            return;
-        }
-
-        let mut cur = self.entries.get(&head_hash).expect("Entry must exist");
-        while cur.height > desired_cp_height {
-            cur = self.entries.get(&cur.block_parent).unwrap();
-        }
-
-        debug_assert_eq!(cur.height, desired_cp_height);
-        let new_cp = *cur.key();
+        let target = {
+            let target_height = height - self.config.checkpoint_distance as Height;
+            let mut cur = self.entries.get(&head_hash).unwrap();
+            while cur.height > target_height {
+                cur = self.entries.get(&cur.block_parent).unwrap();
+            }
+            *cur.key()
+        };
 
         {
-            let mut new_cp_e = self
-                .entries
-                .get_mut(&new_cp)
-                .expect("Checkpoint entry must exist");
-            new_cp_e.checkpoint_parent = Some(old_cp);
+            let mut e = self.entries.get_mut(&target).unwrap();
+            e.next_height = height + self.config.checkpoint_distance as Height;
+            e.checkpoint_parent = Some(old_cp);
         }
 
-        *self.checkpoint.write() = new_cp;
-        self.adjust_difficulty(old_cp, new_cp);
-        self.prune_trie_at_checkpoint(new_cp);
-        self.prune_storage_after_new_checkpoint(new_cp);
+        *self.checkpoint.write() = target;
+        self.adjust_difficulty(old_cp, target);
+        self.prune_graph(target);
+        self.prune_trie(target);
+        self.prune_storage(target);
     }
 
     fn adjust_difficulty(&self, prev_cp: Multihash, new_cp: Multihash) {
@@ -651,7 +643,7 @@ impl<V: Validator> Graph<V> {
         self.difficulty.store(new, Ordering::Relaxed);
     }
 
-    fn prune_trie_at_checkpoint(&self, cp: Multihash) {
+    fn prune_trie(&self, cp: Multihash) {
         let mut e = self
             .entries
             .get_mut(&cp)
@@ -667,7 +659,44 @@ impl<V: Validator> Graph<V> {
         e.trie.retain(keys.iter());
     }
 
-    fn prune_storage_after_new_checkpoint(&self, new_cp: Multihash) {
+    fn prune_graph(&self, new_cp: Multihash) {
+        let cp_height = self
+            .entries
+            .get(&new_cp)
+            .expect("Checkpoint entry must exist")
+            .height;
+
+        let mut keep: HashSet<Multihash> = HashSet::new();
+        let mut cur = new_cp;
+
+        loop {
+            let e = self.entries.get(&cur).unwrap();
+            keep.extend(e.witness.atoms.iter());
+
+            if e.checkpoint_parent.is_none_or(|p| p == e.block_parent) {
+                break;
+            }
+
+            cur = e.block_parent;
+        }
+
+        self.entries
+            .iter()
+            .filter(|e| {
+                let last = cp_height.saturating_sub(self.config.checkpoint_distance);
+                e.height < last && e.height <= cp_height && !keep.contains(e.key())
+            })
+            .for_each(|e| {
+                self.entries.remove(e.key());
+                self.invalidated.remove(e.key());
+            });
+
+        self.entries.iter_mut().for_each(|mut e| {
+            e.children.retain(|ch| self.entries.contains_key(ch));
+        });
+    }
+
+    fn prune_storage(&self, new_cp: Multihash) {
         let retain = match self.config.storage_mode {
             StorageMode::General { .. } => 1,
             StorageMode::Archive { retain_checkpoints } => retain_checkpoints,
