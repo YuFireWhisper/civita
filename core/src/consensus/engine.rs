@@ -47,7 +47,7 @@ pub struct Engine<V> {
 
     graph: Graph<V>,
     pending_tasks: DashMap<Multihash, (Atom, HashMap<Multihash, Vec<u8>>)>,
-    vdf_result_tx: Sender<(Multihash, u64, Vec<u8>)>,
+    vdf_result_tx: Sender<(Multihash, Vec<u8>)>,
 
     source_info: DashMap<Multihash, Vec<(MessageId, PeerId)>>,
 
@@ -119,7 +119,7 @@ impl<V: Validator> Engine<V> {
     async fn run(
         &self,
         mut gossip_rx: Receiver<gossipsub::Message>,
-        mut vdf_result_rx: Receiver<(Multihash, u64, Vec<u8>)>,
+        mut vdf_result_rx: Receiver<(Multihash, Vec<u8>)>,
     ) {
         let mut request_response_rx = self.request_response.subscribe(self.req_resp_topic);
 
@@ -139,8 +139,8 @@ impl<V: Validator> Engine<V> {
                 Some(msg) = request_response_rx.recv() => {
                     self.on_recv_reqeust_response(msg).await;
                 }
-                Some((hash, difficulty, result)) = vdf_result_rx.recv() => {
-                    self.on_vdf_complete(hash, difficulty, result).await;
+                Some((hash, result)) = vdf_result_rx.recv() => {
+                    self.on_vdf_complete(hash, result).await;
                 }
             }
         }
@@ -155,7 +155,7 @@ impl<V: Validator> Engine<V> {
             let vdf_proof = vdf
                 .solve(&hash.to_bytes(), difficulty)
                 .expect("VDF solve failed");
-            if let Err(e) = tx.send((hash, difficulty, vdf_proof)).await {
+            if let Err(e) = tx.send((hash, vdf_proof)).await {
                 log::error!("Failed to send VDF result: {e}");
             }
         });
@@ -258,15 +258,10 @@ impl<V: Validator> Engine<V> {
         }
     }
 
-    async fn on_vdf_complete(&self, hash: Multihash, difficulty: u64, result: Vec<u8>) {
+    async fn on_vdf_complete(&self, hash: Multihash, result: Vec<u8>) {
         let Some((atom, sigs)) = self.pending_tasks.remove(&hash).map(|e| e.1) else {
             return;
         };
-
-        if difficulty != self.graph.difficulty() {
-            self.start_vdf_task(hash);
-            return;
-        }
 
         let head = self.graph.head();
         let trie_proofs = atom
