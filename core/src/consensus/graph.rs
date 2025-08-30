@@ -9,6 +9,7 @@ use dashmap::{DashMap, DashSet};
 use derivative::Derivative;
 use libp2p::PeerId;
 use parking_lot::RwLock as ParkingLock;
+use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
     consensus::validator::Validator,
@@ -31,6 +32,7 @@ pub enum RejectReason {
     MimatchBlockParent,
     InvalidScriptSig,
     InvalidConversion,
+    InvalidVdfProof,
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +104,9 @@ pub struct Config {
 
     #[derivative(Default(value = "StorageMode::Archive { retain_checkpoints: Some(1) }"))]
     pub storage_mode: StorageMode,
+
+    #[derivative(Default(value = "1024"))]
+    pub vdf_params: u16,
 }
 
 #[derive(Serialize)]
@@ -125,6 +130,7 @@ pub struct Graph<V> {
 
     history: ParkingLock<VecDeque<(Vec<u8>, Vec<u8>)>>,
 
+    vdf: WesolowskiVDF,
     difficulty: AtomicU64,
 
     config: Config,
@@ -164,6 +170,7 @@ impl<V: Validator> Graph<V> {
         let entry = Entry::genesis();
         let hash = entry.hash();
         let difficulty = AtomicU64::new(config.init_vdf_difficulty);
+        let vdf = WesolowskiVDFParams(config.vdf_params).new();
 
         Self {
             entries: DashMap::from_iter([(hash, entry)]),
@@ -173,6 +180,7 @@ impl<V: Validator> Graph<V> {
             main_head: ParkingLock::new(hash),
             checkpoint: ParkingLock::new(hash),
             history: ParkingLock::new(VecDeque::new()),
+            vdf,
             difficulty,
             config,
             _marker: std::marker::PhantomData,
@@ -200,6 +208,15 @@ impl<V: Validator> Graph<V> {
 
         if atom.checkpoint != *self.checkpoint.read() {
             self.remove_subgraph_with_ignore(hash, IgnoreReason::MimatchCheckpoint, &mut result);
+            return result;
+        }
+
+        if self
+            .vdf
+            .verify(&hash.to_vec(), self.difficulty(), &witness.vdf_proof)
+            .is_err()
+        {
+            self.remove_subgraph_with_reject(hash, RejectReason::InvalidVdfProof, &mut result);
             return result;
         }
 

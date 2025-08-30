@@ -157,34 +157,6 @@ impl<V: Validator> Engine<V> {
     }
 
     async fn on_recv_atom(&self, atom: Atom, witness: Witness) {
-        let hash = atom.hash();
-
-        if atom.checkpoint != self.graph.checkpoint() {
-            if let Some(sources) = self.source_info.remove(&atom.hash()) {
-                for (msg_id, peer_id) in sources.1 {
-                    self.gossipsub
-                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Ignore)
-                        .await;
-                }
-            }
-            return;
-        }
-
-        if self
-            .vdf
-            .verify(&hash.to_vec(), self.graph.difficulty(), &witness.vdf_proof)
-            .is_err()
-        {
-            if let Some(sources) = self.source_info.remove(&atom.hash()) {
-                for (msg_id, peer_id) in sources.1 {
-                    self.gossipsub
-                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Reject)
-                        .await;
-                }
-            }
-            return;
-        }
-
         let result = self.graph.upsert(atom, witness);
 
         for hash in result.accepted {
