@@ -2,22 +2,22 @@ use std::{collections::HashMap, sync::Arc};
 
 use civita_serialize::Serialize;
 use dashmap::DashMap;
-use libp2p::PeerId;
+use libp2p::{
+    gossipsub::{MessageAcceptance, MessageId},
+    PeerId,
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
-    consensus::{
-        graph::{Graph, UpdateResult},
-        validator::Validator,
-    },
+    consensus::{graph::Graph, validator::Validator},
     crypto::Multihash,
     network::{
         gossipsub,
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    ty::atom::{Atom, Command, Witness},
+    ty::atom::{Atom, Witness},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -49,6 +49,8 @@ pub struct Engine<V> {
     pending_tasks: DashMap<Multihash, (Atom, HashMap<Multihash, Vec<u8>>)>,
     vdf_result_tx: Sender<(Multihash, u64, Vec<u8>)>,
 
+    source_info: DashMap<Multihash, Vec<(MessageId, PeerId)>>,
+
     vdf: WesolowskiVDF,
 }
 
@@ -74,6 +76,8 @@ impl<V: Validator> Engine<V> {
             graph,
             pending_tasks: DashMap::new(),
 
+            source_info: DashMap::new(),
+
             vdf,
             vdf_result_tx,
         });
@@ -89,23 +93,23 @@ impl<V: Validator> Engine<V> {
         Ok(engine)
     }
 
-    pub async fn propose(
-        &self,
-        cmd: Command,
-        script_sigs: HashMap<Multihash, Vec<u8>>,
-    ) -> Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let atom = Atom::new(self.transport.local_peer_id(), Some(cmd), now);
-
-        let hash = atom.hash();
-        self.pending_tasks.insert(hash, (atom, script_sigs));
-        self.start_vdf_task(hash);
-
-        Ok(())
-    }
+    // pub async fn propose(
+    //     &self,
+    //     cmd: Command,
+    //     script_sigs: HashMap<Multihash, Vec<u8>>,
+    // ) -> Result<()> {
+    //     let now = std::time::SystemTime::now()
+    //         .duration_since(std::time::UNIX_EPOCH)
+    //         .unwrap()
+    //         .as_secs();
+    //     let atom = Atom::new(self.transport.local_peer_id(), Some(cmd), now);
+    //
+    //     let hash = atom.hash();
+    //     self.pending_tasks.insert(hash, (atom, script_sigs));
+    //     self.start_vdf_task(hash);
+    //
+    //     Ok(())
+    // }
 
     async fn run(
         &self,
@@ -120,11 +124,12 @@ impl<V: Validator> Engine<V> {
                     type Pair = (Atom, Witness);
 
                     let Ok((atom, witness)) = Pair::from_slice(msg.data.as_slice()) else {
-                        self.disconnect_peer(msg.propagation_source).await;
+                        self.gossipsub.report_validation_result(&msg.id, &msg.propagation_source, MessageAcceptance::Reject).await;
                         continue;
                     };
 
-                    self.on_recv_atom(atom, witness, msg.propagation_source).await;
+                    self.source_info.entry(atom.hash()).or_default().push((msg.id, msg.propagation_source));
+                    self.on_recv_atom(atom, witness).await;
                 }
                 Some(msg) = request_response_rx.recv() => {
                     self.on_recv_reqeust_response(msg).await;
@@ -151,35 +156,69 @@ impl<V: Validator> Engine<V> {
         });
     }
 
-    async fn on_recv_atom(&self, atom: Atom, witness: Witness, source: PeerId) -> bool {
-        if self
-            .vdf
-            .verify(
-                &atom.hash().to_bytes(),
-                self.graph.difficulty(),
-                &witness.vdf_proof,
-            )
-            .is_err()
-        {
-            self.disconnect_peer(source).await;
-            return true;
+    async fn on_recv_atom(&self, atom: Atom, witness: Witness) {
+        let hash = atom.hash();
+
+        if atom.checkpoint != self.graph.checkpoint() {
+            if let Some(sources) = self.source_info.remove(&atom.hash()) {
+                for (msg_id, peer_id) in sources.1 {
+                    self.gossipsub
+                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Ignore)
+                        .await;
+                }
+            }
+            return;
         }
 
-        match self.graph.upsert(atom, witness) {
-            UpdateResult::Missing(hashes) => {
-                let bytes = hashes.to_vec();
-                self.request_response
-                    .send_request(source, bytes, self.req_resp_topic)
-                    .await;
-                true
-            }
-            UpdateResult::Invalidated(peers) => {
-                for peer in peers {
-                    self.disconnect_peer(peer).await;
+        if self
+            .vdf
+            .verify(&hash.to_vec(), self.graph.difficulty(), &witness.vdf_proof)
+            .is_err()
+        {
+            if let Some(sources) = self.source_info.remove(&atom.hash()) {
+                for (msg_id, peer_id) in sources.1 {
+                    self.gossipsub
+                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Reject)
+                        .await;
                 }
-                false
             }
-            UpdateResult::Noop => true,
+            return;
+        }
+
+        let result = self.graph.upsert(atom, witness);
+
+        for hash in result.accepted {
+            if let Some(sources) = self.source_info.remove(&hash) {
+                for (msg_id, peer_id) in sources.1 {
+                    self.gossipsub
+                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Accept)
+                        .await;
+                }
+            }
+        }
+
+        for (hash, reason) in result.rejected {
+            log::warn!("Atom {hash:?} rejected: {reason:?}");
+
+            if let Some(sources) = self.source_info.remove(&hash) {
+                for (msg_id, peer_id) in sources.1 {
+                    self.gossipsub
+                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Reject)
+                        .await;
+                }
+            }
+        }
+
+        for (hash, reason) in result.ignored {
+            log::info!("Atom {hash:?} ignored: {reason:?}");
+
+            if let Some(sources) = self.source_info.remove(&hash) {
+                for (msg_id, peer_id) in sources.1 {
+                    self.gossipsub
+                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Ignore)
+                        .await;
+                }
+            }
         }
     }
 
@@ -236,9 +275,7 @@ impl<V: Validator> Engine<V> {
                 }
 
                 for (atom, witness) in atoms {
-                    if !self.on_recv_atom(atom, witness, peer).await {
-                        break;
-                    }
+                    self.on_recv_atom(atom, witness).await;
                 }
             }
         }
@@ -273,7 +310,7 @@ impl<V: Validator> Engine<V> {
         atom.to_writer(&mut bytes);
         witness.to_writer(&mut bytes);
 
-        if !self.graph.upsert(atom, witness).is_noop() {
+        if !self.graph.upsert(atom, witness).accepted.contains(&hash) {
             log::error!("Inconsistent state after VDF completion");
             return;
         }

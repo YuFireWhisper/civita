@@ -160,22 +160,24 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
-    // pub fn empty(config: Config) -> Self {
-    //     let entry = Entry::genesis();
-    //     let hash = entry.hash();
-    //     let difficulty = AtomicU64::new(config.init_vdf_difficulty);
-    //
-    //     Self {
-    //         entries: DashMap::from_iter([(hash, entry)]),
-    //         invalidated: DashSet::new(),
-    //         main_head: ParkingLock::new(hash),
-    //         checkpoint: ParkingLock::new(hash),
-    //         history: ParkingLock::new(VecDeque::new()),
-    //         difficulty,
-    //         config,
-    //         _marker: std::marker::PhantomData,
-    //     }
-    // }
+    pub fn empty(config: Config) -> Self {
+        let entry = Entry::genesis();
+        let hash = entry.hash();
+        let difficulty = AtomicU64::new(config.init_vdf_difficulty);
+
+        Self {
+            entries: DashMap::from_iter([(hash, entry)]),
+            accepted: DashSet::from_iter([hash]),
+            rejected: DashSet::new(),
+            ignored: DashSet::new(),
+            main_head: ParkingLock::new(hash),
+            checkpoint: ParkingLock::new(hash),
+            history: ParkingLock::new(VecDeque::new()),
+            difficulty,
+            config,
+            _marker: std::marker::PhantomData,
+        }
+    }
 
     pub fn upsert(&self, atom: Atom, witness: Witness) -> UpdateResult {
         let hash = atom.hash();
@@ -293,12 +295,6 @@ impl<V: Validator> Graph<V> {
             c.pending_parents.fetch_sub(1, Ordering::Relaxed);
             self.validate(*ch, result);
         });
-    }
-
-    fn checkpoint_height(&self) -> Height {
-        self.entries
-            .get(&self.checkpoint.read())
-            .map_or(0, |e| e.height)
     }
 
     fn block_parent_of<'a>(
@@ -849,5 +845,9 @@ impl<V: Validator> Graph<V> {
         e.trie
             .generate_guide(token_ids.map(|id| id.to_vec()))
             .expect("Proofs must be generated")
+    }
+
+    pub fn checkpoint(&self) -> Multihash {
+        *self.checkpoint.read()
     }
 }
