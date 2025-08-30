@@ -17,7 +17,7 @@ use crate::{
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    ty::atom::{Atom, Witness},
+    ty::atom::{Atom, Command, Witness},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -93,23 +93,28 @@ impl<V: Validator> Engine<V> {
         Ok(engine)
     }
 
-    // pub async fn propose(
-    //     &self,
-    //     cmd: Command,
-    //     script_sigs: HashMap<Multihash, Vec<u8>>,
-    // ) -> Result<()> {
-    //     let now = std::time::SystemTime::now()
-    //         .duration_since(std::time::UNIX_EPOCH)
-    //         .unwrap()
-    //         .as_secs();
-    //     let atom = Atom::new(self.transport.local_peer_id(), Some(cmd), now);
-    //
-    //     let hash = atom.hash();
-    //     self.pending_tasks.insert(hash, (atom, script_sigs));
-    //     self.start_vdf_task(hash);
-    //
-    //     Ok(())
-    // }
+    pub async fn propose(
+        &self,
+        cmd: Command,
+        script_sigs: HashMap<Multihash, Vec<u8>>,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let atom = Atom::new(
+            self.graph.checkpoint(),
+            self.transport.local_peer_id(),
+            Some(cmd),
+            now,
+        );
+
+        let hash = atom.hash();
+        self.pending_tasks.insert(hash, (atom, script_sigs));
+        self.start_vdf_task(hash);
+
+        Ok(())
+    }
 
     async fn run(
         &self,
