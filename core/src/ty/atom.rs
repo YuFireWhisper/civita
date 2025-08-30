@@ -26,6 +26,7 @@ pub struct Command {
 #[derive(Clone)]
 #[derive(Serialize)]
 pub struct Atom {
+    pub checkpoint: Multihash,
     pub peer: PeerId,
     pub cmd: Option<Command>,
     pub timestamp: u64,
@@ -45,8 +46,9 @@ pub struct Witness {
 }
 
 impl Atom {
-    pub fn new(peer: PeerId, cmd: Option<Command>, timestamp: u64) -> Self {
+    pub fn new(checkpoint: Multihash, peer: PeerId, cmd: Option<Command>, timestamp: u64) -> Self {
         Self {
+            checkpoint,
             peer,
             cmd,
             timestamp,
@@ -62,6 +64,7 @@ impl Atom {
 impl Default for Atom {
     fn default() -> Self {
         Self {
+            checkpoint: Multihash::default(),
             peer: PeerId::from_multihash(Multihash::default()).unwrap(),
             cmd: None,
             timestamp: 0,
