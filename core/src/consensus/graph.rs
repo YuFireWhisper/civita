@@ -681,16 +681,15 @@ impl<V: Validator> Graph<V> {
             }
         };
 
+        let buf = atoms.into_iter().fold(Vec::new(), |mut acc, e| {
+            acc.extend(e.atom.to_vec());
+            acc.extend(e.witness.to_vec());
+            acc
+        });
+
         *self.checkpoint.write() = target_hash;
         self.difficulty.store(difficulty, Ordering::Relaxed);
-        self.history.write().push_back((
-            info.to_vec(),
-            atoms
-                .into_iter()
-                .map(|e| (e.atom, e.witness))
-                .collect::<Vec<_>>()
-                .to_vec(),
-        ));
+        self.history.write().push_back((info.to_vec(), buf));
     }
 
     fn walk_and_collection(&self, start: Multihash, end: Multihash) -> (Vec<u64>, Vec<Entry>) {
