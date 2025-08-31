@@ -284,10 +284,6 @@ impl<V: Validator> Graph<V> {
     fn validate(&self, hash: Multihash, result: &mut UpdateResult) {
         let entry = self.entries.get(&hash).unwrap();
 
-        if entry.validated {
-            return;
-        }
-
         let Some(bp_hash) = self.block_parent_of(entry.witness.atoms.iter()) else {
             drop(entry);
             self.remove_subgraph_with_reject(hash, RejectReason::MimatchBlockParent, result);
