@@ -15,7 +15,7 @@ use crate::{
     consensus::validator::Validator,
     crypto::{hasher::Hasher, Multihash},
     ty::{
-        atom::{Atom, Height, Witness},
+        atom::{Atom, Command, Height, Witness},
         token::Token,
     },
     utils::Trie,
@@ -28,6 +28,7 @@ type State = HashMap<Multihash, Option<Token>>;
 pub enum RejectReason {
     Rejected,
     RejectedParent,
+    EmptyParents,
     SelfReference,
     MimatchBlockParent,
     InvalidScriptSig,
@@ -44,6 +45,13 @@ pub enum IgnoreReason {
     Ignored,
     IgnoredParent,
     MimatchCheckpoint,
+}
+
+#[derive(Clone, Copy)]
+#[derive(Debug)]
+enum Reason {
+    Reject(RejectReason),
+    Ignore(IgnoreReason),
 }
 
 #[derive(Default)]
@@ -63,12 +71,9 @@ pub enum StorageMode {
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 struct Entry {
-    // Basic information
     pub atom: Atom,
     pub witness: Witness,
     pub height: Height,
-
-    // General
     pub block_parent: Multihash,
     pub children: HashSet<Multihash>,
 
@@ -144,12 +149,10 @@ pub struct Graph<V> {
 
 impl Entry {
     pub fn new(atom: Atom, witness: Witness) -> Self {
-        let pending_parents = AtomicU32::new(witness.atoms.len() as u32);
-
         Self {
             atom,
+            pending_parents: AtomicU32::new(witness.atoms.len() as u32),
             witness,
-            pending_parents,
             is_missing: false,
             ..Default::default()
         }
@@ -158,7 +161,6 @@ impl Entry {
     pub fn genesis() -> Self {
         Self {
             is_block: true,
-            trie: Trie::default(),
             is_missing: false,
             ..Default::default()
         }
@@ -188,8 +190,6 @@ impl<V: Validator> Graph<V> {
     pub fn empty(config: Config) -> Self {
         let entry = Entry::genesis();
         let hash = entry.hash();
-        let difficulty = AtomicU64::new(config.init_vdf_difficulty);
-        let vdf = WesolowskiVDFParams(config.vdf_params).new();
 
         Self {
             entries: DashMap::from_iter([(hash, entry)]),
@@ -199,8 +199,8 @@ impl<V: Validator> Graph<V> {
             main_head: ParkingLock::new(hash),
             checkpoint: ParkingLock::new(hash),
             history: ParkingLock::new(VecDeque::new()),
-            vdf,
-            difficulty,
+            vdf: WesolowskiVDFParams(config.vdf_params).new(),
+            difficulty: AtomicU64::new(config.init_vdf_difficulty),
             heaviest_weight: AtomicU64::new(0),
             config,
             _marker: std::marker::PhantomData,
@@ -212,23 +212,28 @@ impl<V: Validator> Graph<V> {
         let mut result = UpdateResult::default();
 
         if self.rejected.contains(&hash) {
-            self.remove_subgraph_with_reject(hash, RejectReason::Rejected, &mut result);
+            self.remove_subgraph(hash, RejectReason::Rejected, &mut result);
             return result;
         }
 
         if self.accepted.contains(&hash) {
-            self.remove_subgraph_with_ignore(hash, IgnoreReason::Accepted, &mut result);
+            self.remove_subgraph(hash, IgnoreReason::Accepted, &mut result);
             return result;
         }
 
         if self.ignored.contains(&hash) {
-            self.remove_subgraph_with_ignore(hash, IgnoreReason::Ignored, &mut result);
+            self.remove_subgraph(hash, IgnoreReason::Ignored, &mut result);
             return result;
         }
 
-        // Parent should have one and only one block parent, and should not contain itself
-        if witness.atoms.is_empty() || witness.atoms.contains(&hash) {
-            self.remove_subgraph_with_reject(hash, RejectReason::SelfReference, &mut result);
+        // Atoms must have least one block parent
+        if witness.atoms.is_empty() {
+            self.remove_subgraph(hash, RejectReason::EmptyParents, &mut result);
+            return result;
+        }
+
+        if witness.atoms.contains(&hash) {
+            self.remove_subgraph(hash, RejectReason::SelfReference, &mut result);
             return result;
         }
 
@@ -252,6 +257,60 @@ impl<V: Validator> Graph<V> {
         result
     }
 
+    fn remove_subgraph<T: Into<Reason>>(
+        &self,
+        hash: Multihash,
+        reason: T,
+        result: &mut UpdateResult,
+    ) {
+        let mut stk = VecDeque::new();
+        stk.push_back(hash);
+
+        let reason = reason.into();
+
+        match reason {
+            Reason::Reject(r) => {
+                result.rejected.insert(hash, r);
+            }
+            Reason::Ignore(r) => {
+                result.ignored.insert(hash, r);
+            }
+        };
+
+        while let Some(u) = stk.pop_front() {
+            let already = match reason {
+                Reason::Reject(_) => self.rejected.insert(u),
+                Reason::Ignore(_) => self.ignored.insert(u),
+            };
+
+            if already {
+                continue;
+            }
+
+            let Some((_, entry)) = self.entries.remove(&u) else {
+                continue;
+            };
+
+            if !entry.is_missing && u != hash {
+                match reason {
+                    Reason::Reject(_) => {
+                        result.rejected.insert(u, RejectReason::RejectedParent);
+                    }
+                    Reason::Ignore(_) => {
+                        result.ignored.insert(u, IgnoreReason::IgnoredParent);
+                    }
+                };
+                entry.witness.atoms.iter().for_each(|p| {
+                    if let Some(mut pe) = self.entries.get_mut(p) {
+                        pe.children.remove(&u);
+                    }
+                });
+            }
+
+            stk.extend(entry.children);
+        }
+    }
+
     pub fn contains(&self, h: &Multihash) -> bool {
         self.entries.get(h).is_some_and(|e| !e.is_missing)
     }
@@ -261,12 +320,12 @@ impl<V: Validator> Graph<V> {
 
         for parent in cur.witness.atoms.iter() {
             if self.rejected.contains(parent) {
-                self.remove_subgraph_with_reject(hash, RejectReason::RejectedParent, result);
+                self.remove_subgraph(hash, RejectReason::RejectedParent, result);
                 return false;
             }
 
             if self.ignored.contains(parent) {
-                self.remove_subgraph_with_ignore(hash, IgnoreReason::IgnoredParent, result);
+                self.remove_subgraph(hash, IgnoreReason::IgnoredParent, result);
                 return false;
             }
 
@@ -291,7 +350,7 @@ impl<V: Validator> Graph<V> {
 
             if entry.atom.checkpoint != *self.checkpoint.read() {
                 drop(entry);
-                self.remove_subgraph_with_ignore(hash, IgnoreReason::MimatchCheckpoint, result);
+                self.remove_subgraph(hash, IgnoreReason::MimatchCheckpoint, result);
                 return;
             }
 
@@ -300,13 +359,14 @@ impl<V: Validator> Graph<V> {
                 .verify(&hash.to_vec(), self.difficulty(), &entry.witness.vdf_proof)
                 .is_err()
             {
-                self.remove_subgraph_with_reject(hash, RejectReason::InvalidVdfProof, result);
+                drop(entry);
+                self.remove_subgraph(hash, RejectReason::InvalidVdfProof, result);
                 return;
             }
 
             let Some(bp_hash) = self.block_parent_of(entry.witness.atoms.iter()) else {
                 drop(entry);
-                self.remove_subgraph_with_reject(hash, RejectReason::MimatchBlockParent, result);
+                self.remove_subgraph(hash, RejectReason::MimatchBlockParent, result);
                 return;
             };
 
@@ -319,7 +379,7 @@ impl<V: Validator> Graph<V> {
         let (state, publishers) = match self.try_execute_atoms(&order, trie) {
             Ok(v) => v,
             Err(r) => {
-                self.remove_subgraph_with_reject(hash, r, result);
+                self.remove_subgraph(hash, r, result);
                 return;
             }
         };
@@ -335,7 +395,7 @@ impl<V: Validator> Graph<V> {
         }
 
         if !self.validate_checkpoint_update(hash, &publishers) {
-            self.remove_subgraph_with_reject(hash, RejectReason::NotHeaviestChain, result);
+            self.remove_subgraph(hash, RejectReason::NotHeaviestChain, result);
             return;
         }
 
@@ -421,51 +481,83 @@ impl<V: Validator> Graph<V> {
             let entry = self.entries.get(hash).unwrap();
             publishers.insert(entry.atom.peer);
 
-            let Some(cmd) = &entry.atom.cmd else {
-                continue;
-            };
-
-            let is_validated = self.accepted.contains(hash);
-
-            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
-                let input = state
-                    .remove(hash)
-                    .unwrap_or_else(|| {
-                        let key = hash.to_vec();
-                        trie.resolve(std::iter::once(&key), &entry.witness.trie_proofs)
-                            .then_some(Token::from_slice(&trie.get(&key).unwrap()).unwrap())
-                    })
-                    .ok_or(RejectReason::MissingInput)?;
-
-                if !is_validated && !entry.validate_script_sig::<V>(hash, &input.script_pk) {
-                    return Err(RejectReason::InvalidScriptSig);
-                }
-
-                acc.insert(*hash, input);
-                Ok(acc)
-            })?;
-
-            if !is_validated && !entry.validate_conversion::<V>(inputs.values()) {
-                return Err(RejectReason::InvalidConversion);
+            if let Some(cmd) = &entry.atom.cmd {
+                self.execute_command(&entry, cmd, &mut state, trie)?;
             }
-
-            state.extend(inputs.into_iter().map(|(k, v)| {
-                if cmd.consumed.contains(&k) {
-                    (k, None)
-                } else {
-                    (k, Some(v))
-                }
-            }));
-
-            cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
-                // Token Id = H(AtomHash || Index)
-                let data = (*hash, i as u32).to_vec();
-                let hash = Hasher::digest(&data);
-                state.insert(hash, Some(t));
-            });
         }
 
         Ok((state, publishers))
+    }
+
+    fn execute_command(
+        &self,
+        entry: &Entry,
+        cmd: &Command,
+        state: &mut State,
+        trie: &mut Trie,
+    ) -> Result<(), RejectReason> {
+        let hash = entry.hash();
+        let is_validated = self.accepted.contains(&hash);
+        let inputs = self.collect_inputs(entry, cmd, state, trie, false)?;
+
+        if !is_validated && !entry.validate_conversion::<V>(inputs.values()) {
+            return Err(RejectReason::InvalidConversion);
+        }
+
+        state.extend(inputs.into_iter().map(|(k, v)| {
+            if cmd.consumed.contains(&k) {
+                (k, None)
+            } else {
+                (k, Some(v))
+            }
+        }));
+
+        cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
+            // Token Id = H(AtomHash || Index)
+            let data = (hash, i as u32).to_vec();
+            let hash = Hasher::digest(&data);
+            state.insert(hash, Some(t));
+        });
+
+        Ok(())
+    }
+
+    fn collect_inputs(
+        &self,
+        entry: &Entry,
+        cmd: &Command,
+        state: &mut State,
+        trie: &mut Trie,
+        is_validated: bool,
+    ) -> Result<HashMap<Multihash, Token>, RejectReason> {
+        cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
+            let input = self.resolve_token(hash, state, trie, &entry.witness)?;
+
+            if !is_validated && !entry.validate_script_sig::<V>(hash, &input.script_pk) {
+                return Err(RejectReason::InvalidScriptSig);
+            }
+
+            acc.insert(*hash, input);
+
+            Ok(acc)
+        })
+    }
+
+    fn resolve_token(
+        &self,
+        hash: &Multihash,
+        state: &mut State,
+        trie: &mut Trie,
+        witness: &Witness,
+    ) -> Result<Token, RejectReason> {
+        state
+            .remove(hash)
+            .unwrap_or_else(|| {
+                let key = hash.to_vec();
+                trie.resolve(std::iter::once(&key), &witness.trie_proofs)
+                    .then(|| Token::from_slice(&trie.get(&key)?).ok())?
+            })
+            .ok_or(RejectReason::MissingInput)
     }
 
     fn validate_checkpoint_update(&self, hash: Multihash, publishers: &HashSet<PeerId>) -> bool {
@@ -542,72 +634,6 @@ impl<V: Validator> Graph<V> {
         let mut entry = self.entries.get_mut(&hash).unwrap();
         entry.trie = trie;
         entry.related_token = related;
-    }
-
-    fn remove_subgraph_with_ignore(
-        &self,
-        hash: Multihash,
-        reason: IgnoreReason,
-        result: &mut UpdateResult,
-    ) {
-        let mut stk = VecDeque::new();
-        stk.push_back(hash);
-
-        result.ignored.insert(hash, reason);
-
-        while let Some(u) = stk.pop_front() {
-            if self.ignored.insert(u) {
-                continue;
-            }
-
-            let Some((_, entry)) = self.entries.remove(&u) else {
-                continue;
-            };
-
-            if !entry.is_missing && u != hash {
-                result.ignored.insert(u, IgnoreReason::IgnoredParent);
-                entry.witness.atoms.iter().for_each(|p| {
-                    if let Some(mut pe) = self.entries.get_mut(p) {
-                        pe.children.remove(&u);
-                    }
-                });
-            }
-
-            stk.extend(entry.children);
-        }
-    }
-
-    fn remove_subgraph_with_reject(
-        &self,
-        hash: Multihash,
-        reason: RejectReason,
-        result: &mut UpdateResult,
-    ) {
-        let mut stk = VecDeque::new();
-        stk.push_back(hash);
-
-        result.rejected.insert(hash, reason);
-
-        while let Some(u) = stk.pop_front() {
-            if self.rejected.insert(u) {
-                continue;
-            }
-
-            let Some((_, entry)) = self.entries.remove(&u) else {
-                continue;
-            };
-
-            if !entry.is_missing && u != hash {
-                result.rejected.insert(u, RejectReason::RejectedParent);
-                entry.witness.atoms.iter().for_each(|p| {
-                    if let Some(mut pe) = self.entries.get_mut(p) {
-                        pe.children.remove(&u);
-                    }
-                });
-            }
-
-            stk.extend(entry.children);
-        }
     }
 
     fn update_publishers(&self, mut cur: Multihash, publishers: &HashSet<PeerId>) {
@@ -1004,5 +1030,17 @@ impl<V: Validator> Graph<V> {
         }
 
         Ok(engine)
+    }
+}
+
+impl From<RejectReason> for Reason {
+    fn from(r: RejectReason) -> Self {
+        Reason::Reject(r)
+    }
+}
+
+impl From<IgnoreReason> for Reason {
+    fn from(r: IgnoreReason) -> Self {
+        Reason::Ignore(r)
     }
 }
