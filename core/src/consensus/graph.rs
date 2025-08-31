@@ -226,20 +226,6 @@ impl<V: Validator> Graph<V> {
             return result;
         }
 
-        if atom.checkpoint != *self.checkpoint.read() {
-            self.remove_subgraph_with_ignore(hash, IgnoreReason::MimatchCheckpoint, &mut result);
-            return result;
-        }
-
-        if self
-            .vdf
-            .verify(&hash.to_vec(), self.difficulty(), &witness.vdf_proof)
-            .is_err()
-        {
-            self.remove_subgraph_with_reject(hash, RejectReason::InvalidVdfProof, &mut result);
-            return result;
-        }
-
         // Parent should have one and only one block parent, and should not contain itself
         if witness.atoms.is_empty() || witness.atoms.contains(&hash) {
             self.remove_subgraph_with_reject(hash, RejectReason::SelfReference, &mut result);
@@ -302,6 +288,21 @@ impl<V: Validator> Graph<V> {
     fn validate(&self, hash: Multihash, result: &mut UpdateResult) {
         let (bp_hash, order, len) = {
             let entry = self.entries.get(&hash).unwrap();
+
+            if entry.atom.checkpoint != *self.checkpoint.read() {
+                drop(entry);
+                self.remove_subgraph_with_ignore(hash, IgnoreReason::MimatchCheckpoint, result);
+                return;
+            }
+
+            if self
+                .vdf
+                .verify(&hash.to_vec(), self.difficulty(), &entry.witness.vdf_proof)
+                .is_err()
+            {
+                self.remove_subgraph_with_reject(hash, RejectReason::InvalidVdfProof, result);
+                return;
+            }
 
             let Some(bp_hash) = self.block_parent_of(entry.witness.atoms.iter()) else {
                 drop(entry);
