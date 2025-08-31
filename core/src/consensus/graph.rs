@@ -539,6 +539,11 @@ impl<V: Validator> Graph<V> {
 
             if !entry.is_missing && u != hash {
                 result.ignored.insert(u, IgnoreReason::IgnoredParent);
+                entry.witness.atoms.iter().for_each(|p| {
+                    if let Some(mut pe) = self.entries.get_mut(p) {
+                        pe.children.remove(&u);
+                    }
+                });
             }
 
             stk.extend(entry.children);
@@ -567,6 +572,11 @@ impl<V: Validator> Graph<V> {
 
             if !entry.is_missing && u != hash {
                 result.rejected.insert(u, RejectReason::RejectedParent);
+                entry.witness.atoms.iter().for_each(|p| {
+                    if let Some(mut pe) = self.entries.get_mut(p) {
+                        pe.children.remove(&u);
+                    }
+                });
             }
 
             stk.extend(entry.children);
