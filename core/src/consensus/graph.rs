@@ -33,6 +33,8 @@ pub enum RejectReason {
     InvalidScriptSig,
     InvalidConversion,
     InvalidVdfProof,
+    NotHeaviestChain,
+    MissingInput,
 }
 
 #[derive(Clone, Copy)]
@@ -69,14 +71,13 @@ struct Entry {
     // General
     pub block_parent: Multihash,
     pub children: HashSet<Multihash>,
-    pub validated: bool,
 
     // Block only
     pub is_block: bool,
     pub trie: Trie,
     pub publishers: HashSet<PeerId>,
     pub related_token: HashMap<PeerId, HashMap<Multihash, Token>>,
-    pub unconflicted_tokens: HashMap<Multihash, Option<Token>>,
+    pub unconfirmed_tokens: HashMap<Multihash, Option<Token>>,
 
     // Pending only
     pub pending_parents: AtomicU32,
@@ -134,6 +135,7 @@ pub struct Graph<V> {
 
     vdf: WesolowskiVDF,
     difficulty: AtomicU64,
+    heaviest_weight: AtomicU64,
 
     config: Config,
 
@@ -165,6 +167,21 @@ impl Entry {
     pub fn hash(&self) -> Multihash {
         self.atom.hash()
     }
+
+    pub fn validate_script_sig<V: Validator>(&self, id: &Multihash, pk: &[u8]) -> bool {
+        self.witness
+            .script_sigs
+            .get(id)
+            .is_none_or(|sig| V::validate_script_sig(pk, sig))
+    }
+
+    pub fn validate_conversion<'a, V: Validator>(
+        &'a self,
+        inputs: impl Iterator<Item = &'a Token>,
+    ) -> bool {
+        let cmd = self.atom.cmd.as_ref().unwrap();
+        V::validate_conversion(cmd.code, inputs, cmd.consumed.iter(), &cmd.created)
+    }
 }
 
 impl<V: Validator> Graph<V> {
@@ -184,6 +201,7 @@ impl<V: Validator> Graph<V> {
             history: ParkingLock::new(VecDeque::new()),
             vdf,
             difficulty,
+            heaviest_weight: AtomicU64::new(0),
             config,
             _marker: std::marker::PhantomData,
         }
@@ -282,30 +300,55 @@ impl<V: Validator> Graph<V> {
     }
 
     fn validate(&self, hash: Multihash, result: &mut UpdateResult) {
-        let entry = self.entries.get(&hash).unwrap();
+        let (bp_hash, order, len) = {
+            let entry = self.entries.get(&hash).unwrap();
 
-        let Some(bp_hash) = self.block_parent_of(entry.witness.atoms.iter()) else {
-            drop(entry);
-            self.remove_subgraph_with_reject(hash, RejectReason::MimatchBlockParent, result);
-            return;
+            let Some(bp_hash) = self.block_parent_of(entry.witness.atoms.iter()) else {
+                drop(entry);
+                self.remove_subgraph_with_reject(hash, RejectReason::MimatchBlockParent, result);
+                return;
+            };
+
+            let order = self.topological_sort(bp_hash, hash, &entry.witness.atoms);
+            (bp_hash, order, entry.witness.atoms.len() as u32)
         };
 
-        let order = self.topological_sort(bp_hash, hash, &entry.witness.atoms);
-        drop(entry);
+        let trie = &mut self.entries.get_mut(&bp_hash).unwrap().trie;
 
-        let Some((state, publishers)) = self.try_execute_atoms(
-            &order,
-            &mut self.entries.get_mut(&bp_hash).unwrap().trie,
-            result,
-        ) else {
-            return;
+        let (state, publishers) = match self.try_execute_atoms(&order, trie) {
+            Ok(v) => v,
+            Err(r) => {
+                self.remove_subgraph_with_reject(hash, r, result);
+                return;
+            }
         };
 
-        self.update_validate_atom(hash, state, publishers);
+        {
+            let mut entry = self.entries.get_mut(&hash).unwrap();
+            entry.block_parent = bp_hash;
+            entry.height = self.entries.get(&bp_hash).unwrap().height + 1;
+        }
+
+        if len < self.config.block_threshold {
+            return;
+        }
+
+        if !self.validate_checkpoint_update(hash, &publishers) {
+            self.remove_subgraph_with_reject(hash, RejectReason::NotHeaviestChain, result);
+            return;
+        }
+
+        self.update_unconflicted_tokens(hash, state);
+        self.update_publishers(bp_hash, &publishers);
+        self.recompute_main_chain_and_checkpoint();
+
         result.accepted.insert(hash);
 
-        let e = self.entries.get(&hash).unwrap();
-        e.children.iter().for_each(|ch| {
+        let mut entry = self.entries.get_mut(&hash).unwrap();
+        entry.is_block = true;
+
+        let entry = entry.downgrade();
+        entry.children.iter().for_each(|ch| {
             let c = self.entries.get_mut(ch).unwrap();
             c.pending_parents.fetch_sub(1, Ordering::Relaxed);
             self.validate(*ch, result);
@@ -369,8 +412,7 @@ impl<V: Validator> Graph<V> {
         &self,
         atoms: &[Multihash],
         trie: &mut Trie,
-        result: &mut UpdateResult,
-    ) -> Option<(State, HashSet<PeerId>)> {
+    ) -> Result<(State, HashSet<PeerId>), RejectReason> {
         let mut state = HashMap::new();
         let mut publishers = HashSet::new();
 
@@ -382,40 +424,28 @@ impl<V: Validator> Graph<V> {
                 continue;
             };
 
-            let Some(inputs) = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
-                let input = state.remove(hash).unwrap_or_else(|| {
-                    let key = hash.to_vec();
-                    trie.resolve(std::iter::once(&key), &entry.witness.trie_proofs)
-                        .then_some(Token::from_slice(&trie.get(&key).unwrap()).unwrap())
-                })?;
+            let is_validated = self.accepted.contains(hash);
 
-                if !entry.validated
-                    && entry
-                        .witness
-                        .script_sigs
-                        .get(hash)
-                        .is_none_or(|sig| V::validate_script_sig(&input.script_pk, sig))
-                {
-                    return None;
+            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
+                let input = state
+                    .remove(hash)
+                    .unwrap_or_else(|| {
+                        let key = hash.to_vec();
+                        trie.resolve(std::iter::once(&key), &entry.witness.trie_proofs)
+                            .then_some(Token::from_slice(&trie.get(&key).unwrap()).unwrap())
+                    })
+                    .ok_or(RejectReason::MissingInput)?;
+
+                if !is_validated && !entry.validate_script_sig::<V>(hash, &input.script_pk) {
+                    return Err(RejectReason::InvalidScriptSig);
                 }
 
                 acc.insert(*hash, input);
-                Some(acc)
-            }) else {
-                self.remove_subgraph_with_reject(*hash, RejectReason::InvalidScriptSig, result);
-                return None;
-            };
+                Ok(acc)
+            })?;
 
-            if !entry.validated
-                && !V::validate_conversion(
-                    cmd.code,
-                    inputs.values(),
-                    cmd.consumed.iter(),
-                    &cmd.created,
-                )
-            {
-                self.remove_subgraph_with_reject(*hash, RejectReason::InvalidConversion, result);
-                return None;
+            if !is_validated && !entry.validate_conversion::<V>(inputs.values()) {
+                return Err(RejectReason::InvalidConversion);
             }
 
             state.extend(inputs.into_iter().map(|(k, v)| {
@@ -434,60 +464,61 @@ impl<V: Validator> Graph<V> {
             });
         }
 
-        Some((state, publishers))
+        Ok((state, publishers))
     }
 
-    fn update_validate_atom(&self, hash: Multihash, state: State, publishers: HashSet<PeerId>) {
-        let mut entry = self.entries.get_mut(&hash).unwrap();
+    fn validate_checkpoint_update(&self, hash: Multihash, publishers: &HashSet<PeerId>) -> bool {
+        let target_hash = self.target_checkpoint_of(hash);
+        let target_entry = self.entries.get(&target_hash).unwrap();
 
-        if (entry.witness.atoms.len() as u32) < self.config.block_threshold {
-            let mut bp_e = self.entries.get_mut(&entry.block_parent).unwrap();
+        let mut p = target_entry.publishers.clone();
+        p.extend(publishers.iter().cloned());
 
-            if state
-                .keys()
-                .any(|k| bp_e.unconflicted_tokens.contains_key(k))
-            {
-                bp_e.children.remove(entry.key());
-            } else {
-                bp_e.unconflicted_tokens.extend(state);
+        let len = p.len() as u64;
+        self.heaviest_weight.fetch_max(len, Ordering::Relaxed) < len
+    }
+
+    fn target_checkpoint_of(&self, hash: Multihash) -> Multihash {
+        let entry = self.entries.get(&hash).unwrap();
+        let target_height = entry.height + self.config.checkpoint_distance;
+
+        let mut cur = hash;
+        loop {
+            let e = self.entries.get(&cur).unwrap();
+            if e.height == target_height {
+                break cur;
             }
+            cur = e.block_parent;
+        }
+    }
 
+    fn update_unconflicted_tokens(&self, hash: Multihash, state: State) {
+        let (bp_hash, len) = {
+            let entry = self.entries.get(&hash).unwrap();
+            (entry.block_parent, entry.witness.atoms.len() as u32)
+        };
+
+        if len < self.config.block_threshold {
+            let mut bp = self.entries.get_mut(&bp_hash).unwrap();
+            if state.keys().any(|k| bp.unconfirmed_tokens.contains_key(k)) {
+                bp.children.remove(&hash);
+            } else {
+                bp.unconfirmed_tokens.extend(state);
+            }
             return;
         }
 
-        let (mut trie, mut related_by_peer) = {
-            let bp_e = self.entries.get(&entry.block_parent).unwrap();
-            (bp_e.trie.clone(), bp_e.related_token.clone())
+        let (mut trie, mut related) = {
+            let bp = self.entries.get(&bp_hash).unwrap();
+            (bp.trie.clone(), bp.related_token.clone())
         };
 
-        fn remove_token_id(
-            k: &Multihash,
-            trie: &mut Trie,
-            related_by_peer: &mut HashMap<PeerId, HashMap<Multihash, Token>>,
-        ) {
-            trie.remove(&k.to_vec());
-            related_by_peer.values_mut().for_each(|m| {
-                m.remove(k);
-            });
-        }
-
-        fn insert_token_for_peer(
-            peer: &PeerId,
-            k: &Multihash,
-            t: &Token,
-            trie: &mut Trie,
-            related_by_peer: &mut HashMap<PeerId, HashMap<Multihash, Token>>,
-        ) {
-            trie.insert(&k.to_vec(), t.to_vec());
-            related_by_peer
-                .entry(*peer)
-                .or_default()
-                .insert(*k, t.clone());
-        }
-
         state.into_iter().for_each(|(k, t)| {
-            let Some(token) = t.as_ref() else {
-                remove_token_id(&k, &mut trie, &mut related_by_peer);
+            let Some(t) = t else {
+                trie.remove(&k.to_vec());
+                related.values_mut().for_each(|m| {
+                    m.remove(&k);
+                });
                 return;
             };
 
@@ -495,26 +526,21 @@ impl<V: Validator> Graph<V> {
 
             match &self.config.storage_mode {
                 StorageMode::General { peer_id } => {
-                    if V::is_related(&token.script_pk, peer_id) {
-                        insert_token_for_peer(peer_id, &k, token, &mut trie, &mut related_by_peer);
+                    if V::is_related(&t.script_pk, peer_id) {
+                        related.entry(*peer_id).or_default().insert(k, t);
                     }
                 }
                 StorageMode::Archive { .. } => {
-                    let peers = V::related_peers(&token.script_pk);
-                    peers.iter().for_each(|p| {
-                        insert_token_for_peer(p, &k, token, &mut trie, &mut related_by_peer);
+                    V::related_peers(&t.script_pk).into_iter().for_each(|p| {
+                        related.entry(p).or_default().insert(k, t.clone());
                     });
                 }
             }
         });
 
-        entry.is_block = true;
+        let mut entry = self.entries.get_mut(&hash).unwrap();
         entry.trie = trie;
-        entry.related_token = related_by_peer;
-        entry.validated = true;
-
-        self.update_publishers(entry.block_parent, &publishers);
-        self.recompute_main_chain_and_checkpoint();
+        entry.related_token = related;
     }
 
     fn remove_subgraph_with_ignore(
@@ -587,7 +613,7 @@ impl<V: Validator> Graph<V> {
         let cp = *self.checkpoint.read();
 
         loop {
-            let mut e = self.entries.get_mut(&cur).expect("Entry must exist");
+            let mut e = self.entries.get_mut(&cur).unwrap();
             e.publishers.extend(publishers.iter().cloned());
 
             if cp == cur {
@@ -601,6 +627,11 @@ impl<V: Validator> Graph<V> {
     fn recompute_main_chain_and_checkpoint(&self) {
         let start = *self.checkpoint.read();
         let new_head = self.ghost_select(start);
+
+        if new_head == *self.main_head.read() {
+            return;
+        }
+
         *self.main_head.write() = new_head;
         self.maybe_advance_checkpoint(new_head, start);
     }
@@ -614,10 +645,7 @@ impl<V: Validator> Graph<V> {
             .expect("Entry must exist")
             .children
             .iter()
-            .map(|h| {
-                let c = self.entries.get(h).expect("Child entry must exist");
-                (c.publishers.len(), h)
-            })
+            .map(|h| (self.entries.get(h).unwrap().publishers.len(), h))
             .max()
             .map(|(.., h)| h)
         {
@@ -630,24 +658,15 @@ impl<V: Validator> Graph<V> {
     fn maybe_advance_checkpoint(&self, head: Multihash, prev: Multihash) {
         let prev_height = self.entries.get(&prev).unwrap().height;
         let head_height = self.entries.get(&head).unwrap().height;
-        let trigger_height = prev_height + self.config.checkpoint_distance * 2;
+
         let target_height = prev_height + self.config.checkpoint_distance;
+        let trigger_height = prev_height + self.config.checkpoint_distance * 2;
 
         if head_height != trigger_height {
             return;
         }
 
-        let target_hash = {
-            let mut cur = head;
-            loop {
-                let e = self.entries.get(&cur).unwrap();
-                if e.height == target_height {
-                    break cur;
-                }
-                cur = e.block_parent;
-            }
-        };
-
+        let target_hash = self.target_checkpoint_of(head);
         let (times, atoms) = self.walk_and_collection(head, target_hash);
         let difficulty = self.adjust_difficulty(times);
         self.clean_to_height(target_height, target_hash);
@@ -715,9 +734,8 @@ impl<V: Validator> Graph<V> {
     }
 
     fn clean_to_height(&self, target: Height, hash: Multihash) {
-        self.entries.retain(|k, e| {
-            k == &hash || (e.height > target && (!e.validated || e.atom.checkpoint == hash))
-        });
+        self.entries
+            .retain(|k, e| k == &hash || (e.height > target && e.atom.checkpoint == hash));
     }
 
     fn adjust_difficulty(&self, mut times: Vec<u64>) -> u64 {
@@ -790,7 +808,7 @@ impl<V: Validator> Graph<V> {
 
         let mut related = e.related_token.get(peer).cloned().unwrap_or_default();
 
-        e.unconflicted_tokens.iter().for_each(|(k, v)| match v {
+        e.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
             Some(t) => match self.config.storage_mode {
                 StorageMode::General { ref peer_id } => {
                     if peer_id == peer && V::is_related(&t.script_pk, peer) {
@@ -820,7 +838,7 @@ impl<V: Validator> Graph<V> {
 
         let mut by_peer = e.related_token.clone();
 
-        e.unconflicted_tokens.iter().for_each(|(k, v)| match v {
+        e.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
             Some(t) => match self.config.storage_mode {
                 StorageMode::General { ref peer_id } => {
                     if V::is_related(&t.script_pk, peer_id) {
@@ -895,7 +913,7 @@ impl<V: Validator> Graph<V> {
             buf.extend(info);
             self.entries
                 .iter()
-                .filter(|e| e.validated && e.key() != &checkpoint)
+                .filter(|e| self.accepted.contains(e.key()) && e.key() != &checkpoint)
                 .for_each(|e| {
                     buf.extend(e.atom.to_vec());
                     buf.extend(e.witness.to_vec());
@@ -951,7 +969,6 @@ impl<V: Validator> Graph<V> {
             trie,
             related_token,
             is_missing: false,
-            validated: true,
             ..Default::default()
         };
 
@@ -969,6 +986,7 @@ impl<V: Validator> Graph<V> {
             history: ParkingLock::new(VecDeque::new()),
             vdf,
             difficulty,
+            heaviest_weight: AtomicU64::new(0),
             config,
             _marker: std::marker::PhantomData,
         };
