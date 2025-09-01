@@ -577,48 +577,48 @@ impl<V: Validator> Graph<V> {
             let cur = &self.entries[idx];
             let is_validated = self.accepted.contains(&cur.hash());
 
-            if let Some(cmd) = &cur.atom.cmd {
-                let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
-                    let token = state
-                        .remove(hash)
-                        .or_else(|| {
-                            let key = hash.to_vec();
-                            trie.resolve(std::iter::once(&key), &cur.witness.trie_proofs)
-                                .then_some(Some(
-                                    Token::from_slice(&trie.get(&key).unwrap()).unwrap(),
-                                ))
-                        })
-                        .flatten()
-                        .ok_or(RejectReason::MissingInput)?;
+            let Some(cmd) = &cur.atom.cmd else {
+                continue;
+            };
 
-                    if !is_validated && !cur.validate_script_sig::<V>(hash, &token.script_pk) {
-                        return Err(RejectReason::InvalidScriptSig);
-                    }
+            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
+                let token = state
+                    .remove(hash)
+                    .or_else(|| {
+                        let key = hash.to_vec();
+                        trie.resolve(std::iter::once(&key), &cur.witness.trie_proofs)
+                            .then_some(Some(Token::from_slice(&trie.get(&key).unwrap()).unwrap()))
+                    })
+                    .flatten()
+                    .ok_or(RejectReason::MissingInput)?;
 
-                    acc.insert(*hash, token);
-
-                    Ok(acc)
-                })?;
-
-                if !is_validated && !cur.validate_conversion::<V>(inputs.values()) {
-                    return Err(RejectReason::InvalidConversion);
+                if !is_validated && !cur.validate_script_sig::<V>(hash, &token.script_pk) {
+                    return Err(RejectReason::InvalidScriptSig);
                 }
 
-                state.extend(inputs.into_iter().map(|(k, v)| {
-                    if cmd.consumed.contains(&k) {
-                        (k, None)
-                    } else {
-                        (k, Some(v))
-                    }
-                }));
+                acc.insert(*hash, token);
 
-                cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
-                    // Token Id = H(AtomHash || Index)
-                    let data = (cur.hash(), i as u32).to_vec();
-                    let hash = Hasher::digest(&data);
-                    state.insert(hash, Some(t));
-                });
+                Ok(acc)
+            })?;
+
+            if !is_validated && !cur.validate_conversion::<V>(inputs.values()) {
+                return Err(RejectReason::InvalidConversion);
             }
+
+            state.extend(inputs.into_iter().map(|(k, v)| {
+                if cmd.consumed.contains(&k) {
+                    (k, None)
+                } else {
+                    (k, Some(v))
+                }
+            }));
+
+            cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
+                // Token Id = H(AtomHash || Index)
+                let data = (cur.hash(), i as u32).to_vec();
+                let hash = Hasher::digest(&data);
+                state.insert(hash, Some(t));
+            });
 
             publishers.insert(cur.atom.peer);
         }
