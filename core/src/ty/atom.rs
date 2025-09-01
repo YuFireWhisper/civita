@@ -42,7 +42,7 @@ pub struct Witness {
     pub vdf_proof: Vec<u8>,
     pub trie_proofs: HashMap<Multihash, Vec<u8>>,
     pub script_sigs: HashMap<Multihash, Vec<u8>>,
-    pub atoms: HashSet<Multihash>,
+    pub atoms: Vec<Multihash>,
 }
 
 impl Atom {
