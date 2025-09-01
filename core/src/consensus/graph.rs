@@ -68,6 +68,7 @@ struct Entry {
     pub witness: Witness,
     pub height: Height,
     pub children: HashSet<usize>,
+    pub excluded: bool,
 
     // Block only
     pub is_block: bool,
@@ -414,6 +415,16 @@ impl<V: Validator> Graph<V> {
             if let Err(e) = self.execute_atoms_with_hash(idx, root_hash) {
                 self.remove_subgraph(idx, e, result);
                 return;
+            }
+
+            if self.entries[idx]
+                .witness
+                .atoms
+                .iter()
+                .any(|h| self.entries[self.index[h]].excluded)
+            {
+                let bp = &mut self.entries[bp_idx];
+                bp.children.remove(&idx);
             }
 
             let (cur, bp) = self.split_entries(idx, bp_idx);
