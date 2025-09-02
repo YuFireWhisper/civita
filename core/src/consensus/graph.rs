@@ -385,7 +385,7 @@ impl<V: Validator> Graph<V> {
         {
             weight += 1;
 
-            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, id| {
+            let inputs = cmd.inputs.iter().try_fold(HashMap::new(), |mut acc, id| {
                 let token = state
                     .remove(id)
                     .or_else(|| {
@@ -420,7 +420,7 @@ impl<V: Validator> Graph<V> {
 
             weight += 1;
 
-            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, id| {
+            let inputs = cmd.inputs.iter().try_fold(HashMap::new(), |mut acc, id| {
                 let token = state
                     .remove(id)
                     .or_else(|| {

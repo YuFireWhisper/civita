@@ -23,7 +23,7 @@ pub struct Header {
 #[derive(Serialize)]
 pub struct Command {
     pub code: u8,
-    pub input: HashSet<Multihash>,
+    pub inputs: HashSet<Multihash>,
     pub consumed: HashSet<Multihash>,
     pub created: Vec<Token>,
 }
