@@ -790,21 +790,39 @@ impl<V: Validator> Graph<V> {
         self.main_head
     }
 
-    pub fn get_children(&self, h: &Multihash) -> HashSet<Multihash> {
-        let entry = &self.entries[h];
+    pub fn get_children(&self, h: Multihash) -> Vec<Multihash> {
+        let entry = &self.entries[&h];
 
-        debug_assert!(!entry.is_missing);
+        let mut indeg: HashMap<_, usize> = HashMap::from_iter(
+            entry
+                .children
+                .iter()
+                .filter(|c| self.contains(c))
+                .map(|c| (*c, self.entries[c].atom.body.atoms.len())),
+        );
 
-        entry
-            .children
-            .iter()
-            .copied()
-            .filter_map(|idx| {
-                self.entries
-                    .get(&idx)
-                    .and_then(|e| (!e.is_missing).then_some(e.hash()))
-            })
-            .collect()
+        let mut result = Vec::with_capacity(indeg.len());
+        let mut stk = VecDeque::from_iter(
+            indeg
+                .iter()
+                .filter(|(_, &d)| d == 0)
+                .map(|(k, _)| *k)
+                .collect::<VecDeque<_>>(),
+        );
+
+        while let Some(u) = stk.pop_front() {
+            result.push(u);
+            self.entries[&u].children.iter().for_each(|c| {
+                if let Some(d) = indeg.get_mut(c) {
+                    *d -= 1;
+                    if *d == 0 {
+                        stk.push_back(*c);
+                    }
+                }
+            });
+        }
+
+        result
     }
 
     pub fn generate_proofs<'a>(
