@@ -26,6 +26,7 @@ pub enum RejectReason {
     ParentInAtoms,
     CheckpointMismatch,
     BlockInAtoms,
+    InvalidBodyHash,
     InvalidTokenId,
     InvalidHeight,
     InvalidScriptSig,
@@ -245,6 +246,10 @@ impl<V: Validator> Graph<V> {
 
         if self.dismissed.contains(hash) {
             return Err(RejectReason::AlreadyDismissed);
+        }
+
+        if !Hasher::validate(&atom.header.body_hash, &atom.body.to_vec()) {
+            return Err(RejectReason::InvalidBodyHash);
         }
 
         if atom.header.height < self.checkpoint_height {
