@@ -10,7 +10,7 @@ use crate::{
     consensus::validator::Validator,
     crypto::{hasher::Hasher, Multihash},
     ty::{
-        atom::{Atom, Height, Witness},
+        atom::{Atom, Height},
         token::Token,
     },
     utils::Trie,
@@ -19,32 +19,19 @@ use crate::{
 #[derive(Clone, Copy)]
 #[derive(Debug)]
 pub enum RejectReason {
-    Rejected,
-    RejectedParent,
-    EmptyParents,
+    AlreadyDismissed,
+    DismissedParent,
+    HeightBelowCheckpoint,
     SelfReference,
-    MimatchBlockParent,
+    ParentInAtoms,
+    CheckpointMismatch,
+    BlockInAtoms,
+    InvalidTokenId,
+    InvalidHeight,
     InvalidScriptSig,
     InvalidConversion,
     InvalidVdfProof,
-    NotHeaviestChain,
     MissingInput,
-}
-
-#[derive(Clone, Copy)]
-#[derive(Debug)]
-pub enum IgnoreReason {
-    Accepted,
-    Ignored,
-    IgnoredParent,
-    MimatchCheckpoint,
-}
-
-#[derive(Clone, Copy)]
-#[derive(Debug)]
-enum Reason {
-    Reject(RejectReason),
-    Ignore(IgnoreReason),
 }
 
 #[derive(Default)]
@@ -52,7 +39,6 @@ enum Reason {
 pub struct UpdateResult {
     pub accepted: HashSet<Multihash>,
     pub rejected: HashMap<Multihash, RejectReason>,
-    pub ignored: HashMap<Multihash, IgnoreReason>,
     pub missing: HashSet<Multihash>,
 }
 
@@ -61,19 +47,18 @@ pub enum StorageMode {
     Archive { retain_checkpoints: Option<u32> },
 }
 
+#[derive(Clone)]
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 struct Entry {
     pub atom: Atom,
-    pub witness: Witness,
-    pub height: Height,
-    pub children: HashSet<usize>,
     pub excluded: bool,
+    pub children: HashSet<Multihash>,
 
     // Block only
     pub is_block: bool,
     pub trie: Trie,
-    pub publishers: HashSet<PeerId>,
+    pub weight: u64,
     pub related_token: HashMap<PeerId, HashMap<Multihash, Token>>,
     pub unconfirmed_tokens: HashMap<Multihash, Option<Token>>,
 
@@ -111,26 +96,19 @@ pub struct Config {
 #[derive(Serialize)]
 pub struct CheckopointInfo {
     pub atom: Atom,
-    pub witness: Witness,
-    pub height: Height,
     pub difficulty: u64,
-    pub related_keys: HashSet<Multihash>,
     pub trie_root: Multihash,
     pub trie_guide: HashMap<Multihash, Vec<u8>>,
+    pub related_keys: HashSet<Multihash>,
 }
 
 pub struct Graph<V> {
-    index: HashMap<Multihash, usize>,
-    entries: Vec<Entry>,
-    free: Vec<usize>,
+    entries: HashMap<Multihash, Entry>,
+    dismissed: HashSet<Multihash>,
 
-    accepted: HashSet<Multihash>,
-    rejected: HashSet<Multihash>,
-    ignored: HashSet<Multihash>,
-
-    main_head: usize,
-    checkpoint: usize,
-    heaviest_weight: u64,
+    main_head: Multihash,
+    checkpoint: Multihash,
+    checkpoint_height: Height,
 
     history: VecDeque<(Vec<u8>, Vec<u8>)>,
 
@@ -142,10 +120,9 @@ pub struct Graph<V> {
 }
 
 impl Entry {
-    pub fn new(atom: Atom, witness: Witness) -> Self {
+    pub fn new(atom: Atom) -> Self {
         Self {
             atom,
-            witness,
             is_missing: false,
             ..Default::default()
         }
@@ -160,11 +137,13 @@ impl Entry {
     }
 
     pub fn hash(&self) -> Multihash {
-        self.atom.hash()
+        self.atom.hash
     }
 
     pub fn validate_script_sig<V: Validator>(&self, id: &Multihash, pk: &[u8]) -> bool {
-        self.witness
+        self.atom
+            .body
+            .witness
             .script_sigs
             .get(id)
             .is_none_or(|sig| V::validate_script_sig(pk, sig))
@@ -174,7 +153,7 @@ impl Entry {
         &'a self,
         inputs: impl Iterator<Item = &'a Token>,
     ) -> bool {
-        let cmd = self.atom.cmd.as_ref().unwrap();
+        let cmd = self.atom.body.cmd.as_ref().unwrap();
         V::validate_conversion(cmd.code, inputs, cmd.consumed.iter(), &cmd.created)
     }
 }
@@ -185,16 +164,12 @@ impl<V: Validator> Graph<V> {
         let hash = entry.hash();
 
         Self {
-            index: HashMap::from_iter([(hash, 0)]),
-            entries: vec![entry],
-            free: Vec::new(),
-            accepted: HashSet::from_iter([hash]),
-            rejected: HashSet::new(),
-            ignored: HashSet::new(),
-            main_head: 0,
-            checkpoint: 0,
+            entries: HashMap::from_iter([(hash, entry)]),
+            dismissed: HashSet::new(),
+            main_head: hash,
+            checkpoint: hash,
+            checkpoint_height: 0,
             history: VecDeque::new(),
-            heaviest_weight: 0,
             vdf: WesolowskiVDFParams(config.vdf_params).new(),
             difficulty: config.init_vdf_difficulty,
             config,
@@ -202,418 +177,293 @@ impl<V: Validator> Graph<V> {
         }
     }
 
-    pub fn upsert(&mut self, atom: Atom, witness: Witness) -> UpdateResult {
-        let hash = atom.hash();
+    pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {
         let mut result = UpdateResult::default();
+        let hash = atom.hash;
 
-        if self.rejected.contains(&hash) {
-            result.rejected.insert(hash, RejectReason::Rejected);
-            return result;
+        if self.contains(&hash) {
+            return None;
         }
 
-        if self.accepted.contains(&hash) {
-            result.ignored.insert(hash, IgnoreReason::Accepted);
-            return result;
-        }
-
-        if self.ignored.contains(&hash) {
-            result.ignored.insert(hash, IgnoreReason::Ignored);
-            return result;
-        }
-
-        let idx = self.create_entry(atom, witness);
-
-        // Atoms must have least one block parent
-        if self.entries[idx].witness.atoms.is_empty() {
-            self.remove_subgraph(idx, RejectReason::EmptyParents, &mut result);
-            return result;
-        }
-
-        if self.entries[idx].witness.atoms.contains(&hash) {
-            self.remove_subgraph(idx, RejectReason::SelfReference, &mut result);
-            return result;
-        }
-
-        if !self.link_parents(idx, &mut result) {
-            return result;
-        }
-
-        self.validate(idx, &mut result);
-
-        result
-    }
-
-    fn remove_subgraph<T: Into<Reason>>(
-        &mut self,
-        idx: usize,
-        reason: T,
-        result: &mut UpdateResult,
-    ) {
-        let reason = reason.into();
-
-        let mut stk = VecDeque::new();
-        let mut parents: HashMap<_, Vec<_>> = HashMap::new();
-
-        stk.push_back(idx);
-
-        while let Some(u) = stk.pop_front() {
-            let hash = self.entries[u].hash();
-
-            let already = match reason {
-                Reason::Reject(_) => self.rejected.insert(hash),
-                Reason::Ignore(_) => self.ignored.insert(hash),
-            };
-
-            if already {
-                continue;
+        match self.entries.get_mut(&hash) {
+            Some(e) => {
+                e.atom = atom;
+                e.is_missing = false;
             }
-
-            let mut entry = std::mem::take(&mut self.entries[u]);
-
-            parents.remove(&u);
-            self.index.remove(&hash);
-            self.free.push(u);
-
-            if !entry.is_missing && u != idx {
-                match reason {
-                    Reason::Reject(r) => {
-                        result.rejected.insert(hash, r);
-                    }
-                    Reason::Ignore(r) => {
-                        result.ignored.insert(hash, r);
-                    }
-                };
-
-                entry
-                    .witness
-                    .atoms
-                    .into_iter()
-                    .filter_map(|h| self.index.get(&h).copied())
-                    .for_each(|i| {
-                        parents.entry(i).or_default().push(idx);
-                    });
+            None => {
+                self.entries.insert(hash, Entry::new(atom));
             }
-
-            stk.extend(
-                entry
-                    .children
-                    .drain()
-                    .filter(|p| self.index.contains_key(&self.entries[*p].hash())),
-            )
-        }
-
-        parents.into_iter().for_each(|(i, c)| {
-            let e = &mut self.entries[i];
-            c.into_iter().for_each(|ch| {
-                e.children.remove(&ch);
-            });
-        });
-    }
-
-    fn create_entry(&mut self, atom: Atom, witness: Witness) -> usize {
-        let hash = atom.hash();
-
-        if let Some(&idx) = self.index.get(&hash) {
-            let entry = &mut self.entries[idx];
-            entry.atom = atom;
-            entry.witness = witness;
-            entry.is_missing = false;
-            return idx;
-        }
-
-        if let Some(idx) = self.free.pop() {
-            self.entries[idx] = Entry::new(atom, witness);
-            self.index.insert(hash, idx);
-            return idx;
-        }
-
-        let idx = self.entries.len();
-        self.entries.push(Entry::new(atom, witness));
-        self.index.insert(hash, idx);
-
-        idx
-    }
-
-    pub fn contains(&self, h: &Multihash) -> bool {
-        self.index
-            .get(h)
-            .is_some_and(|&i| !self.entries[i].is_missing)
-    }
-
-    fn link_parents(&mut self, idx: usize, result: &mut UpdateResult) -> bool {
-        let cur = unsafe {
-            let ptr = self.entries.as_mut_ptr();
-            &mut *ptr.add(idx)
         };
 
-        for p_hash in &cur.witness.atoms {
-            if self.rejected.contains(p_hash) {
-                self.remove_subgraph(idx, RejectReason::RejectedParent, result);
-                return false;
-            }
-
-            if self.ignored.contains(p_hash) {
-                self.remove_subgraph(idx, IgnoreReason::IgnoredParent, result);
-                return false;
-            }
-
-            let pidx = self.index.get(p_hash).copied().unwrap_or_else(|| {
-                let idx = self.free.pop().unwrap_or(self.entries.len());
-                self.entries.push(Entry::default());
-                self.index.insert(*p_hash, idx);
-                result.missing.insert(*p_hash);
-                idx
-            });
-
-            let parent = &mut self.entries[pidx];
-            parent.children.insert(idx);
-
-            if !parent.is_missing && parent.pending_parents == 0 {
-                cur.pending_parents -= 1;
-            }
+        if let Err(r) = self.basic_validation(&hash) {
+            self.remove_subgraph(hash, r, &mut result);
+            return Some(result);
         }
 
-        true
-    }
-
-    fn validate(&mut self, idx: usize, result: &mut UpdateResult) {
-        let cur = &self.entries[idx];
-        let hash = cur.hash();
-
-        if cur.pending_parents != 0 {
-            return;
-        }
-
-        if self.entries[idx].atom.checkpoint != self.entries[self.checkpoint].hash() {
-            self.remove_subgraph(idx, IgnoreReason::MimatchCheckpoint, result);
-            return;
-        }
-
-        if self
-            .vdf
-            .verify(&hash.to_vec(), self.difficulty, &cur.witness.vdf_proof)
-            .is_err()
-        {
-            self.remove_subgraph(idx, RejectReason::InvalidVdfProof, result);
-            return;
-        }
-
-        if !cur
-            .witness
-            .atoms
-            .iter()
-            .all(|h| self.entries[self.index[h]].witness.atoms[0] == cur.witness.atoms[0])
-        {
-            self.remove_subgraph(idx, RejectReason::MimatchBlockParent, result);
-            return;
-        }
-
-        let bp_idx = self.index[&cur.witness.atoms[0]];
-
-        if cur.witness.atoms.len() < self.config.block_threshold as usize {
-            let root_hash = self.entries[bp_idx].trie.root_hash();
-            if let Err(e) = self.execute_atoms_with_hash(idx, root_hash) {
-                self.remove_subgraph(idx, e, result);
-                return;
-            }
-
-            if self.entries[idx]
-                .witness
-                .atoms
-                .iter()
-                .any(|h| self.entries[self.index[h]].excluded)
-            {
-                let bp = &mut self.entries[bp_idx];
-                bp.children.remove(&idx);
-            }
-
-            let (cur, bp) = self.split_entries(idx, bp_idx);
-
-            if let Some(cmd) = &cur.atom.cmd {
-                if cmd
-                    .consumed
-                    .iter()
-                    .any(|id| bp.unconfirmed_tokens.contains_key(id))
-                {
-                    bp.children.remove(&idx);
-                } else {
-                    bp.unconfirmed_tokens.extend(
-                        cmd.created
-                            .iter()
-                            .cloned()
-                            .enumerate()
-                            .map(|(i, t)| {
-                                let data = (cur.hash(), i as u32).to_vec();
-                                let id = Hasher::digest(&data);
-                                (id, Some(t))
-                            })
-                            .chain(cmd.consumed.iter().copied().map(|id| (id, None))),
-                    );
+        match self.validate_parents(hash) {
+            Ok(missing) => {
+                if !missing.is_empty() {
+                    self.entries.get_mut(&hash).unwrap().pending_parents = missing.len();
+                    result.missing = missing;
+                    return Some(result);
                 }
             }
-
-            cur.height = bp.height + 1;
-            result.accepted.insert(hash);
-            return;
-        }
-
-        let mut trie = self.entries[bp_idx].trie.clone();
-        let mut related = self.entries[bp_idx].related_token.clone();
-        let publishers = match self.execute_atoms_with_trie(idx, &mut trie, &mut related) {
-            Ok(v) => v,
             Err(r) => {
-                self.remove_subgraph(idx, r, result);
-                return;
+                self.remove_subgraph(hash, r, &mut result);
+                return Some(result);
             }
-        };
-
-        if !self.validate_checkpoint_update(idx, &publishers) {
-            self.remove_subgraph(idx, RejectReason::NotHeaviestChain, result);
-            return;
         }
 
-        self.update_publishers(bp_idx, &publishers);
-        self.recompute_main_chain_and_checkpoint();
+        if let Err(r) = self.final_validation(hash) {
+            self.remove_subgraph(hash, r, &mut result);
+            return Some(result);
+        }
 
         result.accepted.insert(hash);
 
-        {
-            let cur = &mut self.entries[idx];
-            cur.is_block = true;
-            cur.trie = trie;
-            cur.related_token = related;
-        }
+        for child in self.entries[&hash].children.clone() {
+            let child_entry = self.entries.get_mut(&child).unwrap();
+            child_entry.pending_parents -= 1;
 
-        let cur = unsafe {
-            let ptr = self.entries.as_mut_ptr();
-            &mut *ptr.add(idx)
-        };
-
-        cur.children.iter().copied().for_each(|i| {
-            self.entries[i].pending_parents -= 1;
-            self.validate(i, result);
-        });
-    }
-
-    fn split_entries(&mut self, cur: usize, parent: usize) -> (&mut Entry, &mut Entry) {
-        if cur < parent {
-            let (l, r) = self.entries.split_at_mut(parent);
-            (&mut l[cur], &mut r[0])
-        } else {
-            let (l, r) = self.entries.split_at_mut(cur);
-            (&mut r[0], &mut l[parent])
-        }
-    }
-
-    fn execute_atoms_with_hash(
-        &self,
-        idx: usize,
-        root_hash: Multihash,
-    ) -> Result<(), RejectReason> {
-        let mut state = HashMap::new();
-        let atoms = &self.entries[idx].witness.atoms[1..];
-
-        for idx in atoms
-            .iter()
-            .map(|idx| self.index[idx])
-            .chain(std::iter::once(idx))
-        {
-            let cur = &self.entries[idx];
-            let is_validated = self.accepted.contains(&cur.hash());
-
-            let Some(cmd) = &cur.atom.cmd else {
-                continue;
-            };
-
-            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
-                let token = state
-                    .remove(hash)
-                    .or_else(|| {
-                        let key = hash.to_vec();
-                        Trie::verify_proof(root_hash, &key, &cur.witness.trie_proofs)
-                            .ok()?
-                            .map(|v| Token::from_slice(&v).unwrap())
-                            .into()
-                    })
-                    .flatten()
-                    .ok_or(RejectReason::MissingInput)?;
-
-                if !is_validated && !cur.validate_script_sig::<V>(hash, &token.script_pk) {
-                    return Err(RejectReason::InvalidScriptSig);
-                }
-
-                acc.insert(*hash, token);
-                Ok(acc)
-            })?;
-
-            if !is_validated && !cur.validate_conversion::<V>(inputs.values()) {
-                return Err(RejectReason::InvalidConversion);
-            }
-
-            state.extend(inputs.into_iter().map(|(k, v)| {
-                if cmd.consumed.contains(&k) {
-                    (k, None)
+            if child_entry.pending_parents == 0 {
+                if let Err(r) = self.final_validation(child) {
+                    self.remove_subgraph(child, r, &mut result);
                 } else {
-                    (k, Some(v))
+                    result.accepted.insert(child);
                 }
-            }));
+            }
+        }
 
-            cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
-                // Token Id = H(AtomHash || Index)
-                let data = (cur.hash(), i as u32).to_vec();
-                let hash = Hasher::digest(&data);
-                state.insert(hash, Some(t));
-            });
+        Some(result)
+    }
+
+    pub fn contains(&self, h: &Multihash) -> bool {
+        !self.dismissed.contains(h) && self.entries.get(h).is_some_and(|e| !e.is_missing)
+    }
+
+    fn basic_validation(&self, hash: &Multihash) -> Result<(), RejectReason> {
+        let atom = &self.entries[hash].atom;
+
+        if self.dismissed.contains(hash) {
+            return Err(RejectReason::AlreadyDismissed);
+        }
+
+        if atom.header.height < self.checkpoint_height {
+            return Err(RejectReason::HeightBelowCheckpoint);
+        }
+
+        if &atom.header.parent == hash {
+            return Err(RejectReason::SelfReference);
+        }
+
+        if atom.body.witness.atoms.contains(hash) {
+            return Err(RejectReason::SelfReference);
+        }
+
+        if atom.body.witness.atoms.contains(&atom.header.parent) {
+            return Err(RejectReason::ParentInAtoms);
         }
 
         Ok(())
     }
 
-    fn execute_atoms_with_trie(
-        &self,
-        idx: usize,
-        trie: &mut Trie,
-        related: &mut HashMap<PeerId, HashMap<Multihash, Token>>,
-    ) -> Result<HashSet<PeerId>, RejectReason> {
-        let mut state = HashMap::new();
-        let mut publishers = HashSet::new();
+    fn remove_subgraph(
+        &mut self,
+        hash: Multihash,
+        reason: RejectReason,
+        result: &mut UpdateResult,
+    ) {
+        if !self.dismissed.insert(hash) {
+            return;
+        }
 
-        let atoms = &self.entries[idx].witness.atoms[1..];
+        result.rejected.insert(hash, reason);
 
-        for idx in atoms
-            .iter()
-            .map(|idx| self.index[idx])
-            .chain(std::iter::once(idx))
-        {
-            let cur = &self.entries[idx];
-            let is_validated = self.accepted.contains(&cur.hash());
+        let Some(entry) = self.entries.remove(&hash) else {
+            return;
+        };
 
-            let Some(cmd) = &cur.atom.cmd else {
+        let mut stk = VecDeque::new();
+        stk.extend(entry.children);
+
+        while let Some(u) = stk.pop_front() {
+            if !self.dismissed.insert(u) {
+                continue;
+            }
+
+            let Some(entry) = self.entries.remove(&u) else {
                 continue;
             };
 
-            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, hash| {
+            if !entry.is_missing {
+                result.rejected.insert(u, RejectReason::DismissedParent);
+            }
+
+            entry.children.into_iter().for_each(|p| {
+                stk.push_back(p);
+            });
+        }
+    }
+
+    fn validate_parents(&mut self, hash: Multihash) -> Result<HashSet<Multihash>, RejectReason> {
+        let mut missing = HashSet::new();
+
+        let parents = {
+            let atom = &self.entries[&hash].atom;
+            let mut atoms = atom.body.witness.atoms.clone();
+            atoms.push(atom.header.parent);
+            atoms
+        };
+
+        for parent in parents {
+            if self.dismissed.contains(&parent) {
+                return Err(RejectReason::DismissedParent);
+            }
+
+            let parent = self.entries.entry(parent).or_insert_with(|| {
+                missing.insert(parent);
+                Entry::default()
+            });
+
+            parent.children.insert(hash);
+        }
+
+        Ok(missing)
+    }
+
+    fn final_validation(&mut self, hash: Multihash) -> Result<(), RejectReason> {
+        let atom = &self.entries[&hash].atom;
+
+        if atom.header.checkpoint != self.checkpoint {
+            return Err(RejectReason::CheckpointMismatch);
+        }
+
+        if atom.header.height != self.entries[&atom.header.parent].atom.header.height + 1 {
+            return Err(RejectReason::InvalidHeight);
+        }
+
+        if atom
+            .body
+            .witness
+            .atoms
+            .iter()
+            .any(|h| self.entries[h].is_block)
+        {
+            return Err(RejectReason::BlockInAtoms);
+        }
+
+        if self
+            .vdf
+            .verify(
+                &hash.to_vec(),
+                self.difficulty,
+                &atom.body.witness.vdf_proof,
+            )
+            .is_err()
+        {
+            return Err(RejectReason::InvalidVdfProof);
+        }
+
+        if !self.validate_execution(&hash)? {
+            return Ok(());
+        }
+
+        self.update_weight(hash);
+        self.recompute_main_chain_and_checkpoint();
+
+        Ok(())
+    }
+
+    fn validate_execution(&mut self, cur_hash: &Multihash) -> Result<bool, RejectReason> {
+        let mut state = HashMap::new();
+        let mut excluded = false;
+        let mut weight = 0u64;
+
+        let cur = &self.entries[cur_hash];
+        let parent_hash = cur.atom.header.parent;
+        let cur_len = cur.atom.body.witness.atoms.len();
+        let atoms = &cur.atom.body.witness.atoms;
+
+        for cmd in atoms
+            .iter()
+            .inspect(|h| excluded |= self.entries[*h].excluded)
+            .filter_map(|h| self.entries[h].atom.body.cmd.as_ref())
+        {
+            weight += 1;
+
+            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, id| {
                 let token = state
-                    .remove(hash)
+                    .remove(id)
                     .or_else(|| {
-                        let key = hash.to_vec();
-                        trie.resolve(std::iter::once(&key), &cur.witness.trie_proofs)
-                            .then_some(Some(Token::from_slice(&trie.get(&key).unwrap()).unwrap()))
+                        let trie = &self.entries[&parent_hash].trie;
+                        trie.get(&id.to_vec())
+                            .map(|v| Token::from_slice(&v).unwrap())
+                            .into()
+                    })
+                    .flatten()
+                    .ok_or(RejectReason::MissingInput)?;
+                acc.insert(*id, token);
+                Ok(acc)
+            })?;
+
+            state.extend(inputs.into_iter().map(|(k, v)| {
+                if cmd.consumed.contains(&k) {
+                    (k, None)
+                } else {
+                    (k, Some(v))
+                }
+            }));
+            state.extend(cmd.created.iter().cloned().map(|t| (t.id, Some(t))));
+        }
+
+        if cur.atom.body.cmd.is_some() {
+            let [Some(cur), Some(parent)] = self.entries.get_disjoint_mut([cur_hash, &parent_hash])
+            else {
+                unreachable!();
+            };
+
+            let cmd = cur.atom.body.cmd.as_ref().unwrap();
+
+            weight += 1;
+
+            let inputs = cmd.input.iter().try_fold(HashMap::new(), |mut acc, id| {
+                let token = state
+                    .remove(id)
+                    .or_else(|| {
+                        let key = id.to_vec();
+                        parent
+                            .trie
+                            .resolve(std::iter::once(&key), &cur.atom.body.witness.trie_proofs)
+                            .then_some(Some(
+                                Token::from_slice(&parent.trie.get(&key).unwrap()).unwrap(),
+                            ))
                     })
                     .flatten()
                     .ok_or(RejectReason::MissingInput)?;
 
-                if !is_validated && !cur.validate_script_sig::<V>(hash, &token.script_pk) {
+                if !cur.validate_script_sig::<V>(id, &token.script_pk) {
                     return Err(RejectReason::InvalidScriptSig);
                 }
 
-                acc.insert(*hash, token);
+                excluded |= parent
+                    .unconfirmed_tokens
+                    .get(id)
+                    .is_some_and(|t| t.is_none());
 
+                acc.insert(*id, token);
                 Ok(acc)
             })?;
 
-            if !is_validated && !cur.validate_conversion::<V>(inputs.values()) {
+            if !cur.validate_conversion::<V>(inputs.values()) {
                 return Err(RejectReason::InvalidConversion);
+            }
+
+            for (idx, t) in cmd.created.iter().cloned().enumerate() {
+                let data = (*cur_hash, idx as u32).to_vec();
+                if !Hasher::validate(&t.id, &data) {
+                    return Err(RejectReason::InvalidTokenId);
+                }
+                state.insert(t.id, Some(t));
             }
 
             state.extend(inputs.into_iter().map(|(k, v)| {
@@ -623,27 +473,37 @@ impl<V: Validator> Graph<V> {
                     (k, Some(v))
                 }
             }));
-
-            cmd.created.iter().cloned().enumerate().for_each(|(i, t)| {
-                // Token Id = H(AtomHash || Index)
-                let data = (cur.hash(), i as u32).to_vec();
-                let hash = Hasher::digest(&data);
-                state.insert(hash, Some(t));
-            });
-
-            publishers.insert(cur.atom.peer);
         }
 
+        if cur_len < self.config.block_threshold as usize {
+            let [Some(cur), Some(parent)] = self.entries.get_disjoint_mut([cur_hash, &parent_hash])
+            else {
+                unreachable!();
+            };
+
+            cur.excluded = excluded;
+            if excluded {
+                parent.children.remove(&cur.atom.hash);
+            }
+
+            return Ok(false);
+        }
+
+        let mut related = self.entries[&parent_hash].related_token.clone();
+        let mut trie = self.entries[&parent_hash].trie.clone();
+
         state.into_iter().for_each(|(k, t)| {
+            let k_vec = k.to_vec();
+
             let Some(t) = t else {
-                trie.remove(&k.to_vec());
+                trie.remove(&k_vec);
                 related.values_mut().for_each(|m| {
                     m.remove(&k);
                 });
                 return;
             };
 
-            trie.insert(&k.to_vec(), t.to_vec());
+            trie.insert(&k_vec, t.to_vec());
 
             match &self.config.storage_mode {
                 StorageMode::General { peer_id } => {
@@ -659,45 +519,25 @@ impl<V: Validator> Graph<V> {
             }
         });
 
-        Ok(publishers)
+        let cur = self.entries.get_mut(cur_hash).unwrap();
+        cur.trie = trie;
+        cur.related_token = related;
+        cur.weight = weight;
+        cur.is_block = true;
+
+        Ok(true)
     }
 
-    fn validate_checkpoint_update(&mut self, idx: usize, publishers: &HashSet<PeerId>) -> bool {
-        let target_idx = self.target_checkpoint_of(idx);
+    fn update_weight(&mut self, start: Multihash) {
+        let (weight, mut cur) = {
+            let e = self.entries.get(&start).unwrap();
+            (e.weight, e.atom.header.parent)
+        };
 
-        let publishers = self.entries[target_idx]
-            .publishers
-            .iter()
-            .chain(publishers.iter())
-            .cloned()
-            .collect::<HashSet<_>>();
-
-        let len = publishers.len() as u64;
-        self.heaviest_weight = self.heaviest_weight.max(len);
-        len > self.heaviest_weight
-    }
-
-    fn target_checkpoint_of(&self, mut cur: usize) -> usize {
-        let target_height = self.entries[cur].height + self.config.checkpoint_distance;
-        loop {
-            let e = &self.entries[cur];
-            if e.height == target_height {
-                break cur;
-            }
-            cur = self.index[&e.witness.atoms[0]];
-        }
-    }
-
-    fn update_publishers(&mut self, mut cur: usize, publishers: &HashSet<PeerId>) {
-        loop {
-            let e = &mut self.entries[cur];
-            e.publishers.extend(publishers.iter().cloned());
-
-            if cur == self.checkpoint {
-                break;
-            }
-
-            cur = self.index[&e.witness.atoms[0]];
+        while cur != self.checkpoint {
+            let entry = self.entries.get_mut(&cur).unwrap();
+            entry.weight += weight;
+            cur = entry.atom.header.parent;
         }
     }
 
@@ -713,12 +553,15 @@ impl<V: Validator> Graph<V> {
         self.maybe_advance_checkpoint();
     }
 
-    fn ghost_select(&self, mut cur: usize) -> usize {
-        while let Some(next) = self.entries[cur]
+    fn ghost_select(&self, mut cur: Multihash) -> Multihash {
+        while let Some(next) = self
+            .entries
+            .get(&cur)
+            .unwrap()
             .children
             .iter()
             .copied()
-            .map(|c| (self.entries[c].publishers.len(), c))
+            .map(|c| (self.entries.get(&c).unwrap().weight, c))
             .max()
             .map(|(.., c)| c)
         {
@@ -729,8 +572,8 @@ impl<V: Validator> Graph<V> {
     }
 
     fn maybe_advance_checkpoint(&mut self) {
-        let prev_height = self.entries[self.checkpoint].height;
-        let head_height = self.entries[self.main_head].height;
+        let prev_height = self.entries[&self.checkpoint].atom.header.height;
+        let head_height = self.entries[&self.main_head].atom.header.height;
         let target_height = prev_height + self.config.checkpoint_distance;
         let trigger_height = prev_height + self.config.checkpoint_distance * 2;
 
@@ -738,10 +581,23 @@ impl<V: Validator> Graph<V> {
             return;
         }
 
-        let target_idx = self.target_checkpoint_of(self.main_head);
-        let (times, atoms) = self.walk_and_collection(self.main_head, target_idx);
+        let target_hash = {
+            let mut cur = self.main_head;
+            loop {
+                let e = &self.entries[&cur];
+                if e.atom.header.height == target_height {
+                    break e.atom.hash;
+                }
+                cur = e.atom.header.parent;
+            }
+        };
+
+        let (times, mut atoms) = self.walk_and_collection(self.main_head, target_hash);
         let difficulty = self.adjust_difficulty(times);
-        self.clean_to_height(target_height, target_idx);
+        self.clean_to_height(
+            atoms.last().unwrap().children.iter().copied().collect(),
+            target_hash,
+        );
 
         {
             let len = match self.config.storage_mode {
@@ -758,65 +614,69 @@ impl<V: Validator> Graph<V> {
             }
         }
 
-        let info = self.generate_checkpoint_info(target_idx).to_vec();
+        let info = self.generate_checkpoint_info(atoms.pop().unwrap());
         let buf = atoms.into_iter().fold(Vec::new(), |mut acc, e| {
             acc.extend(e.atom.to_vec());
-            acc.extend(e.witness.to_vec());
             acc
         });
 
-        self.checkpoint = target_idx;
+        self.checkpoint = target_hash;
         self.difficulty = difficulty;
         self.history.push_back((info.to_vec(), buf));
     }
 
-    fn walk_and_collection(&mut self, start: usize, end: usize) -> (Vec<u64>, Vec<Entry>) {
+    fn walk_and_collection(&mut self, start: Multihash, end: Multihash) -> (Vec<u64>, Vec<Entry>) {
         let mut atoms = Vec::new();
         let mut times = Vec::new();
         let mut cur = start;
         let mut next_time: Option<u64> = None;
 
         loop {
-            let e = std::mem::take(&mut self.entries[cur]);
-            self.index.remove(&e.hash());
-            self.free.push(cur);
+            let entry = self.entries.remove(&cur).unwrap();
 
             if let Some(dt) = next_time {
-                let dt = dt.saturating_sub(e.atom.timestamp);
+                let dt = dt.saturating_sub(entry.atom.header.timestamp);
                 if dt > 0 {
                     times.push(dt);
                 }
             }
 
-            next_time = Some(e.atom.timestamp);
+            next_time = Some(entry.atom.header.timestamp);
 
             if cur == end {
+                atoms.push(entry);
                 break;
             }
 
-            cur = self.index[&e.witness.atoms[0]];
-            atoms.extend(e.witness.atoms.iter().copied().map(|h| {
-                let e = std::mem::take(&mut self.entries[self.index[&h]]);
-                self.index.remove(&e.hash());
-                self.free.push(self.index[&h]);
-                e
-            }));
-            atoms.push(e);
+            cur = entry.atom.header.parent;
+            atoms.extend(
+                entry
+                    .atom
+                    .body
+                    .witness
+                    .atoms
+                    .iter()
+                    .copied()
+                    .map(|h| self.entries.remove(&h).unwrap()),
+            );
+            atoms.push(entry);
         }
 
         (times, atoms)
     }
 
-    fn clean_to_height(&mut self, target: Height, idx: usize) {
-        let hash = self.entries[idx].hash();
-        self.entries.iter_mut().for_each(|e| {
-            let e_hash = e.hash();
-            if e.height <= target && e_hash != hash {
-                std::mem::take(e);
-                self.index.remove(&e_hash);
-                self.free.push(self.index[&e_hash]);
+    fn clean_to_height(&mut self, mut stk: VecDeque<Multihash>, end: Multihash) {
+        while let Some(cur) = stk.pop_front() {
+            if cur == end {
+                continue;
             }
-        });
+
+            let Some(entry) = self.entries.remove(&cur) else {
+                continue;
+            };
+
+            stk.extend(entry.children.into_iter());
+        }
     }
 
     fn adjust_difficulty(&self, mut times: Vec<u64>) -> u64 {
@@ -845,26 +705,23 @@ impl<V: Validator> Graph<V> {
         ((self.difficulty as f32 * ratio) as u64).max(1)
     }
 
-    fn generate_checkpoint_info(&self, idx: usize) -> CheckopointInfo {
-        let e = &self.entries[idx];
-        let related_keys = e
+    fn generate_checkpoint_info(&self, entry: Entry) -> CheckopointInfo {
+        let related_keys = entry
             .related_token
             .values()
             .flat_map(|m| m.keys())
             .cloned()
             .collect::<HashSet<_>>();
-        let guide = e
+        let guide = entry
             .trie
             .generate_guide(related_keys.iter().map(|k| k.to_vec()))
             .expect("Guide must be generated");
 
         CheckopointInfo {
-            atom: e.atom.clone(),
-            witness: e.witness.clone(),
-            height: e.height,
+            atom: entry.atom,
             difficulty: self.difficulty(),
             related_keys,
-            trie_root: e.trie.root_hash(),
+            trie_root: entry.trie.root_hash(),
             trie_guide: guide,
         }
     }
@@ -873,20 +730,18 @@ impl<V: Validator> Graph<V> {
         self.difficulty
     }
 
-    pub fn get(&self, h: &Multihash) -> Option<(Atom, Witness)> {
-        self.index.get(h).and_then(|&i| {
-            let e = &self.entries[i];
-            (!e.is_missing).then(|| (e.atom.clone(), e.witness.clone()))
-        })
+    pub fn get(&self, h: &Multihash) -> Option<&Atom> {
+        self.entries
+            .get(h)
+            .and_then(|e| (!e.is_missing).then_some(&e.atom))
     }
 
     pub fn tokens_for(&self, peer: &PeerId) -> HashMap<Multihash, Token> {
-        let h = self.main_head;
-        let e = &self.entries[h];
+        let entry = &self.entries[&self.main_head];
 
-        let mut related = e.related_token.get(peer).cloned().unwrap_or_default();
+        let mut related = entry.related_token.get(peer).cloned().unwrap_or_default();
 
-        e.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
+        entry.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
             Some(t) => match self.config.storage_mode {
                 StorageMode::General { ref peer_id } => {
                     if peer_id == peer && V::is_related(&t.script_pk, peer) {
@@ -911,12 +766,11 @@ impl<V: Validator> Graph<V> {
     }
 
     pub fn tokens_all(&self) -> HashMap<PeerId, HashMap<Multihash, Token>> {
-        let h = self.main_head;
-        let e = &self.entries[h];
+        let entry = &self.entries[&self.main_head];
 
-        let mut by_peer = e.related_token.clone();
+        let mut by_peer = entry.related_token.clone();
 
-        e.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
+        entry.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
             Some(t) => match self.config.storage_mode {
                 StorageMode::General { ref peer_id } => {
                     if V::is_related(&t.script_pk, peer_id) {
@@ -940,20 +794,22 @@ impl<V: Validator> Graph<V> {
     }
 
     pub fn head(&self) -> Multihash {
-        self.entries[self.main_head].hash()
+        self.main_head
     }
 
     pub fn get_children(&self, h: &Multihash) -> HashSet<Multihash> {
-        let e = &self.entries[self.index[h]];
+        let entry = &self.entries[h];
 
-        debug_assert!(e.is_block);
+        debug_assert!(!entry.is_missing);
 
-        e.children
+        entry
+            .children
             .iter()
             .copied()
             .filter_map(|idx| {
-                let e = &self.entries[idx];
-                (e.is_block && !e.is_missing).then_some(e.hash())
+                self.entries
+                    .get(&idx)
+                    .and_then(|e| (!e.is_missing).then_some(e.hash()))
             })
             .collect()
     }
@@ -963,14 +819,15 @@ impl<V: Validator> Graph<V> {
         token_ids: impl Iterator<Item = &'a Multihash>,
         h: &Multihash,
     ) -> HashMap<Multihash, Vec<u8>> {
-        let e = &self.entries[self.index[h]];
-        e.trie
+        let entry = &self.entries[h];
+        entry
+            .trie
             .generate_guide(token_ids.map(|id| id.to_vec()))
             .expect("Proofs must be generated")
     }
 
     pub fn checkpoint(&self) -> Multihash {
-        self.entries[self.checkpoint].hash()
+        self.checkpoint
     }
 
     pub fn export(&self) -> Vec<u8> {
@@ -984,19 +841,13 @@ impl<V: Validator> Graph<V> {
                 buf.extend(atoms);
             });
         } else {
-            let info = self.generate_checkpoint_info(self.checkpoint).to_vec();
+            let checkpoint = self.entries[&self.checkpoint].clone();
+            let info = self.generate_checkpoint_info(checkpoint).to_vec();
             buf.extend(info);
-            let checkpoint_hash = self.entries[self.checkpoint].hash();
             self.entries
                 .iter()
-                .filter(|e| {
-                    let hash = e.hash();
-                    self.accepted.contains(&hash) && hash != checkpoint_hash
-                })
-                .for_each(|e| {
-                    buf.extend(e.atom.to_vec());
-                    buf.extend(e.witness.to_vec());
-                });
+                .filter(|(k, v)| k != &&self.checkpoint && !v.is_missing)
+                .for_each(|(_, v)| buf.extend(v.atom.to_vec()));
         }
 
         buf
@@ -1037,12 +888,10 @@ impl<V: Validator> Graph<V> {
             m
         };
 
-        let hash = info.atom.hash();
+        let hash = info.atom.hash;
 
         let checkpoint = Entry {
             atom: info.atom,
-            witness: info.witness,
-            height: info.height,
             is_block: true,
             trie,
             related_token,
@@ -1050,50 +899,28 @@ impl<V: Validator> Graph<V> {
             ..Default::default()
         };
 
-        let index = HashMap::from_iter([(hash, 0)]);
-        let entries = vec![checkpoint];
-        let vdf = WesolowskiVDFParams(config.vdf_params).new();
-
-        let mut engine = Self {
-            index,
-            entries,
-            free: Vec::new(),
-            accepted: HashSet::from_iter([hash]),
-            rejected: HashSet::new(),
-            ignored: HashSet::new(),
-            main_head: 0,
-            checkpoint: 0,
+        let mut graph = Self {
+            checkpoint_height: checkpoint.atom.header.height,
+            entries: HashMap::from_iter([(hash, checkpoint)]),
+            dismissed: HashSet::new(),
+            main_head: hash,
+            checkpoint: hash,
             history: VecDeque::new(),
-            vdf,
+            vdf: WesolowskiVDFParams(config.vdf_params).new(),
             difficulty: info.difficulty,
-            heaviest_weight: 0,
             config,
             _marker: std::marker::PhantomData,
         };
 
         while !data.is_empty() {
             let atom = Atom::from_reader(&mut data)?;
-            let witness = Witness::from_reader(&mut data)?;
-
-            if !engine.upsert(atom, witness).rejected.is_empty() {
+            if !graph.upsert(atom).is_some_and(|r| r.rejected.is_empty()) {
                 return Err(civita_serialize::Error(
                     "Imported data contains invalid atom".into(),
                 ));
             }
         }
 
-        Ok(engine)
-    }
-}
-
-impl From<RejectReason> for Reason {
-    fn from(r: RejectReason) -> Self {
-        Reason::Reject(r)
-    }
-}
-
-impl From<IgnoreReason> for Reason {
-    fn from(r: IgnoreReason) -> Self {
-        Reason::Ignore(r)
+        Ok(graph)
     }
 }
