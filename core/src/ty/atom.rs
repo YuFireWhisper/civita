@@ -8,6 +8,7 @@ pub type Height = u32;
 pub type Timestamp = u64;
 
 #[derive(Clone)]
+#[derive(Default)]
 #[derive(Serialize)]
 pub struct Header {
     pub parent: Multihash,
@@ -37,6 +38,7 @@ pub struct Witness {
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 #[derive(Serialize)]
 pub struct Body {
     pub cmd: Option<Command>,
@@ -44,6 +46,7 @@ pub struct Body {
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 #[derive(Serialize)]
 pub struct Atom {
     pub hash: Multihash,
