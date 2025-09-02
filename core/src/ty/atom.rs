@@ -14,6 +14,7 @@ pub struct Header {
     pub parent: Multihash,
     pub checkpoint: Multihash,
     pub height: Height,
+    pub nonce: Vec<u8>,
     pub timestamp: Timestamp,
     pub body_hash: Multihash,
 }
@@ -31,10 +32,8 @@ pub struct Command {
 #[derive(Default)]
 #[derive(Serialize)]
 pub struct Witness {
-    pub vdf_proof: Vec<u8>,
     pub trie_proofs: HashMap<Multihash, Vec<u8>>,
     pub script_sigs: HashMap<Multihash, Vec<u8>>,
-    pub atoms: Vec<Multihash>,
 }
 
 #[derive(Clone)]
@@ -42,7 +41,7 @@ pub struct Witness {
 #[derive(Serialize)]
 pub struct Body {
     pub cmd: Option<Command>,
-    pub witness: Witness,
+    pub atoms: Vec<Multihash>,
 }
 
 #[derive(Clone)]
@@ -52,4 +51,5 @@ pub struct Atom {
     pub hash: Multihash,
     pub header: Header,
     pub body: Body,
+    pub witness: Witness,
 }
