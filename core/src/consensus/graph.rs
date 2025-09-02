@@ -30,7 +30,7 @@ pub enum RejectReason {
     InvalidHeight,
     InvalidScriptSig,
     InvalidConversion,
-    InvalidVdfProof,
+    InvalidNonce,
     MissingInput,
 }
 
@@ -142,7 +142,6 @@ impl Entry {
 
     pub fn validate_script_sig<V: Validator>(&self, id: &Multihash, pk: &[u8]) -> bool {
         self.atom
-            .body
             .witness
             .script_sigs
             .get(id)
@@ -256,11 +255,11 @@ impl<V: Validator> Graph<V> {
             return Err(RejectReason::SelfReference);
         }
 
-        if atom.body.witness.atoms.contains(hash) {
+        if atom.body.atoms.contains(hash) {
             return Err(RejectReason::SelfReference);
         }
 
-        if atom.body.witness.atoms.contains(&atom.header.parent) {
+        if atom.body.atoms.contains(&atom.header.parent) {
             return Err(RejectReason::ParentInAtoms);
         }
 
@@ -310,7 +309,7 @@ impl<V: Validator> Graph<V> {
 
         let parents = {
             let atom = &self.entries[&hash].atom;
-            let mut atoms = atom.body.witness.atoms.clone();
+            let mut atoms = atom.body.atoms.clone();
             atoms.push(atom.header.parent);
             atoms
         };
@@ -342,26 +341,16 @@ impl<V: Validator> Graph<V> {
             return Err(RejectReason::InvalidHeight);
         }
 
-        if atom
-            .body
-            .witness
-            .atoms
-            .iter()
-            .any(|h| self.entries[h].is_block)
-        {
+        if atom.body.atoms.iter().any(|h| self.entries[h].is_block) {
             return Err(RejectReason::BlockInAtoms);
         }
 
         if self
             .vdf
-            .verify(
-                &hash.to_vec(),
-                self.difficulty,
-                &atom.body.witness.vdf_proof,
-            )
+            .verify(&hash.to_vec(), self.difficulty, &atom.header.nonce)
             .is_err()
         {
-            return Err(RejectReason::InvalidVdfProof);
+            return Err(RejectReason::InvalidNonce);
         }
 
         if !self.validate_execution(&hash)? {
@@ -381,8 +370,8 @@ impl<V: Validator> Graph<V> {
 
         let cur = &self.entries[cur_hash];
         let parent_hash = cur.atom.header.parent;
-        let cur_len = cur.atom.body.witness.atoms.len();
-        let atoms = &cur.atom.body.witness.atoms;
+        let cur_len = cur.atom.body.atoms.len();
+        let atoms = &cur.atom.body.atoms;
 
         for cmd in atoms
             .iter()
@@ -433,7 +422,7 @@ impl<V: Validator> Graph<V> {
                         let key = id.to_vec();
                         parent
                             .trie
-                            .resolve(std::iter::once(&key), &cur.atom.body.witness.trie_proofs)
+                            .resolve(std::iter::once(&key), &cur.atom.witness.trie_proofs)
                             .then_some(Some(
                                 Token::from_slice(&parent.trie.get(&key).unwrap()).unwrap(),
                             ))
@@ -653,7 +642,6 @@ impl<V: Validator> Graph<V> {
                 entry
                     .atom
                     .body
-                    .witness
                     .atoms
                     .iter()
                     .copied()
