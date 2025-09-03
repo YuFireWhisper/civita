@@ -1,9 +1,14 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use civita_serialize::Serialize;
+use civita_serialize_derive::Serialize;
 use dashmap::DashMap;
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
+    request_response::ResponseChannel,
     PeerId,
 };
 use tokio::sync::{
@@ -13,7 +18,7 @@ use tokio::sync::{
 
 use crate::{
     consensus::{
-        graph::{CreationError, Graph},
+        graph::{self, CreationError, Graph, StorageMode},
         validator::Validator,
     },
     crypto::{hasher::Hasher, Multihash},
@@ -32,12 +37,28 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error(transparent)]
     Gossipsub(#[from] gossipsub::Error),
+
+    #[error("Bootstrap peers is empty")]
+    NoBootstrapPeers,
+
+    #[error("Bootstrap timeout")]
+    BootstrapTimeout,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Serialize)]
+enum Request {
+    Atoms(HashSet<Multihash>),
+    Sync(Option<PeerId>),
+}
+
 pub struct Config {
     pub gossip_topic: u8,
     pub request_response_topic: u8,
+    pub graph_config: graph::Config,
+
+    pub bootstrap_peers: Vec<PeerId>,
+    pub bootstrap_timeout: tokio::time::Duration,
+    pub bootstrap_topic: u8,
 }
 
 pub struct Engine<V> {
@@ -55,13 +76,10 @@ pub struct Engine<V> {
 }
 
 impl<V: Validator> Engine<V> {
-    pub async fn new(
-        transport: Arc<Transport>,
-        graph: Graph<V>,
-        config: Config,
-    ) -> Result<Arc<Self>> {
+    pub async fn new(transport: Arc<Transport>, config: Config) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
+        let graph = Self::bootstrap(&request_response, &config).await?;
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
@@ -82,6 +100,52 @@ impl<V: Validator> Engine<V> {
         });
 
         Ok(engine)
+    }
+
+    async fn bootstrap(req_resp: &RequestResponse, config: &Config) -> Result<Graph<V>> {
+        if config.bootstrap_peers.is_empty() {
+            return Err(Error::NoBootstrapPeers);
+        }
+
+        let target = if let StorageMode::General { peer_id } = &config.graph_config.storage_mode {
+            Some(*peer_id)
+        } else {
+            None
+        };
+
+        let msg = Request::Sync(target).to_vec();
+
+        let mut rx = req_resp.subscribe(config.bootstrap_topic);
+
+        for &peer in &config.bootstrap_peers {
+            req_resp
+                .send_request(peer, msg.clone(), config.bootstrap_topic)
+                .await;
+        }
+
+        let graph = tokio::time::timeout(config.bootstrap_timeout, async {
+            while let Some(msg) = rx.recv().await {
+                let Message::Response { response, peer } = &msg else {
+                    continue;
+                };
+
+                if !config.bootstrap_peers.contains(peer) {
+                    continue;
+                }
+
+                if let Ok(graph) = Graph::import(response, config.graph_config.clone()) {
+                    return Ok(graph);
+                }
+            }
+
+            panic!("Channel closed before receiving response");
+        })
+        .await
+        .map_err(|_| Error::BootstrapTimeout)?;
+
+        req_resp.unsubscribe(config.bootstrap_topic);
+
+        graph
     }
 
     pub async fn propose(
@@ -211,30 +275,14 @@ impl<V: Validator> Engine<V> {
                 request,
                 channel,
             } => {
-                let hashes = Vec::from_slice(request.as_slice()).unwrap_or_default();
-                if hashes.is_empty() {
+                let Ok(req) = Request::from_slice(request.as_slice()) else {
                     self.disconnect_peer(peer).await;
                     return;
-                }
-
-                let atoms = {
-                    let graph = self.graph.read().await;
-                    let Some(atoms) = hashes.iter().try_fold(Vec::new(), |mut acc, h| {
-                        acc.push(graph.get(h)?.to_vec());
-                        Some(acc)
-                    }) else {
-                        self.disconnect_peer(peer).await;
-                        return;
-                    };
-                    atoms
                 };
 
-                if let Err(e) = self
-                    .request_response
-                    .send_response(channel, atoms.to_vec(), self.req_resp_topic)
-                    .await
-                {
-                    log::error!("Failed to send response: {e}");
+                match req {
+                    Request::Atoms(hashes) => self.handle_atom_request(peer, hashes, channel).await,
+                    Request::Sync(target) => self.handle_sync_request(peer, target, channel).await,
                 }
             }
             Message::Response { peer, response } => {
@@ -259,6 +307,58 @@ impl<V: Validator> Engine<V> {
                     self.on_recv_atom(atom).await;
                 }
             }
+        }
+    }
+
+    async fn handle_atom_request(
+        &self,
+        peer: PeerId,
+        hashes: HashSet<Multihash>,
+        channel: ResponseChannel<Vec<u8>>,
+    ) {
+        if hashes.is_empty() {
+            self.disconnect_peer(peer).await;
+            return;
+        }
+
+        let atoms = {
+            let graph = self.graph.read().await;
+            let Some(atoms) = hashes.iter().try_fold(Vec::new(), |mut acc, h| {
+                acc.push(graph.get(h)?.to_vec());
+                Some(acc)
+            }) else {
+                self.disconnect_peer(peer).await;
+                return;
+            };
+            atoms
+        };
+
+        if let Err(e) = self
+            .request_response
+            .send_response(channel, atoms.to_vec(), self.req_resp_topic)
+            .await
+        {
+            log::error!("Failed to send response: {e}");
+        }
+    }
+
+    async fn handle_sync_request(
+        &self,
+        peer: PeerId,
+        target: Option<PeerId>,
+        channel: ResponseChannel<Vec<u8>>,
+    ) {
+        let Some(data) = self.graph.read().await.export(target) else {
+            self.disconnect_peer(peer).await;
+            return;
+        };
+
+        if let Err(e) = self
+            .request_response
+            .send_response(channel, data.to_vec(), self.req_resp_topic)
+            .await
+        {
+            log::error!("Failed to send response: {e}");
         }
     }
 

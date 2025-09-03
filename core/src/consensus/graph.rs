@@ -52,6 +52,7 @@ pub struct UpdateResult {
     pub missing: HashSet<Multihash>,
 }
 
+#[derive(Clone, Copy)]
 pub enum StorageMode {
     General { peer_id: PeerId },
     Archive { retain_checkpoints: u32 },
@@ -78,6 +79,7 @@ struct Entry {
     pub is_missing: bool,
 }
 
+#[derive(Clone)]
 #[derive(Derivative)]
 #[derivative(Default)]
 pub struct Config {
