@@ -617,7 +617,7 @@ impl<V: Validator> Graph<V> {
             }
         }
 
-        let info = self.generate_checkpoint_info(&atoms.pop().unwrap());
+        let info = self.generate_checkpoint_info(&atoms.pop().unwrap(), None);
         let buf = atoms.into_iter().fold(Vec::new(), |mut acc, e| {
             acc.extend(e.atom.to_vec());
             acc
@@ -707,13 +707,22 @@ impl<V: Validator> Graph<V> {
         ((self.difficulty as f32 * ratio) as u64).max(1)
     }
 
-    fn generate_checkpoint_info(&self, entry: &Entry) -> CheckopointInfo {
-        let related_keys = entry
-            .related_token
-            .values()
-            .flat_map(|m| m.keys())
-            .cloned()
-            .collect::<HashSet<_>>();
+    fn generate_checkpoint_info(&self, entry: &Entry, peer_id: Option<PeerId>) -> CheckopointInfo {
+        let related_keys = if let Some(peer_id) = peer_id {
+            entry
+                .related_token
+                .get(&peer_id)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            entry
+                .related_token
+                .values()
+                .flat_map(|m| m.keys())
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
+
         let guide = entry
             .trie
             .generate_guide(related_keys.iter().map(|k| k.to_vec()))
@@ -815,28 +824,32 @@ impl<V: Validator> Graph<V> {
         self.checkpoint
     }
 
-    pub fn export(&self) -> Vec<u8> {
+    pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
+        if let StorageMode::General { peer_id: p } = self.config.storage_mode {
+            if peer_id.is_none_or(|id| id != p) {
+                return None;
+            }
+        };
+
         let mut buf = Vec::new();
 
-        let history = &self.history;
-
-        if !history.is_empty() {
-            buf.extend_from_slice(&history[0].0);
-            history.iter().for_each(|(_, atoms)| {
+        if !self.history.is_empty() && peer_id.is_none() {
+            buf.extend_from_slice(&self.history[0].0);
+            self.history.iter().for_each(|(_, atoms)| {
                 buf.extend(atoms);
             });
-        } else {
-            let checkpoint = self.entries[&self.checkpoint].clone();
-            let info = self.generate_checkpoint_info(&checkpoint).to_vec();
-            buf.extend(info);
         }
+
+        let checkpoint = &self.entries[&self.checkpoint];
+        let info = self.generate_checkpoint_info(checkpoint, peer_id).to_vec();
+        buf.extend(info);
 
         self.entries
             .iter()
             .filter(|(k, v)| k != &&self.checkpoint && !v.is_missing)
             .for_each(|(_, v)| buf.extend(v.atom.to_vec()));
 
-        buf
+        Some(buf)
     }
 
     pub fn import(mut data: &[u8], config: Config) -> Result<Self, civita_serialize::Error> {
