@@ -28,7 +28,10 @@ use crate::{
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    ty::atom::{Atom, Command},
+    ty::{
+        atom::{Atom, Command},
+        token::Token,
+    },
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -446,5 +449,12 @@ impl<V: Validator> Engine<V> {
         }
 
         true
+    }
+
+    pub async fn tokens(&self) -> HashMap<Multihash, Token> {
+        self.graph
+            .read()
+            .await
+            .tokens_for(&self.transport.local_peer_id())
     }
 }
