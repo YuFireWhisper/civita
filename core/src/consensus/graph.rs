@@ -146,10 +146,6 @@ impl Entry {
         }
     }
 
-    pub fn hash(&self) -> Multihash {
-        self.atom.hash
-    }
-
     pub fn validate_script_sig<V: Validator>(&self, id: &Multihash, pk: &[u8]) -> bool {
         self.atom
             .witness
@@ -170,7 +166,7 @@ impl Entry {
 impl<V: Validator> Graph<V> {
     pub fn empty(config: Config) -> Self {
         let entry = Entry::genesis();
-        let hash = entry.hash();
+        let hash = entry.atom.hash;
 
         Self {
             entries: HashMap::from_iter([(hash, entry)]),
@@ -701,10 +697,6 @@ impl<V: Validator> Graph<V> {
         ((self.difficulty as f32 * ratio) as u64).max(1)
     }
 
-    pub fn difficulty(&self) -> u64 {
-        self.difficulty
-    }
-
     pub fn get(&self, h: &Multihash) -> Option<&Atom> {
         self.entries
             .get(h)
@@ -766,26 +758,6 @@ impl<V: Validator> Graph<V> {
         });
 
         by_peer
-    }
-
-    pub fn head(&self) -> Multihash {
-        self.main_head
-    }
-
-    pub fn generate_proofs<'a>(
-        &self,
-        token_ids: impl Iterator<Item = &'a Multihash>,
-        h: &Multihash,
-    ) -> HashMap<Multihash, Vec<u8>> {
-        let entry = &self.entries[h];
-        entry
-            .trie
-            .generate_guide(token_ids.map(|id| id.to_vec()))
-            .expect("Proofs must be generated")
-    }
-
-    pub fn checkpoint(&self) -> Multihash {
-        self.checkpoint
     }
 
     pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
