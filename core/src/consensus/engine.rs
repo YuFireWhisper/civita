@@ -6,18 +6,23 @@ use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
     PeerId,
 };
-use tokio::sync::mpsc::{Receiver, Sender};
-use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    RwLock,
+};
 
 use crate::{
-    consensus::{graph::Graph, validator::Validator},
-    crypto::Multihash,
+    consensus::{
+        graph::{CreationError, Graph},
+        validator::Validator,
+    },
+    crypto::{hasher::Hasher, Multihash},
     network::{
         gossipsub,
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    ty::atom::{Atom, Command, Witness},
+    ty::atom::{Atom, Command},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -33,8 +38,6 @@ pub enum Error {
 pub struct Config {
     pub gossip_topic: u8,
     pub request_response_topic: u8,
-    pub vdf_params: u16,
-    pub vdf_difficulty: u64,
 }
 
 pub struct Engine<V> {
@@ -45,13 +48,10 @@ pub struct Engine<V> {
     gossip_topic: u8,
     req_resp_topic: u8,
 
-    graph: Graph<V>,
-    pending_tasks: DashMap<Multihash, (Atom, HashMap<Multihash, Vec<u8>>)>,
-    vdf_result_tx: Sender<(Multihash, Vec<u8>)>,
+    graph: RwLock<Graph<V>>,
 
-    source_info: DashMap<Multihash, Vec<(MessageId, PeerId)>>,
-
-    vdf: WesolowskiVDF,
+    pending_atoms: DashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
+    atom_result_tx: Sender<Atom>,
 }
 
 impl<V: Validator> Engine<V> {
@@ -62,32 +62,23 @@ impl<V: Validator> Engine<V> {
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
-        let vdf = WesolowskiVDFParams(config.vdf_params).new();
-        let (vdf_result_tx, vdf_result_rx) = tokio::sync::mpsc::channel(100);
-
-        let engine = Arc::new(Self {
-            transport: transport.clone(),
-            gossipsub: gossipsub.clone(),
-            request_response: request_response.clone(),
-
-            gossip_topic: config.gossip_topic,
-            req_resp_topic: config.request_response_topic,
-
-            graph,
-            pending_tasks: DashMap::new(),
-
-            source_info: DashMap::new(),
-
-            vdf,
-            vdf_result_tx,
-        });
-
+        let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
-        let engine_clone = engine.clone();
+        let engine = Arc::new(Self {
+            transport,
+            gossipsub,
+            request_response,
+            gossip_topic: config.gossip_topic,
+            req_resp_topic: config.request_response_topic,
+            graph: RwLock::new(graph),
+            pending_atoms: DashMap::new(),
+            atom_result_tx,
+        });
 
+        let engine_clone = engine.clone();
         tokio::spawn(async move {
-            engine_clone.run(gossip_rx, vdf_result_rx).await;
+            engine_clone.run(gossip_rx, atom_result_rx).await;
         });
 
         Ok(engine)
@@ -97,21 +88,20 @@ impl<V: Validator> Engine<V> {
         &self,
         cmd: Command,
         script_sigs: HashMap<Multihash, Vec<u8>>,
-    ) -> Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let atom = Atom::new(
-            self.graph.checkpoint(),
-            self.transport.local_peer_id(),
-            Some(cmd),
-            now,
-        );
+    ) -> Result<(), CreationError> {
+        let handle = self
+            .graph
+            .read()
+            .await
+            .create_atom(Some((cmd, script_sigs)))?;
+        let tx = self.atom_result_tx.clone();
 
-        let hash = atom.hash();
-        self.pending_tasks.insert(hash, (atom, script_sigs));
-        self.start_vdf_task(hash);
+        tokio::spawn(async move {
+            let atom = handle.await.expect("Atom creation failed");
+            if let Err(e) = tx.send(atom).await {
+                log::error!("Failed to send VDF result: {e}");
+            }
+        });
 
         Ok(())
     }
@@ -119,81 +109,90 @@ impl<V: Validator> Engine<V> {
     async fn run(
         &self,
         mut gossip_rx: Receiver<gossipsub::Message>,
-        mut vdf_result_rx: Receiver<(Multihash, Vec<u8>)>,
+        mut atom_result_rx: Receiver<Atom>,
     ) {
         let mut request_response_rx = self.request_response.subscribe(self.req_resp_topic);
 
         loop {
             tokio::select! {
                 Some(msg) = gossip_rx.recv() => {
-                    type Pair = (Atom, Witness);
-
-                    let Ok((atom, witness)) = Pair::from_slice(msg.data.as_slice()) else {
+                    let Ok(atom) = Atom::from_slice(msg.data.as_slice()) else {
                         self.gossipsub.report_validation_result(&msg.id, &msg.propagation_source, MessageAcceptance::Reject).await;
                         continue;
                     };
 
-                    self.source_info.entry(atom.hash()).or_default().push((msg.id, msg.propagation_source));
-                    self.on_recv_atom(atom, witness).await;
+                    if !Hasher::validate(&atom.hash, &atom.header.to_vec()) {
+                        log::warn!("Invalid atom hash from peer {}", msg.propagation_source);
+                        self.gossipsub
+                            .report_validation_result(&msg.id, &msg.propagation_source, MessageAcceptance::Reject)
+                            .await;
+                        continue;
+                    }
+
+                    self.pending_atoms
+                        .entry(atom.hash)
+                        .or_default()
+                        .push((Some(msg.id), msg.propagation_source));
+
+                    self.on_recv_atom(atom).await;
                 }
                 Some(msg) = request_response_rx.recv() => {
                     self.on_recv_reqeust_response(msg).await;
                 }
-                Some((hash, result)) = vdf_result_rx.recv() => {
-                    self.on_vdf_complete(hash, result).await;
+                Some(atom) = atom_result_rx.recv() => {
+                    self.on_atom_ready(atom).await;
                 }
             }
         }
     }
 
-    fn start_vdf_task(&self, hash: Multihash) {
-        let vdf = self.vdf.clone();
-        let difficulty = self.graph.difficulty();
-        let tx = self.vdf_result_tx.clone();
+    async fn on_recv_atom(&self, atom: Atom) {
+        let hash = atom.hash;
 
-        tokio::spawn(async move {
-            let vdf_proof = vdf
-                .solve(&hash.to_bytes(), difficulty)
-                .expect("VDF solve failed");
-            if let Err(e) = tx.send((hash, vdf_proof)).await {
-                log::error!("Failed to send VDF result: {e}");
+        let Some(result) = self.graph.write().await.upsert(atom) else {
+            log::info!("Atom {hash:?} is already existing");
+
+            let Some((_, infos)) = self.pending_atoms.remove(&hash) else {
+                return;
+            };
+
+            for (msg_id, peer) in infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p))) {
+                self.gossipsub
+                    .report_validation_result(&msg_id, &peer, MessageAcceptance::Ignore)
+                    .await;
             }
-        });
-    }
 
-    async fn on_recv_atom(&self, atom: Atom, witness: Witness) {
-        let result = self.graph.upsert(atom, witness);
+            return;
+        };
 
         for hash in result.accepted {
-            if let Some(sources) = self.source_info.remove(&hash) {
-                for (msg_id, peer_id) in sources.1 {
-                    self.gossipsub
-                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Accept)
-                        .await;
-                }
+            log::info!("Atom {hash:?} accepted");
+
+            let Some((_, infos)) = self.pending_atoms.remove(&hash) else {
+                continue;
+            };
+
+            for (msg_id, peer_id) in infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p))) {
+                self.gossipsub
+                    .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Ignore)
+                    .await;
             }
         }
 
         for (hash, reason) in result.rejected {
-            log::warn!("Atom {hash:?} rejected: {reason:?}");
+            log::info!("Atom {hash:?} rejected: {reason:?}");
 
-            if let Some(sources) = self.source_info.remove(&hash) {
-                for (msg_id, peer_id) in sources.1 {
+            let Some((_, infos)) = self.pending_atoms.remove(&hash) else {
+                continue;
+            };
+
+            for (msg_id, peer_id) in infos {
+                if let Some(msg_id) = msg_id {
                     self.gossipsub
                         .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Reject)
                         .await;
-                }
-            }
-        }
-
-        for (hash, reason) in result.ignored {
-            log::info!("Atom {hash:?} ignored: {reason:?}");
-
-            if let Some(sources) = self.source_info.remove(&hash) {
-                for (msg_id, peer_id) in sources.1 {
-                    self.gossipsub
-                        .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Ignore)
-                        .await;
+                } else {
+                    self.disconnect_peer(peer_id).await;
                 }
             }
         }
@@ -212,26 +211,22 @@ impl<V: Validator> Engine<V> {
                 request,
                 channel,
             } => {
-                let hashes: Vec<Multihash> =
-                    Vec::from_slice(request.as_slice()).unwrap_or_default();
-
+                let hashes = Vec::from_slice(request.as_slice()).unwrap_or_default();
                 if hashes.is_empty() {
                     self.disconnect_peer(peer).await;
                     return;
                 }
 
-                let atoms = hashes.into_iter().try_fold(Vec::new(), |mut acc, hash| {
-                    if let Some((atom, witness)) = self.graph.get(&hash) {
-                        acc.push((atom, witness));
+                let atoms = {
+                    let graph = self.graph.read().await;
+                    let Some(atoms) = hashes.iter().try_fold(Vec::new(), |mut acc, h| {
+                        acc.push(graph.get(h)?.to_vec());
                         Some(acc)
-                    } else {
-                        None
-                    }
-                });
-
-                let Some(atoms) = atoms else {
-                    self.disconnect_peer(peer).await;
-                    return;
+                    }) else {
+                        self.disconnect_peer(peer).await;
+                        return;
+                    };
+                    atoms
                 };
 
                 if let Err(e) = self
@@ -243,52 +238,45 @@ impl<V: Validator> Engine<V> {
                 }
             }
             Message::Response { peer, response } => {
-                let atoms: Vec<(Atom, Witness)> =
-                    Vec::from_slice(response.as_slice()).unwrap_or_default();
-
+                let atoms: Vec<Atom> = Vec::from_slice(response.as_slice()).unwrap_or_default();
                 if atoms.is_empty() {
                     self.disconnect_peer(peer).await;
                     return;
                 }
 
-                for (atom, witness) in atoms {
-                    self.on_recv_atom(atom, witness).await;
+                for atom in atoms {
+                    if !Hasher::validate(&atom.hash, &atom.header.to_vec()) {
+                        log::warn!("Invalid atom hash from peer {peer}");
+                        self.disconnect_peer(peer).await;
+                        return;
+                    }
+
+                    self.pending_atoms
+                        .entry(atom.hash)
+                        .or_default()
+                        .push((None, peer));
+
+                    self.on_recv_atom(atom).await;
                 }
             }
         }
     }
 
-    async fn on_vdf_complete(&self, hash: Multihash, result: Vec<u8>) {
-        let Some((atom, sigs)) = self.pending_tasks.remove(&hash).map(|e| e.1) else {
-            return;
-        };
+    async fn on_atom_ready(&self, atom: Atom) {
+        let hash = atom.hash;
+        let bytes = atom.to_vec();
+        let result = self.graph.write().await.upsert(atom).unwrap();
 
-        let head = self.graph.head();
-        let trie_proofs = atom
-            .cmd
-            .as_ref()
-            .map(|cmd| self.graph.generate_proofs(cmd.input.iter(), &head))
-            .unwrap_or_default();
-        let atoms = self.graph.get_children(&head);
-
-        let witness = Witness {
-            vdf_proof: result,
-            trie_proofs,
-            script_sigs: sigs,
-            atoms,
-        };
-
-        let mut bytes = Vec::new();
-        atom.to_writer(&mut bytes);
-        witness.to_writer(&mut bytes);
-
-        if !self.graph.upsert(atom, witness).accepted.contains(&hash) {
-            log::error!("Inconsistent state after VDF completion");
+        if !result.rejected.is_empty() {
+            debug_assert!(result.rejected.len() == 1);
+            log::error!("Created atom was rejected: {:?}", result.rejected[&hash]);
             return;
         }
 
+        debug_assert!(result.accepted.contains(&hash));
+
         if let Err(e) = self.gossipsub.publish(self.gossip_topic, bytes).await {
-            log::error!("Failed to publish atom after VDF completion: {e}");
+            log::error!("Failed to publish created atom: {e}");
         }
     }
 }
