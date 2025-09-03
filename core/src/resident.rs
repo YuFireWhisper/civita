@@ -5,13 +5,13 @@ use libp2p::PeerId;
 use crate::{
     consensus::{
         engine,
-        graph::{self, CreationError},
+        graph::{self, CreationError, StorageMode},
         validator::Validator,
         Engine,
     },
     crypto::Multihash,
     network::Transport,
-    ty::atom::Command,
+    ty::atom::{Command, Height},
 };
 
 const GOSSIP_TOPIC: u8 = 0;
@@ -28,9 +28,17 @@ pub enum Error {
 }
 
 pub struct Config {
-    graph_config: graph::Config,
     bootstrap_peers: Vec<PeerId>,
     bootstrap_timeout: tokio::time::Duration,
+    heartbeat_interval: Option<tokio::time::Duration>,
+
+    block_threshold: u32,
+    checkpoint_distance: Height,
+    target_block_time: u64,
+    init_vdf_difficulty: u64,
+    max_difficulty_adjustment: f32,
+    storage_mode: StorageMode,
+    vdf_params: u16,
 }
 
 pub struct Resident<V> {
@@ -40,16 +48,27 @@ pub struct Resident<V> {
 
 impl<V: Validator> Resident<V> {
     pub async fn new(transport: Arc<Transport>, config: Config) -> Result<Self> {
-        let config = engine::Config {
+        let graph_config = graph::Config {
+            block_threshold: config.block_threshold,
+            checkpoint_distance: config.checkpoint_distance,
+            target_block_time: config.target_block_time,
+            init_vdf_difficulty: config.init_vdf_difficulty,
+            max_difficulty_adjustment: config.max_difficulty_adjustment,
+            storage_mode: config.storage_mode,
+            vdf_params: config.vdf_params,
+        };
+
+        let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
             request_response_topic: REQUEST_RESPONSE_TOPIC,
             bootstrap_topic: BOOTSTRAP_TOPIC,
-            graph_config: config.graph_config,
+            graph_config,
             bootstrap_peers: config.bootstrap_peers,
             bootstrap_timeout: config.bootstrap_timeout,
+            heartbeat_interval: config.heartbeat_interval,
         };
 
-        let engine = Engine::new(transport.clone(), config).await?;
+        let engine = Engine::new(transport.clone(), engine_config).await?;
 
         Ok(Self { transport, engine })
     }
