@@ -242,7 +242,7 @@ impl<V: Validator> Graph<V> {
         Some(result)
     }
 
-    pub fn contains(&self, h: &Multihash) -> bool {
+    fn contains(&self, h: &Multihash) -> bool {
         !self.dismissed.contains(h) && self.entries.get(h).is_some_and(|e| !e.is_missing)
     }
 
@@ -911,7 +911,7 @@ impl<V: Validator> Graph<V> {
         }))
     }
 
-    pub fn get_children(&self, h: Multihash) -> Vec<Multihash> {
+    fn get_children(&self, h: Multihash) -> Vec<Multihash> {
         let entry = &self.entries[&h];
 
         let mut indeg: HashMap<_, usize> = HashMap::from_iter(
