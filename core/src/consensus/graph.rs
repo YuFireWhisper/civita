@@ -59,8 +59,8 @@ pub struct UpdateResult {
 
 #[derive(Clone, Copy)]
 pub enum StorageMode {
-    General { peer_id: PeerId },
-    Archive { retain_checkpoints: u32 },
+    General(PeerId),
+    Archive(u32),
 }
 
 #[derive(Clone)]
@@ -103,7 +103,7 @@ pub struct Config {
     #[derivative(Default(value = "0.1"))]
     pub max_difficulty_adjustment: f32,
 
-    #[derivative(Default(value = "StorageMode::Archive { retain_checkpoints: 1 }"))]
+    #[derivative(Default(value = "StorageMode::Archive(1)"))]
     pub storage_mode: StorageMode,
 
     #[derivative(Default(value = "1024"))]
@@ -521,12 +521,12 @@ impl<V: Validator> Graph<V> {
             trie.insert(&k_vec, t.to_vec());
 
             match &self.config.storage_mode {
-                StorageMode::General { peer_id } => {
+                StorageMode::General(peer_id) => {
                     if V::is_related(&t.script_pk, peer_id) {
                         related.entry(*peer_id).or_default().insert(k, t);
                     }
                 }
-                StorageMode::Archive { .. } => {
+                StorageMode::Archive(..) => {
                     V::related_peers(&t.script_pk).into_iter().for_each(|p| {
                         related.entry(p).or_default().insert(k, t.clone());
                     });
@@ -626,8 +626,8 @@ impl<V: Validator> Graph<V> {
 
         {
             let len = match self.config.storage_mode {
-                StorageMode::General { .. } => 1,
-                StorageMode::Archive { retain_checkpoints } => retain_checkpoints,
+                StorageMode::General(..) => 1,
+                StorageMode::Archive(l) => l,
             };
 
             if len != 0 && self.history.len() >= len as usize {
@@ -716,13 +716,13 @@ impl<V: Validator> Graph<V> {
         let mut related = entry.related_token.get(peer).cloned().unwrap_or_default();
 
         entry.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
-            Some(t) => match self.config.storage_mode {
-                StorageMode::General { ref peer_id } => {
+            Some(t) => match &self.config.storage_mode {
+                StorageMode::General(peer_id) => {
                     if peer_id == peer && V::is_related(&t.script_pk, peer) {
                         related.insert(*k, t.clone());
                     }
                 }
-                StorageMode::Archive { .. } => {
+                StorageMode::Archive(..) => {
                     if V::related_peers(&t.script_pk)
                         .into_iter()
                         .any(|p| &p == peer)
@@ -745,13 +745,13 @@ impl<V: Validator> Graph<V> {
         let mut by_peer = entry.related_token.clone();
 
         entry.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
-            Some(t) => match self.config.storage_mode {
-                StorageMode::General { ref peer_id } => {
+            Some(t) => match &self.config.storage_mode {
+                StorageMode::General(peer_id) => {
                     if V::is_related(&t.script_pk, peer_id) {
                         by_peer.entry(*peer_id).or_default().insert(*k, t.clone());
                     }
                 }
-                StorageMode::Archive { .. } => {
+                StorageMode::Archive(..) => {
                     for p in V::related_peers(&t.script_pk) {
                         by_peer.entry(p).or_default().insert(*k, t.clone());
                     }
@@ -768,8 +768,8 @@ impl<V: Validator> Graph<V> {
     }
 
     pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
-        if let StorageMode::General { peer_id: p } = self.config.storage_mode {
-            if peer_id.is_none_or(|id| id != p) {
+        if let StorageMode::General(p) = &self.config.storage_mode {
+            if peer_id.is_none_or(|id| &id != p) {
                 return None;
             }
         };
@@ -801,12 +801,12 @@ impl<V: Validator> Graph<V> {
                 let key = k.to_vec();
                 let token = Token::from_slice(&trie.get(&key).unwrap()).unwrap();
                 match &config.storage_mode {
-                    StorageMode::General { peer_id } => {
+                    StorageMode::General(peer_id) => {
                         if V::is_related(&token.script_pk, peer_id) {
                             m.entry(*peer_id).or_default().insert(*k, token);
                         }
                     }
-                    StorageMode::Archive { .. } => {
+                    StorageMode::Archive(..) => {
                         V::related_peers(&token.script_pk)
                             .into_iter()
                             .for_each(|p| {

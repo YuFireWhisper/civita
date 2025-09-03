@@ -113,8 +113,8 @@ impl<V: Validator> Engine<V> {
             return Err(Error::NoBootstrapPeers);
         }
 
-        let target = if let StorageMode::General { peer_id } = &config.graph_config.storage_mode {
-            Some(*peer_id)
+        let target = if let StorageMode::General(peer_id) = config.graph_config.storage_mode {
+            Some(peer_id)
         } else {
             None
         };
