@@ -175,13 +175,23 @@ impl<V: Validator> Graph<V> {
         let entry = Entry::genesis();
         let hash = entry.atom.hash;
 
+        let mut history = VecDeque::new();
+        let snapshot = Snapshot {
+            atom: entry.atom.clone(),
+            difficulty: config.init_vdf_difficulty,
+            trie_root: entry.trie.root_hash(),
+            trie_guide: HashMap::new(),
+            related_keys: HashSet::new(),
+        };
+        history.push_back((snapshot.to_vec(), Vec::new()));
+
         Self {
             entries: HashMap::from_iter([(hash, entry)]),
             dismissed: HashSet::new(),
             main_head: hash,
             checkpoint: hash,
             checkpoint_height: 0,
-            history: VecDeque::new(),
+            history,
             vdf: WesolowskiVDFParams(config.vdf_params).new(),
             difficulty: config.init_vdf_difficulty,
             config,
