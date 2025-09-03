@@ -739,34 +739,6 @@ impl<V: Validator> Graph<V> {
         related
     }
 
-    pub fn tokens_all(&self) -> HashMap<PeerId, HashMap<Multihash, Token>> {
-        let entry = &self.entries[&self.main_head];
-
-        let mut by_peer = entry.related_token.clone();
-
-        entry.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
-            Some(t) => match &self.config.storage_mode {
-                StorageMode::General(peer_id) => {
-                    if V::is_related(&t.script_pk, peer_id) {
-                        by_peer.entry(*peer_id).or_default().insert(*k, t.clone());
-                    }
-                }
-                StorageMode::Archive(..) => {
-                    for p in V::related_peers(&t.script_pk) {
-                        by_peer.entry(p).or_default().insert(*k, t.clone());
-                    }
-                }
-            },
-            None => {
-                for (_, m) in by_peer.iter_mut() {
-                    m.remove(k);
-                }
-            }
-        });
-
-        by_peer
-    }
-
     pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
         if let StorageMode::General(p) = &self.config.storage_mode {
             if peer_id.is_none_or(|id| &id != p) {
