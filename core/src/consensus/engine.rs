@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    future,
     sync::Arc,
 };
 
@@ -59,6 +60,8 @@ pub struct Config {
     pub bootstrap_peers: Vec<PeerId>,
     pub bootstrap_timeout: tokio::time::Duration,
     pub bootstrap_topic: u8,
+
+    pub heartbeat_interval: Option<tokio::time::Duration>,
 }
 
 pub struct Engine<V> {
@@ -73,6 +76,8 @@ pub struct Engine<V> {
 
     pending_atoms: DashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
     atom_result_tx: Sender<Atom>,
+
+    heartbeat_interval: Option<tokio::time::Duration>,
 }
 
 impl<V: Validator> Engine<V> {
@@ -92,6 +97,7 @@ impl<V: Validator> Engine<V> {
             graph: RwLock::new(graph),
             pending_atoms: DashMap::new(),
             atom_result_tx,
+            heartbeat_interval: config.heartbeat_interval,
         });
 
         let engine_clone = engine.clone();
@@ -176,11 +182,13 @@ impl<V: Validator> Engine<V> {
         mut atom_result_rx: Receiver<Atom>,
     ) {
         let mut request_response_rx = self.request_response.subscribe(self.req_resp_topic);
+        let mut hb_interval = self.heartbeat_interval.map(tokio::time::interval);
 
         loop {
             let mut gossip_msg = None;
             let mut req_resp_msg = None;
             let mut atom_result = None;
+            let mut hb_tick = false;
 
             tokio::select! {
                 Some(msg) = gossip_rx.recv() => {
@@ -191,6 +199,14 @@ impl<V: Validator> Engine<V> {
                 }
                 Some(atom) = atom_result_rx.recv() => {
                     atom_result = Some(atom);
+                }
+                _ = async {
+                    match hb_interval.as_mut() {
+                        Some(interval) => interval.tick().await,
+                        None => future::pending().await,
+                    }
+                } => {
+                    hb_tick = true;
                 }
             }
 
@@ -203,7 +219,25 @@ impl<V: Validator> Engine<V> {
             }
 
             if let Some(atom) = atom_result {
-                self.on_atom_ready(atom).await;
+                if self.on_atom_ready(atom).await {
+                    hb_interval.as_mut().map(|i| i.reset());
+                }
+            }
+
+            if hb_tick {
+                let Ok(handle) = self.graph.read().await.create_atom(None) else {
+                    log::error!("Failed to create heartbeat atom");
+                    continue;
+                };
+
+                let tx = self.atom_result_tx.clone();
+
+                tokio::spawn(async move {
+                    let atom = handle.await.expect("Atom creation failed");
+                    if let Err(e) = tx.send(atom).await {
+                        log::error!("Failed to send VDF result: {e}");
+                    }
+                });
             }
         }
     }
@@ -392,7 +426,7 @@ impl<V: Validator> Engine<V> {
         }
     }
 
-    async fn on_atom_ready(&self, atom: Atom) {
+    async fn on_atom_ready(&self, atom: Atom) -> bool {
         let hash = atom.hash;
         let bytes = atom.to_vec();
         let result = self.graph.write().await.upsert(atom).unwrap();
@@ -400,7 +434,7 @@ impl<V: Validator> Engine<V> {
         if !result.rejected.is_empty() {
             debug_assert!(result.rejected.len() == 1);
             log::error!("Created atom was rejected: {:?}", result.rejected[&hash]);
-            return;
+            return false;
         }
 
         debug_assert!(result.accepted.contains(&hash));
@@ -408,5 +442,7 @@ impl<V: Validator> Engine<V> {
         if let Err(e) = self.gossipsub.publish(self.gossip_topic, bytes).await {
             log::error!("Failed to publish created atom: {e}");
         }
+
+        true
     }
 }
