@@ -178,36 +178,66 @@ impl<V: Validator> Engine<V> {
         let mut request_response_rx = self.request_response.subscribe(self.req_resp_topic);
 
         loop {
+            let mut gossip_msg = None;
+            let mut req_resp_msg = None;
+            let mut atom_result = None;
+
             tokio::select! {
                 Some(msg) = gossip_rx.recv() => {
-                    let Ok(atom) = Atom::from_slice(msg.data.as_slice()) else {
-                        self.gossipsub.report_validation_result(&msg.id, &msg.propagation_source, MessageAcceptance::Reject).await;
-                        continue;
-                    };
-
-                    if !Hasher::validate(&atom.hash, &atom.header.to_vec()) {
-                        log::warn!("Invalid atom hash from peer {}", msg.propagation_source);
-                        self.gossipsub
-                            .report_validation_result(&msg.id, &msg.propagation_source, MessageAcceptance::Reject)
-                            .await;
-                        continue;
-                    }
-
-                    self.pending_atoms
-                        .entry(atom.hash)
-                        .or_default()
-                        .push((Some(msg.id), msg.propagation_source));
-
-                    self.on_recv_atom(atom).await;
+                    gossip_msg = Some(msg);
                 }
                 Some(msg) = request_response_rx.recv() => {
-                    self.on_recv_reqeust_response(msg).await;
+                    req_resp_msg = Some(msg);
                 }
                 Some(atom) = atom_result_rx.recv() => {
-                    self.on_atom_ready(atom).await;
+                    atom_result = Some(atom);
                 }
             }
+
+            if let Some(msg) = gossip_msg {
+                self.handle_gossip_message(msg).await;
+            }
+
+            if let Some(msg) = req_resp_msg {
+                self.on_recv_reqeust_response(msg).await;
+            }
+
+            if let Some(atom) = atom_result {
+                self.on_atom_ready(atom).await;
+            }
         }
+    }
+
+    async fn handle_gossip_message(&self, msg: gossipsub::Message) {
+        let Ok(atom) = Atom::from_slice(msg.data.as_slice()) else {
+            self.gossipsub
+                .report_validation_result(
+                    &msg.id,
+                    &msg.propagation_source,
+                    MessageAcceptance::Reject,
+                )
+                .await;
+            return;
+        };
+
+        if !Hasher::validate(&atom.hash, &atom.header.to_vec()) {
+            log::warn!("Invalid atom hash from peer {}", msg.propagation_source);
+            self.gossipsub
+                .report_validation_result(
+                    &msg.id,
+                    &msg.propagation_source,
+                    MessageAcceptance::Reject,
+                )
+                .await;
+            return;
+        }
+
+        self.pending_atoms
+            .entry(atom.hash)
+            .or_default()
+            .push((Some(msg.id), msg.propagation_source));
+
+        self.on_recv_atom(atom).await;
     }
 
     async fn on_recv_atom(&self, atom: Atom) {
