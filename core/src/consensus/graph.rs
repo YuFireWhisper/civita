@@ -39,8 +39,13 @@ pub enum RejectReason {
     MissingInput,
 }
 
+#[derive(Debug)]
+#[derive(thiserror::Error)]
 pub enum CreationError {
+    #[error("One or more input tokens are already consumed")]
     InputConsumed,
+
+    #[error("Failed to generate trie guide for input tokens")]
     FailedToGenerateGuide,
 }
 
