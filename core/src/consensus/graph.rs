@@ -617,7 +617,7 @@ impl<V: Validator> Graph<V> {
             }
         }
 
-        let info = self.generate_checkpoint_info(atoms.pop().unwrap());
+        let info = self.generate_checkpoint_info(&atoms.pop().unwrap());
         let buf = atoms.into_iter().fold(Vec::new(), |mut acc, e| {
             acc.extend(e.atom.to_vec());
             acc
@@ -707,7 +707,7 @@ impl<V: Validator> Graph<V> {
         ((self.difficulty as f32 * ratio) as u64).max(1)
     }
 
-    fn generate_checkpoint_info(&self, entry: Entry) -> CheckopointInfo {
+    fn generate_checkpoint_info(&self, entry: &Entry) -> CheckopointInfo {
         let related_keys = entry
             .related_token
             .values()
@@ -720,7 +720,7 @@ impl<V: Validator> Graph<V> {
             .expect("Guide must be generated");
 
         CheckopointInfo {
-            atom: entry.atom,
+            atom: entry.atom.clone(),
             difficulty: self.difficulty(),
             related_keys,
             trie_root: entry.trie.root_hash(),
@@ -827,13 +827,14 @@ impl<V: Validator> Graph<V> {
             });
         } else {
             let checkpoint = self.entries[&self.checkpoint].clone();
-            let info = self.generate_checkpoint_info(checkpoint).to_vec();
+            let info = self.generate_checkpoint_info(&checkpoint).to_vec();
             buf.extend(info);
-            self.entries
-                .iter()
-                .filter(|(k, v)| k != &&self.checkpoint && !v.is_missing)
-                .for_each(|(_, v)| buf.extend(v.atom.to_vec()));
         }
+
+        self.entries
+            .iter()
+            .filter(|(k, v)| k != &&self.checkpoint && !v.is_missing)
+            .for_each(|(_, v)| buf.extend(v.atom.to_vec()));
 
         buf
     }
