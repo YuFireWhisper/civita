@@ -54,7 +54,7 @@ pub struct UpdateResult {
 
 pub enum StorageMode {
     General { peer_id: PeerId },
-    Archive { retain_checkpoints: Option<u32> },
+    Archive { retain_checkpoints: u32 },
 }
 
 #[derive(Clone)]
@@ -96,7 +96,7 @@ pub struct Config {
     #[derivative(Default(value = "0.1"))]
     pub max_difficulty_adjustment: f32,
 
-    #[derivative(Default(value = "StorageMode::Archive { retain_checkpoints: Some(1) }"))]
+    #[derivative(Default(value = "StorageMode::Archive { retain_checkpoints: 1 }"))]
     pub storage_mode: StorageMode,
 
     #[derivative(Default(value = "1024"))]
@@ -104,7 +104,7 @@ pub struct Config {
 }
 
 #[derive(Serialize)]
-pub struct CheckopointInfo {
+pub struct Snapshot {
     pub atom: Atom,
     pub difficulty: u64,
     pub trie_root: Multihash,
@@ -367,7 +367,16 @@ impl<V: Validator> Graph<V> {
             return Err(RejectReason::InvalidNonce);
         }
 
-        if !self.validate_execution(&hash)? {
+        let is_block = self.validate_execution(&hash)?;
+
+        self.history
+            .iter_mut()
+            .last()
+            .unwrap()
+            .1
+            .extend(self.entries[&hash].atom.to_vec());
+
+        if !is_block {
             return Ok(());
         }
 
@@ -577,108 +586,93 @@ impl<V: Validator> Graph<V> {
     fn maybe_advance_checkpoint(&mut self) {
         let prev_height = self.entries[&self.checkpoint].atom.header.height;
         let head_height = self.entries[&self.main_head].atom.header.height;
-        let target_height = prev_height + self.config.checkpoint_distance;
-        let trigger_height = prev_height + self.config.checkpoint_distance * 2;
 
-        if head_height != trigger_height {
+        if head_height != prev_height + self.config.checkpoint_distance * 2 {
             return;
         }
 
-        let target_hash = {
-            let mut cur = self.main_head;
-            loop {
-                let e = &self.entries[&cur];
-                if e.atom.header.height == target_height {
-                    break e.atom.hash;
-                }
-                cur = e.atom.header.parent;
+        let next_height = prev_height + self.config.checkpoint_distance;
+        let next_hash = self.get_block_at_height(self.main_head, next_height);
+
+        let times = self.collect_times(next_hash, self.checkpoint);
+        let difficulty = self.adjust_difficulty(times);
+
+        self.entries
+            .retain(|_, e| e.atom.header.checkpoint == next_hash);
+
+        let snapshot = {
+            let entry = &self.entries[&next_hash];
+            let related_keys = entry
+                .related_token
+                .values()
+                .flat_map(|m| m.keys())
+                .cloned()
+                .collect::<HashSet<_>>();
+            let trie_guide = entry
+                .trie
+                .generate_guide(related_keys.iter().map(|k| k.to_vec()))
+                .expect("Guide must be generated");
+            Snapshot {
+                atom: entry.atom.clone(),
+                difficulty,
+                trie_root: entry.trie.root_hash(),
+                trie_guide,
+                related_keys,
             }
         };
 
-        let (times, mut atoms) = self.walk_and_collection(self.main_head, target_hash);
-        let difficulty = self.adjust_difficulty(times);
-        self.clean_to_height(
-            atoms.last().unwrap().children.iter().copied().collect(),
-            target_hash,
-        );
-
         {
             let len = match self.config.storage_mode {
-                StorageMode::General { .. } => Some(0),
+                StorageMode::General { .. } => 1,
                 StorageMode::Archive { retain_checkpoints } => retain_checkpoints,
             };
 
-            if len.is_some_and(|l| l == 0) {
-                return;
-            }
-
-            if len.is_some_and(|l| self.history.len() >= l as usize) {
+            if len != 0 && self.history.len() >= len as usize {
                 self.history.pop_front();
             }
         }
 
-        let info = self.generate_checkpoint_info(&atoms.pop().unwrap(), None);
-        let buf = atoms.into_iter().fold(Vec::new(), |mut acc, e| {
-            acc.extend(e.atom.to_vec());
-            acc
-        });
-
-        self.checkpoint = target_hash;
+        self.history.push_back((snapshot.to_vec(), Vec::new()));
+        self.checkpoint_height = next_height;
+        self.checkpoint = next_hash;
         self.difficulty = difficulty;
-        self.history.push_back((info.to_vec(), buf));
     }
 
-    fn walk_and_collection(&mut self, start: Multihash, end: Multihash) -> (Vec<u64>, Vec<Entry>) {
-        let mut atoms = Vec::new();
+    fn get_block_at_height(&self, mut cur: Multihash, height: Height) -> Multihash {
+        loop {
+            let e = &self.entries[&cur];
+            if e.atom.header.height == height {
+                break e.atom.hash;
+            }
+            cur = e.atom.header.parent;
+        }
+    }
+
+    fn collect_times(&mut self, start: Multihash, end: Multihash) -> Vec<u64> {
         let mut times = Vec::new();
-        let mut cur = start;
-        let mut next_time: Option<u64> = None;
+
+        let (mut cur, mut next_time) = {
+            let entry = &self.entries[&start];
+            (entry.atom.header.parent, entry.atom.header.timestamp)
+        };
 
         loop {
-            let entry = self.entries.remove(&cur).unwrap();
+            let entry = &self.entries[&cur];
 
-            if let Some(dt) = next_time {
-                let dt = dt.saturating_sub(entry.atom.header.timestamp);
-                if dt > 0 {
-                    times.push(dt);
-                }
+            let dt = next_time.saturating_sub(entry.atom.header.timestamp);
+            if dt > 0 {
+                times.push(dt);
             }
 
-            next_time = Some(entry.atom.header.timestamp);
+            next_time = entry.atom.header.timestamp;
+            cur = entry.atom.header.parent;
 
             if cur == end {
-                atoms.push(entry);
                 break;
             }
-
-            cur = entry.atom.header.parent;
-            atoms.extend(
-                entry
-                    .atom
-                    .body
-                    .atoms
-                    .iter()
-                    .copied()
-                    .map(|h| self.entries.remove(&h).unwrap()),
-            );
-            atoms.push(entry);
         }
 
-        (times, atoms)
-    }
-
-    fn clean_to_height(&mut self, mut stk: VecDeque<Multihash>, end: Multihash) {
-        while let Some(cur) = stk.pop_front() {
-            if cur == end {
-                continue;
-            }
-
-            let Some(entry) = self.entries.remove(&cur) else {
-                continue;
-            };
-
-            stk.extend(entry.children.into_iter());
-        }
+        times
     }
 
     fn adjust_difficulty(&self, mut times: Vec<u64>) -> u64 {
@@ -705,36 +699,6 @@ impl<V: Validator> Graph<V> {
         );
 
         ((self.difficulty as f32 * ratio) as u64).max(1)
-    }
-
-    fn generate_checkpoint_info(&self, entry: &Entry, peer_id: Option<PeerId>) -> CheckopointInfo {
-        let related_keys = if let Some(peer_id) = peer_id {
-            entry
-                .related_token
-                .get(&peer_id)
-                .map(|m| m.keys().cloned().collect())
-                .unwrap_or_default()
-        } else {
-            entry
-                .related_token
-                .values()
-                .flat_map(|m| m.keys())
-                .cloned()
-                .collect::<HashSet<_>>()
-        };
-
-        let guide = entry
-            .trie
-            .generate_guide(related_keys.iter().map(|k| k.to_vec()))
-            .expect("Guide must be generated");
-
-        CheckopointInfo {
-            atom: entry.atom.clone(),
-            difficulty: self.difficulty(),
-            related_keys,
-            trie_root: entry.trie.root_hash(),
-            trie_guide: guide,
-        }
     }
 
     pub fn difficulty(&self) -> u64 {
@@ -832,28 +796,16 @@ impl<V: Validator> Graph<V> {
         };
 
         let mut buf = Vec::new();
-
-        if !self.history.is_empty() && peer_id.is_none() {
-            buf.extend_from_slice(&self.history[0].0);
-            self.history.iter().for_each(|(_, atoms)| {
-                buf.extend(atoms);
-            });
-        }
-
-        let checkpoint = &self.entries[&self.checkpoint];
-        let info = self.generate_checkpoint_info(checkpoint, peer_id).to_vec();
-        buf.extend(info);
-
-        self.entries
-            .iter()
-            .filter(|(k, v)| k != &&self.checkpoint && !v.is_missing)
-            .for_each(|(_, v)| buf.extend(v.atom.to_vec()));
+        buf.extend_from_slice(&self.history[0].0);
+        self.history.iter().for_each(|(_, atoms)| {
+            buf.extend(atoms);
+        });
 
         Some(buf)
     }
 
     pub fn import(mut data: &[u8], config: Config) -> Result<Self, civita_serialize::Error> {
-        let info = CheckopointInfo::from_reader(&mut data)?;
+        let info = Snapshot::from_reader(&mut data)?;
 
         let trie = {
             let mut t = Trie::with_root_hash(info.trie_root);
