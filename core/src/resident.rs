@@ -11,7 +11,10 @@ use crate::{
     },
     crypto::Multihash,
     network::Transport,
-    ty::atom::{Command, Height},
+    ty::{
+        atom::{Command, Height},
+        token::Token,
+    },
 };
 
 const GOSSIP_TOPIC: u8 = 0;
@@ -79,5 +82,9 @@ impl<V: Validator> Resident<V> {
         sigs: HashMap<Multihash, Vec<u8>>,
     ) -> Result<(), CreationError> {
         self.engine.propose(cmd, sigs).await
+    }
+
+    pub async fn tokens(&self) -> HashMap<Multihash, Token> {
+        self.engine.tokens().await
     }
 }
