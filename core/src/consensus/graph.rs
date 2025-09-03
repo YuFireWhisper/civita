@@ -94,8 +94,8 @@ pub struct Config {
     #[derivative(Default(value = "10"))]
     pub checkpoint_distance: Height,
 
-    #[derivative(Default(value = "60_000"))]
-    pub target_block_time_ms: u64,
+    #[derivative(Default(value = "60"))]
+    pub target_block_time: u64,
 
     #[derivative(Default(value = "50000"))]
     pub init_vdf_difficulty: u64,
@@ -694,7 +694,7 @@ impl<V: Validator> Graph<V> {
             median
         };
 
-        let target = self.config.target_block_time_ms as f32;
+        let target = self.config.target_block_time as f32;
         let ratio_raw = target / median;
         let ratio = ratio_raw.clamp(
             1.0 / self.config.max_difficulty_adjustment,
