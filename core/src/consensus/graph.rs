@@ -1,16 +1,20 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::SystemTime,
+};
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
 use derivative::Derivative;
 use libp2p::PeerId;
+use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
     consensus::validator::Validator,
     crypto::{hasher::Hasher, Multihash},
     ty::{
-        atom::{Atom, Height},
+        atom::{self, Atom, Command, Height},
         token::Token,
     },
     utils::Trie,
@@ -33,6 +37,11 @@ pub enum RejectReason {
     InvalidConversion,
     InvalidNonce,
     MissingInput,
+}
+
+pub enum CreationError {
+    InputConsumed,
+    FailedToGenerateGuide,
 }
 
 #[derive(Default)]
@@ -790,41 +799,6 @@ impl<V: Validator> Graph<V> {
         self.main_head
     }
 
-    pub fn get_children(&self, h: Multihash) -> Vec<Multihash> {
-        let entry = &self.entries[&h];
-
-        let mut indeg: HashMap<_, usize> = HashMap::from_iter(
-            entry
-                .children
-                .iter()
-                .filter(|c| self.contains(c))
-                .map(|c| (*c, self.entries[c].atom.body.atoms.len())),
-        );
-
-        let mut result = Vec::with_capacity(indeg.len());
-        let mut stk = VecDeque::from_iter(
-            indeg
-                .iter()
-                .filter(|(_, &d)| d == 0)
-                .map(|(k, _)| *k)
-                .collect::<VecDeque<_>>(),
-        );
-
-        while let Some(u) = stk.pop_front() {
-            result.push(u);
-            self.entries[&u].children.iter().for_each(|c| {
-                if let Some(d) = indeg.get_mut(c) {
-                    *d -= 1;
-                    if *d == 0 {
-                        stk.push_back(*c);
-                    }
-                }
-            });
-        }
-
-        result
-    }
-
     pub fn generate_proofs<'a>(
         &self,
         token_ids: impl Iterator<Item = &'a Multihash>,
@@ -933,5 +907,104 @@ impl<V: Validator> Graph<V> {
         }
 
         Ok(graph)
+    }
+
+    pub fn create_atom(
+        &self,
+        pair: Option<(Command, HashMap<Multihash, Vec<u8>>)>,
+    ) -> Result<JoinHandle<Atom>, CreationError> {
+        let mut trie_proofs = HashMap::new();
+        let mut cmd = None;
+        let mut sigs = HashMap::new();
+
+        let head = &self.entries[&self.main_head];
+
+        if let Some(pair) = pair {
+            for id in &pair.0.inputs {
+                if head.unconfirmed_tokens.get(id).is_some_and(|t| t.is_none()) {
+                    return Err(CreationError::InputConsumed);
+                }
+            }
+
+            trie_proofs = head
+                .trie
+                .generate_guide(pair.0.inputs.iter().map(|id| id.to_vec()))
+                .ok_or(CreationError::FailedToGenerateGuide)?;
+
+            cmd = Some(pair.0);
+            sigs = pair.1;
+        }
+
+        let body = atom::Body {
+            cmd,
+            atoms: self.get_children(self.main_head),
+        };
+
+        let witness = atom::Witness {
+            trie_proofs,
+            script_sigs: sigs,
+        };
+
+        let mut header = atom::Header {
+            parent: self.main_head,
+            checkpoint: self.checkpoint,
+            height: head.atom.header.height + 1,
+            nonce: Vec::new(),
+            timestamp: SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            body_hash: Hasher::digest(&body.to_vec()),
+        };
+
+        let vdf = self.vdf.clone();
+        let difficulty = self.difficulty;
+
+        Ok(tokio::spawn(async move {
+            header.nonce = vdf
+                .solve(&header.to_vec(), difficulty)
+                .expect("VDF must be solved");
+            Atom {
+                hash: Hasher::digest(&header.to_vec()),
+                header,
+                body,
+                witness,
+            }
+        }))
+    }
+
+    pub fn get_children(&self, h: Multihash) -> Vec<Multihash> {
+        let entry = &self.entries[&h];
+
+        let mut indeg: HashMap<_, usize> = HashMap::from_iter(
+            entry
+                .children
+                .iter()
+                .filter(|c| self.contains(c))
+                .map(|c| (*c, self.entries[c].atom.body.atoms.len())),
+        );
+
+        let mut result = Vec::with_capacity(indeg.len());
+        let mut stk = VecDeque::from_iter(
+            indeg
+                .iter()
+                .filter(|(_, &d)| d == 0)
+                .map(|(k, _)| *k)
+                .collect::<VecDeque<_>>(),
+        );
+
+        while let Some(u) = stk.pop_front() {
+            result.push(u);
+            self.entries[&u].children.iter().for_each(|c| {
+                if let Some(d) = indeg.get_mut(c) {
+                    *d -= 1;
+                    if *d == 0 {
+                        stk.push_back(*c);
+                    }
+                }
+            });
+        }
+
+        result
     }
 }
