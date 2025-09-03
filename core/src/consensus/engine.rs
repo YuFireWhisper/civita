@@ -220,7 +220,9 @@ impl<V: Validator> Engine<V> {
 
             if let Some(atom) = atom_result {
                 if self.on_atom_ready(atom).await {
-                    hb_interval.as_mut().map(|i| i.reset());
+                    if let Some(i) = hb_interval.as_mut() {
+                        i.reset()
+                    }
                 }
             }
 
