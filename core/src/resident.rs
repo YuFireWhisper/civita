@@ -34,8 +34,6 @@ pub enum Error {
 }
 
 pub struct Config {
-    pub bootstrap_peers: Vec<PeerId>,
-    pub bootstrap_timeout: tokio::time::Duration,
     pub heartbeat_interval: Option<tokio::time::Duration>,
 
     pub block_threshold: u32,
@@ -53,7 +51,12 @@ pub struct Resident<V> {
 }
 
 impl<V: Validator> Resident<V> {
-    pub async fn new(transport: Arc<Transport>, config: Config) -> Result<Self> {
+    pub async fn new(
+        transport: Arc<Transport>,
+        peers: Vec<PeerId>,
+        timeout: tokio::time::Duration,
+        config: Config,
+    ) -> Result<Self> {
         let graph_config = graph::Config {
             block_threshold: config.block_threshold,
             checkpoint_distance: config.checkpoint_distance,
@@ -65,8 +68,8 @@ impl<V: Validator> Resident<V> {
         };
 
         let bootstrap_config = engine::BootstrapConfig {
-            peers: config.bootstrap_peers,
-            timeout: config.bootstrap_timeout,
+            peers,
+            timeout,
             topic: BOOTSTRAP_TOPIC,
         };
 
