@@ -69,7 +69,6 @@ pub enum StorageMode {
 #[derivative(Default(bound = ""))]
 struct Entry {
     pub atom: Atom,
-    pub excluded: bool,
     pub children: HashSet<Multihash>,
 
     // Block only
@@ -453,51 +452,31 @@ impl<V: Validator> Graph<V> {
         Ok(())
     }
 
-    fn validate_execution(&mut self, cur_hash: &Multihash) -> Result<bool, RejectReason> {
+    fn validate_execution(&mut self, target_hash: &Multihash) -> Result<bool, RejectReason> {
         let mut created = HashMap::new();
         let mut consumed = HashSet::new();
 
         let mut excluded = false;
         let mut weight = 0u64;
 
-        let cur = &self.entries[cur_hash];
-        let parent_hash = cur.atom.header.parent;
-        let cur_len = cur.atom.body.atoms.len();
-        let atoms = &cur.atom.body.atoms;
+        let parent_hash = self.entries[target_hash].atom.header.parent;
 
-        for cmd in atoms
+        for hash in self.entries[target_hash]
+            .atom
+            .body
+            .atoms
+            .clone()
             .iter()
-            .inspect(|h| excluded |= self.entries[*h].excluded)
-            .filter_map(|h| self.entries[h].atom.body.cmd.as_ref())
+            .chain(std::iter::once(target_hash))
         {
-            weight += 1;
-
-            cmd.inputs.iter().copied().try_for_each(|id| {
-                if !consumed.insert(id) {
-                    return Err(RejectReason::DoubleSpend);
-                }
-
-                if created.remove(&id).is_some() {
-                    return Ok(());
-                }
-
-                if self.entries[&parent_hash].trie.get(&id.to_vec()).is_none() {
-                    return Err(RejectReason::MissingInput);
-                };
-
-                Ok(())
-            })?;
-
-            created.extend(cmd.created.iter().cloned().map(|t| (t.id, t)));
-        }
-
-        if cur.atom.body.cmd.is_some() {
-            let [Some(cur), Some(parent)] = self.entries.get_disjoint_mut([cur_hash, &parent_hash])
+            let [Some(cur), Some(parent)] = self.entries.get_disjoint_mut([hash, &parent_hash])
             else {
                 unreachable!();
             };
 
-            let cmd = cur.atom.body.cmd.as_ref().unwrap();
+            let Some(cmd) = &cur.atom.body.cmd else {
+                continue;
+            };
 
             weight += 1;
 
@@ -506,6 +485,8 @@ impl<V: Validator> Graph<V> {
                 .iter()
                 .copied()
                 .try_fold(Vec::new(), |mut acc, id| {
+                    let key = id.to_vec();
+
                     if !consumed.insert(id) {
                         return Err(RejectReason::DoubleSpend);
                     }
@@ -515,15 +496,17 @@ impl<V: Validator> Graph<V> {
                         return Ok(acc);
                     }
 
-                    let Some(token) = parent
+                    if !parent
                         .trie
-                        .get(&id.to_vec())
-                        .map(|v| Token::from_slice(&v).unwrap())
-                    else {
+                        .resolve(std::iter::once(&key), &cur.atom.witness.trie_proofs)
+                    {
                         return Err(RejectReason::MissingInput);
-                    };
+                    }
 
-                    if !cur.validate_script_sig::<V>(&id, &token.script_pk) {
+                    let bytes = parent.trie.get(&key).unwrap();
+                    let token = Token::from_slice(&bytes).unwrap();
+
+                    if hash == target_hash && !cur.validate_script_sig::<V>(&id, &token.script_pk) {
                         return Err(RejectReason::InvalidScriptSig);
                     }
 
@@ -533,28 +516,31 @@ impl<V: Validator> Graph<V> {
                         .is_some_and(|t| t.is_none());
 
                     acc.push(token);
+
                     Ok(acc)
                 })?;
 
-            if !V::validate_conversion(cmd.code, &inputs, &cmd.created) {
+            if hash == target_hash && !V::validate_conversion(cmd.code, &inputs, &cmd.created) {
                 return Err(RejectReason::InvalidConversion);
             }
 
             created.extend(cmd.created.iter().cloned().map(|t| (t.id, t)));
         }
 
-        if cur_len < self.config.block_threshold as usize {
-            let [Some(cur), Some(parent)] = self.entries.get_disjoint_mut([cur_hash, &parent_hash])
+        {
+            let [Some(target), Some(parent)] =
+                self.entries.get_disjoint_mut([target_hash, &parent_hash])
             else {
                 unreachable!();
             };
 
-            cur.excluded = excluded;
-            if excluded {
-                parent.children.remove(&cur.atom.hash);
+            if target.atom.body.atoms.len() + 1 < self.config.block_threshold as usize {
+                parent.children.remove(target_hash);
+                parent
+                    .unconfirmed_tokens
+                    .extend(consumed.into_iter().map(|id| (id, None)));
+                return Ok(false);
             }
-
-            return Ok(false);
         }
 
         let mut related = self.entries[&parent_hash].related_token.clone();
@@ -586,7 +572,7 @@ impl<V: Validator> Graph<V> {
             }
         });
 
-        let cur = self.entries.get_mut(cur_hash).unwrap();
+        let cur = self.entries.get_mut(target_hash).unwrap();
         cur.trie = trie;
         cur.related_token = related;
         cur.weight = weight;
