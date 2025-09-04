@@ -74,9 +74,9 @@ struct Entry {
     // Block only
     pub is_block: bool,
     pub trie: Trie,
-    pub weight: u64,
     pub related_token: HashMap<PeerId, HashMap<Multihash, Token>>,
     pub unconfirmed_tokens: HashMap<Multihash, Option<Token>>,
+    pub cmd_hashes: HashSet<Multihash>,
 
     // Pending only
     pub pending_parents: usize,
@@ -186,7 +186,6 @@ impl<V: Validator> Graph<V> {
                 atom,
                 is_block: true,
                 trie,
-                weight: 0,
                 related_token,
                 is_missing: false,
                 ..Default::default()
@@ -457,7 +456,7 @@ impl<V: Validator> Graph<V> {
         let mut consumed = HashSet::new();
 
         let mut excluded = false;
-        let mut weight = 0u64;
+        let mut cmd_hashes = HashSet::new();
 
         let parent_hash = self.entries[target_hash].atom.header.parent;
 
@@ -478,7 +477,7 @@ impl<V: Validator> Graph<V> {
                 continue;
             };
 
-            weight += 1;
+            cmd_hashes.insert(*hash);
 
             let inputs = cmd
                 .inputs
@@ -575,21 +574,21 @@ impl<V: Validator> Graph<V> {
         let cur = self.entries.get_mut(target_hash).unwrap();
         cur.trie = trie;
         cur.related_token = related;
-        cur.weight = weight;
+        cur.cmd_hashes = cmd_hashes;
         cur.is_block = true;
 
         Ok(true)
     }
 
     fn update_weight(&mut self, start: Multihash) {
-        let (weight, mut cur) = {
+        let (cmds, mut cur) = {
             let e = self.entries.get(&start).unwrap();
-            (e.weight, e.atom.header.parent)
+            (e.cmd_hashes.clone(), e.atom.header.parent)
         };
 
         while cur != self.checkpoint {
             let entry = self.entries.get_mut(&cur).unwrap();
-            entry.weight += weight;
+            entry.cmd_hashes.extend(cmds.iter().copied());
             cur = entry.atom.header.parent;
         }
     }
@@ -614,7 +613,7 @@ impl<V: Validator> Graph<V> {
             .children
             .iter()
             .copied()
-            .map(|c| (self.entries.get(&c).unwrap().weight, c))
+            .map(|c| (self.entries[&c].cmd_hashes.len(), c))
             .max()
             .map(|(.., c)| c)
         {
