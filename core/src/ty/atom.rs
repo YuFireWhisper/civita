@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use civita_serialize_derive::Serialize;
 
@@ -23,8 +23,7 @@ pub struct Header {
 #[derive(Serialize)]
 pub struct Command {
     pub code: u8,
-    pub inputs: HashSet<Multihash>,
-    pub consumed: HashSet<Multihash>,
+    pub inputs: Vec<Multihash>,
     pub created: Vec<Token>,
 }
 
