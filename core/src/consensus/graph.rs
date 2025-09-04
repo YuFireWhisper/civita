@@ -512,8 +512,14 @@ impl<V: Validator> Graph<V> {
                     Ok(acc)
                 })?;
 
-            if hash == target_hash && !V::validate_conversion(cmd.code, &inputs, &cmd.created) {
-                return Err(RejectReason::InvalidConversion);
+            if hash == target_hash {
+                if !Self::is_token_id_valid(cmd.inputs[0], &cmd.created) {
+                    return Err(RejectReason::InvalidTokenId);
+                }
+
+                if !V::validate_conversion(cmd.code, &inputs, &cmd.created) {
+                    return Err(RejectReason::InvalidConversion);
+                }
             }
 
             created.extend(cmd.created.iter().cloned().map(|t| (t.id, t)));
@@ -571,6 +577,13 @@ impl<V: Validator> Graph<V> {
         cur.is_block = true;
 
         Ok(true)
+    }
+
+    fn is_token_id_valid(first_input: Multihash, tokens: &[Token]) -> bool {
+        tokens
+            .iter()
+            .enumerate()
+            .all(|(i, t)| Hasher::validate(&t.id, &(first_input, i as u32).to_vec()))
     }
 
     fn update_weight(&mut self, start: Multihash) {
