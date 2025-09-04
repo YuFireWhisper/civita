@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use libp2p::PeerId;
 
@@ -12,7 +15,7 @@ use crate::{
     crypto::Multihash,
     network::Transport,
     ty::{
-        atom::{Command, Height},
+        atom::{Atom, Command, Height},
         token::Token,
     },
 };
@@ -31,17 +34,17 @@ pub enum Error {
 }
 
 pub struct Config {
-    bootstrap_peers: Vec<PeerId>,
-    bootstrap_timeout: tokio::time::Duration,
-    heartbeat_interval: Option<tokio::time::Duration>,
+    pub bootstrap_peers: Vec<PeerId>,
+    pub bootstrap_timeout: tokio::time::Duration,
+    pub heartbeat_interval: Option<tokio::time::Duration>,
 
-    block_threshold: u32,
-    checkpoint_distance: Height,
-    target_block_time: u64,
-    init_vdf_difficulty: u64,
-    max_difficulty_adjustment: f32,
-    storage_mode: StorageMode,
-    vdf_params: u16,
+    pub block_threshold: u32,
+    pub checkpoint_distance: Height,
+    pub target_block_time: u64,
+    pub init_vdf_difficulty: u64,
+    pub max_difficulty_adjustment: f32,
+    pub storage_mode: StorageMode,
+    pub vdf_params: u16,
 }
 
 pub struct Resident<V> {
@@ -61,17 +64,63 @@ impl<V: Validator> Resident<V> {
             vdf_params: config.vdf_params,
         };
 
+        let bootstrap_config = engine::BootstrapConfig {
+            peers: config.bootstrap_peers,
+            timeout: config.bootstrap_timeout,
+            topic: BOOTSTRAP_TOPIC,
+        };
+
         let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
             request_response_topic: REQUEST_RESPONSE_TOPIC,
-            bootstrap_topic: BOOTSTRAP_TOPIC,
-            graph_config,
-            bootstrap_peers: config.bootstrap_peers,
-            bootstrap_timeout: config.bootstrap_timeout,
             heartbeat_interval: config.heartbeat_interval,
         };
 
-        let engine = Engine::new(transport.clone(), engine_config).await?;
+        let engine = Engine::new(
+            transport.clone(),
+            graph_config,
+            bootstrap_config,
+            engine_config,
+        )
+        .await?;
+
+        Ok(Self { transport, engine })
+    }
+
+    pub async fn with_genesis(
+        transport: Arc<Transport>,
+        atom: Atom,
+        trie_root: Multihash,
+        trie_guide: HashMap<Multihash, Vec<u8>>,
+        related_keys: HashSet<Multihash>,
+        config: Config,
+    ) -> Result<Self> {
+        let graph_config = graph::Config {
+            block_threshold: config.block_threshold,
+            checkpoint_distance: config.checkpoint_distance,
+            target_block_time: config.target_block_time,
+            init_vdf_difficulty: config.init_vdf_difficulty,
+            max_difficulty_adjustment: config.max_difficulty_adjustment,
+            storage_mode: config.storage_mode,
+            vdf_params: config.vdf_params,
+        };
+
+        let engine_config = engine::Config {
+            gossip_topic: GOSSIP_TOPIC,
+            request_response_topic: REQUEST_RESPONSE_TOPIC,
+            heartbeat_interval: config.heartbeat_interval,
+        };
+
+        let engine = Engine::with_genesis(
+            transport.clone(),
+            atom,
+            trie_root,
+            trie_guide,
+            related_keys,
+            graph_config,
+            engine_config,
+        )
+        .await?;
 
         Ok(Self { transport, engine })
     }

@@ -55,15 +55,15 @@ enum Request {
     Sync(Option<PeerId>),
 }
 
+pub struct BootstrapConfig {
+    pub peers: Vec<PeerId>,
+    pub timeout: tokio::time::Duration,
+    pub topic: u8,
+}
+
 pub struct Config {
     pub gossip_topic: u8,
     pub request_response_topic: u8,
-    pub graph_config: graph::Config,
-
-    pub bootstrap_peers: Vec<PeerId>,
-    pub bootstrap_timeout: tokio::time::Duration,
-    pub bootstrap_topic: u8,
-
     pub heartbeat_interval: Option<tokio::time::Duration>,
 }
 
@@ -84,11 +84,16 @@ pub struct Engine<V> {
 }
 
 impl<V: Validator> Engine<V> {
-    pub async fn new(transport: Arc<Transport>, config: Config) -> Result<Arc<Self>> {
+    pub async fn new(
+        transport: Arc<Transport>,
+        graph_config: graph::Config,
+        bootstrap_config: BootstrapConfig,
+        config: Config,
+    ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
-        let graph = Self::bootstrap(&request_response, &config).await?;
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
+        let graph = Self::bootstrap(&request_response, graph_config, bootstrap_config).await?;
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
@@ -111,38 +116,40 @@ impl<V: Validator> Engine<V> {
         Ok(engine)
     }
 
-    async fn bootstrap(req_resp: &RequestResponse, config: &Config) -> Result<Graph<V>> {
-        if config.bootstrap_peers.is_empty() {
+    async fn bootstrap(
+        req_resp: &RequestResponse,
+        graph_config: graph::Config,
+        bootstrap_config: BootstrapConfig,
+    ) -> Result<Graph<V>> {
+        if bootstrap_config.peers.is_empty() {
             return Err(Error::NoBootstrapPeers);
         }
 
-        let target = if let StorageMode::General(peer_id) = config.graph_config.storage_mode {
-            Some(peer_id)
-        } else {
-            None
+        let target = match graph_config.storage_mode {
+            StorageMode::General(peer_id) => Some(peer_id),
+            _ => None,
         };
 
+        let mut rx = req_resp.subscribe(bootstrap_config.topic);
+
         let msg = Request::Sync(target).to_vec();
-
-        let mut rx = req_resp.subscribe(config.bootstrap_topic);
-
-        for &peer in &config.bootstrap_peers {
+        for &peer in &bootstrap_config.peers {
             req_resp
-                .send_request(peer, msg.clone(), config.bootstrap_topic)
+                .send_request(peer, msg.clone(), bootstrap_config.topic)
                 .await;
         }
 
-        let graph = tokio::time::timeout(config.bootstrap_timeout, async {
+        let graph = tokio::time::timeout(bootstrap_config.timeout, async {
             while let Some(msg) = rx.recv().await {
                 let Message::Response { response, peer } = &msg else {
                     continue;
                 };
 
-                if !config.bootstrap_peers.contains(peer) {
+                if !bootstrap_config.peers.contains(peer) {
                     continue;
                 }
 
-                if let Ok(graph) = Graph::import(response, config.graph_config.clone()) {
+                if let Ok(graph) = Graph::import(response, graph_config.clone()) {
                     return Ok(graph);
                 }
             }
@@ -152,9 +159,44 @@ impl<V: Validator> Engine<V> {
         .await
         .map_err(|_| Error::BootstrapTimeout)?;
 
-        req_resp.unsubscribe(config.bootstrap_topic);
+        req_resp.unsubscribe(bootstrap_config.topic);
 
         graph
+    }
+
+    pub async fn with_genesis(
+        transport: Arc<Transport>,
+        atom: Atom,
+        trie_root: Multihash,
+        trie_guide: HashMap<Multihash, Vec<u8>>,
+        related_keys: HashSet<Multihash>,
+        graph_config: graph::Config,
+        config: Config,
+    ) -> Result<Arc<Self>> {
+        let gossipsub = transport.gossipsub();
+        let request_response = transport.request_response();
+        let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
+        let graph = Graph::with_genesis(atom, trie_root, trie_guide, related_keys, graph_config);
+        let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
+
+        let engine = Arc::new(Self {
+            transport,
+            gossipsub,
+            request_response,
+            gossip_topic: config.gossip_topic,
+            req_resp_topic: config.request_response_topic,
+            graph: RwLock::new(graph),
+            pending_atoms: DashMap::new(),
+            atom_result_tx,
+            heartbeat_interval: config.heartbeat_interval,
+        });
+
+        let engine_clone = engine.clone();
+        tokio::spawn(async move {
+            engine_clone.run(gossip_rx, atom_result_rx).await;
+        });
+
+        Ok(engine)
     }
 
     pub async fn propose(
