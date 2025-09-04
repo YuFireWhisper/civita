@@ -145,14 +145,6 @@ impl Entry {
         }
     }
 
-    pub fn genesis() -> Self {
-        Self {
-            is_block: true,
-            is_missing: false,
-            ..Default::default()
-        }
-    }
-
     pub fn validate_script_sig<V: Validator>(&self, id: &Multihash, pk: &[u8]) -> bool {
         self.atom
             .witness
@@ -172,16 +164,50 @@ impl Entry {
 
 impl<V: Validator> Graph<V> {
     pub fn empty(config: Config) -> Self {
-        let entry = Entry::genesis();
-        let hash = entry.atom.hash;
+        Self::with_genesis(
+            Atom::default(),
+            Multihash::default(),
+            HashMap::new(),
+            HashSet::new(),
+            config,
+        )
+    }
+
+    pub fn with_genesis(
+        atom: Atom,
+        trie_root: Multihash,
+        trie_guide: HashMap<Multihash, Vec<u8>>,
+        related_keys: HashSet<Multihash>,
+        config: Config,
+    ) -> Self {
+        let hash = atom.hash;
+
+        let entry = {
+            let trie = Self::resolve_trie(trie_root, &trie_guide);
+            let target = match &config.storage_mode {
+                StorageMode::General(peer_id) => Some(*peer_id),
+                StorageMode::Archive(..) => None,
+            };
+            let related_token = Self::resolve_related(&trie, &related_keys, target);
+
+            Entry {
+                atom,
+                is_block: true,
+                trie,
+                weight: 0,
+                related_token,
+                is_missing: false,
+                ..Default::default()
+            }
+        };
 
         let mut history = VecDeque::new();
         let snapshot = Snapshot {
             atom: entry.atom.clone(),
             difficulty: config.init_vdf_difficulty,
             trie_root: entry.trie.root_hash(),
-            trie_guide: HashMap::new(),
-            related_keys: HashSet::new(),
+            trie_guide,
+            related_keys,
         };
         history.push_back((snapshot.to_vec(), Vec::new()));
 
@@ -197,6 +223,41 @@ impl<V: Validator> Graph<V> {
             config,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    fn resolve_trie(root: Multihash, guide: &HashMap<Multihash, Vec<u8>>) -> Trie {
+        let mut t = Trie::with_root_hash(root);
+        if !t.resolve(guide.keys().cloned().map(|k| k.to_vec()), guide) {
+            panic!("Failed to reconstruct trie");
+        }
+        t
+    }
+
+    fn resolve_related(
+        trie: &Trie,
+        keys: &HashSet<Multihash>,
+        target: Option<PeerId>,
+    ) -> HashMap<PeerId, HashMap<Multihash, Token>> {
+        let mut related: HashMap<_, HashMap<_, _>> = HashMap::new();
+
+        keys.iter().for_each(|k| {
+            let key = k.to_vec();
+            let token = Token::from_slice(&trie.get(&key).unwrap()).unwrap();
+
+            if let Some(peer_id) = &target {
+                if V::is_related(&token.script_pk, peer_id) {
+                    related.entry(*peer_id).or_default().insert(*k, token);
+                }
+            } else {
+                V::related_peers(&token.script_pk)
+                    .into_iter()
+                    .for_each(|p| {
+                        related.entry(p).or_default().insert(*k, token.clone());
+                    });
+            }
+        });
+
+        related
     }
 
     pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {
@@ -768,56 +829,35 @@ impl<V: Validator> Graph<V> {
     pub fn import(mut data: &[u8], config: Config) -> Result<Self, civita_serialize::Error> {
         let info = Snapshot::from_reader(&mut data)?;
 
-        let trie = {
-            let mut t = Trie::with_root_hash(info.trie_root);
-            let keys = info.related_keys.iter().map(|k| k.to_vec());
-            if !t.resolve(keys, &info.trie_guide) {
-                return Err(civita_serialize::Error("Failed to reconstruct trie".into()));
-            }
-            t
-        };
-
-        let related_token = {
-            let mut m: HashMap<_, HashMap<_, _>> = HashMap::new();
-            info.related_keys.iter().for_each(|k| {
-                let key = k.to_vec();
-                let token = Token::from_slice(&trie.get(&key).unwrap()).unwrap();
-                match &config.storage_mode {
-                    StorageMode::General(peer_id) => {
-                        if V::is_related(&token.script_pk, peer_id) {
-                            m.entry(*peer_id).or_default().insert(*k, token);
-                        }
-                    }
-                    StorageMode::Archive(..) => {
-                        V::related_peers(&token.script_pk)
-                            .into_iter()
-                            .for_each(|p| {
-                                m.entry(p).or_default().insert(*k, token.clone());
-                            });
-                    }
-                }
-            });
-            m
-        };
-
         let hash = info.atom.hash;
+        let height = info.atom.header.height;
+        let history = VecDeque::from_iter([(info.to_vec(), Vec::new())]);
 
-        let checkpoint = Entry {
-            atom: info.atom,
-            is_block: true,
-            trie,
-            related_token,
-            is_missing: false,
-            ..Default::default()
+        let entry = {
+            let trie = Self::resolve_trie(info.trie_root, &info.trie_guide);
+            let target = match &config.storage_mode {
+                StorageMode::General(peer_id) => Some(*peer_id),
+                StorageMode::Archive(..) => None,
+            };
+            let related_token = Self::resolve_related(&trie, &info.related_keys, target);
+
+            Entry {
+                atom: info.atom,
+                is_block: true,
+                trie,
+                related_token,
+                is_missing: false,
+                ..Default::default()
+            }
         };
 
         let mut graph = Self {
-            checkpoint_height: checkpoint.atom.header.height,
-            entries: HashMap::from_iter([(hash, checkpoint)]),
+            entries: HashMap::from_iter([(hash, entry)]),
             dismissed: HashSet::new(),
             main_head: hash,
             checkpoint: hash,
-            history: VecDeque::new(),
+            checkpoint_height: height,
+            history,
             vdf: WesolowskiVDFParams(config.vdf_params).new(),
             difficulty: info.difficulty,
             config,
