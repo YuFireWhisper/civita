@@ -14,7 +14,7 @@ use crate::{
     consensus::validator::Validator,
     crypto::{hasher::Hasher, Multihash},
     ty::{
-        atom::{self, Atom, Command, Height},
+        atom::{Atom, Command, Height},
         token::Token,
     },
     utils::Trie,
@@ -30,7 +30,6 @@ pub enum RejectReason {
     ParentInAtoms,
     CheckpointMismatch,
     BlockInAtoms,
-    InvalidBodyHash,
     InvalidTokenId,
     InvalidHeight,
     InvalidScriptSig,
@@ -147,7 +146,6 @@ impl Entry {
 
     pub fn validate_script_sig<V: Validator>(&self, id: &Multihash, pk: &[u8]) -> bool {
         self.atom
-            .witness
             .script_sigs
             .get(id)
             .is_none_or(|sig| V::validate_script_sig(pk, sig))
@@ -322,23 +320,19 @@ impl<V: Validator> Graph<V> {
             return Err(RejectReason::AlreadyDismissed);
         }
 
-        if !Hasher::validate(&atom.header.body_hash, &atom.body.to_vec()) {
-            return Err(RejectReason::InvalidBodyHash);
-        }
-
-        if atom.header.height < self.checkpoint_height {
+        if atom.height < self.checkpoint_height {
             return Err(RejectReason::HeightBelowCheckpoint);
         }
 
-        if &atom.header.parent == hash {
+        if &atom.parent == hash {
             return Err(RejectReason::SelfReference);
         }
 
-        if atom.body.atoms.contains(hash) {
+        if atom.atoms.contains(hash) {
             return Err(RejectReason::SelfReference);
         }
 
-        if atom.body.atoms.contains(&atom.header.parent) {
+        if atom.atoms.contains(&atom.parent) {
             return Err(RejectReason::ParentInAtoms);
         }
 
@@ -388,8 +382,8 @@ impl<V: Validator> Graph<V> {
 
         let parents = {
             let atom = &self.entries[&hash].atom;
-            let mut atoms = atom.body.atoms.clone();
-            atoms.push(atom.header.parent);
+            let mut atoms = atom.atoms.clone();
+            atoms.push(atom.parent);
             atoms
         };
 
@@ -412,21 +406,21 @@ impl<V: Validator> Graph<V> {
     fn final_validation(&mut self, hash: Multihash) -> Result<(), RejectReason> {
         let atom = &self.entries[&hash].atom;
 
-        if atom.header.checkpoint != self.checkpoint {
+        if atom.checkpoint != self.checkpoint {
             return Err(RejectReason::CheckpointMismatch);
         }
 
-        if atom.header.height != self.entries[&atom.header.parent].atom.header.height + 1 {
+        if atom.height != self.entries[&atom.parent].atom.height + 1 {
             return Err(RejectReason::InvalidHeight);
         }
 
-        if atom.body.atoms.iter().any(|h| self.entries[h].is_block) {
+        if atom.atoms.iter().any(|h| self.entries[h].is_block) {
             return Err(RejectReason::BlockInAtoms);
         }
 
         if self
             .vdf
-            .verify(&hash.to_vec(), self.difficulty, &atom.header.nonce)
+            .verify(&hash.to_vec(), self.difficulty, &atom.nonce)
             .is_err()
         {
             return Err(RejectReason::InvalidNonce);
@@ -458,11 +452,10 @@ impl<V: Validator> Graph<V> {
         let mut excluded = false;
         let mut cmd_hashes = HashSet::new();
 
-        let parent_hash = self.entries[target_hash].atom.header.parent;
+        let parent_hash = self.entries[target_hash].atom.parent;
 
         for hash in self.entries[target_hash]
             .atom
-            .body
             .atoms
             .clone()
             .iter()
@@ -473,7 +466,7 @@ impl<V: Validator> Graph<V> {
                 unreachable!();
             };
 
-            let Some(cmd) = &cur.atom.body.cmd else {
+            let Some(cmd) = &cur.atom.cmd else {
                 continue;
             };
 
@@ -497,7 +490,7 @@ impl<V: Validator> Graph<V> {
 
                     if !parent
                         .trie
-                        .resolve(std::iter::once(&key), &cur.atom.witness.trie_proofs)
+                        .resolve(std::iter::once(&key), &cur.atom.trie_proofs)
                     {
                         return Err(RejectReason::MissingInput);
                     }
@@ -533,7 +526,7 @@ impl<V: Validator> Graph<V> {
                 unreachable!();
             };
 
-            if target.atom.body.atoms.len() + 1 < self.config.block_threshold as usize {
+            if target.atom.atoms.len() + 1 < self.config.block_threshold as usize {
                 parent.children.remove(target_hash);
                 parent
                     .unconfirmed_tokens
@@ -583,13 +576,13 @@ impl<V: Validator> Graph<V> {
     fn update_weight(&mut self, start: Multihash) {
         let (cmds, mut cur) = {
             let e = self.entries.get(&start).unwrap();
-            (e.cmd_hashes.clone(), e.atom.header.parent)
+            (e.cmd_hashes.clone(), e.atom.parent)
         };
 
         while cur != self.checkpoint {
             let entry = self.entries.get_mut(&cur).unwrap();
             entry.cmd_hashes.extend(cmds.iter().copied());
-            cur = entry.atom.header.parent;
+            cur = entry.atom.parent;
         }
     }
 
@@ -624,8 +617,8 @@ impl<V: Validator> Graph<V> {
     }
 
     fn maybe_advance_checkpoint(&mut self) {
-        let prev_height = self.entries[&self.checkpoint].atom.header.height;
-        let head_height = self.entries[&self.main_head].atom.header.height;
+        let prev_height = self.entries[&self.checkpoint].atom.height;
+        let head_height = self.entries[&self.main_head].atom.height;
 
         if head_height != prev_height + self.config.checkpoint_distance * 2 {
             return;
@@ -637,8 +630,7 @@ impl<V: Validator> Graph<V> {
         let times = self.collect_times(next_hash, self.checkpoint);
         let difficulty = self.adjust_difficulty(times);
 
-        self.entries
-            .retain(|_, e| e.atom.header.checkpoint == next_hash);
+        self.entries.retain(|_, e| e.atom.checkpoint == next_hash);
 
         let snapshot = {
             let entry = &self.entries[&next_hash];
@@ -681,10 +673,10 @@ impl<V: Validator> Graph<V> {
     fn get_block_at_height(&self, mut cur: Multihash, height: Height) -> Multihash {
         loop {
             let e = &self.entries[&cur];
-            if e.atom.header.height == height {
+            if e.atom.height == height {
                 break e.atom.hash;
             }
-            cur = e.atom.header.parent;
+            cur = e.atom.parent;
         }
     }
 
@@ -693,19 +685,19 @@ impl<V: Validator> Graph<V> {
 
         let (mut cur, mut next_time) = {
             let entry = &self.entries[&start];
-            (entry.atom.header.parent, entry.atom.header.timestamp)
+            (entry.atom.parent, entry.atom.timestamp)
         };
 
         loop {
             let entry = &self.entries[&cur];
 
-            let dt = next_time.saturating_sub(entry.atom.header.timestamp);
+            let dt = next_time.saturating_sub(entry.atom.timestamp);
             if dt > 0 {
                 times.push(dt);
             }
 
-            next_time = entry.atom.header.timestamp;
-            cur = entry.atom.header.parent;
+            next_time = entry.atom.timestamp;
+            cur = entry.atom.parent;
 
             if cur == end {
                 break;
@@ -796,7 +788,7 @@ impl<V: Validator> Graph<V> {
         let info = Snapshot::from_reader(&mut data)?;
 
         let hash = info.atom.hash;
-        let height = info.atom.header.height;
+        let height = info.atom.height;
         let history = VecDeque::from_iter([(info.to_vec(), Vec::new())]);
 
         let entry = {
@@ -848,7 +840,7 @@ impl<V: Validator> Graph<V> {
     ) -> Result<JoinHandle<Atom>, CreationError> {
         let mut trie_proofs = HashMap::new();
         let mut cmd = None;
-        let mut sigs = HashMap::new();
+        let mut script_sigs = HashMap::new();
 
         let head = &self.entries[&self.main_head];
 
@@ -865,44 +857,34 @@ impl<V: Validator> Graph<V> {
                 .ok_or(CreationError::FailedToGenerateGuide)?;
 
             cmd = Some(pair.0);
-            sigs = pair.1;
+            script_sigs = pair.1;
         }
 
-        let body = atom::Body {
-            cmd,
-            atoms: self.get_children(self.main_head),
-        };
-
-        let witness = atom::Witness {
-            trie_proofs,
-            script_sigs: sigs,
-        };
-
-        let mut header = atom::Header {
+        let mut atom = Atom {
+            hash: Multihash::default(),
             parent: self.main_head,
             checkpoint: self.checkpoint,
-            height: head.atom.header.height + 1,
+            height: self.entries[&self.main_head].atom.height + 1,
             nonce: Vec::new(),
             timestamp: SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            body_hash: Hasher::digest(&body.to_vec()),
+            cmd,
+            atoms: self.get_children(self.main_head),
+            trie_proofs,
+            script_sigs,
         };
 
         let vdf = self.vdf.clone();
         let difficulty = self.difficulty;
 
         Ok(tokio::spawn(async move {
-            header.nonce = vdf
-                .solve(&header.to_vec(), difficulty)
+            atom.nonce = vdf
+                .solve(&atom.to_vec(), difficulty)
                 .expect("VDF must be solved");
-            Atom {
-                hash: Hasher::digest(&header.to_vec()),
-                header,
-                body,
-                witness,
-            }
+            atom.hash = Hasher::digest(&atom.to_vec());
+            atom
         }))
     }
 
@@ -914,7 +896,7 @@ impl<V: Validator> Graph<V> {
                 .children
                 .iter()
                 .filter(|c| self.contains(c))
-                .map(|c| (*c, self.entries[c].atom.body.atoms.len())),
+                .map(|c| (*c, self.entries[c].atom.atoms.len())),
         );
 
         let mut result = Vec::with_capacity(indeg.len());
