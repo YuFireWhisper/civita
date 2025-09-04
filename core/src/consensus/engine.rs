@@ -301,7 +301,7 @@ impl<V: Validator> Engine<V> {
             return;
         };
 
-        if !Hasher::validate(&atom.hash, &atom.header.to_vec()) {
+        if !Hasher::validate(&atom.hash, &atom.hash_input()) {
             log::warn!("Invalid atom hash from peer {}", msg.propagation_source);
             self.gossipsub
                 .report_validation_result(
@@ -404,7 +404,7 @@ impl<V: Validator> Engine<V> {
                 }
 
                 for atom in atoms {
-                    if !Hasher::validate(&atom.hash, &atom.header.to_vec()) {
+                    if !Hasher::validate(&atom.hash, &atom.hash_input()) {
                         log::warn!("Invalid atom hash from peer {peer}");
                         self.disconnect_peer(peer).await;
                         return;
