@@ -37,6 +37,7 @@ pub enum RejectReason {
     InvalidConversion,
     InvalidNonce,
     MissingInput,
+    DoubleSpend,
 }
 
 #[derive(Debug)]
@@ -151,14 +152,6 @@ impl Entry {
             .script_sigs
             .get(id)
             .is_none_or(|sig| V::validate_script_sig(pk, sig))
-    }
-
-    pub fn validate_conversion<'a, V: Validator>(
-        &'a self,
-        inputs: impl Iterator<Item = &'a Token>,
-    ) -> bool {
-        let cmd = self.atom.body.cmd.as_ref().unwrap();
-        V::validate_conversion(cmd.code, inputs, cmd.consumed.iter(), &cmd.created)
     }
 }
 
@@ -461,7 +454,9 @@ impl<V: Validator> Graph<V> {
     }
 
     fn validate_execution(&mut self, cur_hash: &Multihash) -> Result<bool, RejectReason> {
-        let mut state = HashMap::new();
+        let mut created = HashMap::new();
+        let mut consumed = HashSet::new();
+
         let mut excluded = false;
         let mut weight = 0u64;
 
@@ -477,29 +472,23 @@ impl<V: Validator> Graph<V> {
         {
             weight += 1;
 
-            let inputs = cmd.inputs.iter().try_fold(HashMap::new(), |mut acc, id| {
-                let token = state
-                    .remove(id)
-                    .or_else(|| {
-                        let trie = &self.entries[&parent_hash].trie;
-                        trie.get(&id.to_vec())
-                            .map(|v| Token::from_slice(&v).unwrap())
-                            .into()
-                    })
-                    .flatten()
-                    .ok_or(RejectReason::MissingInput)?;
-                acc.insert(*id, token);
-                Ok(acc)
+            cmd.inputs.iter().copied().try_for_each(|id| {
+                if !consumed.insert(id) {
+                    return Err(RejectReason::DoubleSpend);
+                }
+
+                if created.remove(&id).is_some() {
+                    return Ok(());
+                }
+
+                if self.entries[&parent_hash].trie.get(&id.to_vec()).is_none() {
+                    return Err(RejectReason::MissingInput);
+                };
+
+                Ok(())
             })?;
 
-            state.extend(inputs.into_iter().map(|(k, v)| {
-                if cmd.consumed.contains(&k) {
-                    (k, None)
-                } else {
-                    (k, Some(v))
-                }
-            }));
-            state.extend(cmd.created.iter().cloned().map(|t| (t.id, Some(t))));
+            created.extend(cmd.created.iter().cloned().map(|t| (t.id, t)));
         }
 
         if cur.atom.body.cmd.is_some() {
@@ -512,53 +501,46 @@ impl<V: Validator> Graph<V> {
 
             weight += 1;
 
-            let inputs = cmd.inputs.iter().try_fold(HashMap::new(), |mut acc, id| {
-                let token = state
-                    .remove(id)
-                    .or_else(|| {
-                        let key = id.to_vec();
-                        parent
-                            .trie
-                            .resolve(std::iter::once(&key), &cur.atom.witness.trie_proofs)
-                            .then_some(Some(
-                                Token::from_slice(&parent.trie.get(&key).unwrap()).unwrap(),
-                            ))
-                    })
-                    .flatten()
-                    .ok_or(RejectReason::MissingInput)?;
+            let inputs = cmd
+                .inputs
+                .iter()
+                .copied()
+                .try_fold(Vec::new(), |mut acc, id| {
+                    if !consumed.insert(id) {
+                        return Err(RejectReason::DoubleSpend);
+                    }
 
-                if !cur.validate_script_sig::<V>(id, &token.script_pk) {
-                    return Err(RejectReason::InvalidScriptSig);
-                }
+                    if let Some(t) = created.remove(&id) {
+                        acc.push(t);
+                        return Ok(acc);
+                    }
 
-                excluded |= parent
-                    .unconfirmed_tokens
-                    .get(id)
-                    .is_some_and(|t| t.is_none());
+                    let Some(token) = parent
+                        .trie
+                        .get(&id.to_vec())
+                        .map(|v| Token::from_slice(&v).unwrap())
+                    else {
+                        return Err(RejectReason::MissingInput);
+                    };
 
-                acc.insert(*id, token);
-                Ok(acc)
-            })?;
+                    if !cur.validate_script_sig::<V>(&id, &token.script_pk) {
+                        return Err(RejectReason::InvalidScriptSig);
+                    }
 
-            if !cur.validate_conversion::<V>(inputs.values()) {
+                    excluded |= parent
+                        .unconfirmed_tokens
+                        .get(&id)
+                        .is_some_and(|t| t.is_none());
+
+                    acc.push(token);
+                    Ok(acc)
+                })?;
+
+            if !V::validate_conversion(cmd.code, &inputs, &cmd.created) {
                 return Err(RejectReason::InvalidConversion);
             }
 
-            for (idx, t) in cmd.created.iter().cloned().enumerate() {
-                let data = (*cur_hash, idx as u32).to_vec();
-                if !Hasher::validate(&t.id, &data) {
-                    return Err(RejectReason::InvalidTokenId);
-                }
-                state.insert(t.id, Some(t));
-            }
-
-            state.extend(inputs.into_iter().map(|(k, v)| {
-                if cmd.consumed.contains(&k) {
-                    (k, None)
-                } else {
-                    (k, Some(v))
-                }
-            }));
+            created.extend(cmd.created.iter().cloned().map(|t| (t.id, t)));
         }
 
         if cur_len < self.config.block_threshold as usize {
@@ -578,17 +560,16 @@ impl<V: Validator> Graph<V> {
         let mut related = self.entries[&parent_hash].related_token.clone();
         let mut trie = self.entries[&parent_hash].trie.clone();
 
-        state.into_iter().for_each(|(k, t)| {
+        consumed.into_iter().for_each(|id| {
+            let k = id.to_vec();
+            trie.remove(&k);
+            related.values_mut().for_each(|m| {
+                m.remove(&id);
+            });
+        });
+
+        created.into_iter().for_each(|(k, t)| {
             let k_vec = k.to_vec();
-
-            let Some(t) = t else {
-                trie.remove(&k_vec);
-                related.values_mut().for_each(|m| {
-                    m.remove(&k);
-                });
-                return;
-            };
-
             trie.insert(&k_vec, t.to_vec());
 
             match &self.config.storage_mode {
