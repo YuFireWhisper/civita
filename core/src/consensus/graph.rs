@@ -881,9 +881,9 @@ impl<V: Validator> Graph<V> {
 
         Ok(tokio::spawn(async move {
             atom.nonce = vdf
-                .solve(&atom.to_vec(), difficulty)
+                .solve(&atom.vdf_input(), difficulty)
                 .expect("VDF must be solved");
-            atom.hash = Hasher::digest(&atom.to_vec());
+            atom.hash = Hasher::digest(&atom.hash_input());
             atom
         }))
     }
