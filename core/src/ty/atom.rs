@@ -8,18 +8,6 @@ pub type Height = u32;
 pub type Timestamp = u64;
 
 #[derive(Clone)]
-#[derive(Default)]
-#[derive(Serialize)]
-pub struct Header {
-    pub parent: Multihash,
-    pub checkpoint: Multihash,
-    pub height: Height,
-    pub nonce: Vec<u8>,
-    pub timestamp: Timestamp,
-    pub body_hash: Multihash,
-}
-
-#[derive(Clone)]
 #[derive(Serialize)]
 pub struct Command {
     pub code: u8,
@@ -30,25 +18,15 @@ pub struct Command {
 #[derive(Clone)]
 #[derive(Default)]
 #[derive(Serialize)]
-pub struct Witness {
-    pub trie_proofs: HashMap<Multihash, Vec<u8>>,
-    pub script_sigs: HashMap<Multihash, Vec<u8>>,
-}
-
-#[derive(Clone)]
-#[derive(Default)]
-#[derive(Serialize)]
-pub struct Body {
-    pub cmd: Option<Command>,
-    pub atoms: Vec<Multihash>,
-}
-
-#[derive(Clone)]
-#[derive(Default)]
-#[derive(Serialize)]
 pub struct Atom {
     pub hash: Multihash,
-    pub header: Header,
-    pub body: Body,
-    pub witness: Witness,
+    pub parent: Multihash,
+    pub checkpoint: Multihash,
+    pub height: Height,
+    pub nonce: Vec<u8>,
+    pub timestamp: Timestamp,
+    pub cmd: Option<Command>,
+    pub atoms: Vec<Multihash>,
+    pub trie_proofs: HashMap<Multihash, Vec<u8>>,
+    pub script_sigs: HashMap<Multihash, Vec<u8>>,
 }
