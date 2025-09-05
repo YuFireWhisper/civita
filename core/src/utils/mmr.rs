@@ -161,18 +161,7 @@ impl Mmr {
     }
 
     fn peaks(&self) -> &Vec<u32> {
-        self.peaks.get_or_init(|| {
-            let mut peak = 0;
-            let mut peaks = Vec::new();
-            let mut s = self.next;
-            while s != 0 {
-                let highest = (1 << (s + 1).ilog2()) - 1;
-                peak += highest;
-                peaks.push(peak - 1);
-                s -= highest;
-            }
-            peaks
-        })
+        self.peaks.get_or_init(|| peak_indices(self.next))
     }
 
     pub fn verify(&self, mut idx: u32, hash: Multihash, proof: &MmrProof) -> bool {
@@ -258,6 +247,34 @@ impl Mmr {
 
         true
     }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        self.hashes.to_writer(&mut buf);
+        self.next.to_writer(&mut buf);
+        self.peaks().to_writer(&mut buf);
+        buf
+    }
+
+    pub fn from_vec(mut data: &[u8]) -> Result<Self, civita_serialize::Error> {
+        let hashes: HashMap<u32, Multihash> = HashMap::from_reader(&mut data)?;
+        let next: u32 = u32::from_reader(&mut data)?;
+        let peaks: Vec<u32> = Vec::from_reader(&mut data)?;
+        let exp_peaks = peak_indices(next);
+
+        if peaks != exp_peaks {
+            return Err(civita_serialize::Error("Invalid peaks".to_string()));
+        }
+
+        let lock = OnceLock::new();
+        lock.set(peaks).unwrap();
+
+        Ok(Self {
+            hashes,
+            next,
+            peaks: lock,
+        })
+    }
 }
 
 fn index_height(i: u32) -> u32 {
@@ -266,6 +283,18 @@ fn index_height(i: u32) -> u32 {
         pos = pos - (1 << (31 - pos.leading_zeros())) + 1;
     }
     31 - pos.leading_zeros()
+}
+
+fn peak_indices(mut s: u32) -> Vec<u32> {
+    let mut peak = 0;
+    let mut peaks = Vec::new();
+    while s != 0 {
+        let highest = (1 << (s + 1).ilog2()) - 1;
+        peak += highest;
+        peaks.push(peak - 1);
+        s -= highest;
+    }
+    peaks
 }
 
 #[cfg(test)]
@@ -363,5 +392,37 @@ mod test {
         assert!(valid);
         assert!(mmr.verify(i1, h1, &p1));
         assert!(mmr.verify(i2, h2, &p2));
+    }
+
+    #[test]
+    fn serialize_deserialize() {
+        let h1 = Hasher::digest(b"1");
+        let h2 = Hasher::digest(b"2");
+        let h3 = Hasher::digest(b"3");
+
+        let mut mmr = Mmr::default();
+
+        let i1 = mmr.append(h1).unwrap();
+        let i2 = mmr.append(h2).unwrap();
+        let i3 = mmr.append(h3).unwrap();
+
+        let p1 = mmr.prove(i1).unwrap();
+        let p2 = mmr.prove(i2).unwrap();
+        let p3 = mmr.prove(i3).unwrap();
+
+        assert!(mmr.verify(i1, h1, &p1));
+        assert!(mmr.verify(i2, h2, &p2));
+        assert!(mmr.verify(i3, h3, &p3));
+
+        let data = mmr.to_vec();
+        let mmr2 = Mmr::from_vec(&data).unwrap();
+
+        let p1 = mmr2.prove(i1).unwrap();
+        let p2 = mmr2.prove(i2).unwrap();
+        let p3 = mmr2.prove(i3).unwrap();
+
+        assert!(mmr2.verify(i1, h1, &p1));
+        assert!(mmr2.verify(i2, h2, &p2));
+        assert!(mmr2.verify(i3, h3, &p3));
     }
 }
