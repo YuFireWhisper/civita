@@ -48,6 +48,62 @@ impl Mmr {
         Hasher::digest(&buf)
     }
 
+    pub fn delete(&mut self, idx: u32) -> bool {
+        if !self.hashes.contains_key(&idx) {
+            return false;
+        }
+
+        self.hashes.insert(idx, Multihash::default());
+        self.recalculate_parents(idx);
+        self.peaks = OnceLock::new();
+
+        true
+    }
+
+    fn recalculate_parents(&mut self, mut idx: u32) {
+        let mut g = index_height(idx);
+
+        loop {
+            let offset = 2 << g;
+            let pidx;
+            let sibling_idx;
+
+            if index_height(idx + 1) > g {
+                sibling_idx = idx + 1 - offset;
+                pidx = idx + 1;
+            } else {
+                sibling_idx = idx + offset - 1;
+                pidx = idx + offset;
+            }
+
+            // Already reached the peak
+            if !self.hashes.contains_key(&pidx) {
+                break;
+            }
+
+            let sibling_hash = match self.hashes.get(&sibling_idx) {
+                Some(hash) => hash,
+                None => panic!("Sibling node missing, data structure corrupted"),
+            };
+
+            let cur_hash = match self.hashes.get(&idx) {
+                Some(hash) => hash,
+                None => panic!("Current node missing, data structure corrupted"),
+            };
+
+            let new_parent_hash = if index_height(idx + 1) > g {
+                self.hash_pospair(pidx + 1, sibling_hash, cur_hash)
+            } else {
+                self.hash_pospair(pidx + 1, cur_hash, sibling_hash)
+            };
+
+            self.hashes.insert(pidx, new_parent_hash);
+
+            idx = pidx;
+            g += 1;
+        }
+    }
+
     pub fn prove(&self, mut idx: u32) -> Option<MmrProof> {
         if idx >= self.next {
             return None;
@@ -188,5 +244,36 @@ mod test {
         assert!(mmr.verify(i2, h2, &p2));
         assert!(mmr.verify(i3, h3, &p3));
         assert!(!mmr.verify(i1, h1, &ip));
+    }
+
+    #[test]
+    fn delete_and_verify() {
+        let h1 = Hasher::digest(b"1");
+        let h2 = Hasher::digest(b"2");
+        let h3 = Hasher::digest(b"3");
+
+        let mut mmr = Mmr::default();
+
+        let i1 = mmr.append(h1).unwrap();
+        let i2 = mmr.append(h2).unwrap();
+        let i3 = mmr.append(h3).unwrap();
+
+        let p1 = mmr.prove(i1).unwrap();
+        let p2 = mmr.prove(i2).unwrap();
+        let p3 = mmr.prove(i3).unwrap();
+
+        assert!(mmr.verify(i1, h1, &p1));
+        assert!(mmr.verify(i2, h2, &p2));
+        assert!(mmr.verify(i3, h3, &p3));
+
+        assert!(mmr.delete(i3));
+
+        let p1 = mmr.prove(i1).unwrap();
+        let p2 = mmr.prove(i2).unwrap();
+        let p3 = mmr.prove(i3).unwrap();
+
+        assert!(mmr.verify(i1, h1, &p1));
+        assert!(mmr.verify(i2, h2, &p2));
+        assert!(!mmr.verify(i3, h3, &p3));
     }
 }
