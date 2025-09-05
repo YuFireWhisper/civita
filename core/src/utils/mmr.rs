@@ -4,9 +4,13 @@ use std::{
 };
 
 use civita_serialize::Serialize;
+use civita_serialize_derive::Serialize;
 
 use crate::crypto::{hasher::Hasher, Multihash};
 
+#[derive(Clone)]
+#[derive(Default)]
+#[derive(Serialize)]
 pub struct MmrProof(Vec<Multihash>);
 
 #[derive(Default)]
