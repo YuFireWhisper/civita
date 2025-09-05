@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::OnceLock,
+};
 
 use civita_serialize::Serialize;
 
@@ -189,6 +192,72 @@ impl Mmr {
 
         self.peaks().iter().any(|p| self.hashes[p] == root)
     }
+
+    pub fn prune<I>(&mut self, indices: I) -> bool
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        let mut keep: HashSet<u32> = HashSet::from_iter(self.peaks().iter().copied());
+
+        for idx in indices {
+            if idx >= self.next || !self.hashes.contains_key(&idx) {
+                return false;
+            }
+
+            keep.insert(idx);
+
+            let mut cur_idx = idx;
+            let peaks = self.peaks();
+
+            let (peak, last) = {
+                let pos = peaks.partition_point(|p| *p < idx);
+                let peak = peaks[pos];
+
+                if peak == idx {
+                    continue;
+                }
+
+                let last = if pos + 1 < peaks.len() {
+                    peaks[pos + 1]
+                } else {
+                    peak
+                };
+
+                (peak, last)
+            };
+
+            let mut g = index_height(cur_idx);
+
+            loop {
+                let offset = 2 << g;
+                let sibling_idx;
+
+                if index_height(cur_idx + 1) > g {
+                    sibling_idx = cur_idx + 1 - offset;
+                    cur_idx += 1;
+                } else {
+                    sibling_idx = cur_idx + offset - 1;
+                    cur_idx += offset;
+                }
+
+                keep.insert(cur_idx);
+
+                if sibling_idx <= last && self.hashes.contains_key(&sibling_idx) {
+                    keep.insert(sibling_idx);
+                }
+
+                g += 1;
+
+                if cur_idx == peak {
+                    break;
+                }
+            }
+        }
+
+        self.hashes.retain(|k, _| keep.contains(k));
+
+        true
+    }
 }
 
 fn index_height(i: u32) -> u32 {
@@ -275,5 +344,24 @@ mod test {
         assert!(mmr.verify(i1, h1, &p1));
         assert!(mmr.verify(i2, h2, &p2));
         assert!(!mmr.verify(i3, h3, &p3));
+    }
+
+    #[test]
+    fn prune_keeps_necessary_nodes() {
+        let h1 = Hasher::digest(b"1");
+        let h2 = Hasher::digest(b"2");
+
+        let mut mmr = Mmr::default();
+
+        let i1 = mmr.append(h1).unwrap();
+        let i2 = mmr.append(h2).unwrap();
+
+        let valid = mmr.prune(vec![i1, i2]);
+        let p1 = mmr.prove(i1).unwrap();
+        let p2 = mmr.prove(i2).unwrap();
+
+        assert!(valid);
+        assert!(mmr.verify(i1, h1, &p1));
+        assert!(mmr.verify(i2, h2, &p2));
     }
 }
