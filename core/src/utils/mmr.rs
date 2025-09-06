@@ -323,6 +323,18 @@ fn peak_range(peaks: &[BigUint], idx: &BigUint) -> (BigUint, BigUint) {
     (peak, next_peak)
 }
 
+impl Clone for Mmr {
+    fn clone(&self) -> Self {
+        Self {
+            hashes: self.hashes.clone(),
+            next: self.next.clone(),
+            leaves: self.leaves.clone(),
+            staged: Staged::default(),
+            peaks: self.peaks.clone(),
+        }
+    }
+}
+
 impl Serialize for Mmr {
     fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, civita_serialize::Error> {
         Ok(Self {
