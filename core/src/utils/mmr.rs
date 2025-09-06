@@ -58,6 +58,14 @@ impl Mmr {
             return false;
         }
 
+        if let Some(h) = self.hashes.get(&idx) {
+            if h == &Multihash::default() || h != &hash {
+                return false;
+            }
+            self.staged.deletes.push(idx);
+            return true;
+        }
+
         let (peak, _) = peak_range(self.peaks(), &idx);
         let mut cur_idx = idx.clone();
         let mut g = index_height(&cur_idx);
