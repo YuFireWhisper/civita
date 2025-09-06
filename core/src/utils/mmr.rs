@@ -31,6 +31,7 @@ pub struct Mmr {
     hashes: HashMap<BigUint, Multihash>,
     next: BigUint,
     leaves: BigUint,
+    leaves_indices: HashSet<BigUint>,
     staged: Staged,
     peaks: OnceLock<Vec<BigUint>>,
 }
@@ -119,12 +120,14 @@ impl Mmr {
 
         staged.deletes.into_iter().for_each(|idx| {
             self.hashes.insert(idx.clone(), Multihash::default());
+            self.leaves_indices.remove(&idx);
             self.recalculate_parents(idx);
         });
 
         staged.appends.into_iter().for_each(|h| {
             let mut g = 0;
             let mut i = self.insert(h);
+            let tmp = &i - 1u8;
 
             while index_height(&i) > g {
                 let il = &i - (2u64 << g);
@@ -138,6 +141,7 @@ impl Mmr {
             }
 
             self.leaves.inc();
+            self.leaves_indices.insert(tmp);
         });
 
         self.staged = Staged::new(self.next.clone(), self.leaves.clone());
@@ -279,6 +283,7 @@ impl Mmr {
         }
 
         self.hashes.retain(|k, _| keep.contains(k));
+        self.leaves_indices.retain(|k| keep.contains(k));
 
         true
     }
@@ -330,7 +335,8 @@ impl Clone for Mmr {
             hashes: self.hashes.clone(),
             next: self.next.clone(),
             leaves: self.leaves.clone(),
-            staged: Staged::default(),
+            leaves_indices: self.leaves_indices.clone(),
+            staged: Staged::new(self.staged.vnext.clone(), self.staged.vleaves.clone()),
             peaks: self.peaks.clone(),
         }
     }
@@ -342,6 +348,7 @@ impl Serialize for Mmr {
             hashes: HashMap::from_reader(reader)?,
             next: BigUint::from_reader(reader)?,
             leaves: BigUint::from_reader(reader)?,
+            leaves_indices: HashSet::from_reader(reader)?,
             staged: Staged::default(),
             peaks: {
                 let peaks = Vec::from_reader(reader)?;
@@ -356,6 +363,7 @@ impl Serialize for Mmr {
         self.hashes.to_writer(writer);
         self.next.to_writer(writer);
         self.leaves.to_writer(writer);
+        self.leaves_indices.to_writer(writer);
         self.peaks().to_writer(writer);
     }
 }
