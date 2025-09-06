@@ -59,7 +59,7 @@ impl Mmr {
             return false;
         }
 
-        let (peak, last) = peak_ranges(self.peaks(), idx);
+        let (peak, last) = peak_range(self.peaks(), idx);
         let mut cur_idx = idx;
         let mut g = index_height(cur_idx);
         let mut acc = hash;
@@ -226,7 +226,7 @@ impl Mmr {
             return None;
         }
 
-        let (peak, last) = peak_ranges(self.peaks(), idx);
+        let (peak, last) = peak_range(self.peaks(), idx);
         if peak == idx {
             return Some(MmrProof(Vec::new()));
         }
@@ -297,7 +297,7 @@ impl Mmr {
                 continue;
             }
 
-            let (peak, last) = peak_ranges(self.peaks(), idx);
+            let (peak, last) = peak_range(self.peaks(), idx);
             if peak == idx {
                 continue;
             }
@@ -397,7 +397,7 @@ fn peak_indices(mut s: u32) -> Vec<u32> {
     peaks
 }
 
-fn peak_ranges(peaks: &[u32], idx: u32) -> (u32, u32) {
+fn peak_range(peaks: &[u32], idx: u32) -> (u32, u32) {
     let pos = peaks.partition_point(|p| *p < idx);
     let peak = peaks[pos];
     (peak, peaks.get(pos + 1).copied().unwrap_or(peak))
