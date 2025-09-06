@@ -145,10 +145,6 @@ impl Mmr {
                 self.hashes.insert(p, hash_pospair(p + 1, s, c));
                 idx = p;
             } else {
-                if idx == peak {
-                    break;
-                }
-
                 let s = &self.hashes[&(idx + offset - 1)];
                 let p = idx + offset;
                 self.hashes.insert(p, hash_pospair(p + 1, c, s));
