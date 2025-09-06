@@ -15,3 +15,6 @@ pub mod libp2p;
 
 #[cfg(feature = "ark-secp256k1")]
 pub mod ark_secp256k1;
+
+#[cfg(feature = "bigint")]
+pub mod bigint;
