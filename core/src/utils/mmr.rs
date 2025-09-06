@@ -158,16 +158,12 @@ impl Mmr {
 
         loop {
             let offset = 2 << g;
-            let pidx;
-            let sibling_idx;
 
-            if index_height(idx + 1) > g {
-                sibling_idx = idx + 1 - offset;
-                pidx = idx + 1;
+            let (pidx, sidx) = if index_height(idx + 1) > g {
+                (idx + 1, idx + 1 - offset)
             } else {
-                sibling_idx = idx + offset - 1;
-                pidx = idx + offset;
-            }
+                (idx + offset, idx + offset - 1)
+            };
 
             if !self.hashes.contains_key(&pidx) {
                 break;
@@ -175,7 +171,7 @@ impl Mmr {
 
             let sibling_hash = self
                 .hashes
-                .get(&sibling_idx)
+                .get(&sidx)
                 .expect("Sibling node missing, data structure corrupted");
             let cur_hash = self
                 .hashes
