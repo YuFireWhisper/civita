@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::OnceLock,
 };
 
@@ -35,22 +35,25 @@ pub struct Mmr {
     peaks: OnceLock<Vec<BigUint>>,
 }
 
+impl Staged {
+    pub fn new(vnext: BigUint, vleaves: BigUint) -> Self {
+        Self {
+            vnext,
+            vleaves,
+            ..Default::default()
+        }
+    }
+}
+
 impl Mmr {
     pub fn append(&mut self, hash: Multihash) -> BigUint {
-        self.ensure_virtual_state();
-
         let idx = self.staged.vnext.clone();
-        self.staged.vnext += 1 + (&self.leaves + &self.staged.vleaves).trailing_ones();
+
+        self.staged.vnext += 1 + self.staged.vleaves.trailing_ones();
         self.staged.vleaves.inc();
         self.staged.appends.push(hash);
 
         idx
-    }
-
-    fn ensure_virtual_state(&mut self) {
-        if self.staged.appends.is_empty() && self.staged.vleaves.is_zero() {
-            self.staged.vnext = self.next.clone();
-        }
     }
 
     pub fn delete(&mut self, idx: BigUint, hash: Multihash, proof: &MmrProof) -> bool {
@@ -123,8 +126,6 @@ impl Mmr {
             let mut g = 0;
             let mut i = self.insert(h);
 
-            println!("{}: {}", &i - 1u8, index_height(&i));
-
             while index_height(&i) > g {
                 let il = &i - (2u64 << g);
                 let ir = &i - 1u8;
@@ -139,8 +140,8 @@ impl Mmr {
             self.leaves.inc();
         });
 
+        self.staged = Staged::new(self.next.clone(), self.leaves.clone());
         self.peaks = OnceLock::new();
-        self.staged = Staged::default();
     }
 
     fn recalculate_parents(&mut self, mut idx: BigUint) {
@@ -390,9 +391,6 @@ mod test {
         let i9 = mmr.append(h9);
 
         mmr.commit();
-
-        println!("Len: {}", mmr.hashes.len());
-        println!("Next: {}", mmr.next);
 
         let p1 = mmr.prove(i1.clone()).unwrap();
         let p2 = mmr.prove(i2.clone()).unwrap();
