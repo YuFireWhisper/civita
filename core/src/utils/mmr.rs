@@ -1,10 +1,13 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::OnceLock,
 };
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
+use num_bigint::BigUint;
+use num_integer::Integer;
+use num_traits::{One, Zero};
 
 use crate::crypto::{hasher::Hasher, Multihash};
 
@@ -17,70 +20,65 @@ pub struct MmrProof(Vec<Multihash>);
 #[derive(Default)]
 struct Staged {
     appends: Vec<Multihash>,
-    fills: HashMap<u32, Multihash>,
-    deletes: Vec<u32>,
-    vnext: u32,
-    vleaves: u32,
+    fills: HashMap<BigUint, Multihash>,
+    deletes: Vec<BigUint>,
+    vnext: BigUint,
+    vleaves: BigUint,
 }
 
 #[derive(Default)]
 pub struct Mmr {
-    hashes: HashMap<u32, Multihash>,
-    next: u32,
+    hashes: HashMap<BigUint, Multihash>,
+    next: BigUint,
+    leaves: BigUint,
     staged: Staged,
-    leaves: u32,
-    peaks: OnceLock<Vec<u32>>,
+    peaks: OnceLock<Vec<BigUint>>,
 }
 
 impl Mmr {
-    pub fn append(&mut self, hash: Multihash) -> u32 {
+    pub fn append(&mut self, hash: Multihash) -> BigUint {
         self.ensure_virtual_state();
 
-        let idx = self.staged.vnext;
-
-        let l = self.leaves + self.staged.vleaves;
-        let merges = l.trailing_ones();
-
-        self.staged.vnext += 1 + merges;
-        self.staged.vleaves += 1;
-
+        let idx = self.staged.vnext.clone();
+        self.staged.vnext += 1 + (&self.leaves + &self.staged.vleaves).trailing_ones();
+        self.staged.vleaves.inc();
         self.staged.appends.push(hash);
 
         idx
     }
 
     fn ensure_virtual_state(&mut self) {
-        if self.staged.appends.is_empty() && self.staged.vleaves == 0 {
-            self.staged.vnext = self.next;
+        if self.staged.appends.is_empty() && self.staged.vleaves.is_zero() {
+            self.staged.vnext = self.next.clone();
         }
     }
 
-    pub fn delete(&mut self, idx: u32, hash: Multihash, proof: &MmrProof) -> bool {
+    pub fn delete(&mut self, idx: BigUint, hash: Multihash, proof: &MmrProof) -> bool {
         if idx >= self.next {
             return false;
         }
 
-        let (peak, _) = peak_range(self.peaks(), idx);
-        let mut cur_idx = idx;
-        let mut g = index_height(cur_idx);
+        let (peak, _) = peak_range(self.peaks(), &idx);
+        let mut cur_idx = idx.clone();
+        let mut g = index_height(&cur_idx);
         let mut local_fills = HashMap::new();
 
         let acc = proof.0.iter().fold(hash, |acc, h| {
-            let offset = 2 << g;
-            let sibling_idx;
+            let offset = BigUint::from(2u32) << g;
+            let sidx;
 
-            if index_height(cur_idx + 1) > g {
-                sibling_idx = cur_idx + 1 - offset;
-                cur_idx += 1;
+            if index_height(&(&cur_idx + 1u8)) > g {
+                cur_idx += 1u8;
+                sidx = &cur_idx - &offset;
                 g += 1;
-                local_fills.entry(sibling_idx).or_insert(*h);
-                hash_pospair(cur_idx + 1, h, &acc)
+                local_fills.entry(sidx).or_insert(*h);
+                hash_pospair(&(&cur_idx + 1u8), h, &acc)
             } else {
-                sibling_idx = cur_idx + offset - 1;
                 cur_idx += offset;
+                sidx = &cur_idx - 1u8;
                 g += 1;
-                local_fills.entry(sibling_idx).or_insert(*h);
-                hash_pospair(cur_idx + 1, &acc, h)
+                local_fills.entry(sidx).or_insert(*h);
+                hash_pospair(&(&cur_idx + 1u8), &acc, h)
             }
         });
 
@@ -88,14 +86,14 @@ impl Mmr {
             return false;
         }
 
-        self.staged.fills.insert(idx, hash);
+        self.staged.fills.insert(idx.clone(), hash);
         self.staged.fills.extend(local_fills);
         self.staged.deletes.push(idx);
 
         true
     }
 
-    pub fn delete_with_idx(&mut self, idx: u32) -> bool {
+    pub fn delete_with_idx(&mut self, idx: BigUint) -> bool {
         if !self.hashes.contains_key(&idx) {
             return false;
         }
@@ -103,65 +101,79 @@ impl Mmr {
         true
     }
 
-    pub fn commmit(&mut self) {
+    pub fn commit(&mut self) {
         let staged = std::mem::take(&mut self.staged);
 
         self.hashes.extend(staged.fills);
 
         staged.deletes.into_iter().for_each(|idx| {
-            self.hashes.insert(idx, Multihash::default());
+            self.hashes.insert(idx.clone(), Multihash::default());
             self.recalculate_parents(idx);
         });
 
+        println!("Appendss len: {}", staged.appends.len());
         staged.appends.into_iter().for_each(|h| {
             let mut g = 0;
             let mut i = self.insert(h);
 
-            while index_height(i) > g {
-                let il = i - (2 << g);
-                let ir = i - 1;
-                i = self.insert(hash_pospair(i + 1, &self.hashes[&il], &self.hashes[&ir]));
+            println!("{}: {}", &i - 1u8, index_height(&i));
+
+            while index_height(&i) > g {
+                let il = &i - (2u64 << g);
+                let ir = &i - 1u8;
+                i = self.insert(hash_pospair(
+                    &(&i + 1u8),
+                    &self.hashes[&il],
+                    &self.hashes[&ir],
+                ));
                 g += 1;
             }
 
-            self.leaves += 1;
+            self.leaves.inc();
         });
 
         self.peaks = OnceLock::new();
         self.staged = Staged::default();
     }
 
-    fn recalculate_parents(&mut self, mut idx: u32) {
-        let mut g = index_height(idx);
-        let peak = peak_range(self.peaks(), idx).0;
+    fn recalculate_parents(&mut self, mut idx: BigUint) {
+        let mut g = index_height(&idx);
+        let peak = peak_range(self.peaks(), &idx).0;
 
         while idx != peak {
-            let offset = 2 << g;
+            let offset = 2u64 << g;
             let c = &self.hashes[&idx];
 
-            if index_height(idx + 1) > g {
-                let s = &self.hashes[&(idx + 1 - offset)];
-                let p = idx + 1;
-                self.hashes.insert(p, hash_pospair(p + 1, s, c));
-                idx = p;
+            if index_height(&(&idx + 1u8)) > g {
+                idx.inc();
+                let s = &self.hashes[&(&idx - offset)];
+                self.hashes
+                    .insert(idx.clone(), hash_pospair(&(&idx + 1u8), s, c));
             } else {
-                let s = &self.hashes[&(idx + offset - 1)];
-                let p = idx + offset;
-                self.hashes.insert(p, hash_pospair(p + 1, c, s));
-                idx = p;
+                idx += offset;
+                let s = &self.hashes[&(&idx - 1u8)];
+                self.hashes
+                    .insert(idx.clone(), hash_pospair(&(&idx + 1u8), c, s));
             }
 
             g += 1;
         }
     }
 
-    fn insert(&mut self, hash: Multihash) -> u32 {
-        self.hashes.insert(self.next, hash);
-        self.next += 1;
-        self.next
+    fn insert(&mut self, hash: Multihash) -> BigUint {
+        self.hashes.insert(self.next.clone(), hash);
+        self.next.inc();
+        self.next.clone()
     }
 
-    pub fn prove(&self, mut idx: u32) -> Option<MmrProof> {
+    pub fn prove(&self, mut idx: BigUint) -> Option<MmrProof> {
+        {
+            let b_t = BTreeMap::from_iter(self.hashes.iter());
+            for (k, v) in b_t {
+                println!("{}: {:?}", k, v.digest());
+            }
+        }
+
         if self
             .hashes
             .get(&idx)
@@ -170,26 +182,24 @@ impl Mmr {
             return None;
         }
 
-        let (peak, last) = peak_range(self.peaks(), idx);
+        let (peak, last) = peak_range(self.peaks(), &idx);
         if peak == idx {
             return Some(MmrProof(Vec::new()));
         }
 
         let mut proof = Vec::new();
-        let mut g = index_height(idx);
+        let mut g = index_height(&idx);
 
         loop {
-            let offset = 2 << g;
-            let isibling;
+            let offset = 2u64 << g;
 
-            // idx is a right child
-            if index_height(idx + 1) > g {
-                isibling = idx + 1 - offset;
-                idx += 1;
+            let isibling = if index_height(&(&idx + 1u8)) > g {
+                idx.inc();
+                &idx - offset
             } else {
-                isibling = idx + offset - 1;
                 idx += offset;
-            }
+                &idx - 1u8
+            };
 
             if isibling > last {
                 return Some(MmrProof(proof));
@@ -197,28 +207,24 @@ impl Mmr {
 
             proof.push(*self.hashes.get(&isibling)?);
             g += 1;
-
-            if idx == peak {
-                return Some(MmrProof(proof));
-            }
         }
     }
 
-    fn peaks(&self) -> &Vec<u32> {
-        self.peaks.get_or_init(|| peak_indices(self.next))
+    fn peaks(&self) -> &Vec<BigUint> {
+        self.peaks.get_or_init(|| peak_indices(&self.next))
     }
 
-    pub fn verify(&self, mut idx: u32, hash: Multihash, proof: &MmrProof) -> bool {
+    pub fn verify(&self, mut idx: BigUint, hash: Multihash, proof: &MmrProof) -> bool {
         let mut root = hash;
-        let mut g = index_height(idx);
+        let mut g = index_height(&idx);
 
         proof.0.iter().for_each(|h| {
-            if index_height(idx + 1) > g {
-                idx += 1;
-                root = hash_pospair(idx + 1, h, &root);
+            if index_height(&(&idx + 1u8)) > g {
+                idx.inc();
+                root = hash_pospair(&(&idx + 1u8), h, &root);
             } else {
-                idx += 2 << g;
-                root = hash_pospair(idx + 1, &root, h);
+                idx += 2u64 << g;
+                root = hash_pospair(&(&idx + 1u8), &root, h);
             }
             g += 1;
         });
@@ -228,50 +234,46 @@ impl Mmr {
 
     pub fn prune<I>(&mut self, indices: I) -> bool
     where
-        I: IntoIterator<Item = u32>,
+        I: IntoIterator<Item = BigUint>,
     {
-        let mut keep: HashSet<u32> = HashSet::from_iter(self.peaks().iter().copied());
+        let mut keep: HashSet<_> = HashSet::from_iter(self.peaks().iter().cloned());
 
-        for idx in indices {
+        for mut idx in indices {
             if !self.hashes.contains_key(&idx) {
                 return false;
             }
 
-            if !keep.insert(idx) {
+            if !keep.insert(idx.clone()) {
                 continue;
             }
 
-            let (peak, last) = peak_range(self.peaks(), idx);
+            let peak = peak_range(self.peaks(), &idx).0;
             if peak == idx {
                 continue;
             }
 
-            let mut cur_idx = idx;
-            let mut g = index_height(cur_idx);
-
+            let mut g = index_height(&idx);
             loop {
-                let offset = 2 << g;
-                let sibling_idx;
-
-                if index_height(cur_idx + 1) > g {
-                    sibling_idx = cur_idx + 1 - offset;
-                    cur_idx += 1;
+                let offset = 2u64 << g;
+                let sibling_idx = if index_height(&(&idx + 1u8)) > g {
+                    idx.inc();
+                    &idx - offset
                 } else {
-                    sibling_idx = cur_idx + offset - 1;
-                    cur_idx += offset;
+                    idx += offset;
+                    &idx - 1u8
+                };
+
+                keep.insert(idx.clone());
+
+                if idx == peak {
+                    break;
                 }
 
-                keep.insert(cur_idx);
-
-                if sibling_idx <= last && self.hashes.contains_key(&sibling_idx) {
+                if self.hashes.contains_key(&sibling_idx) {
                     keep.insert(sibling_idx);
                 }
 
                 g += 1;
-
-                if cur_idx == peak {
-                    break;
-                }
             }
         }
 
@@ -279,76 +281,76 @@ impl Mmr {
 
         true
     }
-
-    pub fn to_vec(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        self.hashes.to_writer(&mut buf);
-        self.next.to_writer(&mut buf);
-        self.peaks().to_writer(&mut buf);
-        buf
-    }
-
-    pub fn from_vec(mut data: &[u8]) -> Result<Self, civita_serialize::Error> {
-        let hashes: HashMap<u32, Multihash> = HashMap::from_reader(&mut data)?;
-        let next: u32 = u32::from_reader(&mut data)?;
-        let peaks: Vec<u32> = Vec::from_reader(&mut data)?;
-        let exp_peaks = peak_indices(next);
-
-        if peaks != exp_peaks {
-            return Err(civita_serialize::Error("Invalid peaks".to_string()));
-        }
-
-        let lock = OnceLock::new();
-        lock.set(peaks.clone()).unwrap();
-
-        let leaves = peaks.iter().map(|&p| 1u32 << index_height(p)).sum();
-
-        Ok(Self {
-            hashes,
-            next,
-            peaks: lock,
-            staged: Staged::default(),
-            leaves,
-        })
-    }
 }
 
-fn index_height(i: u32) -> u32 {
-    let mut pos = i + 1;
-    while (pos & (pos + 1)) != 0 {
-        pos = pos - (1 << (31 - pos.leading_zeros())) + 1;
+fn index_height(i: &BigUint) -> u64 {
+    let mut pos = i + 1u8;
+
+    while pos.bits() != pos.count_ones() {
+        pos = &pos - (1u64 << (pos.bits() - 1)) + 1u8;
     }
-    31 - pos.leading_zeros()
+
+    pos.bits().saturating_sub(1)
 }
 
-fn hash_pospair(idx: u32, l: &Multihash, r: &Multihash) -> Multihash {
+fn hash_pospair(idx: &BigUint, l: &Multihash, r: &Multihash) -> Multihash {
     let mut buf = Vec::new();
-    idx.to_writer(&mut buf);
+    buf.extend(idx.to_bytes_be());
     l.to_writer(&mut buf);
     r.to_writer(&mut buf);
     Hasher::digest(&buf)
 }
 
-fn peak_indices(mut s: u32) -> Vec<u32> {
-    let mut peak = 0;
+fn peak_indices(s: &BigUint) -> Vec<BigUint> {
+    let mut s = s.clone() + 1u8;
+    let mut peak = BigUint::zero();
     let mut peaks = Vec::new();
-    while s != 0 {
-        let highest = (1 << (s + 1).ilog2()) - 1;
-        peak += highest;
-        peaks.push(peak - 1);
-        s -= highest;
+
+    while !s.is_zero() {
+        let size = (BigUint::one() << ((&s + 1u8).bits() - 1)) - 1u8;
+        peak += &size;
+        peaks.push(&peak - 1u8);
+        s -= size;
     }
+
     peaks
 }
 
-fn peak_range(peaks: &[u32], idx: u32) -> (u32, u32) {
-    let pos = peaks.partition_point(|p| *p < idx);
-    let peak = peaks[pos];
-    (peak, peaks.get(pos + 1).copied().unwrap_or(peak))
+fn peak_range(peaks: &[BigUint], idx: &BigUint) -> (BigUint, BigUint) {
+    let pos = peaks.partition_point(|p| p < idx);
+    let peak = peaks[pos].clone();
+    let next_peak = peaks.get(pos + 1).cloned().unwrap_or_else(|| peak.clone());
+    (peak, next_peak)
+}
+
+impl Serialize for Mmr {
+    fn from_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, civita_serialize::Error> {
+        Ok(Self {
+            hashes: HashMap::from_reader(reader)?,
+            next: BigUint::from_reader(reader)?,
+            leaves: BigUint::from_reader(reader)?,
+            staged: Staged::default(),
+            peaks: {
+                let peaks = Vec::from_reader(reader)?;
+                let lock = OnceLock::new();
+                lock.set(peaks).unwrap();
+                lock
+            },
+        })
+    }
+
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) {
+        self.hashes.to_writer(writer);
+        self.next.to_writer(writer);
+        self.leaves.to_writer(writer);
+        self.peaks().to_writer(writer);
+    }
 }
 
 #[cfg(test)]
 mod test {
+    use civita_serialize::Serialize;
+
     use crate::{crypto::hasher::Hasher, utils::mmr::Mmr};
 
     #[test]
@@ -375,17 +377,20 @@ mod test {
         let i8 = mmr.append(h8);
         let i9 = mmr.append(h9);
 
-        mmr.commmit();
+        mmr.commit();
 
-        let p1 = mmr.prove(i1).unwrap();
-        let p2 = mmr.prove(i2).unwrap();
-        let p3 = mmr.prove(i3).unwrap();
-        let p4 = mmr.prove(i4).unwrap();
-        let p5 = mmr.prove(i5).unwrap();
-        let p6 = mmr.prove(i6).unwrap();
-        let p7 = mmr.prove(i7).unwrap();
-        let p8 = mmr.prove(i8).unwrap();
-        let p9 = mmr.prove(i9).unwrap();
+        println!("Len: {}", mmr.hashes.len());
+        println!("Next: {}", mmr.next);
+
+        let p1 = mmr.prove(i1.clone()).unwrap();
+        let p2 = mmr.prove(i2.clone()).unwrap();
+        let p3 = mmr.prove(i3.clone()).unwrap();
+        let p4 = mmr.prove(i4.clone()).unwrap();
+        let p5 = mmr.prove(i5.clone()).unwrap();
+        let p6 = mmr.prove(i6.clone()).unwrap();
+        let p7 = mmr.prove(i7.clone()).unwrap();
+        let p8 = mmr.prove(i8.clone()).unwrap();
+        let p9 = mmr.prove(i9.clone()).unwrap();
 
         assert!(mmr.verify(i1, h1, &p1));
         assert!(mmr.verify(i2, h2, &p2));
@@ -422,20 +427,20 @@ mod test {
         let i8 = mmr.append(h8);
         let i9 = mmr.append(h9);
 
-        mmr.commmit();
+        mmr.commit();
 
-        mmr.delete(i3, h3, &mmr.prove(i3).unwrap());
-        mmr.delete(i6, h6, &mmr.prove(i6).unwrap());
-        mmr.delete(i9, h9, &mmr.prove(i9).unwrap());
+        mmr.delete(i3.clone(), h3, &mmr.prove(i3.clone()).unwrap());
+        mmr.delete(i6.clone(), h6, &mmr.prove(i6.clone()).unwrap());
+        mmr.delete(i9.clone(), h9, &mmr.prove(i9.clone()).unwrap());
 
-        mmr.commmit();
+        mmr.commit();
 
-        let p1 = mmr.prove(i1).unwrap();
-        let p2 = mmr.prove(i2).unwrap();
-        let p4 = mmr.prove(i4).unwrap();
-        let p5 = mmr.prove(i5).unwrap();
-        let p7 = mmr.prove(i7).unwrap();
-        let p8 = mmr.prove(i8).unwrap();
+        let p1 = mmr.prove(i1.clone()).unwrap();
+        let p2 = mmr.prove(i2.clone()).unwrap();
+        let p4 = mmr.prove(i4.clone()).unwrap();
+        let p5 = mmr.prove(i5.clone()).unwrap();
+        let p7 = mmr.prove(i7.clone()).unwrap();
+        let p8 = mmr.prove(i8.clone()).unwrap();
 
         assert!(mmr.verify(i1, h1, &p1));
         assert!(mmr.verify(i2, h2, &p2));
@@ -458,11 +463,11 @@ mod test {
         let i1 = mmr.append(h1);
         let i2 = mmr.append(h2);
 
-        mmr.commmit();
+        mmr.commit();
 
-        let valid = mmr.prune(vec![i1, i2]);
-        let p1 = mmr.prove(i1).unwrap();
-        let p2 = mmr.prove(i2).unwrap();
+        let valid = mmr.prune(vec![i1.clone(), i2.clone()]);
+        let p1 = mmr.prove(i1.clone()).unwrap();
+        let p2 = mmr.prove(i2.clone()).unwrap();
 
         assert!(valid);
         assert!(mmr.verify(i1, h1, &p1));
@@ -481,22 +486,22 @@ mod test {
         let i2 = mmr.append(h2);
         let i3 = mmr.append(h3);
 
-        mmr.commmit();
+        mmr.commit();
 
-        let p1 = mmr.prove(i1).unwrap();
-        let p2 = mmr.prove(i2).unwrap();
-        let p3 = mmr.prove(i3).unwrap();
+        let p1 = mmr.prove(i1.clone()).unwrap();
+        let p2 = mmr.prove(i2.clone()).unwrap();
+        let p3 = mmr.prove(i3.clone()).unwrap();
 
-        assert!(mmr.verify(i1, h1, &p1));
-        assert!(mmr.verify(i2, h2, &p2));
-        assert!(mmr.verify(i3, h3, &p3));
+        assert!(mmr.verify(i1.clone(), h1, &p1));
+        assert!(mmr.verify(i2.clone(), h2, &p2));
+        assert!(mmr.verify(i3.clone(), h3, &p3));
 
         let data = mmr.to_vec();
-        let mmr2 = Mmr::from_vec(&data).unwrap();
+        let mmr2 = Mmr::from_slice(&data).unwrap();
 
-        let p1 = mmr2.prove(i1).unwrap();
-        let p2 = mmr2.prove(i2).unwrap();
-        let p3 = mmr2.prove(i3).unwrap();
+        let p1 = mmr2.prove(i1.clone()).unwrap();
+        let p2 = mmr2.prove(i2.clone()).unwrap();
+        let p3 = mmr2.prove(i3.clone()).unwrap();
 
         assert!(mmr2.verify(i1, h1, &p1));
         assert!(mmr2.verify(i2, h2, &p2));
