@@ -59,20 +59,7 @@ impl Mmr {
             return false;
         }
 
-        let peaks = self.peaks();
-        let pos = peaks.partition_point(|p| *p < idx);
-
-        if pos >= peaks.len() {
-            return false;
-        }
-        let peak = peaks[pos];
-
-        let last = if pos + 1 < peaks.len() {
-            peaks[pos + 1]
-        } else {
-            peak
-        };
-
+        let (peak, last) = peak_ranges(self.peaks(), idx);
         let mut cur_idx = idx;
         let mut g = index_height(cur_idx);
         let mut acc = hash;
@@ -239,24 +226,10 @@ impl Mmr {
             return None;
         }
 
-        let peaks = self.peaks();
-
-        let (peak, last) = {
-            let pos = peaks.partition_point(|p| *p < idx);
-            let peak = peaks[pos];
-
-            if peak == idx {
-                return Some(MmrProof(Vec::new()));
-            }
-
-            let last = if pos + 1 < peaks.len() {
-                peaks[pos + 1]
-            } else {
-                peak
-            };
-
-            (peak, last)
-        };
+        let (peak, last) = peak_ranges(self.peaks(), idx);
+        if peak == idx {
+            return Some(MmrProof(Vec::new()));
+        }
 
         let mut proof = Vec::new();
         let mut g = index_height(idx);
@@ -316,32 +289,20 @@ impl Mmr {
         let mut keep: HashSet<u32> = HashSet::from_iter(self.peaks().iter().copied());
 
         for idx in indices {
-            if idx >= self.next || !self.hashes.contains_key(&idx) {
+            if !self.hashes.contains_key(&idx) {
                 return false;
             }
 
-            keep.insert(idx);
+            if !keep.insert(idx) {
+                continue;
+            }
+
+            let (peak, last) = peak_ranges(self.peaks(), idx);
+            if peak == idx {
+                continue;
+            }
 
             let mut cur_idx = idx;
-            let peaks = self.peaks();
-
-            let (peak, last) = {
-                let pos = peaks.partition_point(|p| *p < idx);
-                let peak = peaks[pos];
-
-                if peak == idx {
-                    continue;
-                }
-
-                let last = if pos + 1 < peaks.len() {
-                    peaks[pos + 1]
-                } else {
-                    peak
-                };
-
-                (peak, last)
-            };
-
             let mut g = index_height(cur_idx);
 
             loop {
@@ -434,6 +395,12 @@ fn peak_indices(mut s: u32) -> Vec<u32> {
         s -= highest;
     }
     peaks
+}
+
+fn peak_ranges(peaks: &[u32], idx: u32) -> (u32, u32) {
+    let pos = peaks.partition_point(|p| *p < idx);
+    let peak = peaks[pos];
+    (peak, peaks.get(pos + 1).copied().unwrap_or(peak))
 }
 
 #[cfg(test)]
