@@ -59,46 +59,31 @@ impl Mmr {
             return false;
         }
 
-        let (peak, last) = peak_range(self.peaks(), idx);
+        let (peak, _) = peak_range(self.peaks(), idx);
         let mut cur_idx = idx;
         let mut g = index_height(cur_idx);
-        let mut acc = hash;
         let mut local_fills = HashMap::new();
 
-        for (i, h) in proof.0.iter().enumerate() {
+        let acc = proof.0.iter().fold(hash, |acc, h| {
             let offset = 2 << g;
             let sibling_idx;
 
             if index_height(cur_idx + 1) > g {
                 sibling_idx = cur_idx + 1 - offset;
                 cur_idx += 1;
-                acc = hash_pospair(cur_idx + 1, h, &acc);
+                g += 1;
+                local_fills.entry(sibling_idx).or_insert(*h);
+                hash_pospair(cur_idx + 1, h, &acc)
             } else {
                 sibling_idx = cur_idx + offset - 1;
                 cur_idx += offset;
-                acc = hash_pospair(cur_idx + 1, &acc, h);
-            }
-
-            if sibling_idx <= last {
+                g += 1;
                 local_fills.entry(sibling_idx).or_insert(*h);
+                hash_pospair(cur_idx + 1, &acc, h)
             }
+        });
 
-            g += 1;
-
-            if cur_idx == peak {
-                if i + 1 != proof.0.len() {
-                    return false;
-                }
-                break;
-            }
-        }
-
-        let valid = self
-            .peaks()
-            .iter()
-            .any(|p| self.hashes.get(p).unwrap() == &acc);
-
-        if !valid {
+        if acc != self.hashes[&peak] {
             return false;
         }
 
