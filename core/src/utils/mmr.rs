@@ -174,13 +174,6 @@ impl Mmr {
     }
 
     pub fn prove(&self, mut idx: BigUint) -> Option<MmrProof> {
-        {
-            let b_t = BTreeMap::from_iter(self.hashes.iter());
-            for (k, v) in b_t {
-                println!("{}: {:?}", k, v.digest());
-            }
-        }
-
         if self
             .hashes
             .get(&idx)
