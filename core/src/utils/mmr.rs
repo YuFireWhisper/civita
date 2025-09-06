@@ -9,6 +9,7 @@ use civita_serialize_derive::Serialize;
 use crate::crypto::{hasher::Hasher, Multihash};
 
 #[derive(Clone)]
+#[derive(Debug)]
 #[derive(Default)]
 #[derive(Serialize)]
 pub struct MmrProof(Vec<Multihash>);
@@ -103,51 +104,28 @@ impl Mmr {
     }
 
     pub fn commmit(&mut self) {
-        let mut staged = std::mem::take(&mut self.staged);
+        let staged = std::mem::take(&mut self.staged);
 
-        self.hashes.extend(staged.fills.drain());
+        self.hashes.extend(staged.fills);
 
         staged.deletes.into_iter().for_each(|idx| {
             self.hashes.insert(idx, Multihash::default());
             self.recalculate_parents(idx);
         });
 
-        let mut stack: Vec<_> = self.peaks().iter().map(|&p| (p, index_height(p))).collect();
+        staged.appends.into_iter().for_each(|h| {
+            let mut g = 0;
+            let mut i = self.insert(h);
 
-        for h in staged.appends.into_iter() {
-            let leaf_idx = self.insert(h);
-            stack.push((leaf_idx, 0));
-
-            while stack.len() >= 2 {
-                let (r_idx, r_h) = *stack.last().unwrap();
-                let (l_idx, l_h) = stack[stack.len() - 2];
-
-                if r_h != l_h {
-                    break;
-                }
-
-                let l_hash = *self
-                    .hashes
-                    .get(&l_idx)
-                    .expect("Left child missing, corrupted MMR");
-                let r_hash = *self
-                    .hashes
-                    .get(&r_idx)
-                    .expect("Right child missing, corrupted MMR");
-
-                let pidx = self.next;
-                let parent_hash = hash_pospair(pidx + 1, &l_hash, &r_hash);
-
-                let inserted_pidx = self.insert(parent_hash);
-                debug_assert_eq!(inserted_pidx, pidx);
-
-                stack.pop();
-                stack.pop();
-                stack.push((pidx, r_h + 1));
+            while index_height(i) > g {
+                let il = i - (2 << g);
+                let ir = i - 1;
+                i = self.insert(hash_pospair(i + 1, &self.hashes[&il], &self.hashes[&ir]));
+                g += 1;
             }
 
             self.leaves += 1;
-        }
+        });
 
         self.peaks = OnceLock::new();
         self.staged = Staged::default();
@@ -155,47 +133,36 @@ impl Mmr {
 
     fn recalculate_parents(&mut self, mut idx: u32) {
         let mut g = index_height(idx);
+        let peak = peak_range(self.peaks(), idx).0;
 
-        loop {
+        while idx != peak {
             let offset = 2 << g;
+            let c = &self.hashes[&idx];
 
-            let (pidx, sidx) = if index_height(idx + 1) > g {
-                (idx + 1, idx + 1 - offset)
+            if index_height(idx + 1) > g {
+                let s = &self.hashes[&(idx + 1 - offset)];
+                let p = idx + 1;
+                self.hashes.insert(p, hash_pospair(p + 1, s, c));
+                idx = p;
             } else {
-                (idx + offset, idx + offset - 1)
-            };
+                if idx == peak {
+                    break;
+                }
 
-            if !self.hashes.contains_key(&pidx) {
-                break;
+                let s = &self.hashes[&(idx + offset - 1)];
+                let p = idx + offset;
+                self.hashes.insert(p, hash_pospair(p + 1, c, s));
+                idx = p;
             }
 
-            let sibling_hash = self
-                .hashes
-                .get(&sidx)
-                .expect("Sibling node missing, data structure corrupted");
-            let cur_hash = self
-                .hashes
-                .get(&idx)
-                .expect("Current node missing, data structure corrupted");
-
-            let new_parent_hash = if index_height(idx + 1) > g {
-                hash_pospair(pidx + 1, sibling_hash, cur_hash)
-            } else {
-                hash_pospair(pidx + 1, cur_hash, sibling_hash)
-            };
-
-            self.hashes.insert(pidx, new_parent_hash);
-
-            idx = pidx;
             g += 1;
         }
     }
 
     fn insert(&mut self, hash: Multihash) -> u32 {
-        let idx = self.next;
-        self.hashes.insert(idx, hash);
+        self.hashes.insert(self.next, hash);
         self.next += 1;
-        idx
+        self.next
     }
 
     pub fn prove(&self, mut idx: u32) -> Option<MmrProof> {
@@ -249,7 +216,7 @@ impl Mmr {
         let mut root = hash;
         let mut g = index_height(idx);
 
-        proof.0.iter().rev().for_each(|h| {
+        proof.0.iter().for_each(|h| {
             if index_height(idx + 1) > g {
                 idx += 1;
                 root = hash_pospair(idx + 1, h, &root);
@@ -386,36 +353,53 @@ fn peak_range(peaks: &[u32], idx: u32) -> (u32, u32) {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        crypto::hasher::Hasher,
-        utils::mmr::{Mmr, MmrProof},
-    };
+    use crate::{crypto::hasher::Hasher, utils::mmr::Mmr};
 
     #[test]
     fn append_and_prove() {
         let h1 = Hasher::digest(b"1");
         let h2 = Hasher::digest(b"2");
         let h3 = Hasher::digest(b"3");
+        let h4 = Hasher::digest(b"4");
+        let h5 = Hasher::digest(b"5");
+        let h6 = Hasher::digest(b"6");
+        let h7 = Hasher::digest(b"7");
+        let h8 = Hasher::digest(b"8");
+        let h9 = Hasher::digest(b"9");
 
         let mut mmr = Mmr::default();
 
         let i1 = mmr.append(h1);
         let i2 = mmr.append(h2);
         let i3 = mmr.append(h3);
-
-        assert_eq!(i1, 0);
-        assert_eq!(i2, 1);
-        assert_eq!(i3, 3);
+        let i4 = mmr.append(h4);
+        let i5 = mmr.append(h5);
+        let i6 = mmr.append(h6);
+        let i7 = mmr.append(h7);
+        let i8 = mmr.append(h8);
+        let i9 = mmr.append(h9);
 
         mmr.commmit();
 
         let p1 = mmr.prove(i1).unwrap();
         let p2 = mmr.prove(i2).unwrap();
         let p3 = mmr.prove(i3).unwrap();
+        let p4 = mmr.prove(i4).unwrap();
+        let p5 = mmr.prove(i5).unwrap();
+        let p6 = mmr.prove(i6).unwrap();
+        let p7 = mmr.prove(i7).unwrap();
+        let p8 = mmr.prove(i8).unwrap();
+        let p9 = mmr.prove(i9).unwrap();
 
         assert!(mmr.verify(i1, h1, &p1));
         assert!(mmr.verify(i2, h2, &p2));
         assert!(mmr.verify(i3, h3, &p3));
+        assert!(mmr.verify(i4, h4, &p4));
+        assert!(mmr.verify(i5, h5, &p5));
+        assert!(mmr.verify(i6, h6, &p6));
+        assert!(mmr.verify(i7, h7, &p7));
+        assert!(mmr.verify(i8, h8, &p8));
+        assert!(mmr.verify(i9, h9, &p9));
     }
 
     #[test]
@@ -423,33 +407,49 @@ mod test {
         let h1 = Hasher::digest(b"1");
         let h2 = Hasher::digest(b"2");
         let h3 = Hasher::digest(b"3");
+        let h4 = Hasher::digest(b"4");
+        let h5 = Hasher::digest(b"5");
+        let h6 = Hasher::digest(b"6");
+        let h7 = Hasher::digest(b"7");
+        let h8 = Hasher::digest(b"8");
+        let h9 = Hasher::digest(b"9");
 
         let mut mmr = Mmr::default();
 
         let i1 = mmr.append(h1);
         let i2 = mmr.append(h2);
         let i3 = mmr.append(h3);
+        let i4 = mmr.append(h4);
+        let i5 = mmr.append(h5);
+        let i6 = mmr.append(h6);
+        let i7 = mmr.append(h7);
+        let i8 = mmr.append(h8);
+        let i9 = mmr.append(h9);
+
+        mmr.commmit();
+
+        mmr.delete(i3, h3, &mmr.prove(i3).unwrap());
+        mmr.delete(i6, h6, &mmr.prove(i6).unwrap());
+        mmr.delete(i9, h9, &mmr.prove(i9).unwrap());
 
         mmr.commmit();
 
         let p1 = mmr.prove(i1).unwrap();
         let p2 = mmr.prove(i2).unwrap();
-        let p3 = mmr.prove(i3).unwrap();
+        let p4 = mmr.prove(i4).unwrap();
+        let p5 = mmr.prove(i5).unwrap();
+        let p7 = mmr.prove(i7).unwrap();
+        let p8 = mmr.prove(i8).unwrap();
 
         assert!(mmr.verify(i1, h1, &p1));
         assert!(mmr.verify(i2, h2, &p2));
-        assert!(mmr.verify(i3, h3, &p3));
-
-        let _ok = mmr.delete(i3, h3, &p3);
-        mmr.commmit();
-
-        let p1 = mmr.prove(i1).unwrap();
-        let p2 = mmr.prove(i2).unwrap();
-        let p3 = mmr.prove(i3).unwrap_or_else(|| MmrProof(Vec::new()));
-
-        assert!(mmr.verify(i1, h1, &p1));
-        assert!(mmr.verify(i2, h2, &p2));
-        assert!(!mmr.verify(i3, h3, &p3));
+        assert!(mmr.verify(i4, h4, &p4));
+        assert!(mmr.verify(i5, h5, &p5));
+        assert!(mmr.verify(i7, h7, &p7));
+        assert!(mmr.verify(i8, h8, &p8));
+        assert!(mmr.prove(i3).is_none());
+        assert!(mmr.prove(i6).is_none());
+        assert!(mmr.prove(i9).is_none());
     }
 
     #[test]
