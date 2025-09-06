@@ -111,7 +111,6 @@ impl Mmr {
             self.recalculate_parents(idx);
         });
 
-        println!("Appendss len: {}", staged.appends.len());
         staged.appends.into_iter().for_each(|h| {
             let mut g = 0;
             let mut i = self.insert(h);
