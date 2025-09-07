@@ -20,7 +20,7 @@ use tokio::sync::{
 
 use crate::{
     consensus::{
-        graph::{self, CreationError, Graph, StorageMode},
+        graph::{self, Graph, StorageMode},
         validator::Validator,
     },
     crypto::{hasher::Hasher, Multihash},
@@ -202,7 +202,7 @@ impl<V: Validator> Engine<V> {
         code: u8,
         iter: I,
         created: Vec<Token>,
-    ) -> Result<(), CreationError>
+    ) -> Result<(), graph::Error>
     where
         I: IntoIterator<Item = (Multihash, Vec<u8>)>,
     {

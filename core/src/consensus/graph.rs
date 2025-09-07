@@ -45,7 +45,7 @@ pub enum RejectReason {
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
-pub enum CreationError {
+pub enum Error {
     #[error("One or more input tokens are already consumed")]
     InputConsumed,
 
@@ -882,7 +882,7 @@ impl<V: Validator> Graph<V> {
         iter: I,
         created: Vec<Token>,
         peer: &PeerId,
-    ) -> Result<Command, CreationError>
+    ) -> Result<Command, Error>
     where
         I: IntoIterator<Item = (Multihash, Vec<u8>)>,
     {
@@ -892,24 +892,24 @@ impl<V: Validator> Graph<V> {
         let inputs = iter
             .into_iter()
             .try_fold(Vec::new(), |mut inputs, (id, sig)| {
-                let idx = map.get(&id).ok_or(CreationError::UnknownTokenId)?;
+                let idx = map.get(&id).ok_or(Error::UnknownTokenId)?;
 
                 match head.confirmed_tokens.get(idx) {
                     Some(token) => {
                         let proof = head
                             .mmr
                             .prove(idx.clone())
-                            .ok_or(CreationError::FailedToProveInput)?;
+                            .ok_or(Error::FailedToProveInput)?;
                         inputs.push(Input::Confirmed(token.clone(), idx.clone(), proof, sig));
                         Ok(inputs)
                     }
                     None => {
                         let Some(token) = head.unconfirmed_tokens.get(&id) else {
-                            return Err(CreationError::UnknownTokenId);
+                            return Err(Error::UnknownTokenId);
                         };
 
                         if token.is_none() {
-                            return Err(CreationError::InputConsumed);
+                            return Err(Error::InputConsumed);
                         }
 
                         inputs.push(Input::Unconfirmed(id, sig));
@@ -925,7 +925,7 @@ impl<V: Validator> Graph<V> {
         })
     }
 
-    pub fn create_atom(&self, cmd: Option<Command>) -> Result<JoinHandle<Atom>, CreationError> {
+    pub fn create_atom(&self, cmd: Option<Command>) -> Result<JoinHandle<Atom>, Error> {
         let mut atom = Atom {
             hash: Multihash::default(),
             parent: self.main_head,
