@@ -8,6 +8,7 @@ use civita_serialize_derive::Serialize;
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
+use serde::ser::SerializeStruct;
 
 use crate::crypto::{hasher::Hasher, Multihash};
 
@@ -490,6 +491,51 @@ impl Serialize for Mmr {
         self.leaves.to_writer(writer);
         self.leaves_indices.to_writer(writer);
         self.peaks().to_writer(writer);
+    }
+}
+
+impl serde::Serialize for Mmr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("Mmr", 5)?;
+        state.serialize_field("hashes", &self.hashes)?;
+        state.serialize_field("next", &self.next)?;
+        state.serialize_field("leaves", &self.leaves)?;
+        state.serialize_field("leaves_indices", &self.leaves_indices)?;
+        state.serialize_field("peaks", &self.peaks())?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Mmr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct MmrHelper {
+            hashes: HashMap<BigUint, Multihash>,
+            next: BigUint,
+            leaves: BigUint,
+            leaves_indices: HashSet<BigUint>,
+            peaks: Vec<BigUint>,
+        }
+
+        let helper = MmrHelper::deserialize(deserializer)?;
+
+        let lock = OnceLock::new();
+        lock.set(helper.peaks).unwrap();
+
+        Ok(Mmr {
+            hashes: helper.hashes,
+            next: helper.next.clone(),
+            leaves: helper.leaves.clone(),
+            leaves_indices: helper.leaves_indices,
+            staged: Staged::new(helper.next, helper.leaves),
+            peaks: lock,
+        })
     }
 }
 
