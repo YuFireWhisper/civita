@@ -207,7 +207,7 @@ impl<V: Validator> Engine<V> {
         I: IntoIterator<Item = (Multihash, Vec<u8>)>,
     {
         let graph = self.graph.read().await;
-        let cmd = graph.create_command(code, iter, created)?;
+        let cmd = graph.create_command(code, iter, created, &self.transport.local_peer_id())?;
         let handle = graph.create_atom(Some(cmd))?;
         drop(graph);
 
