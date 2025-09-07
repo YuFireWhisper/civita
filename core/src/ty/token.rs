@@ -4,6 +4,7 @@ use crate::crypto::Multihash;
 
 #[derive(Clone)]
 #[derive(Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Token {
     pub id: Multihash,
     pub value: Vec<u8>,

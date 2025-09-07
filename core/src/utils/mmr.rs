@@ -15,6 +15,7 @@ use crate::crypto::{hasher::Hasher, Multihash};
 #[derive(Debug)]
 #[derive(Default)]
 #[derive(Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MmrProof(Vec<Multihash>);
 
 #[derive(Default)]
@@ -357,6 +358,59 @@ impl Mmr {
             staged: Staged::new(self.next.clone(), self.leaves.clone()),
             peaks: self.peaks.clone(),
         })
+    }
+
+    pub fn track<I>(&mut self, items: I) -> bool
+    where
+        I: IntoIterator<Item = (BigUint, Multihash, MmrProof)>,
+    {
+        let mut fills: HashMap<BigUint, Multihash> = HashMap::new();
+
+        for (mut idx, mut hash, proof) in items.into_iter() {
+            let mut g = index_height(&idx);
+
+            for sib in proof.0 {
+                let offset = 2u64 << g;
+
+                let sidx = if index_height(&(&idx + 1u8)) > g {
+                    idx.inc();
+                    hash = hash_pospair(&(&idx + 1u8), &sib, &hash);
+                    &idx - offset
+                } else {
+                    idx += offset;
+                    hash = hash_pospair(&(&idx + 1u8), &hash, &sib);
+                    &idx - 1u8
+                };
+
+                if !self.is_matching(&idx, &hash)
+                    || fills.insert(idx.clone(), hash).is_some_and(|h| h != hash)
+                {
+                    return false;
+                }
+
+                if !self.is_matching(&sidx, &sib)
+                    || fills.insert(idx.clone(), sib).is_some_and(|h| h != sib)
+                {
+                    return false;
+                }
+
+                g += 1;
+            }
+        }
+
+        self.hashes.extend(fills);
+        true
+    }
+
+    fn is_matching(&self, idx: &BigUint, hash: &Multihash) -> bool {
+        if idx >= &self.next {
+            return false;
+        }
+
+        self.hashes
+            .get(idx)
+            .is_some_and(|h| h != &Multihash::default() && h == hash)
+            && !self.staged.deletes.contains(idx)
     }
 }
 

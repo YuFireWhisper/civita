@@ -1,6 +1,6 @@
 use sha2::Digest;
 
-pub type Multihash = libp2p::multihash::Multihash<64>;
+pub type Multihash = multihash::Multihash<64>;
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
