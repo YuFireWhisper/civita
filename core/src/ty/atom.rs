@@ -1,18 +1,24 @@
-use std::collections::HashMap;
-
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
+use num_bigint::BigUint;
 
-use crate::{crypto::Multihash, ty::token::Token};
+use crate::{crypto::Multihash, ty::token::Token, utils::mmr::MmrProof};
 
 pub type Height = u32;
 pub type Timestamp = u64;
 
 #[derive(Clone)]
 #[derive(Serialize)]
+pub enum Input {
+    Confirmed(Token, BigUint, MmrProof, Vec<u8>),
+    Unconfirmed(Multihash, Vec<u8>),
+}
+
+#[derive(Clone)]
+#[derive(Serialize)]
 pub struct Command {
     pub code: u8,
-    pub inputs: Vec<Multihash>,
+    pub inputs: Vec<Input>,
     pub created: Vec<Token>,
 }
 
@@ -28,8 +34,15 @@ pub struct Atom {
     pub timestamp: Timestamp,
     pub cmd: Option<Command>,
     pub atoms: Vec<Multihash>,
-    pub trie_proofs: HashMap<Multihash, Vec<u8>>,
-    pub script_sigs: HashMap<Multihash, Vec<u8>>,
+}
+
+impl Input {
+    pub fn id(&self) -> &Multihash {
+        match self {
+            Input::Confirmed(t, ..) => &t.id,
+            Input::Unconfirmed(id, ..) => id,
+        }
+    }
 }
 
 impl Atom {
@@ -42,7 +55,6 @@ impl Atom {
         self.timestamp.to_writer(&mut buf);
         self.cmd.to_writer(&mut buf);
         self.atoms.to_writer(&mut buf);
-        self.trie_proofs.to_writer(&mut buf);
         buf
     }
 
@@ -54,7 +66,6 @@ impl Atom {
         self.timestamp.to_writer(&mut buf);
         self.cmd.to_writer(&mut buf);
         self.atoms.to_writer(&mut buf);
-        self.trie_proofs.to_writer(&mut buf);
         buf
     }
 }
