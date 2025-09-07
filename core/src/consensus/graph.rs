@@ -7,6 +7,7 @@ use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
 use derivative::Derivative;
 use libp2p::PeerId;
+use num_bigint::BigUint;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
@@ -14,10 +15,10 @@ use crate::{
     consensus::validator::Validator,
     crypto::{hasher::Hasher, Multihash},
     ty::{
-        atom::{Atom, Command, Height},
+        atom::{Atom, Command, Height, Input},
         token::Token,
     },
-    utils::Trie,
+    utils::mmr::Mmr,
 };
 
 #[derive(Clone, Copy)]
@@ -35,8 +36,11 @@ pub enum RejectReason {
     InvalidScriptSig,
     InvalidConversion,
     InvalidNonce,
+    InvalidProof,
     MissingInput,
+    MissingProof,
     DoubleSpend,
+    EmptyInput,
 }
 
 #[derive(Debug)]
@@ -47,6 +51,18 @@ pub enum CreationError {
 
     #[error("Failed to generate trie guide for input tokens")]
     FailedToGenerateGuide,
+
+    #[error("No input tokens provided")]
+    NoInput,
+
+    #[error("Unknown token id")]
+    UnknownTokenId,
+
+    #[error("Failed to prove input token in MMR")]
+    FailedToProveInput,
+
+    #[error("Missing script signature for input token")]
+    MissingScriptSig,
 }
 
 #[derive(Default)]
@@ -63,7 +79,6 @@ pub enum StorageMode {
     Archive(u32),
 }
 
-#[derive(Clone)]
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 struct Entry {
@@ -72,9 +87,14 @@ struct Entry {
 
     // Block only
     pub is_block: bool,
-    pub trie: Trie,
-    pub related_token: HashMap<PeerId, HashMap<Multihash, Token>>,
+    pub mmr: Mmr,
+
+    pub confirmed_indices: HashMap<PeerId, HashSet<BigUint>>,
+    pub confirmed_tokens: HashMap<BigUint, Token>,
+    pub confirmed_hash_to_index: HashMap<Multihash, BigUint>,
+
     pub unconfirmed_tokens: HashMap<Multihash, Option<Token>>,
+
     pub cmd_hashes: HashSet<Multihash>,
 
     // Pending only
@@ -113,9 +133,8 @@ pub struct Config {
 pub struct Snapshot {
     pub atom: Atom,
     pub difficulty: u64,
-    pub trie_root: Multihash,
-    pub trie_guide: HashMap<Multihash, Vec<u8>>,
-    pub related_keys: HashSet<Multihash>,
+    pub mmr: Mmr,
+    pub tokens: HashMap<BigUint, Token>,
 }
 
 pub struct Graph<V> {
@@ -143,62 +162,53 @@ impl Entry {
             ..Default::default()
         }
     }
+}
 
-    pub fn validate_script_sig<V: Validator>(&self, id: &Multihash, pk: &[u8]) -> bool {
-        self.atom
-            .script_sigs
-            .get(id)
-            .is_none_or(|sig| V::validate_script_sig(pk, sig))
+impl Snapshot {
+    pub fn new(atom: Atom, difficulty: u64, mmr: Mmr, tokens: HashMap<BigUint, Token>) -> Self {
+        Self {
+            atom,
+            difficulty,
+            mmr,
+            tokens,
+        }
     }
 }
 
 impl<V: Validator> Graph<V> {
     pub fn empty(config: Config) -> Self {
-        Self::with_genesis(
-            Atom::default(),
-            Multihash::default(),
-            HashMap::new(),
-            HashSet::new(),
-            config,
-        )
+        Self::with_genesis(Atom::default(), Mmr::default(), HashMap::new(), config)
     }
 
     pub fn with_genesis(
         atom: Atom,
-        trie_root: Multihash,
-        trie_guide: HashMap<Multihash, Vec<u8>>,
-        related_keys: HashSet<Multihash>,
+        mmr: Mmr,
+        tokens: HashMap<BigUint, Token>,
         config: Config,
     ) -> Self {
         let hash = atom.hash;
 
         let entry = {
-            let trie = Self::resolve_trie(trie_root, &trie_guide);
-            let target = match &config.storage_mode {
-                StorageMode::General(peer_id) => Some(*peer_id),
-                StorageMode::Archive(..) => None,
-            };
-            let related_token = Self::resolve_related(&trie, &related_keys, target);
+            let indices = Self::resolve_related(&mmr, &tokens, &config.storage_mode);
 
             Entry {
                 atom,
                 is_block: true,
-                trie,
-                related_token,
+                mmr,
+                confirmed_indices: indices,
+                confirmed_tokens: tokens.clone(),
                 is_missing: false,
                 ..Default::default()
             }
         };
 
-        let mut history = VecDeque::new();
-        let snapshot = Snapshot {
-            atom: entry.atom.clone(),
-            difficulty: config.init_vdf_difficulty,
-            trie_root: entry.trie.root_hash(),
-            trie_guide,
-            related_keys,
-        };
-        history.push_back((snapshot.to_vec(), Vec::new()));
+        let snapshot = Snapshot::new(
+            entry.atom.clone(),
+            config.init_vdf_difficulty,
+            entry.mmr.clone(),
+            tokens,
+        );
+        let history = VecDeque::from_iter([(snapshot.to_vec(), Vec::new())]);
 
         Self {
             entries: HashMap::from_iter([(hash, entry)]),
@@ -214,39 +224,35 @@ impl<V: Validator> Graph<V> {
         }
     }
 
-    fn resolve_trie(root: Multihash, guide: &HashMap<Multihash, Vec<u8>>) -> Trie {
-        let mut t = Trie::with_root_hash(root);
-        if !t.resolve(guide.keys().cloned().map(|k| k.to_vec()), guide) {
-            panic!("Failed to reconstruct trie");
-        }
-        t
-    }
-
     fn resolve_related(
-        trie: &Trie,
-        keys: &HashSet<Multihash>,
-        target: Option<PeerId>,
-    ) -> HashMap<PeerId, HashMap<Multihash, Token>> {
-        let mut related: HashMap<_, HashMap<_, _>> = HashMap::new();
+        mmr: &Mmr,
+        tokens: &HashMap<BigUint, Token>,
+        mode: &StorageMode,
+    ) -> HashMap<PeerId, HashSet<BigUint>> {
+        let mut indices: HashMap<_, HashSet<_>> = HashMap::new();
 
-        keys.iter().for_each(|k| {
-            let key = k.to_vec();
-            let token = Token::from_slice(&trie.get(&key).unwrap()).unwrap();
+        let target = match mode {
+            StorageMode::General(p) => Some(*p),
+            StorageMode::Archive(..) => None,
+        };
+
+        mmr.leaves().into_iter().for_each(|idx| {
+            let token = tokens.get(&idx).expect("MMR must be consistent");
 
             if let Some(peer_id) = &target {
                 if V::is_related(&token.script_pk, peer_id) {
-                    related.entry(*peer_id).or_default().insert(*k, token);
+                    indices.entry(*peer_id).or_default().insert(idx);
                 }
             } else {
                 V::related_peers(&token.script_pk)
                     .into_iter()
                     .for_each(|p| {
-                        related.entry(p).or_default().insert(*k, token.clone());
+                        indices.entry(p).or_default().insert(idx.clone());
                     });
             }
         });
 
-        related
+        indices
     }
 
     pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {
@@ -446,13 +452,13 @@ impl<V: Validator> Graph<V> {
     }
 
     fn validate_execution(&mut self, target_hash: &Multihash) -> Result<bool, RejectReason> {
-        let mut created = HashMap::new();
-        let mut consumed = HashSet::new();
+        let mut created: Vec<Token> = Vec::new();
+        let mut consumed: HashMap<Multihash, BigUint> = HashMap::new();
 
         let mut excluded = false;
         let mut cmd_hashes = HashSet::new();
-
         let parent_hash = self.entries[target_hash].atom.parent;
+        let mut mmr = self.entries[&parent_hash].mmr.clone();
 
         for hash in self.entries[target_hash]
             .atom
@@ -461,59 +467,70 @@ impl<V: Validator> Graph<V> {
             .iter()
             .chain(std::iter::once(target_hash))
         {
-            let [Some(cur), Some(parent)] = self.entries.get_disjoint_mut([hash, &parent_hash])
-            else {
-                unreachable!();
-            };
+            let (cur, parent) = self.get_two_entries_mut(hash, &parent_hash);
 
             let Some(cmd) = &cur.atom.cmd else {
                 continue;
             };
+
+            if cmd.inputs.is_empty() {
+                return Err(RejectReason::EmptyInput);
+            }
 
             cmd_hashes.insert(*hash);
 
             let inputs = cmd
                 .inputs
                 .iter()
-                .copied()
-                .try_fold(Vec::new(), |mut acc, id| {
-                    let key = id.to_vec();
+                .cloned()
+                .try_fold(Vec::new(), |mut acc, input| match input {
+                    Input::Confirmed(token, idx, proof, sig) => {
+                        if consumed.insert(token.id, idx.clone()).is_some() {
+                            return Err(RejectReason::DoubleSpend);
+                        }
 
-                    if !consumed.insert(id) {
-                        return Err(RejectReason::DoubleSpend);
+                        if !mmr.delete(idx, token.id, &proof) {
+                            return Err(RejectReason::InvalidProof);
+                        }
+
+                        if hash == target_hash && !V::validate_script_sig(&sig, &token.script_pk) {
+                            return Err(RejectReason::InvalidScriptSig);
+                        }
+
+                        excluded |= parent
+                            .unconfirmed_tokens
+                            .get(&token.id)
+                            .is_some_and(|t| t.is_none());
+
+                        acc.push(token);
+                        Ok(acc)
                     }
+                    Input::Unconfirmed(token_id, sig) => {
+                        let Some(token) = created
+                            .binary_search_by_key(&&token_id, |t| &t.id)
+                            .ok()
+                            .map(|i| created.remove(i))
+                        else {
+                            return Err(RejectReason::MissingInput);
+                        };
 
-                    if let Some(t) = created.remove(&id) {
-                        acc.push(t);
-                        return Ok(acc);
+                        if hash == target_hash && !V::validate_script_sig(&sig, &token.script_pk) {
+                            return Err(RejectReason::InvalidScriptSig);
+                        }
+
+                        excluded |= parent
+                            .unconfirmed_tokens
+                            .get(&token.id)
+                            .is_some_and(|t| t.is_none());
+
+                        acc.push(token);
+
+                        Ok(acc)
                     }
-
-                    if !parent
-                        .trie
-                        .resolve(std::iter::once(&key), &cur.atom.trie_proofs)
-                    {
-                        return Err(RejectReason::MissingInput);
-                    }
-
-                    let bytes = parent.trie.get(&key).unwrap();
-                    let token = Token::from_slice(&bytes).unwrap();
-
-                    if hash == target_hash && !cur.validate_script_sig::<V>(&id, &token.script_pk) {
-                        return Err(RejectReason::InvalidScriptSig);
-                    }
-
-                    excluded |= parent
-                        .unconfirmed_tokens
-                        .get(&id)
-                        .is_some_and(|t| t.is_none());
-
-                    acc.push(token);
-
-                    Ok(acc)
                 })?;
 
             if hash == target_hash {
-                if !Self::is_token_id_valid(cmd.inputs[0], &cmd.created) {
+                if !Self::is_token_id_valid(*cmd.inputs[0].id(), &cmd.created) {
                     return Err(RejectReason::InvalidTokenId);
                 }
 
@@ -522,61 +539,75 @@ impl<V: Validator> Graph<V> {
                 }
             }
 
-            created.extend(cmd.created.iter().cloned().map(|t| (t.id, t)));
+            cmd.created.iter().cloned().for_each(|token| {
+                created.push(token);
+            });
         }
 
-        {
-            let [Some(target), Some(parent)] =
-                self.entries.get_disjoint_mut([target_hash, &parent_hash])
-            else {
-                unreachable!();
-            };
+        let threshold = self.config.block_threshold as usize;
 
-            if target.atom.atoms.len() + 1 < self.config.block_threshold as usize {
+        let (target, parent) = self.get_two_entries_mut(target_hash, &parent_hash);
+
+        if target.atom.atoms.len() + 1 < threshold {
+            if excluded {
                 parent.children.remove(target_hash);
+            } else {
                 parent
                     .unconfirmed_tokens
-                    .extend(consumed.into_iter().map(|id| (id, None)));
-                return Ok(false);
+                    .extend(consumed.into_keys().map(|id| (id, None)));
             }
+            return Ok(false);
         }
 
-        let mut related = self.entries[&parent_hash].related_token.clone();
-        let mut trie = self.entries[&parent_hash].trie.clone();
+        let mut confirmed_indices = parent.confirmed_indices.clone();
+        let mut confirmed_tokens = parent.confirmed_tokens.clone();
 
-        consumed.into_iter().for_each(|id| {
-            let k = id.to_vec();
-            trie.remove(&k);
-            related.values_mut().for_each(|m| {
-                m.remove(&id);
+        consumed.into_values().for_each(|idx| {
+            confirmed_tokens.remove(&idx);
+            confirmed_indices.values_mut().for_each(|v| {
+                v.remove(&idx);
             });
         });
 
-        created.into_iter().for_each(|(k, t)| {
-            let k_vec = k.to_vec();
-            trie.insert(&k_vec, t.to_vec());
+        created.into_iter().for_each(|token| {
+            let idx = mmr.append(token.id);
 
             match &self.config.storage_mode {
-                StorageMode::General(peer_id) => {
-                    if V::is_related(&t.script_pk, peer_id) {
-                        related.entry(*peer_id).or_default().insert(k, t);
+                StorageMode::General(p) => {
+                    if V::is_related(&token.script_pk, p) {
+                        confirmed_indices.entry(*p).or_default().insert(idx.clone());
+                        confirmed_tokens.insert(idx, token);
                     }
                 }
                 StorageMode::Archive(..) => {
-                    V::related_peers(&t.script_pk).into_iter().for_each(|p| {
-                        related.entry(p).or_default().insert(k, t.clone());
-                    });
+                    V::related_peers(&token.script_pk)
+                        .into_iter()
+                        .for_each(|p| {
+                            confirmed_indices.entry(p).or_default().insert(idx.clone());
+                            confirmed_tokens.insert(idx.clone(), token.clone());
+                        });
                 }
             }
         });
 
+        mmr.commit();
+        mmr.prune(confirmed_indices.values().flatten().cloned());
+
         let cur = self.entries.get_mut(target_hash).unwrap();
-        cur.trie = trie;
-        cur.related_token = related;
+        cur.mmr = mmr;
+        cur.confirmed_indices = confirmed_indices;
+        cur.confirmed_tokens = confirmed_tokens;
         cur.cmd_hashes = cmd_hashes;
         cur.is_block = true;
 
         Ok(true)
+    }
+
+    fn get_two_entries_mut(&mut self, a: &Multihash, b: &Multihash) -> (&mut Entry, &mut Entry) {
+        match self.entries.get_disjoint_mut([a, b]) {
+            [Some(e1), Some(e2)] => (e1, e2),
+            _ => unreachable!(),
+        }
     }
 
     fn is_token_id_valid(first_input: Multihash, tokens: &[Token]) -> bool {
@@ -647,22 +678,11 @@ impl<V: Validator> Graph<V> {
 
         let snapshot = {
             let entry = &self.entries[&next_hash];
-            let related_keys = entry
-                .related_token
-                .values()
-                .flat_map(|m| m.keys())
-                .cloned()
-                .collect::<HashSet<_>>();
-            let trie_guide = entry
-                .trie
-                .generate_guide(related_keys.iter().map(|k| k.to_vec()))
-                .expect("Guide must be generated");
             Snapshot {
                 atom: entry.atom.clone(),
                 difficulty,
-                trie_root: entry.trie.root_hash(),
-                trie_guide,
-                related_keys,
+                mmr: entry.mmr.clone(),
+                tokens: entry.confirmed_tokens.clone(),
             }
         };
 
@@ -752,33 +772,40 @@ impl<V: Validator> Graph<V> {
             .and_then(|e| (!e.is_missing).then_some(&e.atom))
     }
 
-    pub fn tokens_for(&self, peer: &PeerId) -> HashMap<Multihash, Token> {
+    pub fn tokens_for(&self, peer: &PeerId) -> Vec<Token> {
         let entry = &self.entries[&self.main_head];
 
-        let mut related = entry.related_token.get(peer).cloned().unwrap_or_default();
+        let mut tokens: Vec<_> = entry
+            .confirmed_indices
+            .get(peer)
+            .map(|idxs| {
+                idxs.iter()
+                    .map(|i| entry.confirmed_tokens[i].clone())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         entry.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
             Some(t) => match &self.config.storage_mode {
-                StorageMode::General(peer_id) => {
-                    if peer_id == peer && V::is_related(&t.script_pk, peer) {
-                        related.insert(*k, t.clone());
+                StorageMode::General(p) => {
+                    if p == peer && V::is_related(&t.script_pk, peer) {
+                        tokens.push(t.clone());
                     }
                 }
                 StorageMode::Archive(..) => {
-                    if V::related_peers(&t.script_pk)
-                        .into_iter()
-                        .any(|p| &p == peer)
-                    {
-                        related.insert(*k, t.clone());
+                    if V::related_peers(&t.script_pk).binary_search(peer).is_ok() {
+                        tokens.push(t.clone());
                     }
                 }
             },
             None => {
-                related.remove(k);
+                if let Ok(i) = tokens.binary_search_by_key(k, |t| t.id) {
+                    tokens.remove(i);
+                }
             }
         });
 
-        related
+        tokens
     }
 
     pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
@@ -805,18 +832,15 @@ impl<V: Validator> Graph<V> {
         let history = VecDeque::from_iter([(info.to_vec(), Vec::new())]);
 
         let entry = {
-            let trie = Self::resolve_trie(info.trie_root, &info.trie_guide);
-            let target = match &config.storage_mode {
-                StorageMode::General(peer_id) => Some(*peer_id),
-                StorageMode::Archive(..) => None,
-            };
-            let related_token = Self::resolve_related(&trie, &info.related_keys, target);
+            let confirmed_indices =
+                Self::resolve_related(&info.mmr, &info.tokens, &config.storage_mode);
 
             Entry {
                 atom: info.atom,
                 is_block: true,
-                trie,
-                related_token,
+                mmr: info.mmr,
+                confirmed_indices,
+                confirmed_tokens: info.tokens,
                 is_missing: false,
                 ..Default::default()
             }
@@ -847,32 +871,56 @@ impl<V: Validator> Graph<V> {
         Ok(graph)
     }
 
-    pub fn create_atom(
+    pub fn create_command<I>(
         &self,
-        pair: Option<(Command, HashMap<Multihash, Vec<u8>>)>,
-    ) -> Result<JoinHandle<Atom>, CreationError> {
-        let mut trie_proofs = HashMap::new();
-        let mut cmd = None;
-        let mut script_sigs = HashMap::new();
-
+        code: u8,
+        iter: I,
+        created: Vec<Token>,
+    ) -> Result<Command, CreationError>
+    where
+        I: IntoIterator<Item = (Multihash, Vec<u8>)>,
+    {
         let head = &self.entries[&self.main_head];
 
-        if let Some(pair) = pair {
-            for id in &pair.0.inputs {
-                if head.unconfirmed_tokens.get(id).is_some_and(|t| t.is_none()) {
-                    return Err(CreationError::InputConsumed);
+        let inputs = iter
+            .into_iter()
+            .try_fold(Vec::new(), |mut inputs, (id, sig)| {
+                let Some(idx) = head.confirmed_hash_to_index.get(&id) else {
+                    return Err(CreationError::UnknownTokenId);
+                };
+
+                match head.confirmed_tokens.get(idx) {
+                    Some(token) => {
+                        let proof = head
+                            .mmr
+                            .prove(idx.clone())
+                            .ok_or(CreationError::FailedToProveInput)?;
+                        inputs.push(Input::Confirmed(token.clone(), idx.clone(), proof, sig));
+                        Ok(inputs)
+                    }
+                    None => {
+                        let Some(token) = head.unconfirmed_tokens.get(&id) else {
+                            return Err(CreationError::UnknownTokenId);
+                        };
+
+                        if token.is_none() {
+                            return Err(CreationError::InputConsumed);
+                        }
+
+                        inputs.push(Input::Unconfirmed(id.clone(), sig));
+                        Ok(inputs)
+                    }
                 }
-            }
+            })?;
 
-            trie_proofs = head
-                .trie
-                .generate_guide(pair.0.inputs.iter().map(|id| id.to_vec()))
-                .ok_or(CreationError::FailedToGenerateGuide)?;
+        Ok(Command {
+            code,
+            inputs,
+            created,
+        })
+    }
 
-            cmd = Some(pair.0);
-            script_sigs = pair.1;
-        }
-
+    pub fn create_atom(&self, cmd: Option<Command>) -> Result<JoinHandle<Atom>, CreationError> {
         let mut atom = Atom {
             hash: Multihash::default(),
             parent: self.main_head,
@@ -885,8 +933,6 @@ impl<V: Validator> Graph<V> {
                 .as_secs(),
             cmd,
             atoms: self.get_children(self.main_head),
-            trie_proofs,
-            script_sigs,
         };
 
         let vdf = self.vdf.clone();
