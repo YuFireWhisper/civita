@@ -292,11 +292,71 @@ impl Mmr {
         self.leaves_indices.clone()
     }
 
-    pub fn to_pruned_vec(&self, indices: Vec<BigUint>) -> Vec<u8> {
-        // TODO: optimize to avoid cloning
-        let mut mmr = self.clone();
-        mmr.prune(indices);
-        mmr.to_vec()
+    pub fn to_pruned<I>(&self, indices: I) -> Option<Mmr>
+    where
+        I: IntoIterator<Item = BigUint>,
+    {
+        let mut keep: HashSet<_> = HashSet::from_iter(self.peaks().iter().cloned());
+
+        for mut idx in indices {
+            if !self.hashes.contains_key(&idx) {
+                return None;
+            }
+
+            if !keep.insert(idx.clone()) {
+                continue;
+            }
+
+            let peak = peak_range(self.peaks(), &idx).0;
+            if peak == idx {
+                continue;
+            }
+
+            let mut g = index_height(&idx);
+            loop {
+                let offset = 2u64 << g;
+                let sibling_idx = if index_height(&(&idx + 1u8)) > g {
+                    idx.inc();
+                    &idx - offset
+                } else {
+                    idx += offset;
+                    &idx - 1u8
+                };
+
+                keep.insert(idx.clone());
+
+                if idx == peak {
+                    break;
+                }
+
+                if self.hashes.contains_key(&sibling_idx) {
+                    keep.insert(sibling_idx);
+                }
+
+                g += 1;
+            }
+        }
+
+        let hashes = keep
+            .iter()
+            .filter_map(|k| self.hashes.get(k).map(|v| (k.clone(), *v)))
+            .collect::<HashMap<_, _>>();
+
+        let leaves_indices = self
+            .leaves_indices
+            .iter()
+            .filter(|k| keep.contains(*k))
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        Some(Mmr {
+            hashes,
+            next: self.next.clone(),
+            leaves: self.leaves.clone(),
+            leaves_indices,
+            staged: Staged::new(self.next.clone(), self.leaves.clone()),
+            peaks: self.peaks.clone(),
+        })
     }
 }
 
