@@ -907,7 +907,7 @@ impl<V: Validator> Graph<V> {
                             return Err(CreationError::InputConsumed);
                         }
 
-                        inputs.push(Input::Unconfirmed(id.clone(), sig));
+                        inputs.push(Input::Unconfirmed(id, sig));
                         Ok(inputs)
                     }
                 }
