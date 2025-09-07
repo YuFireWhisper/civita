@@ -287,6 +287,10 @@ impl Mmr {
 
         true
     }
+
+    pub fn leaves(&self) -> HashSet<BigUint> {
+        self.leaves_indices.clone()
+    }
 }
 
 fn index_height(i: &BigUint) -> u64 {
