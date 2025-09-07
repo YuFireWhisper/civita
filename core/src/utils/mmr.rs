@@ -291,6 +291,13 @@ impl Mmr {
     pub fn leaves(&self) -> HashSet<BigUint> {
         self.leaves_indices.clone()
     }
+
+    pub fn to_pruned_vec(&self, indices: Vec<BigUint>) -> Vec<u8> {
+        // TODO: optimize to avoid cloning
+        let mut mmr = self.clone();
+        mmr.prune(indices);
+        mmr.to_vec()
+    }
 }
 
 fn index_height(i: &BigUint) -> u64 {
