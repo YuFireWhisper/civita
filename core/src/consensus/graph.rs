@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     time::SystemTime,
 };
 
@@ -63,6 +63,18 @@ pub enum Error {
 
     #[error("Missing script signature for input token")]
     MissingScriptSig,
+
+    #[error("Storage is empty")]
+    EmptyStorage,
+
+    #[error(transparent)]
+    Decode(#[from] bincode::error::DecodeError),
+
+    #[error("Invalid atoms")]
+    InvalidAtoms,
+
+    #[error("Invalid tokens")]
+    InvalidTokens,
 }
 
 #[derive(Default)]
@@ -74,6 +86,7 @@ pub struct UpdateResult {
 }
 
 #[derive(Clone, Copy)]
+#[derive(PartialEq, Eq)]
 pub enum StorageMode {
     General(PeerId),
     Archive(u32),
@@ -136,6 +149,16 @@ pub struct Snapshot {
     pub tokens: HashMap<BigUint, Token>,
 }
 
+struct Storage {
+    difficulty: u64,
+    mmr: Mmr,
+    tokens: HashMap<BigUint, Token>,
+
+    atoms: BTreeMap<Height, HashMap<Multihash, Vec<u8>>>,
+    others: VecDeque<(Vec<u8>, Vec<u8>)>,
+    mode: StorageMode,
+}
+
 pub struct Graph<V> {
     entries: HashMap<Multihash, Entry>,
     dismissed: HashSet<Multihash>,
@@ -144,13 +167,24 @@ pub struct Graph<V> {
     checkpoint: Multihash,
     checkpoint_height: Height,
 
-    history: VecDeque<(Vec<u8>, Vec<u8>)>,
+    storage: Storage,
 
+    // history: VecDeque<(Vec<u8>, Vec<u8>)>,
     vdf: WesolowskiVDF,
     difficulty: u64,
 
     config: Config,
     _marker: std::marker::PhantomData<V>,
+}
+
+impl StorageMode {
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> u32 {
+        match self {
+            StorageMode::General(_) => 1,
+            StorageMode::Archive(l) => *l,
+        }
+    }
 }
 
 impl Entry {
@@ -174,7 +208,246 @@ impl Snapshot {
     }
 }
 
+impl Storage {
+    pub fn push_atom(&mut self, atom: &Atom) {
+        use bincode::{config, serde::encode_to_vec};
+
+        self.atoms
+            .entry(atom.height)
+            .or_default()
+            .insert(atom.hash, encode_to_vec(atom, config::standard()).unwrap());
+    }
+
+    pub fn finalize<I>(
+        &mut self,
+        hashes: I,
+        last: Multihash,
+        difficulty: u64,
+        mmr: Mmr,
+        tokens: HashMap<BigUint, Token>,
+    ) where
+        I: IntoIterator<Item = Multihash>,
+    {
+        use bincode::{config, serde::encode_into_std_write};
+
+        if self.mode.len() == 1 {
+            self.difficulty = difficulty;
+            self.mmr = mmr;
+            self.tokens = tokens;
+            hashes.into_iter().for_each(|_| {
+                self.atoms.pop_first();
+            });
+
+            let map = self.atoms.iter_mut().next().unwrap().1;
+            let atom = map.remove(&last).unwrap();
+            *map = HashMap::from([(last, atom)]);
+
+            return;
+        }
+
+        let mut buf_1 = Vec::new();
+        let atom = self
+            .atoms
+            .pop_first()
+            .unwrap()
+            .1
+            .into_values()
+            .next()
+            .unwrap();
+        encode_into_std_write(&atom, &mut buf_1, config::standard()).unwrap();
+        encode_into_std_write(self.difficulty, &mut buf_1, config::standard()).unwrap();
+        encode_into_std_write(&self.mmr, &mut buf_1, config::standard()).unwrap();
+        encode_into_std_write(&self.tokens, &mut buf_1, config::standard()).unwrap();
+
+        let mut buf_2 = Vec::new();
+        hashes.into_iter().for_each(|h| {
+            self.atoms.pop_first().unwrap().1.remove(&h).unwrap();
+            encode_into_std_write(&atom, &mut buf_2, config::standard()).unwrap();
+        });
+
+        {
+            let map = self.atoms.iter_mut().next().unwrap().1;
+            let atom = map.remove(&last).unwrap();
+            *map = HashMap::from([(last, atom)]);
+        }
+
+        self.others.push_back((buf_1, buf_2));
+        self.difficulty = difficulty;
+        self.mmr = mmr;
+        self.tokens = tokens;
+
+        if self.mode.len() != 0 && self.others.len() > (self.mode.len() - 1) as usize {
+            self.others.pop_front();
+        }
+    }
+
+    pub fn export(&self, idxs: Option<Vec<BigUint>>) -> Option<Vec<u8>> {
+        use bincode::{config, serde::encode_into_std_write};
+
+        let mut buf = Vec::new();
+
+        match idxs {
+            Some(idxs) => {
+                let map = self.atoms.iter().next().unwrap().1;
+                let atom = map.values().next().unwrap();
+                let mmr = self.mmr.to_pruned(idxs.clone())?;
+                let token = idxs.into_iter().try_fold(HashMap::new(), |mut acc, id| {
+                    let token = self.tokens.get(&id).cloned()?;
+                    acc.insert(id, token);
+                    Some(acc)
+                })?;
+
+                encode_into_std_write(atom, &mut buf, config::standard()).unwrap();
+                encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
+                encode_into_std_write(&mmr, &mut buf, config::standard()).unwrap();
+                encode_into_std_write(&token, &mut buf, config::standard()).unwrap();
+            }
+
+            None => {
+                if self.others.is_empty() {
+                    let map = self.atoms.iter().next().unwrap().1;
+                    let atom = map.values().next().unwrap();
+                    encode_into_std_write(atom, &mut buf, config::standard()).unwrap();
+                    encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
+                    encode_into_std_write(&self.mmr, &mut buf, config::standard()).unwrap();
+                    encode_into_std_write(&self.tokens, &mut buf, config::standard()).unwrap();
+                    self.atoms.iter().skip(1).for_each(|(_, map)| {
+                        map.values().for_each(|v| {
+                            encode_into_std_write(v, &mut buf, config::standard()).unwrap();
+                        });
+                    });
+                } else {
+                    let tmp = &self.others.front().unwrap();
+                    encode_into_std_write(tmp, &mut buf, config::standard()).unwrap();
+                    self.others.iter().skip(1).for_each(|v| {
+                        encode_into_std_write(&v.1, &mut buf, config::standard()).unwrap();
+                    });
+                    self.atoms.iter().for_each(|(_, map)| {
+                        map.values().for_each(|v| {
+                            encode_into_std_write(v, &mut buf, config::standard()).unwrap();
+                        });
+                    });
+                }
+            }
+        }
+
+        Some(buf)
+    }
+
+    pub fn import<V: Validator>(mut data: &[u8], config: Config) -> Result<Graph<V>, Error> {
+        use bincode::{
+            config,
+            serde::{decode_from_slice, decode_from_std_read},
+        };
+
+        let atom = decode_from_std_read::<Atom, _, _>(&mut data, config::standard())?;
+        let difficulty = decode_from_std_read(&mut data, config::standard())?;
+        let mmr = decode_from_std_read(&mut data, config::standard())?;
+        let tokens = decode_from_std_read(&mut data, config::standard())?;
+        let atoms: Vec<Vec<u8>> = decode_from_std_read(&mut data, config::standard())?;
+        let atoms = atoms
+            .into_iter()
+            .try_fold(Vec::new(), |mut acc, atom| {
+                acc.push(decode_from_slice::<Atom, _>(&atom, config::standard())?.0);
+                Ok(acc)
+            })
+            .map_err(Error::Decode)?;
+
+        Graph::new(atom, difficulty, mmr, tokens, atoms, config)
+    }
+}
+
 impl<V: Validator> Graph<V> {
+    pub fn new(
+        atom: Atom,
+        difficulty: u64,
+        mmr: Mmr,
+        tokens: HashMap<BigUint, Token>,
+        atoms: Vec<Atom>,
+        config: Config,
+    ) -> Result<Self, Error> {
+        let mut graph = {
+            let entry = {
+                let indices = Self::resolve_related(&mmr, &tokens, &config.storage_mode)
+                    .ok_or(Error::InvalidTokens)?;
+                Entry {
+                    atom: atom.clone(),
+                    is_block: true,
+                    mmr: mmr.clone(),
+                    confirmed_indices: indices,
+                    confirmed_tokens: tokens.clone(),
+                    is_missing: false,
+                    ..Default::default()
+                }
+            };
+
+            let storage = Storage {
+                difficulty,
+                mmr,
+                tokens,
+                atoms: BTreeMap::from_iter([(
+                    atom.height,
+                    HashMap::from_iter([(atom.hash, atom.to_vec())]),
+                )]),
+                others: VecDeque::new(),
+                mode: config.storage_mode,
+            };
+
+            Self {
+                entries: HashMap::from_iter([(atom.hash, entry)]),
+                dismissed: HashSet::new(),
+                main_head: atom.hash,
+                checkpoint: atom.hash,
+                checkpoint_height: atom.height,
+                storage,
+                vdf: WesolowskiVDFParams(config.vdf_params).new(),
+                difficulty,
+                config,
+                _marker: std::marker::PhantomData,
+            }
+        };
+
+        if atoms
+            .into_iter()
+            .any(|a| graph.upsert(a).is_none_or(|r| !r.rejected.is_empty()))
+        {
+            return Err(Error::InvalidAtoms);
+        }
+
+        Ok(graph)
+    }
+
+    fn resolve_related(
+        mmr: &Mmr,
+        tokens: &HashMap<BigUint, Token>,
+        mode: &StorageMode,
+    ) -> Option<HashMap<PeerId, HashMap<Multihash, BigUint>>> {
+        let target = match mode {
+            StorageMode::General(p) => Some(*p),
+            StorageMode::Archive(..) => None,
+        };
+
+        mmr.leaves()
+            .into_iter()
+            .try_fold(HashMap::<_, HashMap<_, _>>::new(), |mut acc, idx| {
+                let token = tokens.get(&idx)?;
+
+                if let Some(p) = target {
+                    if V::is_related(&token.script_pk, &p) {
+                        acc.entry(p).or_default().insert(token.id, idx.clone());
+                    }
+                } else {
+                    V::related_peers(&token.script_pk)
+                        .into_iter()
+                        .for_each(|p| {
+                            acc.entry(p).or_default().insert(token.id, idx.clone());
+                        });
+                }
+
+                Some(acc)
+            })
+    }
+
     pub fn empty(config: Config) -> Self {
         Self::with_genesis(Atom::default(), Mmr::default(), HashMap::new(), config)
     }
@@ -185,73 +458,15 @@ impl<V: Validator> Graph<V> {
         tokens: HashMap<BigUint, Token>,
         config: Config,
     ) -> Self {
-        let hash = atom.hash;
-
-        let entry = {
-            let indices = Self::resolve_related(&mmr, &tokens, &config.storage_mode);
-
-            Entry {
-                atom,
-                is_block: true,
-                mmr,
-                confirmed_indices: indices,
-                confirmed_tokens: tokens.clone(),
-                is_missing: false,
-                ..Default::default()
-            }
-        };
-
-        let snapshot = Snapshot::new(
-            entry.atom.clone(),
+        Self::new(
+            atom,
             config.init_vdf_difficulty,
-            entry.mmr.clone(),
+            mmr,
             tokens,
-        );
-        let history = VecDeque::from_iter([(snapshot.to_vec(), Vec::new())]);
-
-        Self {
-            entries: HashMap::from_iter([(hash, entry)]),
-            dismissed: HashSet::new(),
-            main_head: hash,
-            checkpoint: hash,
-            checkpoint_height: 0,
-            history,
-            vdf: WesolowskiVDFParams(config.vdf_params).new(),
-            difficulty: config.init_vdf_difficulty,
+            Vec::new(),
             config,
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    fn resolve_related(
-        mmr: &Mmr,
-        tokens: &HashMap<BigUint, Token>,
-        mode: &StorageMode,
-    ) -> HashMap<PeerId, HashMap<Multihash, BigUint>> {
-        let target = match mode {
-            StorageMode::General(p) => Some(*p),
-            StorageMode::Archive(..) => None,
-        };
-
-        let mut indices: HashMap<_, HashMap<_, _>> = HashMap::new();
-
-        mmr.leaves().into_iter().for_each(|idx| {
-            let token = tokens.get(&idx).expect("MMR must be consistent");
-
-            if let Some(p) = target {
-                if V::is_related(&token.script_pk, &p) {
-                    indices.entry(p).or_default().insert(token.id, idx.clone());
-                }
-            } else {
-                V::related_peers(&token.script_pk)
-                    .into_iter()
-                    .for_each(|p| {
-                        indices.entry(p).or_default().insert(token.id, idx.clone());
-                    });
-            }
-        });
-
-        indices
+        )
+        .unwrap()
     }
 
     pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {
@@ -433,12 +648,7 @@ impl<V: Validator> Graph<V> {
 
         let is_block = self.validate_execution(&hash)?;
 
-        self.history
-            .iter_mut()
-            .last()
-            .unwrap()
-            .1
-            .extend(self.entries[&hash].atom.to_vec());
+        self.storage.push_atom(&self.entries[&hash].atom);
 
         if !is_block {
             return Ok(());
@@ -676,33 +886,17 @@ impl<V: Validator> Graph<V> {
         let next_height = prev_height + self.config.checkpoint_distance;
         let next_hash = self.get_block_at_height(self.main_head, next_height);
 
-        let times = self.collect_times(next_hash, self.checkpoint);
+        let (times, hashes) = self.collect_times_and_hashes(next_hash, self.checkpoint);
         let difficulty = self.adjust_difficulty(times);
 
+        self.storage.finalize(
+            hashes,
+            next_hash,
+            difficulty,
+            self.entries[&next_hash].mmr.clone(),
+            self.entries[&next_hash].confirmed_tokens.clone(),
+        );
         self.entries.retain(|_, e| e.atom.checkpoint == next_hash);
-
-        let snapshot = {
-            let entry = &self.entries[&next_hash];
-            Snapshot {
-                atom: entry.atom.clone(),
-                difficulty,
-                mmr: entry.mmr.clone(),
-                tokens: entry.confirmed_tokens.clone(),
-            }
-        };
-
-        {
-            let len = match self.config.storage_mode {
-                StorageMode::General(..) => 1,
-                StorageMode::Archive(l) => l,
-            };
-
-            if len != 0 && self.history.len() >= len as usize {
-                self.history.pop_front();
-            }
-        }
-
-        self.history.push_back((snapshot.to_vec(), Vec::new()));
         self.checkpoint_height = next_height;
         self.checkpoint = next_hash;
         self.difficulty = difficulty;
@@ -718,8 +912,13 @@ impl<V: Validator> Graph<V> {
         }
     }
 
-    fn collect_times(&mut self, start: Multihash, end: Multihash) -> Vec<u64> {
+    fn collect_times_and_hashes(
+        &mut self,
+        start: Multihash,
+        end: Multihash,
+    ) -> (Vec<u64>, Vec<Multihash>) {
         let mut times = Vec::new();
+        let mut hashes = Vec::new();
 
         let (mut cur, mut next_time) = {
             let entry = &self.entries[&start];
@@ -740,9 +939,11 @@ impl<V: Validator> Graph<V> {
             if cur == end {
                 break;
             }
+
+            hashes.push(cur);
         }
 
-        times
+        (times, hashes)
     }
 
     fn adjust_difficulty(&self, mut times: Vec<u64>) -> u64 {
@@ -814,66 +1015,17 @@ impl<V: Validator> Graph<V> {
     }
 
     pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
-        if let StorageMode::General(p) = &self.config.storage_mode {
-            if peer_id.is_none_or(|id| &id != p) {
-                return None;
-            }
-        };
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&self.history[0].0);
-        self.history.iter().for_each(|(_, atoms)| {
-            buf.extend(atoms);
-        });
-
-        Some(buf)
+        self.storage.export(peer_id.map(|p| {
+            self.entries[&self.checkpoint]
+                .confirmed_indices
+                .get(&p)
+                .map(|m| m.values().cloned().collect())
+                .unwrap_or_default()
+        }))
     }
 
-    pub fn import(mut data: &[u8], config: Config) -> Result<Self, civita_serialize::Error> {
-        let info = Snapshot::from_reader(&mut data)?;
-
-        let hash = info.atom.hash;
-        let height = info.atom.height;
-        let history = VecDeque::from_iter([(info.to_vec(), Vec::new())]);
-
-        let entry = {
-            let confirmed_indices =
-                Self::resolve_related(&info.mmr, &info.tokens, &config.storage_mode);
-
-            Entry {
-                atom: info.atom,
-                is_block: true,
-                mmr: info.mmr,
-                confirmed_indices,
-                confirmed_tokens: info.tokens,
-                is_missing: false,
-                ..Default::default()
-            }
-        };
-
-        let mut graph = Self {
-            entries: HashMap::from_iter([(hash, entry)]),
-            dismissed: HashSet::new(),
-            main_head: hash,
-            checkpoint: hash,
-            checkpoint_height: height,
-            history,
-            vdf: WesolowskiVDFParams(config.vdf_params).new(),
-            difficulty: info.difficulty,
-            config,
-            _marker: std::marker::PhantomData,
-        };
-
-        while !data.is_empty() {
-            let atom = Atom::from_reader(&mut data)?;
-            if !graph.upsert(atom).is_some_and(|r| r.rejected.is_empty()) {
-                return Err(civita_serialize::Error(
-                    "Imported data contains invalid atom".into(),
-                ));
-            }
-        }
-
-        Ok(graph)
+    pub fn import(data: &[u8], config: Config) -> Result<Self, Error> {
+        Storage::import(data, config)
     }
 
     pub fn create_command<I>(
