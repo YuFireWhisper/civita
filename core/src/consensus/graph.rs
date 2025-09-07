@@ -89,9 +89,8 @@ struct Entry {
     pub is_block: bool,
     pub mmr: Mmr,
 
-    pub confirmed_indices: HashMap<PeerId, HashSet<BigUint>>,
+    pub confirmed_indices: HashMap<PeerId, HashMap<Multihash, BigUint>>,
     pub confirmed_tokens: HashMap<BigUint, Token>,
-    pub confirmed_hash_to_index: HashMap<Multihash, BigUint>,
 
     pub unconfirmed_tokens: HashMap<Multihash, Option<Token>>,
 
@@ -228,26 +227,26 @@ impl<V: Validator> Graph<V> {
         mmr: &Mmr,
         tokens: &HashMap<BigUint, Token>,
         mode: &StorageMode,
-    ) -> HashMap<PeerId, HashSet<BigUint>> {
-        let mut indices: HashMap<_, HashSet<_>> = HashMap::new();
-
+    ) -> HashMap<PeerId, HashMap<Multihash, BigUint>> {
         let target = match mode {
             StorageMode::General(p) => Some(*p),
             StorageMode::Archive(..) => None,
         };
 
+        let mut indices: HashMap<_, HashMap<_, _>> = HashMap::new();
+
         mmr.leaves().into_iter().for_each(|idx| {
             let token = tokens.get(&idx).expect("MMR must be consistent");
 
-            if let Some(peer_id) = &target {
-                if V::is_related(&token.script_pk, peer_id) {
-                    indices.entry(*peer_id).or_default().insert(idx);
+            if let Some(p) = target {
+                if V::is_related(&token.script_pk, &p) {
+                    indices.entry(p).or_default().insert(token.id, idx.clone());
                 }
             } else {
                 V::related_peers(&token.script_pk)
                     .into_iter()
                     .for_each(|p| {
-                        indices.entry(p).or_default().insert(idx.clone());
+                        indices.entry(p).or_default().insert(token.id, idx.clone());
                     });
             }
         });
@@ -562,10 +561,10 @@ impl<V: Validator> Graph<V> {
         let mut confirmed_indices = parent.confirmed_indices.clone();
         let mut confirmed_tokens = parent.confirmed_tokens.clone();
 
-        consumed.into_values().for_each(|idx| {
+        consumed.into_iter().for_each(|(id, idx)| {
             confirmed_tokens.remove(&idx);
             confirmed_indices.values_mut().for_each(|v| {
-                v.remove(&idx);
+                v.remove(&id);
             });
         });
 
@@ -575,7 +574,10 @@ impl<V: Validator> Graph<V> {
             match &self.config.storage_mode {
                 StorageMode::General(p) => {
                     if V::is_related(&token.script_pk, p) {
-                        confirmed_indices.entry(*p).or_default().insert(idx.clone());
+                        confirmed_indices
+                            .entry(*p)
+                            .or_default()
+                            .insert(token.id, idx.clone());
                         confirmed_tokens.insert(idx, token);
                     }
                 }
@@ -583,7 +585,10 @@ impl<V: Validator> Graph<V> {
                     V::related_peers(&token.script_pk)
                         .into_iter()
                         .for_each(|p| {
-                            confirmed_indices.entry(p).or_default().insert(idx.clone());
+                            confirmed_indices
+                                .entry(p)
+                                .or_default()
+                                .insert(token.id, idx.clone());
                             confirmed_tokens.insert(idx.clone(), token.clone());
                         });
                 }
@@ -591,7 +596,7 @@ impl<V: Validator> Graph<V> {
         });
 
         mmr.commit();
-        mmr.prune(confirmed_indices.values().flatten().cloned());
+        mmr.prune(confirmed_indices.values().flat_map(|m| m.values()).cloned());
 
         let cur = self.entries.get_mut(target_hash).unwrap();
         cur.mmr = mmr;
@@ -779,7 +784,7 @@ impl<V: Validator> Graph<V> {
             .confirmed_indices
             .get(peer)
             .map(|idxs| {
-                idxs.iter()
+                idxs.values()
                     .map(|i| entry.confirmed_tokens[i].clone())
                     .collect()
             })
@@ -876,18 +881,18 @@ impl<V: Validator> Graph<V> {
         code: u8,
         iter: I,
         created: Vec<Token>,
+        peer: &PeerId,
     ) -> Result<Command, CreationError>
     where
         I: IntoIterator<Item = (Multihash, Vec<u8>)>,
     {
         let head = &self.entries[&self.main_head];
+        let map = &head.confirmed_indices[peer];
 
         let inputs = iter
             .into_iter()
             .try_fold(Vec::new(), |mut inputs, (id, sig)| {
-                let Some(idx) = head.confirmed_hash_to_index.get(&id) else {
-                    return Err(CreationError::UnknownTokenId);
-                };
+                let idx = map.get(&id).ok_or(CreationError::UnknownTokenId)?;
 
                 match head.confirmed_tokens.get(idx) {
                     Some(token) => {
