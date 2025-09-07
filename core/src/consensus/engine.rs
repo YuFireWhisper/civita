@@ -12,6 +12,7 @@ use libp2p::{
     request_response::ResponseChannel,
     PeerId,
 };
+use num_bigint::BigUint;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     RwLock,
@@ -28,10 +29,8 @@ use crate::{
         request_response::{Message, RequestResponse},
         Gossipsub, Transport,
     },
-    ty::{
-        atom::{Atom, Command},
-        token::Token,
-    },
+    ty::{atom::Atom, token::Token},
+    utils::mmr::Mmr,
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -167,16 +166,15 @@ impl<V: Validator> Engine<V> {
     pub async fn with_genesis(
         transport: Arc<Transport>,
         atom: Atom,
-        trie_root: Multihash,
-        trie_guide: HashMap<Multihash, Vec<u8>>,
-        related_keys: HashSet<Multihash>,
+        mmr: Mmr,
+        tokens: HashMap<BigUint, Token>,
         graph_config: graph::Config,
         config: Config,
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let graph = Graph::with_genesis(atom, trie_root, trie_guide, related_keys, graph_config);
+        let graph = Graph::with_genesis(atom, mmr, tokens, graph_config);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
@@ -199,16 +197,20 @@ impl<V: Validator> Engine<V> {
         Ok(engine)
     }
 
-    pub async fn propose(
+    pub async fn propose<I>(
         &self,
-        cmd: Command,
-        script_sigs: HashMap<Multihash, Vec<u8>>,
-    ) -> Result<(), CreationError> {
-        let handle = self
-            .graph
-            .read()
-            .await
-            .create_atom(Some((cmd, script_sigs)))?;
+        code: u8,
+        iter: I,
+        created: Vec<Token>,
+    ) -> Result<(), CreationError>
+    where
+        I: IntoIterator<Item = (Multihash, Vec<u8>)>,
+    {
+        let graph = self.graph.read().await;
+        let cmd = graph.create_command(code, iter, created)?;
+        let handle = graph.create_atom(Some(cmd))?;
+        drop(graph);
+
         let tx = self.atom_result_tx.clone();
 
         tokio::spawn(async move {
@@ -493,7 +495,7 @@ impl<V: Validator> Engine<V> {
         true
     }
 
-    pub async fn tokens(&self) -> HashMap<Multihash, Token> {
+    pub async fn tokens(&self) -> Vec<Token> {
         self.graph
             .read()
             .await
