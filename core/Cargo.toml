@@ -44,14 +44,12 @@ derivative = "2.2"
 vdf = "0.1"
 parking_lot = "0.12"
 petgraph = "0.8"
-num-bigint = { version = "0.4", features = ["serde"] }
-num-traits = "0.2"
-num-integer = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 bincode = { version = "2.0", features = ["serde"] }
 multihash = { version = "0.19", features = ["serde"] }
 multihash-derive = "0.9"
 multihash-codetable = { version = "0.1", features = ["sha2", "sha3", "blake3"] }
+primitive-types = { version = "0.13", features = ["serde", "num-traits"] }
 
 [dev-dependencies]
 tempfile = "3.17"

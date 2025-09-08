@@ -4,22 +4,20 @@ use std::{
 };
 
 use civita_serialize::Serialize;
-use civita_serialize_derive::Serialize;
 use derivative::Derivative;
 use multihash_derive::MultihashDigest;
-use num_bigint::BigUint;
-use num_integer::Integer;
-use num_traits::{One, Zero};
+use primitive_types::U256;
 
 use crate::crypto::{hasher::Hasher, Multihash};
 
+type Index = U256;
+
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Serialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct MmrProof {
     pub siblings: Vec<Multihash>,
-    pub idx: BigUint,
+    pub idx: Index,
 }
 
 #[derive(Derivative)]
@@ -32,17 +30,17 @@ struct Staged<T> {
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct Mmr<T> {
-    hashes: HashMap<BigUint, Multihash>,
-    indices: HashMap<Multihash, BigUint>,
+    hashes: HashMap<Index, Multihash>,
+    indices: HashMap<Multihash, Index>,
     deletes: HashSet<Multihash>,
     leaves: HashMap<Multihash, T>,
-    next: BigUint,
+    next: Index,
     staged: Staged<T>,
-    peaks: OnceLock<Vec<BigUint>>,
+    peaks: OnceLock<Vec<Index>>,
 }
 
 impl MmrProof {
-    pub fn new(siblings: Vec<Multihash>, idx: BigUint) -> Self {
+    pub fn new(siblings: Vec<Multihash>, idx: Index) -> Self {
         Self { siblings, idx }
     }
 }
@@ -63,26 +61,26 @@ impl<T> Mmr<T> {
         let exp = peak_range(self.peaks(), &proof.idx).0;
         let exp_len = index_height(&exp);
 
-        if proof.siblings.len() as u64 != exp_len {
+        if proof.siblings.len() != exp_len {
             return false;
         }
 
         let mut idx = proof.idx.clone();
         let mut acc = hash;
         let mut g = index_height(&idx);
-        let mut fills: HashMap<BigUint, Multihash> = HashMap::from_iter([(idx.clone(), hash)]);
+        let mut fills: HashMap<Index, Multihash> = HashMap::from_iter([(idx, hash)]);
 
         for hash in &proof.siblings {
-            let offset = 2u64 << g;
+            let offset = 2usize << g;
 
             if index_height(&(&idx + 1u8)) > g {
-                idx += 1u8;
+                idx += 1u8.into();
                 let sidx = &idx - offset;
                 fills.insert(sidx, *hash);
                 acc = hash_pospair(&(&idx + 1u8), hash, &acc);
                 g += 1;
             } else {
-                idx += offset;
+                idx += offset.into();
                 let sidx = &idx - 1u8;
                 fills.insert(sidx, *hash);
                 acc = hash_pospair(&(&idx + 1u8), &acc, hash);
@@ -133,23 +131,23 @@ impl<T> Mmr<T> {
         self.peaks = OnceLock::new();
     }
 
-    fn recalculate_parents(&mut self, mut idx: BigUint) {
+    fn recalculate_parents(&mut self, mut idx: Index) {
         let mut g = index_height(&idx);
         let peak = peak_range(self.peaks(), &idx).0;
         let mut c = &Multihash::default();
 
         while idx != peak {
-            let offset = 2u64 << g;
+            let offset = 2usize << g;
 
             if index_height(&(&idx + 1u8)) > g {
-                idx.inc();
+                idx += 1u8.into();
                 let is = &idx - offset;
                 let s = self.hashes.get(&is).copied().unwrap_or_default();
                 let h = hash_pospair(&(&idx + 1u8), &s, c);
                 self.hashes.insert(idx.clone(), h);
                 self.indices.insert(h, idx.clone());
             } else {
-                idx += offset;
+                idx += offset.into();
                 let is = &idx - 1u8;
                 let s = self.hashes.get(&is).copied().unwrap_or_default();
                 let h = hash_pospair(&(&idx + 1u8), c, &s);
@@ -162,10 +160,10 @@ impl<T> Mmr<T> {
         }
     }
 
-    fn insert(&mut self, hash: Multihash) -> BigUint {
+    fn insert(&mut self, hash: Multihash) -> Index {
         self.hashes.insert(self.next.clone(), hash);
-        self.next.inc();
-        self.next.clone()
+        self.next += 1u8.into();
+        self.next
     }
 
     pub fn get(&self, hash: &Multihash) -> Option<&T> {
@@ -185,13 +183,13 @@ impl<T> Mmr<T> {
         let mut g = index_height(&idx);
 
         loop {
-            let offset = 2u64 << g;
+            let offset = 2usize << g;
 
             let isibling = if index_height(&(&idx + 1u8)) > g {
-                idx.inc();
+                idx += 1u8.into();
                 &idx - offset
             } else {
-                idx += offset;
+                idx += offset.into();
                 &idx - 1u8
             };
 
@@ -204,20 +202,20 @@ impl<T> Mmr<T> {
         }
     }
 
-    fn peaks(&self) -> &Vec<BigUint> {
+    fn peaks(&self) -> &Vec<Index> {
         self.peaks.get_or_init(|| peak_indices(&self.next))
     }
 
-    pub fn verify(&self, mut idx: BigUint, hash: Multihash, proof: &MmrProof) -> bool {
+    pub fn verify(&self, mut idx: Index, hash: Multihash, proof: &MmrProof) -> bool {
         let mut root = hash;
         let mut g = index_height(&idx);
 
         proof.siblings.iter().for_each(|h| {
             if index_height(&(&idx + 1u8)) > g {
-                idx.inc();
+                idx += 1u8.into();
                 root = hash_pospair(&(&idx + 1u8), h, &root);
             } else {
-                idx += 2u64 << g;
+                idx += (2usize << g).into();
                 root = hash_pospair(&(&idx + 1u8), &root, h);
             }
             g += 1;
@@ -250,10 +248,10 @@ impl<T> Mmr<T> {
             loop {
                 let offset = 2u64 << g;
                 let sibling_idx = if index_height(&(&idx + 1u8)) > g {
-                    idx.inc();
+                    idx += 1u8.into();
                     &idx - offset
                 } else {
-                    idx += offset;
+                    idx += offset.into();
                     &idx - 1u8
                 };
 
@@ -292,8 +290,8 @@ impl<T: Clone> Mmr<T> {
     where
         I: IntoIterator<Item = Multihash>,
     {
-        let mut hashes: HashMap<BigUint, Multihash> = HashMap::new();
-        let mut indices: HashMap<Multihash, BigUint> = HashMap::new();
+        let mut hashes: HashMap<Index, Multihash> = HashMap::new();
+        let mut indices: HashMap<Multihash, Index> = HashMap::new();
         let mut deletes: HashSet<Multihash> = HashSet::new();
         let mut leaves: HashMap<Multihash, T> = HashMap::new();
 
@@ -322,12 +320,12 @@ impl<T: Clone> Mmr<T> {
                     leaves.insert(hash, v.clone());
                 }
 
-                let offset = 2u64 << g;
+                let offset = 2usize << g;
                 let sidx = if index_height(&(&idx + 1u8)) > g {
-                    idx.inc();
+                    idx += 1u8.into();
                     &idx - offset
                 } else {
-                    idx += offset;
+                    idx += offset.into();
                     &idx - 1u8
                 };
 
@@ -363,32 +361,32 @@ impl<T: Clone> Mmr<T> {
     }
 }
 
-fn index_height(i: &BigUint) -> u64 {
+fn index_height(i: &Index) -> usize {
     let mut pos = i + 1u8;
 
-    while pos.bits() != pos.count_ones() {
+    while pos != Index::MAX {
         pos = &pos - (1u64 << (pos.bits() - 1)) + 1u8;
     }
 
     pos.bits().saturating_sub(1)
 }
 
-fn hash_pospair(idx: &BigUint, l: &Multihash, r: &Multihash) -> Multihash {
+fn hash_pospair(idx: &Index, l: &Multihash, r: &Multihash) -> Multihash {
     let mut buf = Vec::new();
-    buf.extend(idx.to_bytes_be());
+    buf.extend(idx.to_big_endian());
     l.to_writer(&mut buf);
     r.to_writer(&mut buf);
     Hasher::default().digest(&buf)
 }
 
-fn peak_indices(s: &BigUint) -> Vec<BigUint> {
+fn peak_indices(s: &Index) -> Vec<Index> {
     let mut s = s.clone() + 1u8;
-    let mut peak = BigUint::zero();
+    let mut peak = Index::zero();
     let mut peaks = Vec::new();
 
     while !s.is_zero() {
-        let size = (BigUint::one() << ((&s + 1u8).bits() - 1)) - 1u8;
-        peak += &size;
+        let size = (Index::zero() << ((&s + 1u8).bits() - 1)) - 1u8;
+        peak += size;
         peaks.push(&peak - 1u8);
         s -= size;
     }
@@ -396,11 +394,11 @@ fn peak_indices(s: &BigUint) -> Vec<BigUint> {
     peaks
 }
 
-fn peak_range(peaks: &[BigUint], idx: &BigUint) -> (BigUint, BigUint) {
+fn peak_range(peaks: &[Index], idx: &Index) -> (Index, Index) {
     let pos = peaks.partition_point(|p| p < idx);
-    let peak = peaks[pos].clone();
-    let next_peak = peaks.get(pos + 1).cloned().unwrap_or_else(|| peak.clone());
-    (peak, next_peak)
+    let peak = &peaks[pos];
+    let next_peak = peaks.get(pos + 1).unwrap_or(peak);
+    (*peak, *next_peak)
 }
 
 impl<T: Clone> Clone for Mmr<T> {
@@ -410,7 +408,7 @@ impl<T: Clone> Clone for Mmr<T> {
             indices: self.indices.clone(),
             deletes: self.deletes.clone(),
             leaves: self.leaves.clone(),
-            next: self.next.clone(),
+            next: self.next,
             peaks: self.peaks.clone(),
             ..Default::default()
         }
@@ -422,7 +420,7 @@ impl<T: serde::Serialize> serde::Serialize for Mmr<T> {
     where
         S: serde::Serializer,
     {
-        let map: HashMap<&Multihash, Option<(&BigUint, Option<&T>)>> = self
+        let map: HashMap<&Multihash, Option<(&Index, Option<&T>)>> = self
             .indices
             .iter()
             .map(|(k, idx)| (k, Some((idx, self.leaves.get(k)))))
@@ -437,15 +435,12 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
     where
         D: serde::Deserializer<'de>,
     {
-        type Tup<T> = (
-            HashMap<Multihash, Option<(BigUint, Option<T>)>>,
-            Vec<BigUint>,
-        );
+        type Tup<T> = (HashMap<Multihash, Option<(Index, Option<T>)>>, Vec<Index>);
 
         let (map, peaks) = Tup::<T>::deserialize(deserializer)?;
 
-        let mut hashes: HashMap<BigUint, Multihash> = HashMap::new();
-        let mut indices: HashMap<Multihash, BigUint> = HashMap::new();
+        let mut hashes: HashMap<Index, Multihash> = HashMap::new();
+        let mut indices: HashMap<Multihash, Index> = HashMap::new();
         let mut leaves: HashMap<Multihash, T> = HashMap::new();
         let mut deletes: HashSet<Multihash> = HashSet::new();
         let next = peaks.last().map(|p| p + 1u8).unwrap_or_default();
