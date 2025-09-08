@@ -23,7 +23,6 @@ pub struct MmrProof(Vec<Multihash>);
 #[derive(Default)]
 struct Staged {
     appends: Vec<Multihash>,
-    fills: HashMap<BigUint, Multihash>,
     deletes: Vec<BigUint>,
     vnext: BigUint,
     vleaves: BigUint,
@@ -101,8 +100,8 @@ impl Mmr {
             return false;
         }
 
-        self.staged.fills.insert(idx.clone(), hash);
-        self.staged.fills.extend(local_fills);
+        self.hashes.insert(idx.clone(), hash);
+        self.hashes.extend(local_fills);
         self.staged.deletes.push(idx);
 
         true
@@ -118,8 +117,6 @@ impl Mmr {
 
     pub fn commit(&mut self) {
         let staged = std::mem::take(&mut self.staged);
-
-        self.hashes.extend(staged.fills);
 
         staged.deletes.into_iter().for_each(|idx| {
             self.hashes.insert(idx.clone(), Multihash::default());
