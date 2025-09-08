@@ -116,6 +116,7 @@ impl<T> Mmr<T> {
             let mut i = self.insert(h);
 
             while index_height(&i) > g {
+                dbg!();
                 let il = i - (2u64 << g);
                 let ir = &i - 1u8;
                 i = self.insert(hash_pospair(
@@ -377,10 +378,16 @@ impl<T: Clone> Mmr<T> {
     }
 }
 
+fn is_all_ones(n: &Index) -> bool {
+    let msb = (1usize << (n.bits() - 1)) - 1;
+    let mask = (1usize << (msb + 1)) - 1;
+    n == &Index::from(mask)
+}
+
 fn index_height(i: &Index) -> usize {
     let mut pos = i + 1u8;
 
-    while pos != Index::MAX {
+    while !is_all_ones(&pos) {
         pos = pos - (1u64 << (pos.bits() - 1)) + 1u8;
     }
 
