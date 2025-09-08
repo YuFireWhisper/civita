@@ -116,7 +116,6 @@ impl<T> Mmr<T> {
             let mut i = self.insert(h);
 
             while index_height(&i) > g {
-                dbg!();
                 let il = i - (2u64 << g);
                 let ir = &i - 1u8;
                 i = self.insert(hash_pospair(
@@ -164,6 +163,7 @@ impl<T> Mmr<T> {
 
     fn insert(&mut self, hash: Multihash) -> Index {
         self.hashes.insert(self.next, hash);
+        self.indices.insert(hash, self.next);
         self.next += 1u8.into();
         self.next
     }
