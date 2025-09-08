@@ -1,7 +1,5 @@
 use std::{collections::HashSet, future, sync::Arc};
 
-use civita_serialize::Serialize;
-use civita_serialize_derive::Serialize;
 use dashmap::DashMap;
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
@@ -43,7 +41,7 @@ pub enum Error {
     BootstrapTimeout,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Request {
     Atoms(HashSet<Multihash>),
     Sync(Option<PeerId>),
@@ -115,6 +113,8 @@ impl<V: Validator> Engine<V> {
         graph_config: graph::Config,
         bootstrap_config: BootstrapConfig,
     ) -> Result<Graph<V>> {
+        use bincode::{config, serde::encode_to_vec};
+
         if bootstrap_config.peers.is_empty() {
             return Err(Error::NoBootstrapPeers);
         }
@@ -126,7 +126,7 @@ impl<V: Validator> Engine<V> {
 
         let mut rx = req_resp.subscribe(bootstrap_config.topic);
 
-        let msg = Request::Sync(target).to_vec();
+        let msg = encode_to_vec(Request::Sync(target), config::standard()).unwrap();
         for &peer in &bootstrap_config.peers {
             req_resp
                 .send_request(peer, msg.clone(), bootstrap_config.topic)
@@ -283,7 +283,10 @@ impl<V: Validator> Engine<V> {
     }
 
     async fn handle_gossip_message(&self, msg: gossipsub::Message) {
-        let Ok(atom) = Atom::from_slice(msg.data.as_slice()) else {
+        let Ok((atom, _)) = bincode::serde::decode_from_slice::<Atom, _>(
+            msg.data.as_slice(),
+            bincode::config::standard(),
+        ) else {
             self.gossipsub
                 .report_validation_result(
                     &msg.id,
@@ -379,7 +382,10 @@ impl<V: Validator> Engine<V> {
                 request,
                 channel,
             } => {
-                let Ok(req) = Request::from_slice(request.as_slice()) else {
+                let Ok((req, _)) = bincode::serde::decode_from_slice::<Request, _>(
+                    request.as_slice(),
+                    bincode::config::standard(),
+                ) else {
                     self.disconnect_peer(peer).await;
                     return;
                 };
@@ -390,7 +396,12 @@ impl<V: Validator> Engine<V> {
                 }
             }
             Message::Response { peer, response } => {
-                let atoms: Vec<Atom> = Vec::from_slice(response.as_slice()).unwrap_or_default();
+                let (atoms, _) = bincode::serde::decode_from_slice::<Vec<Atom>, _>(
+                    response.as_slice(),
+                    bincode::config::standard(),
+                )
+                .unwrap_or_default();
+
                 if atoms.is_empty() {
                     self.disconnect_peer(peer).await;
                     return;
@@ -425,21 +436,21 @@ impl<V: Validator> Engine<V> {
             return;
         }
 
-        let atoms = {
+        let vec = {
             let graph = self.graph.read().await;
             let Some(atoms) = hashes.iter().try_fold(Vec::new(), |mut acc, h| {
-                acc.push(graph.get(h)?.to_vec());
+                acc.push(graph.get(h)?);
                 Some(acc)
             }) else {
                 self.disconnect_peer(peer).await;
                 return;
             };
-            atoms
+            bincode::serde::encode_to_vec(&atoms, bincode::config::standard()).unwrap()
         };
 
         if let Err(e) = self
             .request_response
-            .send_response(channel, atoms.to_vec(), self.req_resp_topic)
+            .send_response(channel, vec, self.req_resp_topic)
             .await
         {
             log::error!("Failed to send response: {e}");
@@ -468,7 +479,7 @@ impl<V: Validator> Engine<V> {
 
     async fn on_atom_ready(&self, atom: Atom) -> bool {
         let hash = atom.hash;
-        let bytes = atom.to_vec();
+        let vec = bincode::serde::encode_to_vec(&atom, bincode::config::standard()).unwrap();
         let result = self.graph.write().await.upsert(atom).unwrap();
 
         if !result.rejected.is_empty() {
@@ -479,7 +490,7 @@ impl<V: Validator> Engine<V> {
 
         debug_assert!(result.accepted.contains(&hash));
 
-        if let Err(e) = self.gossipsub.publish(self.gossip_topic, bytes).await {
+        if let Err(e) = self.gossipsub.publish(self.gossip_topic, vec).await {
             log::error!("Failed to publish created atom: {e}");
         }
 

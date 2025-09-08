@@ -339,13 +339,11 @@ impl<V: Validator> Graph<V> {
                 }
             };
 
+            let vec = bincode::serde::encode_to_vec(&atom, bincode::config::standard()).unwrap();
             let storage = Storage {
                 difficulty,
                 mmr,
-                atoms: BTreeMap::from_iter([(
-                    atom.height,
-                    HashMap::from_iter([(atom.hash, atom.to_vec())]),
-                )]),
+                atoms: BTreeMap::from_iter([(atom.height, HashMap::from_iter([(atom.hash, vec)]))]),
                 others: VecDeque::new(),
                 mode: config.storage_mode,
             };
@@ -384,7 +382,6 @@ impl<V: Validator> Graph<V> {
         };
 
         mmr.leaves()
-            .into_iter()
             .try_fold(HashMap::<_, HashSet<_>>::new(), |mut acc, (_, token)| {
                 if let Some(p) = target {
                     if V::is_related(&token.script_pk, &p) {
@@ -911,7 +908,6 @@ impl<V: Validator> Graph<V> {
             StorageMode::General(p) => {
                 debug_assert_eq!(&p, peer);
                 mmr.leaves()
-                    .into_iter()
                     .filter(|(h, _)| !entry.unconfirmed.contains_key(h))
                     .map(|(_, t)| t.clone())
                     .chain(
