@@ -4,13 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-civita-serialize = { path = "../serialize", features = [
-  "libp2p",
-  "ark-secp256k1",
-  "bigint",
-] }
-civita-serialize-derive = { path = "../serialize-derive" }
-
 libp2p = { version = "0.56", features = [
   "identify",
   "macros",

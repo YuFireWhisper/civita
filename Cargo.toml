@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "serialize", "serialize-derive"]
+members = ["core"]
 resolver = "2"
 
 [workspace.package]
@@ -9,5 +9,3 @@ edition = "2021"
 
 [workspace.dependencies]
 civita-core = { path = "./core" }
-civita-serialize = { path = "./serialize" }
-civita-serialize-derive = { path = "./serialize-derive" }
