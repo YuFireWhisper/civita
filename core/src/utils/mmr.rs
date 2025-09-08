@@ -378,16 +378,15 @@ impl<T: Clone> Mmr<T> {
     }
 }
 
-fn is_all_ones(n: &Index) -> bool {
-    let msb = (1usize << (n.bits() - 1)) - 1;
-    let mask = (1usize << (msb + 1)) - 1;
-    n == &Index::from(mask)
+fn is_all_ones(n: Index) -> bool {
+    let next = n + 1u8;
+    next != U256::zero() && (next & (n)) == U256::zero()
 }
 
 fn index_height(i: &Index) -> usize {
     let mut pos = i + 1u8;
 
-    while !is_all_ones(&pos) {
+    while !is_all_ones(pos) {
         pos = pos - (1u64 << (pos.bits() - 1)) + 1u8;
     }
 
