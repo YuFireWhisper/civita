@@ -1,49 +1,41 @@
-type Multihash = libp2p::multihash::Multihash<64>;
+use multihash_derive::MultihashDigest;
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
 #[derive(Default)]
 #[derive(Eq, PartialEq)]
+#[derive(MultihashDigest)]
+#[mh(alloc_size = 64)]
 #[repr(u8)]
 pub enum Hasher {
     #[default]
-    Sha2_256 = 0x01,
+    #[mh(code = 0x01, hasher = multihash_codetable::Sha2_256)]
+    Sha2_256,
+
+    #[mh(code = 0x02, hasher = multihash_codetable::Sha2_512)]
+    Sha2_512,
+
+    #[mh(code = 0x03, hasher = multihash_codetable::Sha3_224)]
+    Sha3_224,
+
+    #[mh(code = 0x04, hasher = multihash_codetable::Sha3_256)]
+    Sha3_256,
+
+    #[mh(code = 0x05, hasher = multihash_codetable::Sha3_384)]
+    Sha3_384,
+
+    #[mh(code = 0x06, hasher = multihash_codetable::Sha3_512)]
+    Sha3_512,
+
+    #[mh(code = 0x07, hasher = multihash_codetable::Blake3_256)]
+    Blake3,
 }
 
 impl Hasher {
-    pub fn from_u8(code: u64) -> Option<Self> {
-        match code {
-            0x01 => Some(Hasher::Sha2_256),
-            _ => None,
-        }
-    }
-
-    pub fn digest(data: &[u8]) -> Multihash {
-        Self::default().digest_with(data)
-    }
-
-    pub fn digest_with(&self, data: &[u8]) -> Multihash {
-        match self {
-            Hasher::Sha2_256 => {
-                use sha2::{Digest, Sha256};
-                let hash = Sha256::digest(data);
-                Multihash::wrap(Hasher::Sha2_256 as u64, &hash)
-                    .expect("SHA2_256 hash should always be valid")
-            }
-        }
-    }
-
-    pub fn is_supported_code(hash: &Multihash) -> bool {
-        Self::from_u8(hash.code()).is_some()
-    }
-
     pub fn validate(hash: &Multihash, data: &[u8]) -> bool {
-        if !Self::is_supported_code(hash) {
+        let Ok(hasher) = Self::try_from(hash.code()) else {
             return false;
-        }
-
-        let expected = Self::digest_with(&Self::from_u8(hash.code()).unwrap(), data);
-
-        hash == &expected
+        };
+        &hasher.digest(data) == hash
     }
 }
