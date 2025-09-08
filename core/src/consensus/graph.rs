@@ -4,11 +4,9 @@ use std::{
 };
 
 use civita_serialize::Serialize;
-use civita_serialize_derive::Serialize;
 use derivative::Derivative;
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
-use num_bigint::BigUint;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
@@ -101,12 +99,10 @@ struct Entry {
 
     // Block only
     pub is_block: bool,
-    pub mmr: Mmr,
+    pub mmr: Mmr<Token>,
 
-    pub confirmed_indices: HashMap<PeerId, HashMap<Multihash, BigUint>>,
-    pub confirmed_tokens: HashMap<BigUint, Token>,
-
-    pub unconfirmed_tokens: HashMap<Multihash, Option<Token>>,
+    pub confirmed: HashMap<PeerId, HashSet<Multihash>>,
+    pub unconfirmed: HashMap<Multihash, Option<Token>>,
 
     pub cmd_hashes: HashSet<Multihash>,
 
@@ -142,19 +138,9 @@ pub struct Config {
     pub vdf_params: u16,
 }
 
-#[derive(Serialize)]
-pub struct Snapshot {
-    pub atom: Atom,
-    pub difficulty: u64,
-    pub mmr: Mmr,
-    pub tokens: HashMap<BigUint, Token>,
-}
-
 struct Storage {
     difficulty: u64,
-    mmr: Mmr,
-    tokens: HashMap<BigUint, Token>,
-
+    mmr: Mmr<Token>,
     atoms: BTreeMap<Height, HashMap<Multihash, Vec<u8>>>,
     others: VecDeque<(Vec<u8>, Vec<u8>)>,
     mode: StorageMode,
@@ -170,7 +156,6 @@ pub struct Graph<V> {
 
     storage: Storage,
 
-    // history: VecDeque<(Vec<u8>, Vec<u8>)>,
     vdf: WesolowskiVDF,
     difficulty: u64,
 
@@ -198,17 +183,6 @@ impl Entry {
     }
 }
 
-impl Snapshot {
-    pub fn new(atom: Atom, difficulty: u64, mmr: Mmr, tokens: HashMap<BigUint, Token>) -> Self {
-        Self {
-            atom,
-            difficulty,
-            mmr,
-            tokens,
-        }
-    }
-}
-
 impl Storage {
     pub fn push_atom(&mut self, atom: &Atom) {
         use bincode::{config, serde::encode_to_vec};
@@ -219,14 +193,8 @@ impl Storage {
             .insert(atom.hash, encode_to_vec(atom, config::standard()).unwrap());
     }
 
-    pub fn finalize<I>(
-        &mut self,
-        hashes: I,
-        last: Multihash,
-        difficulty: u64,
-        mmr: Mmr,
-        tokens: HashMap<BigUint, Token>,
-    ) where
+    pub fn finalize<I>(&mut self, hashes: I, last: Multihash, difficulty: u64, mmr: Mmr<Token>)
+    where
         I: IntoIterator<Item = Multihash>,
     {
         use bincode::{config, serde::encode_into_std_write};
@@ -234,7 +202,6 @@ impl Storage {
         if self.mode.len() == 1 {
             self.difficulty = difficulty;
             self.mmr = mmr;
-            self.tokens = tokens;
             hashes.into_iter().for_each(|_| {
                 self.atoms.pop_first();
             });
@@ -258,7 +225,6 @@ impl Storage {
         encode_into_std_write(&atom, &mut buf_1, config::standard()).unwrap();
         encode_into_std_write(self.difficulty, &mut buf_1, config::standard()).unwrap();
         encode_into_std_write(&self.mmr, &mut buf_1, config::standard()).unwrap();
-        encode_into_std_write(&self.tokens, &mut buf_1, config::standard()).unwrap();
 
         let mut buf_2 = Vec::new();
         hashes.into_iter().for_each(|h| {
@@ -275,14 +241,16 @@ impl Storage {
         self.others.push_back((buf_1, buf_2));
         self.difficulty = difficulty;
         self.mmr = mmr;
-        self.tokens = tokens;
 
         if self.mode.len() != 0 && self.others.len() > (self.mode.len() - 1) as usize {
             self.others.pop_front();
         }
     }
 
-    pub fn export(&self, idxs: Option<Vec<BigUint>>) -> Option<Vec<u8>> {
+    pub fn export<I>(&self, idxs: Option<I>) -> Option<Vec<u8>>
+    where
+        I: IntoIterator<Item = Multihash>,
+    {
         use bincode::{config, serde::encode_into_std_write};
 
         let mut buf = Vec::new();
@@ -291,17 +259,10 @@ impl Storage {
             Some(idxs) => {
                 let map = self.atoms.iter().next().unwrap().1;
                 let atom = map.values().next().unwrap();
-                let mmr = self.mmr.to_pruned(idxs.clone())?;
-                let token = idxs.into_iter().try_fold(HashMap::new(), |mut acc, id| {
-                    let token = self.tokens.get(&id).cloned()?;
-                    acc.insert(id, token);
-                    Some(acc)
-                })?;
-
+                let mmr = self.mmr.to_pruned(idxs)?;
                 encode_into_std_write(atom, &mut buf, config::standard()).unwrap();
                 encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
                 encode_into_std_write(&mmr, &mut buf, config::standard()).unwrap();
-                encode_into_std_write(&token, &mut buf, config::standard()).unwrap();
             }
 
             None => {
@@ -311,7 +272,6 @@ impl Storage {
                     encode_into_std_write(atom, &mut buf, config::standard()).unwrap();
                     encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
                     encode_into_std_write(&self.mmr, &mut buf, config::standard()).unwrap();
-                    encode_into_std_write(&self.tokens, &mut buf, config::standard()).unwrap();
                     self.atoms.iter().skip(1).for_each(|(_, map)| {
                         map.values().for_each(|v| {
                             encode_into_std_write(v, &mut buf, config::standard()).unwrap();
@@ -344,7 +304,6 @@ impl Storage {
         let atom = decode_from_std_read::<Atom, _, _>(&mut data, config::standard())?;
         let difficulty = decode_from_std_read(&mut data, config::standard())?;
         let mmr = decode_from_std_read(&mut data, config::standard())?;
-        let tokens = decode_from_std_read(&mut data, config::standard())?;
         let atoms: Vec<Vec<u8>> = decode_from_std_read(&mut data, config::standard())?;
         let atoms = atoms
             .into_iter()
@@ -354,7 +313,7 @@ impl Storage {
             })
             .map_err(Error::Decode)?;
 
-        Graph::new(atom, difficulty, mmr, tokens, atoms, config)
+        Graph::new(atom, difficulty, mmr, atoms, config)
     }
 }
 
@@ -362,21 +321,19 @@ impl<V: Validator> Graph<V> {
     pub fn new(
         atom: Atom,
         difficulty: u64,
-        mmr: Mmr,
-        tokens: HashMap<BigUint, Token>,
+        mmr: Mmr<Token>,
         atoms: Vec<Atom>,
         config: Config,
     ) -> Result<Self, Error> {
         let mut graph = {
             let entry = {
-                let indices = Self::resolve_related(&mmr, &tokens, &config.storage_mode)
+                let indices = Self::resolve_related(&mmr, &config.storage_mode)
                     .ok_or(Error::InvalidTokens)?;
                 Entry {
                     atom: atom.clone(),
                     is_block: true,
                     mmr: mmr.clone(),
-                    confirmed_indices: indices,
-                    confirmed_tokens: tokens.clone(),
+                    confirmed: indices,
                     is_missing: false,
                     ..Default::default()
                 }
@@ -385,7 +342,6 @@ impl<V: Validator> Graph<V> {
             let storage = Storage {
                 difficulty,
                 mmr,
-                tokens,
                 atoms: BTreeMap::from_iter([(
                     atom.height,
                     HashMap::from_iter([(atom.hash, atom.to_vec())]),
@@ -419,10 +375,9 @@ impl<V: Validator> Graph<V> {
     }
 
     fn resolve_related(
-        mmr: &Mmr,
-        tokens: &HashMap<BigUint, Token>,
+        mmr: &Mmr<Token>,
         mode: &StorageMode,
-    ) -> Option<HashMap<PeerId, HashMap<Multihash, BigUint>>> {
+    ) -> Option<HashMap<PeerId, HashSet<Multihash>>> {
         let target = match mode {
             StorageMode::General(p) => Some(*p),
             StorageMode::Archive(..) => None,
@@ -430,18 +385,16 @@ impl<V: Validator> Graph<V> {
 
         mmr.leaves()
             .into_iter()
-            .try_fold(HashMap::<_, HashMap<_, _>>::new(), |mut acc, idx| {
-                let token = tokens.get(&idx)?;
-
+            .try_fold(HashMap::<_, HashSet<_>>::new(), |mut acc, (_, token)| {
                 if let Some(p) = target {
                     if V::is_related(&token.script_pk, &p) {
-                        acc.entry(p).or_default().insert(token.id, idx.clone());
+                        acc.entry(p).or_default().insert(token.id);
                     }
                 } else {
                     V::related_peers(&token.script_pk)
                         .into_iter()
                         .for_each(|p| {
-                            acc.entry(p).or_default().insert(token.id, idx.clone());
+                            acc.entry(p).or_default().insert(token.id);
                         });
                 }
 
@@ -450,24 +403,11 @@ impl<V: Validator> Graph<V> {
     }
 
     pub fn empty(config: Config) -> Self {
-        Self::with_genesis(Atom::default(), Mmr::default(), HashMap::new(), config)
+        Self::with_genesis(Atom::default(), Mmr::default(), config)
     }
 
-    pub fn with_genesis(
-        atom: Atom,
-        mmr: Mmr,
-        tokens: HashMap<BigUint, Token>,
-        config: Config,
-    ) -> Self {
-        Self::new(
-            atom,
-            config.init_vdf_difficulty,
-            mmr,
-            tokens,
-            Vec::new(),
-            config,
-        )
-        .unwrap()
+    pub fn with_genesis(atom: Atom, mmr: Mmr<Token>, config: Config) -> Self {
+        Self::new(atom, config.init_vdf_difficulty, mmr, Vec::new(), config).unwrap()
     }
 
     pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {
@@ -663,7 +603,7 @@ impl<V: Validator> Graph<V> {
 
     fn validate_execution(&mut self, target_hash: &Multihash) -> Result<bool, RejectReason> {
         let mut created: Vec<Token> = Vec::new();
-        let mut consumed: HashMap<Multihash, BigUint> = HashMap::new();
+        let mut consumed = HashSet::new();
 
         let mut excluded = false;
         let mut cmd_hashes = HashSet::new();
@@ -694,12 +634,12 @@ impl<V: Validator> Graph<V> {
                 .iter()
                 .cloned()
                 .try_fold(Vec::new(), |mut acc, input| match input {
-                    Input::Confirmed(token, idx, proof, sig) => {
-                        if consumed.insert(token.id, idx.clone()).is_some() {
+                    Input::Confirmed(token, proof, sig) => {
+                        if !consumed.insert(token.id) {
                             return Err(RejectReason::DoubleSpend);
                         }
 
-                        if !mmr.delete(idx, token.id, &proof) {
+                        if !mmr.delete(token.id, &proof) {
                             return Err(RejectReason::InvalidProof);
                         }
 
@@ -708,7 +648,7 @@ impl<V: Validator> Graph<V> {
                         }
 
                         excluded |= parent
-                            .unconfirmed_tokens
+                            .unconfirmed
                             .get(&token.id)
                             .is_some_and(|t| t.is_none());
 
@@ -729,7 +669,7 @@ impl<V: Validator> Graph<V> {
                         }
 
                         excluded |= parent
-                            .unconfirmed_tokens
+                            .unconfirmed
                             .get(&token.id)
                             .is_some_and(|t| t.is_none());
 
@@ -767,57 +707,44 @@ impl<V: Validator> Graph<V> {
             if excluded {
                 parent.children.remove(target_hash);
             } else {
-                parent
-                    .unconfirmed_tokens
-                    .extend(consumed.into_keys().map(|id| (id, None)));
+                let iter = consumed.into_iter().map(|id| (id, None));
+                parent.unconfirmed.extend(iter);
             }
             return Ok(false);
         }
 
-        let mut confirmed_indices = parent.confirmed_indices.clone();
-        let mut confirmed_tokens = parent.confirmed_tokens.clone();
+        let mut confirmed = parent.confirmed.clone();
 
-        consumed.into_iter().for_each(|(id, idx)| {
-            confirmed_tokens.remove(&idx);
-            confirmed_indices.values_mut().for_each(|v| {
+        consumed.into_iter().for_each(|id| {
+            confirmed.values_mut().for_each(|v| {
                 v.remove(&id);
             });
         });
 
         created.into_iter().for_each(|token| {
-            let idx = mmr.append(token.id);
-
             match &self.config.storage_mode {
                 StorageMode::General(p) => {
                     if V::is_related(&token.script_pk, p) {
-                        confirmed_indices
-                            .entry(*p)
-                            .or_default()
-                            .insert(token.id, idx.clone());
-                        confirmed_tokens.insert(idx, token);
+                        confirmed.entry(*p).or_default().insert(token.id);
                     }
                 }
                 StorageMode::Archive(..) => {
                     V::related_peers(&token.script_pk)
                         .into_iter()
                         .for_each(|p| {
-                            confirmed_indices
-                                .entry(p)
-                                .or_default()
-                                .insert(token.id, idx.clone());
-                            confirmed_tokens.insert(idx.clone(), token.clone());
+                            confirmed.entry(p).or_default().insert(token.id);
                         });
                 }
             }
+            mmr.append(token.id, token);
         });
 
         mmr.commit();
-        mmr.prune(confirmed_indices.values().flat_map(|m| m.values()).cloned());
+        mmr.prune(confirmed.values().flat_map(|m| m.iter()).cloned());
 
         let cur = self.entries.get_mut(target_hash).unwrap();
         cur.mmr = mmr;
-        cur.confirmed_indices = confirmed_indices;
-        cur.confirmed_tokens = confirmed_tokens;
+        cur.confirmed = confirmed;
         cur.cmd_hashes = cmd_hashes;
         cur.is_block = true;
 
@@ -893,7 +820,6 @@ impl<V: Validator> Graph<V> {
             next_hash,
             difficulty,
             self.entries[&next_hash].mmr.clone(),
-            self.entries[&next_hash].confirmed_tokens.clone(),
         );
         self.entries.retain(|_, e| e.atom.checkpoint == next_hash);
         self.checkpoint_height = next_height;
@@ -979,46 +905,52 @@ impl<V: Validator> Graph<V> {
 
     pub fn tokens_for(&self, peer: &PeerId) -> Vec<Token> {
         let entry = &self.entries[&self.main_head];
+        let mmr = &entry.mmr;
 
-        let mut tokens: Vec<_> = entry
-            .confirmed_indices
-            .get(peer)
-            .map(|idxs| {
-                idxs.values()
-                    .map(|i| entry.confirmed_tokens[i].clone())
+        match self.config.storage_mode {
+            StorageMode::General(p) => {
+                debug_assert_eq!(&p, peer);
+                mmr.leaves()
+                    .into_iter()
+                    .filter(|(h, _)| !entry.unconfirmed.contains_key(h))
+                    .map(|(_, t)| t.clone())
+                    .chain(
+                        entry
+                            .unconfirmed
+                            .iter()
+                            .filter_map(|(h, t)| t.as_ref().map(|t| (h, t)))
+                            .filter(|(_, t)| V::is_related(&t.script_pk, peer))
+                            .map(|(_, t)| t.clone()),
+                    )
                     .collect()
-            })
-            .unwrap_or_default();
-
-        entry.unconfirmed_tokens.iter().for_each(|(k, v)| match v {
-            Some(t) => match &self.config.storage_mode {
-                StorageMode::General(p) => {
-                    if p == peer && V::is_related(&t.script_pk, peer) {
-                        tokens.push(t.clone());
-                    }
-                }
-                StorageMode::Archive(..) => {
-                    if V::related_peers(&t.script_pk).binary_search(peer).is_ok() {
-                        tokens.push(t.clone());
-                    }
-                }
-            },
-            None => {
-                if let Ok(i) = tokens.binary_search_by_key(k, |t| t.id) {
-                    tokens.remove(i);
-                }
             }
-        });
-
-        tokens
+            StorageMode::Archive(..) => entry
+                .confirmed
+                .get(peer)
+                .into_iter()
+                .flat_map(|hs| {
+                    hs.iter()
+                        .filter(|h| !entry.unconfirmed.contains_key(h))
+                        .map(|h| mmr.get(h).cloned().unwrap())
+                })
+                .chain(
+                    entry
+                        .unconfirmed
+                        .iter()
+                        .filter_map(|(h, t)| t.as_ref().map(|t| (h, t)))
+                        .filter(|(_, t)| V::is_related(&t.script_pk, peer))
+                        .map(|(_, t)| t.clone()),
+                )
+                .collect(),
+        }
     }
 
     pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
         self.storage.export(peer_id.map(|p| {
             self.entries[&self.checkpoint]
-                .confirmed_indices
+                .confirmed
                 .get(&p)
-                .map(|m| m.values().cloned().collect())
+                .map(|m| m.iter().cloned())
                 .unwrap_or_default()
         }))
     }
@@ -1032,25 +964,19 @@ impl<V: Validator> Graph<V> {
         code: u8,
         inputs: impl IntoIterator<Item = (Multihash, Vec<u8>)>,
         created: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
-        peer: &PeerId,
     ) -> Result<Command, Error> {
         let head = &self.entries[&self.main_head];
-        let map = &head.confirmed_indices[peer];
 
         let inputs = inputs
             .into_iter()
             .try_fold(Vec::new(), |mut acc, (id, sig)| {
-                let idx = map.get(&id).ok_or(Error::UnknownTokenId)?;
-                match head.confirmed_tokens.get(idx) {
+                match head.mmr.get(&id) {
                     Some(token) => {
-                        let proof = head
-                            .mmr
-                            .prove(idx.clone())
-                            .ok_or(Error::FailedToProveInput)?;
-                        acc.push(Input::Confirmed(token.clone(), idx.clone(), proof, sig));
+                        let proof = head.mmr.prove(id).ok_or(Error::FailedToProveInput)?;
+                        acc.push(Input::Confirmed(token.clone(), proof, sig));
                     }
                     None => {
-                        head.unconfirmed_tokens
+                        head.unconfirmed
                             .get(&id)
                             .ok_or(Error::UnknownTokenId)?
                             .as_ref()
