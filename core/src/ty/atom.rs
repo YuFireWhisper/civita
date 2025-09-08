@@ -1,13 +1,9 @@
-use civita_serialize::Serialize;
-use civita_serialize_derive::Serialize;
-
 use crate::{crypto::Multihash, ty::token::Token, utils::mmr::MmrProof};
 
 pub type Height = u32;
 pub type Timestamp = u64;
 
 #[derive(Clone)]
-#[derive(Serialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Input {
     Confirmed(Token, MmrProof, Vec<u8>),
@@ -15,7 +11,6 @@ pub enum Input {
 }
 
 #[derive(Clone)]
-#[derive(Serialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Command {
     pub code: u8,
@@ -25,7 +20,6 @@ pub struct Command {
 
 #[derive(Clone)]
 #[derive(Default)]
-#[derive(Serialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Atom {
     pub hash: Multihash,
@@ -49,25 +43,29 @@ impl Input {
 
 impl Atom {
     pub fn hash_input(&self) -> Vec<u8> {
+        use bincode::{config, serde::encode_into_std_write};
+
         let mut buf = Vec::new();
-        self.parent.to_writer(&mut buf);
-        self.checkpoint.to_writer(&mut buf);
-        self.height.to_writer(&mut buf);
-        self.nonce.to_writer(&mut buf);
-        self.timestamp.to_writer(&mut buf);
-        self.cmd.to_writer(&mut buf);
-        self.atoms.to_writer(&mut buf);
+        encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.nonce, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
         buf
     }
 
     pub fn vdf_input(&self) -> Vec<u8> {
+        use bincode::{config, serde::encode_into_std_write};
+
         let mut buf = Vec::new();
-        self.parent.to_writer(&mut buf);
-        self.checkpoint.to_writer(&mut buf);
-        self.height.to_writer(&mut buf);
-        self.timestamp.to_writer(&mut buf);
-        self.cmd.to_writer(&mut buf);
-        self.atoms.to_writer(&mut buf);
+        encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
         buf
     }
 }
