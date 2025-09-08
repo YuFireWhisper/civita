@@ -1,10 +1,8 @@
-use civita_serialize_derive::Serialize;
 use multihash_derive::MultihashDigest;
 
 use crate::crypto::{hasher::Hasher, Multihash};
 
 #[derive(Clone)]
-#[derive(Serialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Token {
     pub id: Multihash,
