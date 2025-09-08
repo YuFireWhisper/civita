@@ -205,8 +205,23 @@ impl<T> Mmr<T> {
         self.peaks.get_or_init(|| peak_indices(&self.next))
     }
 
-    pub fn verify(&self, mut idx: Index, hash: Multihash, proof: &MmrProof) -> bool {
+    pub fn verify(&self, hash: Multihash, proof: &MmrProof) -> bool {
+        if hash == Multihash::default()
+            || self.deletes.contains(&hash)
+            || self.staged.deletes.contains(&hash)
+        {
+            return false;
+        }
+
+        let exp = peak_range(self.peaks(), &proof.idx).0;
+        let exp_len = index_height(&exp);
+
+        if proof.siblings.len() != exp_len {
+            return false;
+        }
+
         let mut root = hash;
+        let mut idx = proof.idx;
         let mut g = index_height(&idx);
 
         proof.siblings.iter().for_each(|h| {
