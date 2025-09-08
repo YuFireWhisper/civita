@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    future,
-    sync::Arc,
-};
+use std::{collections::HashSet, future, sync::Arc};
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
@@ -12,7 +8,6 @@ use libp2p::{
     request_response::ResponseChannel,
     PeerId,
 };
-use num_bigint::BigUint;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     RwLock,
@@ -166,15 +161,14 @@ impl<V: Validator> Engine<V> {
     pub async fn with_genesis(
         transport: Arc<Transport>,
         atom: Atom,
-        mmr: Mmr,
-        tokens: HashMap<BigUint, Token>,
+        mmr: Mmr<Token>,
         graph_config: graph::Config,
         config: Config,
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let graph = Graph::with_genesis(atom, mmr, tokens, graph_config);
+        let graph = Graph::with_genesis(atom, mmr, graph_config);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
@@ -204,7 +198,7 @@ impl<V: Validator> Engine<V> {
         created: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
     ) -> Result<(), graph::Error> {
         let graph = self.graph.read().await;
-        let cmd = graph.create_command(code, inputs, created, &self.transport.local_peer_id())?;
+        let cmd = graph.create_command(code, inputs, created)?;
         let handle = graph.create_atom(Some(cmd))?;
         drop(graph);
 

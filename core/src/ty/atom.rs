@@ -1,6 +1,5 @@
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
-use num_bigint::BigUint;
 
 use crate::{crypto::Multihash, ty::token::Token, utils::mmr::MmrProof};
 
@@ -11,7 +10,7 @@ pub type Timestamp = u64;
 #[derive(Serialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Input {
-    Confirmed(Token, BigUint, MmrProof, Vec<u8>),
+    Confirmed(Token, MmrProof, Vec<u8>),
     Unconfirmed(Multihash, Vec<u8>),
 }
 

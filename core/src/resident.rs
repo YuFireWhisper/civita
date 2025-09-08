@@ -1,7 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use libp2p::PeerId;
-use num_bigint::BigUint;
 
 use crate::{
     consensus::{
@@ -95,8 +94,7 @@ impl<V: Validator> Resident<V> {
     pub async fn with_genesis(
         transport: Arc<Transport>,
         atom: Atom,
-        mmr: Mmr,
-        tokens: HashMap<BigUint, Token>,
+        mmr: Mmr<Token>,
         config: Config,
     ) -> Result<Self> {
         let graph_config = graph::Config {
@@ -115,15 +113,8 @@ impl<V: Validator> Resident<V> {
             heartbeat_interval: config.heartbeat_interval,
         };
 
-        let engine = Engine::with_genesis(
-            transport.clone(),
-            atom,
-            mmr,
-            tokens,
-            graph_config,
-            engine_config,
-        )
-        .await?;
+        let engine =
+            Engine::with_genesis(transport.clone(), atom, mmr, graph_config, engine_config).await?;
 
         Ok(Self { transport, engine })
     }
