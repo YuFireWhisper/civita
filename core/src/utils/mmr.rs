@@ -3,7 +3,6 @@ use std::{
     sync::OnceLock,
 };
 
-use civita_serialize::Serialize;
 use derivative::Derivative;
 use multihash_derive::MultihashDigest;
 use primitive_types::U256;
@@ -372,10 +371,12 @@ fn index_height(i: &Index) -> usize {
 }
 
 fn hash_pospair(idx: &Index, l: &Multihash, r: &Multihash) -> Multihash {
+    use bincode::{config, serde::encode_into_std_write};
+
     let mut buf = Vec::new();
-    buf.extend(idx.to_big_endian());
-    l.to_writer(&mut buf);
-    r.to_writer(&mut buf);
+    encode_into_std_write(idx, &mut buf, config::standard()).unwrap();
+    encode_into_std_write(l, &mut buf, config::standard()).unwrap();
+    encode_into_std_write(r, &mut buf, config::standard()).unwrap();
     Hasher::default().digest(&buf)
 }
 
