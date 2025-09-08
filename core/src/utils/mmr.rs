@@ -65,7 +65,7 @@ impl<T> Mmr<T> {
             return false;
         }
 
-        let mut idx = proof.idx.clone();
+        let mut idx = proof.idx;
         let mut acc = hash;
         let mut g = index_height(&idx);
         let mut fills: HashMap<Index, Multihash> = HashMap::from_iter([(idx, hash)]);
@@ -75,7 +75,7 @@ impl<T> Mmr<T> {
 
             if index_height(&(&idx + 1u8)) > g {
                 idx += 1u8.into();
-                let sidx = &idx - offset;
+                let sidx = idx - offset;
                 fills.insert(sidx, *hash);
                 acc = hash_pospair(&(&idx + 1u8), hash, &acc);
                 g += 1;
@@ -115,7 +115,7 @@ impl<T> Mmr<T> {
             let mut i = self.insert(h);
 
             while index_height(&i) > g {
-                let il = &i - (2u64 << g);
+                let il = i - (2u64 << g);
                 let ir = &i - 1u8;
                 i = self.insert(hash_pospair(
                     &(&i + 1u8),
@@ -141,18 +141,18 @@ impl<T> Mmr<T> {
 
             if index_height(&(&idx + 1u8)) > g {
                 idx += 1u8.into();
-                let is = &idx - offset;
+                let is = idx - offset;
                 let s = self.hashes.get(&is).copied().unwrap_or_default();
                 let h = hash_pospair(&(&idx + 1u8), &s, c);
-                self.hashes.insert(idx.clone(), h);
-                self.indices.insert(h, idx.clone());
+                self.hashes.insert(idx, h);
+                self.indices.insert(h, idx);
             } else {
                 idx += offset.into();
                 let is = &idx - 1u8;
                 let s = self.hashes.get(&is).copied().unwrap_or_default();
                 let h = hash_pospair(&(&idx + 1u8), c, &s);
-                self.hashes.insert(idx.clone(), h);
-                self.indices.insert(h, idx.clone());
+                self.hashes.insert(idx, h);
+                self.indices.insert(h, idx);
             }
 
             g += 1;
@@ -161,7 +161,7 @@ impl<T> Mmr<T> {
     }
 
     fn insert(&mut self, hash: Multihash) -> Index {
-        self.hashes.insert(self.next.clone(), hash);
+        self.hashes.insert(self.next, hash);
         self.next += 1u8.into();
         self.next
     }
@@ -172,7 +172,7 @@ impl<T> Mmr<T> {
 
     pub fn prove(&self, hash: Multihash) -> Option<MmrProof> {
         let mut idx = self.indices.get(&hash).cloned()?;
-        let tmp = idx.clone();
+        let tmp = idx;
 
         let (peak, last) = peak_range(self.peaks(), &idx);
         if peak == idx {
@@ -187,7 +187,7 @@ impl<T> Mmr<T> {
 
             let isibling = if index_height(&(&idx + 1u8)) > g {
                 idx += 1u8.into();
-                &idx - offset
+                idx - offset
             } else {
                 idx += offset.into();
                 &idx - 1u8
@@ -249,7 +249,7 @@ impl<T> Mmr<T> {
                 let offset = 2u64 << g;
                 let sibling_idx = if index_height(&(&idx + 1u8)) > g {
                     idx += 1u8.into();
-                    &idx - offset
+                    idx - offset
                 } else {
                     idx += offset.into();
                     &idx - 1u8
@@ -295,10 +295,10 @@ impl<T: Clone> Mmr<T> {
         let mut deletes: HashSet<Multihash> = HashSet::new();
         let mut leaves: HashMap<Multihash, T> = HashMap::new();
 
-        self.peaks().iter().for_each(|p| {
-            let h = self.hashes[p];
-            hashes.insert(p.clone(), h);
-            indices.insert(h, p.clone());
+        self.peaks().iter().copied().for_each(|p| {
+            let h = self.hashes[&p];
+            hashes.insert(p, h);
+            indices.insert(h, p);
         });
 
         for hash in iter {
@@ -310,11 +310,11 @@ impl<T: Clone> Mmr<T> {
             let mut g = index_height(&idx);
 
             loop {
-                if hashes.insert(idx.clone(), hash).is_some() {
+                if hashes.insert(idx, hash).is_some() {
                     break;
                 }
 
-                indices.insert(hash, idx.clone());
+                indices.insert(hash, idx);
 
                 if let Some(v) = self.leaves.get(&hash) {
                     leaves.insert(hash, v.clone());
@@ -323,7 +323,7 @@ impl<T: Clone> Mmr<T> {
                 let offset = 2usize << g;
                 let sidx = if index_height(&(&idx + 1u8)) > g {
                     idx += 1u8.into();
-                    &idx - offset
+                    idx - offset
                 } else {
                     idx += offset.into();
                     &idx - 1u8
@@ -338,8 +338,8 @@ impl<T: Clone> Mmr<T> {
                     break;
                 };
 
-                hashes.insert(sidx.clone(), hash);
-                indices.insert(hash, sidx.clone());
+                hashes.insert(sidx, hash);
+                indices.insert(hash, sidx);
 
                 if let Some(v) = self.leaves.get(&hash) {
                     leaves.insert(hash, v.clone());
@@ -354,7 +354,7 @@ impl<T: Clone> Mmr<T> {
             indices,
             deletes,
             leaves,
-            next: self.next.clone(),
+            next: self.next,
             staged: Staged::default(),
             peaks: self.peaks.clone(),
         })
@@ -365,7 +365,7 @@ fn index_height(i: &Index) -> usize {
     let mut pos = i + 1u8;
 
     while pos != Index::MAX {
-        pos = &pos - (1u64 << (pos.bits() - 1)) + 1u8;
+        pos = pos - (1u64 << (pos.bits() - 1)) + 1u8;
     }
 
     pos.bits().saturating_sub(1)
@@ -380,7 +380,7 @@ fn hash_pospair(idx: &Index, l: &Multihash, r: &Multihash) -> Multihash {
 }
 
 fn peak_indices(s: &Index) -> Vec<Index> {
-    let mut s = s.clone() + 1u8;
+    let mut s = *s + 1u8;
     let mut peak = Index::zero();
     let mut peaks = Vec::new();
 
@@ -451,7 +451,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
                 continue;
             };
 
-            hashes.insert(idx.clone(), h);
+            hashes.insert(idx, h);
             indices.insert(h, idx);
 
             if let Some(v) = v {
