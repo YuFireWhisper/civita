@@ -410,7 +410,7 @@ fn peak_indices(s: &Index) -> Vec<Index> {
     let mut peaks = Vec::new();
 
     while !s.is_zero() {
-        let size = (Index::zero() << ((&s + 1u8).bits() - 1)) - 1u8;
+        let size = (Index::one() << ((&s + 1u8).bits() - 1)) - 1u8;
         peak += size;
         peaks.push(&peak - 1u8);
         s -= size;
