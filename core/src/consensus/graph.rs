@@ -3,7 +3,6 @@ use std::{
     time::SystemTime,
 };
 
-use civita_serialize::Serialize;
 use derivative::Derivative;
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
@@ -578,7 +577,7 @@ impl<V: Validator> Graph<V> {
 
         if self
             .vdf
-            .verify(&hash.to_vec(), self.difficulty, &atom.nonce)
+            .verify(&hash.to_bytes(), self.difficulty, &atom.nonce)
             .is_err()
         {
             return Err(RejectReason::InvalidNonce);
