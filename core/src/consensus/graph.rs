@@ -1027,47 +1027,46 @@ impl<V: Validator> Graph<V> {
         Storage::import(data, config)
     }
 
-    pub fn create_command<I>(
+    pub fn create_command(
         &self,
         code: u8,
-        iter: I,
-        created: Vec<Token>,
+        inputs: impl IntoIterator<Item = (Multihash, Vec<u8>)>,
+        created: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
         peer: &PeerId,
-    ) -> Result<Command, Error>
-    where
-        I: IntoIterator<Item = (Multihash, Vec<u8>)>,
-    {
+    ) -> Result<Command, Error> {
         let head = &self.entries[&self.main_head];
         let map = &head.confirmed_indices[peer];
 
-        let inputs = iter
+        let inputs = inputs
             .into_iter()
-            .try_fold(Vec::new(), |mut inputs, (id, sig)| {
+            .try_fold(Vec::new(), |mut acc, (id, sig)| {
                 let idx = map.get(&id).ok_or(Error::UnknownTokenId)?;
-
                 match head.confirmed_tokens.get(idx) {
                     Some(token) => {
                         let proof = head
                             .mmr
                             .prove(idx.clone())
                             .ok_or(Error::FailedToProveInput)?;
-                        inputs.push(Input::Confirmed(token.clone(), idx.clone(), proof, sig));
-                        Ok(inputs)
+                        acc.push(Input::Confirmed(token.clone(), idx.clone(), proof, sig));
                     }
                     None => {
-                        let Some(token) = head.unconfirmed_tokens.get(&id) else {
-                            return Err(Error::UnknownTokenId);
-                        };
-
-                        if token.is_none() {
-                            return Err(Error::InputConsumed);
-                        }
-
-                        inputs.push(Input::Unconfirmed(id, sig));
-                        Ok(inputs)
+                        head.unconfirmed_tokens
+                            .get(&id)
+                            .ok_or(Error::UnknownTokenId)?
+                            .as_ref()
+                            .ok_or(Error::InputConsumed)?;
+                        acc.push(Input::Unconfirmed(id, sig));
                     }
                 }
+                Ok::<_, Error>(acc)
             })?;
+
+        let first_input_id = inputs.first().ok_or(Error::NoInput)?.id();
+        let created = created
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (pk, sig))| Token::new(first_input_id, idx as u32, pk, sig))
+            .collect();
 
         Ok(Command {
             code,
