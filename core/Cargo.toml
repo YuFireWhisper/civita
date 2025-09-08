@@ -20,24 +20,11 @@ libp2p = { version = "0.56", features = [
 ] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
-sha2 = "0.10"
 futures = "0.3"
 dashmap = "6.1"
 log = "0.4"
-rand = "0.9"
-mockall = { version = "0.13", features = ["nightly"] }
-async-trait = "0.1"
-blake3 = "1.8"
-ark-ff = "0.5"
-ark-ec = "0.5"
-ark-secp256k1 = "0.5"
-ark-serialize = "0.5"
-ark-std = "0.5"
-statrs = "0.18"
 derivative = "2.2"
 vdf = "0.1"
-parking_lot = "0.12"
-petgraph = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 bincode = { version = "2.0", features = ["serde"] }
 multihash = { version = "0.19", features = ["serde"] }
@@ -46,6 +33,3 @@ multihash-codetable = { version = "0.1", features = ["sha2", "sha3", "blake3"] }
 primitive-types = { version = "0.13", features = ["serde", "num-traits"] }
 
 [dev-dependencies]
-tempfile = "3.17"
-rstest = "0.25"
-hex = "0.4"
