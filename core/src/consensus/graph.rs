@@ -7,6 +7,7 @@ use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
 use derivative::Derivative;
 use libp2p::PeerId;
+use multihash_derive::MultihashDigest;
 use num_bigint::BigUint;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
@@ -1099,7 +1100,7 @@ impl<V: Validator> Graph<V> {
             atom.nonce = vdf
                 .solve(&atom.vdf_input(), difficulty)
                 .expect("VDF must be solved");
-            atom.hash = Hasher::digest(&atom.hash_input());
+            atom.hash = Hasher::default().digest(&atom.hash_input());
             atom
         }))
     }

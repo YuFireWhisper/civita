@@ -5,6 +5,7 @@ use std::{
 
 use civita_serialize::Serialize;
 use civita_serialize_derive::Serialize;
+use multihash_derive::MultihashDigest;
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
@@ -430,7 +431,7 @@ fn hash_pospair(idx: &BigUint, l: &Multihash, r: &Multihash) -> Multihash {
     buf.extend(idx.to_bytes_be());
     l.to_writer(&mut buf);
     r.to_writer(&mut buf);
-    Hasher::digest(&buf)
+    Hasher::default().digest(&buf)
 }
 
 fn peak_indices(s: &BigUint) -> Vec<BigUint> {
@@ -542,20 +543,21 @@ impl<'de> serde::Deserialize<'de> for Mmr {
 #[cfg(test)]
 mod test {
     use civita_serialize::Serialize;
+    use multihash_derive::MultihashDigest;
 
     use crate::{crypto::hasher::Hasher, utils::mmr::Mmr};
 
     #[test]
     fn append_and_prove() {
-        let h1 = Hasher::digest(b"1");
-        let h2 = Hasher::digest(b"2");
-        let h3 = Hasher::digest(b"3");
-        let h4 = Hasher::digest(b"4");
-        let h5 = Hasher::digest(b"5");
-        let h6 = Hasher::digest(b"6");
-        let h7 = Hasher::digest(b"7");
-        let h8 = Hasher::digest(b"8");
-        let h9 = Hasher::digest(b"9");
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
+        let h3 = Hasher::default().digest(b"3");
+        let h4 = Hasher::default().digest(b"4");
+        let h5 = Hasher::default().digest(b"5");
+        let h6 = Hasher::default().digest(b"6");
+        let h7 = Hasher::default().digest(b"7");
+        let h8 = Hasher::default().digest(b"8");
+        let h9 = Hasher::default().digest(b"9");
 
         let mut mmr = Mmr::default();
 
@@ -594,15 +596,15 @@ mod test {
 
     #[test]
     fn delete_and_verify() {
-        let h1 = Hasher::digest(b"1");
-        let h2 = Hasher::digest(b"2");
-        let h3 = Hasher::digest(b"3");
-        let h4 = Hasher::digest(b"4");
-        let h5 = Hasher::digest(b"5");
-        let h6 = Hasher::digest(b"6");
-        let h7 = Hasher::digest(b"7");
-        let h8 = Hasher::digest(b"8");
-        let h9 = Hasher::digest(b"9");
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
+        let h3 = Hasher::default().digest(b"3");
+        let h4 = Hasher::default().digest(b"4");
+        let h5 = Hasher::default().digest(b"5");
+        let h6 = Hasher::default().digest(b"6");
+        let h7 = Hasher::default().digest(b"7");
+        let h8 = Hasher::default().digest(b"8");
+        let h9 = Hasher::default().digest(b"9");
 
         let mut mmr = Mmr::default();
 
@@ -644,8 +646,8 @@ mod test {
 
     #[test]
     fn prune_keeps_necessary_nodes() {
-        let h1 = Hasher::digest(b"1");
-        let h2 = Hasher::digest(b"2");
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
 
         let mut mmr = Mmr::default();
 
@@ -665,9 +667,9 @@ mod test {
 
     #[test]
     fn serialize_deserialize() {
-        let h1 = Hasher::digest(b"1");
-        let h2 = Hasher::digest(b"2");
-        let h3 = Hasher::digest(b"3");
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
+        let h3 = Hasher::default().digest(b"3");
 
         let mut mmr = Mmr::default();
 
