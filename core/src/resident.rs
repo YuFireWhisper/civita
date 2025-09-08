@@ -1,23 +1,22 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use libp2p::PeerId;
+use num_bigint::BigUint;
 
 use crate::{
     consensus::{
         engine,
-        graph::{self, CreationError, StorageMode},
+        graph::{self, StorageMode},
         validator::Validator,
         Engine,
     },
     crypto::Multihash,
     network::Transport,
     ty::{
-        atom::{Atom, Command, Height},
+        atom::{Atom, Height},
         token::Token,
     },
+    utils::mmr::Mmr,
 };
 
 const GOSSIP_TOPIC: u8 = 0;
@@ -31,11 +30,14 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error(transparent)]
     Engine(#[from] engine::Error),
+
+    #[error(transparent)]
+    Graph(#[from] graph::Error),
 }
 
+#[derive(Clone, Copy)]
 pub struct Config {
     pub heartbeat_interval: Option<tokio::time::Duration>,
-
     pub block_threshold: u32,
     pub checkpoint_distance: Height,
     pub target_block_time: u64,
@@ -93,9 +95,8 @@ impl<V: Validator> Resident<V> {
     pub async fn with_genesis(
         transport: Arc<Transport>,
         atom: Atom,
-        trie_root: Multihash,
-        trie_guide: HashMap<Multihash, Vec<u8>>,
-        related_keys: HashSet<Multihash>,
+        mmr: Mmr,
+        tokens: HashMap<BigUint, Token>,
         config: Config,
     ) -> Result<Self> {
         let graph_config = graph::Config {
@@ -117,9 +118,8 @@ impl<V: Validator> Resident<V> {
         let engine = Engine::with_genesis(
             transport.clone(),
             atom,
-            trie_root,
-            trie_guide,
-            related_keys,
+            mmr,
+            tokens,
             graph_config,
             engine_config,
         )
@@ -130,13 +130,17 @@ impl<V: Validator> Resident<V> {
 
     pub async fn propose(
         &self,
-        cmd: Command,
-        sigs: HashMap<Multihash, Vec<u8>>,
-    ) -> Result<(), CreationError> {
-        self.engine.propose(cmd, sigs).await
+        code: u8,
+        inputs: impl IntoIterator<Item = (Multihash, Vec<u8>)>,
+        created: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), Error> {
+        self.engine
+            .propose(code, inputs, created)
+            .await
+            .map_err(Error::from)
     }
 
-    pub async fn tokens(&self) -> HashMap<Multihash, Token> {
+    pub async fn tokens(&self) -> Vec<Token> {
         self.engine.tokens().await
     }
 }
