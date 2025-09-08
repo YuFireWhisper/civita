@@ -21,6 +21,7 @@ pub struct MmrProof {
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
+#[derivative(PartialEq(bound = "T: Eq"), Eq(bound = "T: Eq"))]
 struct Staged<T> {
     appends: HashMap<Multihash, T>,
     deletes: HashSet<Multihash>,
@@ -28,6 +29,7 @@ struct Staged<T> {
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
+#[derivative(PartialEq(bound = "T: Eq"), Eq(bound = "T: Eq"))]
 pub struct Mmr<T> {
     hashes: HashMap<Index, Multihash>,
     indices: HashMap<Multihash, Index>,
@@ -491,163 +493,209 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
     }
 }
 
-//
-// #[cfg(test)]
-// mod test {
-//     use civita_serialize::Serialize;
-//     use multihash_derive::MultihashDigest;
-//
-//     use crate::{crypto::hasher::Hasher, utils::mmr::Mmr};
-//
-//     #[test]
-//     fn append_and_prove() {
-//         let h1 = Hasher::default().digest(b"1");
-//         let h2 = Hasher::default().digest(b"2");
-//         let h3 = Hasher::default().digest(b"3");
-//         let h4 = Hasher::default().digest(b"4");
-//         let h5 = Hasher::default().digest(b"5");
-//         let h6 = Hasher::default().digest(b"6");
-//         let h7 = Hasher::default().digest(b"7");
-//         let h8 = Hasher::default().digest(b"8");
-//         let h9 = Hasher::default().digest(b"9");
-//
-//         let mut mmr = Mmr::default();
-//
-//         let i1 = mmr.append(h1);
-//         let i2 = mmr.append(h2);
-//         let i3 = mmr.append(h3);
-//         let i4 = mmr.append(h4);
-//         let i5 = mmr.append(h5);
-//         let i6 = mmr.append(h6);
-//         let i7 = mmr.append(h7);
-//         let i8 = mmr.append(h8);
-//         let i9 = mmr.append(h9);
-//
-//         mmr.commit();
-//
-//         let p1 = mmr.prove(i1.clone()).unwrap();
-//         let p2 = mmr.prove(i2.clone()).unwrap();
-//         let p3 = mmr.prove(i3.clone()).unwrap();
-//         let p4 = mmr.prove(i4.clone()).unwrap();
-//         let p5 = mmr.prove(i5.clone()).unwrap();
-//         let p6 = mmr.prove(i6.clone()).unwrap();
-//         let p7 = mmr.prove(i7.clone()).unwrap();
-//         let p8 = mmr.prove(i8.clone()).unwrap();
-//         let p9 = mmr.prove(i9.clone()).unwrap();
-//
-//         assert!(mmr.verify(i1, h1, &p1));
-//         assert!(mmr.verify(i2, h2, &p2));
-//         assert!(mmr.verify(i3, h3, &p3));
-//         assert!(mmr.verify(i4, h4, &p4));
-//         assert!(mmr.verify(i5, h5, &p5));
-//         assert!(mmr.verify(i6, h6, &p6));
-//         assert!(mmr.verify(i7, h7, &p7));
-//         assert!(mmr.verify(i8, h8, &p8));
-//         assert!(mmr.verify(i9, h9, &p9));
-//     }
-//
-//     #[test]
-//     fn delete_and_verify() {
-//         let h1 = Hasher::default().digest(b"1");
-//         let h2 = Hasher::default().digest(b"2");
-//         let h3 = Hasher::default().digest(b"3");
-//         let h4 = Hasher::default().digest(b"4");
-//         let h5 = Hasher::default().digest(b"5");
-//         let h6 = Hasher::default().digest(b"6");
-//         let h7 = Hasher::default().digest(b"7");
-//         let h8 = Hasher::default().digest(b"8");
-//         let h9 = Hasher::default().digest(b"9");
-//
-//         let mut mmr = Mmr::default();
-//
-//         let i1 = mmr.append(h1);
-//         let i2 = mmr.append(h2);
-//         let i3 = mmr.append(h3);
-//         let i4 = mmr.append(h4);
-//         let i5 = mmr.append(h5);
-//         let i6 = mmr.append(h6);
-//         let i7 = mmr.append(h7);
-//         let i8 = mmr.append(h8);
-//         let i9 = mmr.append(h9);
-//
-//         mmr.commit();
-//
-//         mmr.delete(i3.clone(), h3, &mmr.prove(i3.clone()).unwrap());
-//         mmr.delete(i6.clone(), h6, &mmr.prove(i6.clone()).unwrap());
-//         mmr.delete(i9.clone(), h9, &mmr.prove(i9.clone()).unwrap());
-//
-//         mmr.commit();
-//
-//         let p1 = mmr.prove(i1.clone()).unwrap();
-//         let p2 = mmr.prove(i2.clone()).unwrap();
-//         let p4 = mmr.prove(i4.clone()).unwrap();
-//         let p5 = mmr.prove(i5.clone()).unwrap();
-//         let p7 = mmr.prove(i7.clone()).unwrap();
-//         let p8 = mmr.prove(i8.clone()).unwrap();
-//
-//         assert!(mmr.verify(i1, h1, &p1));
-//         assert!(mmr.verify(i2, h2, &p2));
-//         assert!(mmr.verify(i4, h4, &p4));
-//         assert!(mmr.verify(i5, h5, &p5));
-//         assert!(mmr.verify(i7, h7, &p7));
-//         assert!(mmr.verify(i8, h8, &p8));
-//         assert!(mmr.prove(i3).is_none());
-//         assert!(mmr.prove(i6).is_none());
-//         assert!(mmr.prove(i9).is_none());
-//     }
-//
-//     #[test]
-//     fn prune_keeps_necessary_nodes() {
-//         let h1 = Hasher::default().digest(b"1");
-//         let h2 = Hasher::default().digest(b"2");
-//
-//         let mut mmr = Mmr::default();
-//
-//         let i1 = mmr.append(h1);
-//         let i2 = mmr.append(h2);
-//
-//         mmr.commit();
-//
-//         let valid = mmr.prune(vec![i1.clone(), i2.clone()]);
-//         let p1 = mmr.prove(i1.clone()).unwrap();
-//         let p2 = mmr.prove(i2.clone()).unwrap();
-//
-//         assert!(valid);
-//         assert!(mmr.verify(i1, h1, &p1));
-//         assert!(mmr.verify(i2, h2, &p2));
-//     }
-//
-//     #[test]
-//     fn serialize_deserialize() {
-//         let h1 = Hasher::default().digest(b"1");
-//         let h2 = Hasher::default().digest(b"2");
-//         let h3 = Hasher::default().digest(b"3");
-//
-//         let mut mmr = Mmr::default();
-//
-//         let i1 = mmr.append(h1);
-//         let i2 = mmr.append(h2);
-//         let i3 = mmr.append(h3);
-//
-//         mmr.commit();
-//
-//         let p1 = mmr.prove(i1.clone()).unwrap();
-//         let p2 = mmr.prove(i2.clone()).unwrap();
-//         let p3 = mmr.prove(i3.clone()).unwrap();
-//
-//         assert!(mmr.verify(i1.clone(), h1, &p1));
-//         assert!(mmr.verify(i2.clone(), h2, &p2));
-//         assert!(mmr.verify(i3.clone(), h3, &p3));
-//
-//         let data = mmr.to_vec();
-//         let mmr2 = Mmr::from_slice(&data).unwrap();
-//
-//         let p1 = mmr2.prove(i1.clone()).unwrap();
-//         let p2 = mmr2.prove(i2.clone()).unwrap();
-//         let p3 = mmr2.prove(i3.clone()).unwrap();
-//
-//         assert!(mmr2.verify(i1, h1, &p1));
-//         assert!(mmr2.verify(i2, h2, &p2));
-//         assert!(mmr2.verify(i3, h3, &p3));
-//     }
-// }
+#[cfg(test)]
+mod test {
+    use multihash_derive::MultihashDigest;
+
+    use crate::{crypto::hasher::Hasher, utils::mmr::Mmr};
+
+    #[test]
+    fn append_and_verify() {
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
+        let h3 = Hasher::default().digest(b"3");
+        let h4 = Hasher::default().digest(b"4");
+        let h5 = Hasher::default().digest(b"5");
+        let h6 = Hasher::default().digest(b"6");
+        let h7 = Hasher::default().digest(b"7");
+        let h8 = Hasher::default().digest(b"8");
+        let h9 = Hasher::default().digest(b"9");
+
+        let mut mmr = Mmr::default();
+
+        mmr.append(h1, 1);
+        mmr.append(h2, 2);
+        mmr.append(h3, 3);
+        mmr.append(h4, 4);
+        mmr.append(h5, 5);
+        mmr.append(h6, 6);
+        mmr.append(h7, 7);
+        mmr.append(h8, 8);
+        mmr.append(h9, 9);
+        mmr.commit();
+
+        let p1 = mmr.prove(h1).unwrap();
+        let p2 = mmr.prove(h2).unwrap();
+        let p3 = mmr.prove(h3).unwrap();
+        let p4 = mmr.prove(h4).unwrap();
+        let p5 = mmr.prove(h5).unwrap();
+        let p6 = mmr.prove(h6).unwrap();
+        let p7 = mmr.prove(h7).unwrap();
+        let p8 = mmr.prove(h8).unwrap();
+        let p9 = mmr.prove(h9).unwrap();
+
+        assert!(mmr.verify(h1, &p1));
+        assert!(mmr.verify(h2, &p2));
+        assert!(mmr.verify(h3, &p3));
+        assert!(mmr.verify(h4, &p4));
+        assert!(mmr.verify(h5, &p5));
+        assert!(mmr.verify(h6, &p6));
+        assert!(mmr.verify(h7, &p7));
+        assert!(mmr.verify(h8, &p8));
+        assert!(mmr.verify(h9, &p9));
+    }
+
+    #[test]
+    fn delete_and_verify() {
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
+        let h3 = Hasher::default().digest(b"3");
+        let h4 = Hasher::default().digest(b"4");
+        let h5 = Hasher::default().digest(b"5");
+        let h6 = Hasher::default().digest(b"6");
+        let h7 = Hasher::default().digest(b"7");
+        let h8 = Hasher::default().digest(b"8");
+        let h9 = Hasher::default().digest(b"9");
+
+        let mut mmr = Mmr::default();
+
+        mmr.append(h1, 1);
+        mmr.append(h2, 2);
+        mmr.append(h3, 3);
+        mmr.append(h4, 4);
+        mmr.append(h5, 5);
+        mmr.append(h6, 6);
+        mmr.append(h7, 7);
+        mmr.append(h8, 8);
+        mmr.append(h9, 9);
+        mmr.commit();
+
+        let p1 = mmr.prove(h1).unwrap();
+        let p2 = mmr.prove(h2).unwrap();
+        let p3 = mmr.prove(h3).unwrap();
+        let p4 = mmr.prove(h4).unwrap();
+        let p5 = mmr.prove(h5).unwrap();
+        let p6 = mmr.prove(h6).unwrap();
+        let p7 = mmr.prove(h7).unwrap();
+        let p8 = mmr.prove(h8).unwrap();
+        let p9 = mmr.prove(h9).unwrap();
+
+        mmr.delete(h3, &mmr.prove(h3).unwrap());
+        mmr.delete(h6, &mmr.prove(h6).unwrap());
+        mmr.delete(h9, &mmr.prove(h9).unwrap());
+        mmr.commit();
+
+        assert!(mmr.verify(h1, &p1));
+        assert!(mmr.verify(h2, &p2));
+        assert!(mmr.verify(h4, &p4));
+        assert!(mmr.verify(h5, &p5));
+        assert!(mmr.verify(h7, &p7));
+        assert!(mmr.verify(h8, &p8));
+        assert!(!mmr.verify(h3, &p3));
+        assert!(!mmr.verify(h6, &p6));
+        assert!(!mmr.verify(h9, &p9));
+        assert!(mmr.prove(h3).is_none());
+        assert!(mmr.prove(h6).is_none());
+        assert!(mmr.prove(h9).is_none());
+    }
+
+    #[test]
+    fn prune_keeps_necessary_nodes() {
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
+        let h3 = Hasher::default().digest(b"3");
+        let h4 = Hasher::default().digest(b"4");
+        let h5 = Hasher::default().digest(b"5");
+        let h6 = Hasher::default().digest(b"6");
+        let h7 = Hasher::default().digest(b"7");
+        let h8 = Hasher::default().digest(b"8");
+        let h9 = Hasher::default().digest(b"9");
+
+        let mut mmr = Mmr::default();
+
+        mmr.append(h1, 1);
+        mmr.append(h2, 2);
+        mmr.append(h3, 3);
+        mmr.append(h4, 4);
+        mmr.append(h5, 5);
+        mmr.append(h6, 6);
+        mmr.append(h7, 7);
+        mmr.append(h8, 8);
+        mmr.append(h9, 9);
+        mmr.commit();
+
+        let p1 = mmr.prove(h1).unwrap();
+        let p2 = mmr.prove(h2).unwrap();
+        let p3 = mmr.prove(h3).unwrap();
+        let p4 = mmr.prove(h4).unwrap();
+        let p5 = mmr.prove(h5).unwrap();
+        let p6 = mmr.prove(h6).unwrap();
+        let p7 = mmr.prove(h7).unwrap();
+        let p8 = mmr.prove(h8).unwrap();
+        let p9 = mmr.prove(h9).unwrap();
+
+        assert!(mmr.prune(vec![h1, h2, h3]));
+        assert!(mmr.verify(h1, &p1));
+        assert!(mmr.verify(h2, &p2));
+        assert!(mmr.verify(h3, &p3));
+        assert!(mmr.verify(h4, &p4));
+        assert!(mmr.verify(h5, &p5));
+        assert!(mmr.verify(h6, &p6));
+        assert!(mmr.verify(h7, &p7));
+        assert!(mmr.verify(h8, &p8));
+        assert!(mmr.verify(h9, &p9));
+
+        assert!(mmr.get(&h1).is_some());
+        assert!(mmr.get(&h2).is_some());
+        assert!(mmr.get(&h3).is_some());
+        assert!(mmr.get(&h4).is_some()); // sibling of h3
+        assert!(mmr.get(&h5).is_none());
+        assert!(mmr.get(&h6).is_none());
+        assert!(mmr.get(&h7).is_none());
+        assert!(mmr.get(&h8).is_none());
+        assert!(mmr.get(&h9).is_none());
+
+        assert!(mmr.prove(h1).is_some());
+        assert!(mmr.prove(h2).is_some());
+        assert!(mmr.prove(h3).is_some());
+        assert!(mmr.prove(h4).is_some());
+        assert!(mmr.prove(h5).is_none());
+        assert!(mmr.prove(h6).is_none());
+        assert!(mmr.prove(h7).is_none());
+        assert!(mmr.prove(h8).is_none());
+        assert!(mmr.prove(h9).is_none());
+    }
+
+    #[test]
+    fn serialize_deserialize() {
+        use bincode::{config, serde::decode_from_slice, serde::encode_to_vec};
+
+        let h1 = Hasher::default().digest(b"1");
+        let h2 = Hasher::default().digest(b"2");
+        let h3 = Hasher::default().digest(b"3");
+        let h4 = Hasher::default().digest(b"4");
+        let h5 = Hasher::default().digest(b"5");
+        let h6 = Hasher::default().digest(b"6");
+        let h7 = Hasher::default().digest(b"7");
+        let h8 = Hasher::default().digest(b"8");
+        let h9 = Hasher::default().digest(b"9");
+
+        let mut mmr = Mmr::default();
+
+        mmr.append(h1, 1);
+        mmr.append(h2, 2);
+        mmr.append(h3, 3);
+        mmr.append(h4, 4);
+        mmr.append(h5, 5);
+        mmr.append(h6, 6);
+        mmr.append(h7, 7);
+        mmr.append(h8, 8);
+        mmr.append(h9, 9);
+        mmr.commit();
+
+        let vec = encode_to_vec(&mmr, config::standard()).unwrap();
+        let (mmr2, _) = decode_from_slice::<Mmr<i32>, _>(&vec, config::standard()).unwrap();
+
+        assert!(mmr == mmr2);
+    }
+}
