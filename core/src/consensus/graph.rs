@@ -740,7 +740,12 @@ impl<V: Validator> Graph<V> {
                 })?;
 
             if hash == target_hash {
-                if !Self::is_token_id_valid(*cmd.inputs[0].id(), &cmd.created) {
+                if cmd
+                    .created
+                    .iter()
+                    .enumerate()
+                    .any(|(i, t)| !t.validate_id(cmd.inputs[0].id(), i as u32))
+                {
                     return Err(RejectReason::InvalidTokenId);
                 }
 
@@ -824,13 +829,6 @@ impl<V: Validator> Graph<V> {
             [Some(e1), Some(e2)] => (e1, e2),
             _ => unreachable!(),
         }
-    }
-
-    fn is_token_id_valid(first_input: Multihash, tokens: &[Token]) -> bool {
-        tokens
-            .iter()
-            .enumerate()
-            .all(|(i, t)| Hasher::validate(&t.id, &(first_input, i as u32).to_vec()))
     }
 
     fn update_weight(&mut self, start: Multihash) {
