@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use libp2p::{
     core::upgrade::{self},
+    identity::Keypair,
     noise,
     swarm::{self, SwarmEvent},
     Multiaddr, PeerId, Swarm, Transport as _,
@@ -12,13 +13,10 @@ use tokio::{
     time::Duration,
 };
 
-use crate::{
-    crypto::SecretKey,
-    network::{
-        behaviour::{self, Behaviour},
-        gossipsub::{self, Gossipsub},
-        request_response,
-    },
+use crate::network::{
+    behaviour::{self, Behaviour},
+    gossipsub::{self, Gossipsub},
+    request_response,
 };
 
 pub mod config;
@@ -34,15 +32,13 @@ pub struct Transport {
     gossipsub: Arc<Gossipsub>,
     req_resp: Arc<request_response::RequestResponse>,
     local_peer_id: PeerId,
+    keypair: Keypair,
     listen_addr: Multiaddr,
-    sk: SecretKey,
     config: Config,
 }
 
 impl Transport {
-    pub async fn new(sk: SecretKey, listen_addr: Multiaddr, config: Config) -> Result<Self> {
-        let keypair = sk.to_libp2p_key();
-
+    pub async fn new(keypair: Keypair, listen_addr: Multiaddr, config: Config) -> Result<Self> {
         let transport = libp2p::tcp::tokio::Transport::default()
             .upgrade(upgrade::Version::V1)
             .authenticate(noise::Config::new(&keypair).expect("Failed to create Noise config"))
@@ -50,7 +46,7 @@ impl Transport {
             .boxed();
 
         let peer_id = keypair.public().to_peer_id();
-        let behaviour = Behaviour::new(keypair, peer_id)?;
+        let behaviour = Behaviour::new(keypair.clone(), peer_id)?;
 
         let swarm_config = swarm::Config::with_tokio_executor();
         let mut swarm = Swarm::new(transport, behaviour, peer_id, swarm_config);
@@ -75,8 +71,8 @@ impl Transport {
             gossipsub,
             req_resp,
             local_peer_id: peer_id,
+            keypair,
             listen_addr,
-            sk,
             config,
         };
 
@@ -174,10 +170,6 @@ impl Transport {
         self.listen_addr.clone()
     }
 
-    pub fn secret_key(&self) -> &SecretKey {
-        &self.sk
-    }
-
     pub fn gossipsub(&self) -> Arc<Gossipsub> {
         self.gossipsub.clone()
     }
@@ -191,6 +183,10 @@ impl Transport {
         swarm.behaviour_mut().kad_mut().remove_peer(&peer_id);
         let _ = swarm.disconnect_peer_id(peer_id);
         Ok(())
+    }
+
+    pub fn keypair(&self) -> Keypair {
+        self.keypair.clone()
     }
 }
 

@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
-use libp2p::{Multiaddr, PeerId};
+use libp2p::{identity::Keypair, Multiaddr, PeerId};
 
-use crate::{
-    crypto::SecretKey,
-    network::{request_response::RequestResponse, Gossipsub},
-};
+use crate::network::{request_response::RequestResponse, Gossipsub};
 
 mod network;
 
@@ -26,11 +23,11 @@ pub enum Transport {
 
 impl Transport {
     pub async fn new_network(
-        sk: SecretKey,
+        keypair: Keypair,
         listen_addr: Multiaddr,
         config: NetworkConfig,
     ) -> Result<Self> {
-        network::Transport::new(sk, listen_addr, config)
+        network::Transport::new(keypair, listen_addr, config)
             .await
             .map(Transport::Network)
             .map_err(Error::from)
@@ -61,12 +58,6 @@ impl Transport {
     pub fn listen_addr(&self) -> Multiaddr {
         match self {
             Transport::Network(transport) => transport.listen_addr(),
-        }
-    }
-
-    pub fn secret_key(&self) -> &SecretKey {
-        match self {
-            Transport::Network(transport) => transport.secret_key(),
         }
     }
 
