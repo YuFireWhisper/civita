@@ -1,4 +1,4 @@
-use civita_core::network::{transport::NetworkConfig, Transport};
+use civita_core::network::{transport::Config, Transport};
 use libp2p::Multiaddr;
 
 const LISTEN_ADDRESS: &str = "/ip4/0.0.0.0/tcp/0";
@@ -9,8 +9,8 @@ pub async fn create_transports(n: usize) -> Vec<Transport> {
     for _ in 0..n {
         let sk = libp2p::identity::Keypair::generate_ed25519();
         let listen_addr: Multiaddr = LISTEN_ADDRESS.parse().unwrap();
-        let config = NetworkConfig::default();
-        if let Ok(transport) = Transport::new_network(sk, listen_addr, config).await {
+        let config = Config::default();
+        if let Ok(transport) = Transport::new(sk, listen_addr, config).await {
             transports.push(transport);
         }
     }
