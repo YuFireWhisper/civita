@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
     request_response::ResponseChannel,
-    PeerId,
+    Multiaddr, PeerId,
 };
 use tokio::sync::{
     mpsc::{Receiver, Sender},
@@ -20,7 +20,7 @@ use crate::{
     network::{
         gossipsub,
         request_response::{Message, RequestResponse},
-        Gossipsub, Transport,
+        transport, Gossipsub, Transport,
     },
     ty::{atom::Atom, token::Token},
     utils::mmr::Mmr,
@@ -33,6 +33,9 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error(transparent)]
     Gossipsub(#[from] gossipsub::Error),
+
+    #[error(transparent)]
+    Transport(#[from] transport::Error),
 
     #[error("Bootstrap peers is empty")]
     NoBootstrapPeers,
@@ -70,7 +73,7 @@ pub struct Engine<V> {
 impl<V: Validator> Engine<V> {
     pub async fn new(
         transport: Arc<Transport>,
-        peers: Vec<PeerId>,
+        peers: Vec<(PeerId, Multiaddr)>,
         timeout: tokio::time::Duration,
         graph_config: graph::Config,
         config: Config,
@@ -80,7 +83,7 @@ impl<V: Validator> Engine<V> {
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
         let mut req_resp_rx = req_resp.take_receiver().await.unwrap();
         let graph =
-            Self::bootstrap(&req_resp, &mut req_resp_rx, peers, timeout, graph_config).await?;
+            Self::bootstrap(&transport, &mut req_resp_rx, peers, timeout, graph_config).await?;
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
@@ -105,9 +108,9 @@ impl<V: Validator> Engine<V> {
     }
 
     async fn bootstrap(
-        req_resp: &RequestResponse,
+        transport: &Transport,
         rx: &mut Receiver<Message>,
-        peers: Vec<PeerId>,
+        peers: Vec<(PeerId, Multiaddr)>,
         timeout: tokio::time::Duration,
         graph_config: graph::Config,
     ) -> Result<Graph<V>> {
@@ -115,14 +118,21 @@ impl<V: Validator> Engine<V> {
 
         debug_assert!(!peers.is_empty());
 
-        let target = match graph_config.storage_mode {
-            StorageMode::General(peer_id) => Some(peer_id),
-            _ => None,
+        let msg = {
+            let target = match graph_config.storage_mode {
+                StorageMode::General(peer_id) => Some(peer_id),
+                _ => None,
+            };
+            encode_to_vec(Request::Sync(target), config::standard()).unwrap()
         };
 
-        let msg = encode_to_vec(Request::Sync(target), config::standard()).unwrap();
-        for peer in &peers {
+        let req_resp = transport.request_response();
+        let mut peers_set = HashSet::new();
+
+        for (peer, addr) in &peers {
+            transport.dial(*peer, addr.clone()).await?;
             req_resp.send_request(*peer, msg.clone()).await;
+            peers_set.insert(*peer);
         }
 
         let graph = tokio::time::timeout(timeout, async {
@@ -131,7 +141,7 @@ impl<V: Validator> Engine<V> {
                     continue;
                 };
 
-                if !peers.contains(peer) {
+                if !peers_set.contains(peer) {
                     continue;
                 }
 

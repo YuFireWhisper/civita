@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use libp2p::{identity::Keypair, PeerId};
+use libp2p::{identity::Keypair, Multiaddr, PeerId};
 use multihash_derive::MultihashDigest;
 
 use crate::{
@@ -52,7 +52,7 @@ pub struct Config {
 pub struct Builder {
     tx_info: Option<(Keypair, libp2p::Multiaddr, transport::Config)>,
     genesis_info: Option<(u8, Vec<Token>, Mmr<Token>)>,
-    normal: Option<(Vec<PeerId>, tokio::time::Duration)>,
+    normal: Option<(Vec<(PeerId, Multiaddr)>, tokio::time::Duration)>,
     config: Option<Config>,
 }
 
@@ -95,7 +95,11 @@ impl Builder {
         self
     }
 
-    pub fn with_normal_info(mut self, peers: Vec<PeerId>, timeout: tokio::time::Duration) -> Self {
+    pub fn with_normal_info(
+        mut self,
+        peers: Vec<(PeerId, Multiaddr)>,
+        timeout: tokio::time::Duration,
+    ) -> Self {
         assert!(self.genesis_info.is_none(), "Genesis info is already set");
         assert!(self.normal.is_none(), "Normal info is already set");
 
