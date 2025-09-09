@@ -595,7 +595,7 @@ impl<V: Validator> Graph<V> {
 
         if std::panic::catch_unwind(|| {
             self.vdf
-                .verify(&hash.to_bytes(), self.difficulty, &atom.nonce)
+                .verify(&atom.vdf_input(), self.difficulty, &atom.nonce)
         })
         .is_err()
         {
