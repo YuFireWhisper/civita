@@ -30,6 +30,5 @@ bincode = { version = "2.0", features = ["serde"] }
 multihash = { version = "0.19", features = ["serde"] }
 multihash-derive = "0.9"
 multihash-codetable = { version = "0.1", features = ["sha2", "sha3", "blake3"] }
-primitive-types = { version = "0.13", features = ["serde", "num-traits"] }
 
 [dev-dependencies]
