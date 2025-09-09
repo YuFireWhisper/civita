@@ -63,7 +63,7 @@ impl Transport {
         let gossipsub = Gossipsub::new(swarm.clone(), peer_id, gossipsub_config).await;
         let gossipsub = Arc::new(gossipsub);
 
-        let req_resp = request_response::RequestResponse::new_network(swarm.clone());
+        let req_resp = request_response::RequestResponse::new(swarm.clone());
         let req_resp = Arc::new(req_resp);
 
         let transport = Self {
@@ -121,7 +121,7 @@ impl Transport {
                                 }
                             },
                             behaviour::Event::RequestResponse(event) => {
-                                if let Err(e) = req_resp.handle_event_network(*event).await {
+                                if let Err(e) = req_resp.handle_event(*event).await {
                                     log::error!("Error handling request response event: {e:?}");
                                 }
                             },
