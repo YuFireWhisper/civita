@@ -31,7 +31,6 @@ struct Staged<T> {
 pub struct Mmr<T> {
     hashes: HashMap<Index, Multihash>,
     indices: HashMap<Multihash, Index>,
-    deletes: HashSet<Multihash>,
     leaves: HashMap<Multihash, T>,
     next: Index,
     staged: Staged<T>,
@@ -62,10 +61,7 @@ impl<T> Mmr<T> {
     }
 
     fn resolve(&self, hash: &Multihash, proof: &MmrProof) -> Option<HashMap<Index, Multihash>> {
-        if hash == &Multihash::default()
-            || self.deletes.contains(hash)
-            || self.staged.deletes.contains(hash)
-        {
+        if hash == &Multihash::default() || self.staged.deletes.contains(hash) {
             return None;
         }
 
@@ -113,8 +109,7 @@ impl<T> Mmr<T> {
 
         staged.deletes.into_iter().for_each(|hash| {
             let idx = self.indices.remove(&hash).unwrap();
-            self.hashes.remove(&idx);
-            self.deletes.insert(hash);
+            self.hashes.insert(idx, Multihash::default());
             self.leaves.remove(&hash);
             self.recalculate_parents(idx);
         });
@@ -151,14 +146,14 @@ impl<T> Mmr<T> {
             if index_height(&(&idx + 1u8)) > g {
                 idx += 1u8.into();
                 let is = idx - offset;
-                let s = self.hashes.get(&is).copied().unwrap_or_default();
+                let s = self.hashes[&is];
                 let h = hash_pospair(&(&idx + 1u8), &s, &c);
                 self.hashes.insert(idx, h);
                 self.indices.insert(h, idx);
             } else {
                 idx += offset;
                 let is = &idx - 1u8;
-                let s = self.hashes.get(&is).copied().unwrap_or_default();
+                let s = self.hashes[&is];
                 let h = hash_pospair(&(&idx + 1u8), &c, &s);
                 self.hashes.insert(idx, h);
                 self.indices.insert(h, idx);
@@ -235,8 +230,6 @@ impl<T> Mmr<T> {
                 continue;
             }
 
-            let lastest = peak_range(self.peaks(), &idx).0;
-
             let mut g = index_height(&idx);
             loop {
                 let offset = 2u64 << g;
@@ -249,12 +242,12 @@ impl<T> Mmr<T> {
                     &idx - 1u8
                 };
 
-                if is > lastest {
+                let Some(sh) = self.hashes.get(&is) else {
                     break;
-                }
+                };
 
+                keep.insert(*sh);
                 keep.insert(self.hashes[&idx]);
-                keep.insert(self.hashes.get(&is).copied().unwrap_or_default());
 
                 g += 1;
             }
@@ -282,7 +275,6 @@ impl<T: Clone> Mmr<T> {
     {
         let mut hashes: HashMap<Index, Multihash> = HashMap::new();
         let mut indices: HashMap<Multihash, Index> = HashMap::new();
-        let mut deletes: HashSet<Multihash> = HashSet::new();
         let mut leaves: HashMap<Multihash, T> = HashMap::new();
 
         self.peaks().iter().copied().for_each(|p| {
@@ -311,7 +303,7 @@ impl<T: Clone> Mmr<T> {
                 }
 
                 let offset = 2usize << g;
-                let sidx = if index_height(&(&idx + 1u8)) > g {
+                let is = if index_height(&(&idx + 1u8)) > g {
                     idx += 1u8.into();
                     idx - offset
                 } else {
@@ -319,20 +311,15 @@ impl<T: Clone> Mmr<T> {
                     &idx - 1u8
                 };
 
-                if let Some(hash) = self.deletes.get(&hash) {
-                    deletes.insert(*hash);
-                    continue;
-                }
-
-                let Some(hash) = self.hashes.get(&sidx).copied() else {
+                let Some(sh) = self.hashes.get(&is).copied() else {
                     break;
                 };
 
-                hashes.insert(sidx, hash);
-                indices.insert(hash, sidx);
+                hashes.insert(is, sh);
+                indices.insert(sh, is);
 
-                if let Some(v) = self.leaves.get(&hash) {
-                    leaves.insert(hash, v.clone());
+                if let Some(v) = self.leaves.get(&sh) {
+                    leaves.insert(sh, v.clone());
                 }
 
                 g += 1;
@@ -342,7 +329,6 @@ impl<T: Clone> Mmr<T> {
         Some(Mmr {
             hashes,
             indices,
-            deletes,
             leaves,
             next: self.next,
             staged: Staged::default(),
@@ -403,7 +389,6 @@ impl<T: Clone> Clone for Mmr<T> {
         Self {
             hashes: self.hashes.clone(),
             indices: self.indices.clone(),
-            deletes: self.deletes.clone(),
             leaves: self.leaves.clone(),
             next: self.next,
             peaks: self.peaks.clone(),
@@ -417,11 +402,10 @@ impl<T: serde::Serialize> serde::Serialize for Mmr<T> {
     where
         S: serde::Serializer,
     {
-        let map: HashMap<&Multihash, Option<(&Index, Option<&T>)>> = self
+        let map: HashMap<&Multihash, (&Index, Option<&T>)> = self
             .indices
             .iter()
-            .map(|(k, idx)| (k, Some((idx, self.leaves.get(k)))))
-            .chain(self.deletes.iter().map(|k| (k, None)))
+            .map(|(k, idx)| (k, (idx, self.leaves.get(k))))
             .collect();
         (map, self.peaks()).serialize(serializer)
     }
@@ -432,25 +416,18 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
     where
         D: serde::Deserializer<'de>,
     {
-        type Tup<T> = (HashMap<Multihash, Option<(Index, Option<T>)>>, Vec<Index>);
+        type Tup<T> = (HashMap<Multihash, (Index, Option<T>)>, Vec<Index>);
 
         let (map, peaks) = Tup::<T>::deserialize(deserializer)?;
 
         let mut hashes: HashMap<Index, Multihash> = HashMap::new();
         let mut indices: HashMap<Multihash, Index> = HashMap::new();
         let mut leaves: HashMap<Multihash, T> = HashMap::new();
-        let mut deletes: HashSet<Multihash> = HashSet::new();
         let next = peaks.last().map(|p| p + 1u8).unwrap_or_default();
 
-        for (h, opt) in map {
-            let Some((idx, v)) = opt else {
-                deletes.insert(h);
-                continue;
-            };
-
+        for (h, (idx, v)) in map {
             hashes.insert(idx, h);
             indices.insert(h, idx);
-
             if let Some(v) = v {
                 leaves.insert(h, v);
             }
@@ -459,7 +436,6 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
         Ok(Mmr {
             hashes,
             indices,
-            deletes,
             leaves,
             next,
             staged: Staged::default(),
@@ -671,7 +647,6 @@ mod test {
 
         assert!(mmr.hashes == mmr2.hashes);
         assert!(mmr.indices == mmr2.indices);
-        assert!(mmr.deletes == mmr2.deletes);
         assert!(mmr.leaves == mmr2.leaves);
         assert!(mmr.next == mmr2.next);
         assert!(mmr.peaks() == mmr2.peaks());
