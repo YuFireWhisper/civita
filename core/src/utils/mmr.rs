@@ -304,6 +304,9 @@ impl<T: Clone> Mmr<T> {
             let h = self.hashes[&p];
             hashes.insert(p, h);
             indices.insert(h, p);
+            if let Some(v) = self.leaves.get(&h) {
+                leaves.insert(h, v.clone());
+            }
         });
 
         for hash in iter {
@@ -315,10 +318,12 @@ impl<T: Clone> Mmr<T> {
             let mut g = index_height(idx);
 
             loop {
-                if hashes.insert(idx, hash).is_some() {
+                if hashes.contains_key(&idx) {
                     break;
                 }
 
+                let hash = *self.hashes.get(&idx).unwrap();
+                hashes.insert(idx, hash);
                 indices.insert(hash, idx);
 
                 if let Some(v) = self.leaves.get(&hash) {
@@ -334,15 +339,12 @@ impl<T: Clone> Mmr<T> {
                     idx - 1
                 };
 
-                let Some(sh) = self.hashes.get(&is).copied() else {
-                    break;
-                };
+                let hash = *self.hashes.get(&is).unwrap();
+                hashes.insert(is, hash);
+                indices.insert(hash, is);
 
-                hashes.insert(is, sh);
-                indices.insert(sh, is);
-
-                if let Some(v) = self.leaves.get(&sh) {
-                    leaves.insert(sh, v.clone());
+                if let Some(v) = self.leaves.get(&hash) {
+                    leaves.insert(hash, v.clone());
                 }
 
                 g += 1;
