@@ -1,17 +1,9 @@
-use std::{sync::Arc, time::SystemTime};
-
-use multihash_derive::MultihashDigest;
+use std::sync::Arc;
 
 use civita_core::{
     self,
     consensus::graph::StorageMode,
-    crypto::{hasher::Hasher, Multihash},
-    resident::{Config, Resident},
-    ty::{
-        atom::{Atom, Command},
-        token::Token,
-    },
-    utils::mmr::Mmr,
+    resident::{self, Config, Resident},
 };
 
 use crate::common::validator::Validator;
@@ -25,59 +17,6 @@ async fn basic_operations() {
     const NUM: usize = 5;
     const INIT_VALUE: usize = 100;
 
-    let mut transports = common::transport::create_transports(NUM).await;
-    let peer_ids = transports
-        .iter()
-        .map(|t| t.local_peer_id())
-        .collect::<Vec<_>>();
-
-    let genesis_atom = {
-        let tokens = (0..NUM)
-            .map(|i| {
-                Token::new(
-                    &Multihash::default(),
-                    i as u32,
-                    INIT_VALUE.to_le_bytes().to_vec(),
-                    transports[i].local_peer_id().as_ref().to_bytes(),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let cmd = Command {
-            code: 0,
-            inputs: vec![],
-            created: tokens,
-        };
-
-        let mut atom = Atom {
-            hash: Multihash::default(),
-            parent: Multihash::default(),
-            checkpoint: Multihash::default(),
-            height: 0,
-            nonce: vec![],
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            cmd: Some(cmd),
-            atoms: vec![],
-        };
-
-        let hash = Hasher::default().digest(&atom.hash_input());
-        atom.hash = hash;
-
-        atom
-    };
-
-    let mmr = {
-        let mut mmr = Mmr::default();
-        for token in genesis_atom.cmd.as_ref().unwrap().created.iter().cloned() {
-            mmr.append(token.id, token);
-        }
-        mmr.commit();
-        mmr
-    };
-
     let config = Config {
         heartbeat_interval: Some(tokio::time::Duration::from_secs(1)),
         block_threshold: 5,
@@ -88,51 +27,56 @@ async fn basic_operations() {
         init_vdf_difficulty: 1,
         vdf_params: VDF_PARAMS,
     };
+    let value = (INIT_VALUE).to_le_bytes();
 
-    let genesis_resident = Resident::<Validator>::with_genesis(
-        Arc::new(transports.remove(0)),
-        genesis_atom,
-        mmr,
-        config,
-    )
-    .await
-    .expect("Failed to create genesis resident");
+    let mut txs = common::transport::create_transports(NUM).await;
+    let peer_ids = txs.iter().map(|t| t.local_peer_id()).collect::<Vec<_>>();
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let genesis_resident = resident::GenesisBuilder::default()
+        .with_command_code(0)
+        .with_init_tokens((0..NUM).map(|i| (value, txs[i].local_peer_id().to_bytes())))
+        .build::<Validator>(Arc::new(txs.remove(0)), config)
+        .await
+        .expect("Failed to create genesis resident");
 
     let mut residents = vec![genesis_resident];
-    for transport in transports.into_iter() {
-        let resident = Resident::<Validator>::new(
-            Arc::new(transport),
-            vec![peer_ids[0]],
-            tokio::time::Duration::from_secs(5),
-            config,
-        )
-        .await
-        .expect("Failed to create resident");
-        residents.push(resident);
-    }
 
     {
-        let tokens = residents[0].tokens().await;
-        residents[0]
-            .propose(
-                0,
-                tokens
-                    .into_iter()
-                    .map(|t| (t.id, peer_ids[0].as_ref().to_bytes())),
-                std::iter::once((
-                    (INIT_VALUE.to_le_bytes()).to_vec(),
-                    peer_ids[1].as_ref().to_bytes(),
-                )),
-            )
-            .await
-            .expect("Failed to propose initial token");
+        let ps = vec![peer_ids[0]];
+        let t = tokio::time::Duration::from_secs(5);
+        for tx in txs.into_iter() {
+            let tx = Arc::new(tx);
+            let r = Resident::new(tx, ps.clone(), t, config).await.unwrap();
+            residents.push(r);
+        }
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    // Genesis -> Peer 1
+    let tokens = residents[0].tokens().await;
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].value, value);
+
+    let inputs = vec![(tokens[0].id, peer_ids[0].to_bytes())];
+    let created = vec![(value, peer_ids[1].to_bytes())];
+
+    residents[0]
+        .propose(0, inputs, created)
+        .await
+        .expect("Failed to propose token transfer");
+
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+        loop {
+            let tokens = residents[1].tokens().await;
+            if tokens.len() == 2 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("Timeout waiting for token transfer");
 
     let tokens = residents[1].tokens().await;
-
     assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens[0].value, value);
+    assert_eq!(tokens[1].value, value);
 }
