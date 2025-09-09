@@ -201,7 +201,13 @@ impl<T> Mmr<T> {
     }
 
     fn peaks(&self) -> &Vec<u64> {
-        self.peaks.get_or_init(|| peak_indices(self.next - 1))
+        self.peaks.get_or_init(|| {
+            if self.next == 0 {
+                vec![]
+            } else {
+                peak_indices(self.next - 1)
+            }
+        })
     }
 
     pub fn verify(&self, hash: Multihash, proof: &MmrProof) -> bool {
