@@ -215,25 +215,50 @@ impl<T> Mmr<T> {
         self.resolve(&hash, proof).is_some()
     }
 
-    pub fn prune<I>(&mut self, hashes: I) -> bool
+    pub fn prune<I>(&mut self, iter: I) -> bool
     where
         I: IntoIterator<Item = Multihash>,
     {
-        let mut keep: HashSet<_> = HashSet::from_iter(self.peaks().iter().map(|p| self.hashes[p]));
+        let mut hashes = HashMap::new();
+        let mut indices = HashMap::new();
+        let mut leaves = HashMap::new();
 
-        for hash in hashes {
-            let Some(mut idx) = self.indices.get(&hash).cloned() else {
-                return false;
-            };
+        self.peaks().clone().into_iter().for_each(|p| {
+            let h = self.hashes[&p];
+            hashes.insert(p, h);
+            indices.insert(h, p);
+            if let Some(v) = self.leaves.remove(&h) {
+                leaves.insert(h, v);
+            }
+        });
 
-            if !keep.insert(hash) {
+        for hash in iter {
+            if indices.contains_key(&hash) {
                 continue;
             }
 
+            let mut idx = if let Some(idx) = self.indices.get(&hash) {
+                *idx
+            } else {
+                return false;
+            };
             let mut g = index_height(&idx);
-            loop {
-                let offset = 2u64 << g;
 
+            loop {
+                if hashes.contains_key(&idx) {
+                    break;
+                }
+
+                let hash = self.hashes.remove(&idx).unwrap();
+                self.indices.remove(&hash);
+                hashes.insert(idx, hash);
+                indices.insert(hash, idx);
+
+                if let Some(v) = self.leaves.remove(&hash) {
+                    leaves.insert(hash, v);
+                }
+
+                let offset = 2u64 << g;
                 let is = if index_height(&(&idx + 1u8)) > g {
                     idx += 1u8.into();
                     idx - offset
@@ -242,23 +267,22 @@ impl<T> Mmr<T> {
                     &idx - 1u8
                 };
 
-                let Some(sh) = self.hashes.get(&is) else {
-                    break;
-                };
+                let hash = self.hashes.remove(&is).unwrap();
+                self.indices.remove(&hash);
+                hashes.insert(is, hash);
+                indices.insert(hash, is);
 
-                keep.insert(*sh);
-                keep.insert(self.hashes[&idx]);
+                if let Some(v) = self.leaves.remove(&hash) {
+                    leaves.insert(hash, v);
+                }
 
                 g += 1;
             }
         }
 
-        self.hashes
-            .extract_if(|_, v| !keep.contains(v))
-            .for_each(|(_, h)| {
-                self.indices.remove(&h);
-                self.leaves.remove(&h);
-            });
+        self.hashes = hashes;
+        self.indices = indices;
+        self.leaves = leaves;
 
         true
     }
