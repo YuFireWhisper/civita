@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use libp2p::PeerId;
+use multihash_derive::MultihashDigest;
 
 use crate::{
     consensus::{
@@ -9,10 +10,10 @@ use crate::{
         validator::Validator,
         Engine,
     },
-    crypto::Multihash,
+    crypto::{Hasher, Multihash},
     network::Transport,
     ty::{
-        atom::{Atom, Height},
+        atom::{Atom, Command, Height},
         token::Token,
     },
     utils::mmr::Mmr,
@@ -44,9 +45,69 @@ pub struct Config {
     pub vdf_params: u16,
 }
 
+#[derive(Default)]
+pub struct GenesisBuilder {
+    code: Option<u8>,
+    tokens: Vec<Token>,
+    mmr: Mmr<Token>,
+}
+
 pub struct Resident<V> {
     transport: Arc<Transport>,
     engine: Arc<Engine<V>>,
+}
+
+impl GenesisBuilder {
+    pub fn with_command_code(mut self, code: u8) -> Self {
+        self.code = Some(code);
+        self
+    }
+
+    pub fn with_init_tokens(
+        mut self,
+        tokens: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+    ) -> Self {
+        tokens.into_iter().for_each(|(value, sig)| {
+            let idx = self.tokens.len() as u32;
+            let token = Token::new(&Multihash::default(), idx, value, sig);
+            self.mmr.append(token.id, token.clone());
+            self.tokens.push(token);
+        });
+        self
+    }
+
+    pub async fn build<V: Validator>(
+        mut self,
+        transport: Arc<Transport>,
+        config: Config,
+    ) -> Result<Resident<V>> {
+        let cmd = self.code.map(|code| Command {
+            code,
+            inputs: vec![],
+            created: self.tokens,
+        });
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut atom = Atom {
+            hash: Multihash::default(),
+            parent: Multihash::default(),
+            checkpoint: Multihash::default(),
+            height: 0,
+            nonce: vec![],
+            timestamp,
+            cmd,
+            atoms: vec![],
+        };
+
+        atom.hash = Hasher::default().digest(&atom.hash_input());
+        self.mmr.commit();
+
+        Resident::with_genesis(transport, atom, self.mmr, config).await
+    }
 }
 
 impl<V: Validator> Resident<V> {
