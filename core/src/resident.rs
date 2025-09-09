@@ -63,13 +63,15 @@ impl GenesisBuilder {
         self
     }
 
-    pub fn with_init_tokens(
-        mut self,
-        tokens: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
-    ) -> Self {
+    pub fn with_init_tokens<I, T, U>(mut self, tokens: I) -> Self
+    where
+        I: IntoIterator<Item = (T, U)>,
+        T: Into<Vec<u8>>,
+        U: Into<Vec<u8>>,
+    {
         tokens.into_iter().for_each(|(value, sig)| {
             let idx = self.tokens.len() as u32;
-            let token = Token::new(&Multihash::default(), idx, value, sig);
+            let token = Token::new(&Multihash::default(), idx, value.into(), sig);
             self.mmr.append(token.id, token.clone());
             self.tokens.push(token);
         });
@@ -174,8 +176,8 @@ impl<V: Validator> Resident<V> {
     pub async fn propose(
         &self,
         code: u8,
-        inputs: impl IntoIterator<Item = (Multihash, Vec<u8>)>,
-        created: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+        inputs: impl IntoIterator<Item = (Multihash, impl Into<Vec<u8>>)>,
+        created: impl IntoIterator<Item = (impl Into<Vec<u8>>, impl Into<Vec<u8>>)>,
     ) -> Result<(), Error> {
         self.engine
             .propose(code, inputs, created)

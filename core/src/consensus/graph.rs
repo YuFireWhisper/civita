@@ -972,8 +972,8 @@ impl<V: Validator> Graph<V> {
     pub fn create_command(
         &self,
         code: u8,
-        inputs: impl IntoIterator<Item = (Multihash, Vec<u8>)>,
-        created: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+        inputs: impl IntoIterator<Item = (Multihash, impl Into<Vec<u8>>)>,
+        created: impl IntoIterator<Item = (impl Into<Vec<u8>>, impl Into<Vec<u8>>)>,
     ) -> Result<Command, Error> {
         let head = &self.entries[&self.main_head];
 
@@ -983,7 +983,7 @@ impl<V: Validator> Graph<V> {
                 match head.mmr.get(&id) {
                     Some(token) => {
                         let proof = head.mmr.prove(id).ok_or(Error::FailedToProveInput)?;
-                        acc.push(Input::Confirmed(token.clone(), proof, sig));
+                        acc.push(Input::Confirmed(token.clone(), proof, sig.into()));
                     }
                     None => {
                         head.unconfirmed
@@ -991,7 +991,7 @@ impl<V: Validator> Graph<V> {
                             .ok_or(Error::UnknownTokenId)?
                             .as_ref()
                             .ok_or(Error::InputConsumed)?;
-                        acc.push(Input::Unconfirmed(id, sig));
+                        acc.push(Input::Unconfirmed(id, sig.into()));
                     }
                 }
                 Ok::<_, Error>(acc)

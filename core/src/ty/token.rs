@@ -11,7 +11,15 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn new(first_input_id: &Multihash, idx: u32, value: Vec<u8>, script_pk: Vec<u8>) -> Self {
+    pub fn new(
+        first_input_id: &Multihash,
+        idx: u32,
+        value: impl Into<Vec<u8>>,
+        script_pk: impl Into<Vec<u8>>,
+    ) -> Self {
+        let value = value.into();
+        let script_pk = script_pk.into();
+
         let mut buf = Vec::new();
         buf.extend(first_input_id.to_bytes());
         buf.extend(&idx.to_le_bytes());

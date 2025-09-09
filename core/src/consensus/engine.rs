@@ -185,8 +185,8 @@ impl<V: Validator> Engine<V> {
     pub async fn propose(
         &self,
         code: u8,
-        inputs: impl IntoIterator<Item = (Multihash, Vec<u8>)>,
-        created: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+        inputs: impl IntoIterator<Item = (Multihash, impl Into<Vec<u8>>)>,
+        created: impl IntoIterator<Item = (impl Into<Vec<u8>>, impl Into<Vec<u8>>)>,
     ) -> Result<(), graph::Error> {
         let graph = self.graph.read().await;
         let cmd = graph.create_command(code, inputs, created)?;
