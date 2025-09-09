@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use libp2p::PeerId;
+use libp2p::{identity::Keypair, PeerId};
 use multihash_derive::MultihashDigest;
 
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
         Engine,
     },
     crypto::{Hasher, Multihash},
-    network::Transport,
+    network::{transport, Transport},
     ty::{
         atom::{Atom, Command, Height},
         token::Token,
@@ -31,6 +31,9 @@ pub enum Error {
 
     #[error(transparent)]
     Graph(#[from] graph::Error),
+
+    #[error(transparent)]
+    Transport(#[from] transport::Error),
 }
 
 #[derive(Clone, Copy)]
@@ -46,67 +49,70 @@ pub struct Config {
 }
 
 #[derive(Default)]
-pub struct GenesisBuilder {
-    code: Option<u8>,
-    tokens: Vec<Token>,
-    mmr: Mmr<Token>,
+pub struct Builder {
+    tx_info: Option<(Keypair, libp2p::Multiaddr, transport::Config)>,
+    genesis_info: Option<(u8, Vec<Token>, Mmr<Token>)>,
+    normal: Option<(Vec<PeerId>, tokio::time::Duration)>,
+    config: Option<Config>,
 }
 
 pub struct Resident<V> {
     engine: Arc<Engine<V>>,
 }
 
-impl GenesisBuilder {
-    pub fn with_command_code(mut self, code: u8) -> Self {
-        self.code = Some(code);
+impl Builder {
+    pub fn with_transport_info(
+        mut self,
+        keypair: Keypair,
+        listen_addr: libp2p::Multiaddr,
+        config: transport::Config,
+    ) -> Self {
+        self.tx_info = Some((keypair, listen_addr, config));
         self
     }
 
-    pub fn with_init_tokens<I, T, U>(mut self, tokens: I) -> Self
+    pub fn with_genesis_info<I, T, U>(mut self, code: u8, tokens: I) -> Self
     where
         I: IntoIterator<Item = (T, U)>,
         T: Into<Vec<u8>>,
         U: Into<Vec<u8>>,
     {
-        tokens.into_iter().for_each(|(value, sig)| {
-            let idx = self.tokens.len() as u32;
-            let token = Token::new(&Multihash::default(), idx, value.into(), sig);
-            self.mmr.append(token.id, token.clone());
-            self.tokens.push(token);
-        });
+        assert!(self.normal.is_none(), "Normal info is already set");
+        assert!(self.genesis_info.is_none(), "Genesis info is already set");
+
+        let (mut mmr, tokens) = tokens.into_iter().enumerate().fold(
+            (Mmr::default(), vec![]),
+            |(mut mmr, mut tokens), (idx, (value, sig))| {
+                let token = Token::new(&Multihash::default(), idx as u32, value.into(), sig);
+                mmr.append(token.id, token.clone());
+                tokens.push(token);
+                (mmr, tokens)
+            },
+        );
+        mmr.commit();
+
+        self.genesis_info = Some((code, tokens, mmr));
         self
     }
 
-    pub async fn build<V: Validator>(
-        mut self,
-        transport: Arc<Transport>,
-        config: Config,
-    ) -> Result<Resident<V>> {
-        let cmd = self.code.map(|code| Command {
-            code,
-            inputs: vec![],
-            created: self.tokens,
-        });
+    pub fn with_normal_info(mut self, peers: Vec<PeerId>, timeout: tokio::time::Duration) -> Self {
+        assert!(self.genesis_info.is_none(), "Genesis info is already set");
+        assert!(self.normal.is_none(), "Normal info is already set");
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.normal = Some((peers, timeout));
+        self
+    }
 
-        let mut atom = Atom {
-            hash: Multihash::default(),
-            parent: Multihash::default(),
-            checkpoint: Multihash::default(),
-            height: 0,
-            nonce: vec![],
-            timestamp,
-            cmd,
-            atoms: vec![],
-        };
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.config = Some(config);
+        self
+    }
 
-        atom.hash = Hasher::default().digest(&atom.hash_input());
-        self.mmr.commit();
+    pub async fn build<V: Validator>(self) -> Result<Resident<V>> {
+        let (keypair, listen_addr, config) = self.tx_info.expect("Transport info is required");
+        let tx = Arc::new(Transport::new(keypair, listen_addr, config).await?);
 
+        let config = self.config.expect("Config is required");
         let graph_config = graph::Config {
             block_threshold: config.block_threshold,
             checkpoint_distance: config.checkpoint_distance,
@@ -116,46 +122,50 @@ impl GenesisBuilder {
             storage_mode: config.storage_mode,
             vdf_params: config.vdf_params,
         };
-
         let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
             heartbeat_interval: config.heartbeat_interval,
         };
 
-        let engine =
-            Engine::with_genesis(transport, atom, self.mmr, graph_config, engine_config).await?;
+        if let Some((code, tokens, mmr)) = self.genesis_info {
+            let cmd = Command {
+                code,
+                inputs: vec![],
+                created: tokens,
+            };
 
-        Ok(Resident { engine })
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let mut atom = Atom {
+                hash: Multihash::default(),
+                parent: Multihash::default(),
+                checkpoint: Multihash::default(),
+                height: 0,
+                nonce: vec![],
+                timestamp,
+                cmd: Some(cmd),
+                atoms: vec![],
+            };
+
+            atom.hash = Hasher::default().digest(&atom.hash_input());
+
+            let engine = Engine::with_genesis(tx, atom, mmr, graph_config, engine_config).await?;
+            return Ok(Resident { engine });
+        }
+
+        if let Some((peers, timeout)) = self.normal {
+            let engine = Engine::new(tx, peers, timeout, graph_config, engine_config).await?;
+            return Ok(Resident { engine });
+        }
+
+        panic!("Either genesis info or normal info must be set");
     }
 }
 
 impl<V: Validator> Resident<V> {
-    pub async fn new(
-        transport: Arc<Transport>,
-        peers: Vec<PeerId>,
-        timeout: tokio::time::Duration,
-        config: Config,
-    ) -> Result<Self> {
-        let graph_config = graph::Config {
-            block_threshold: config.block_threshold,
-            checkpoint_distance: config.checkpoint_distance,
-            target_block_time: config.target_block_time,
-            init_vdf_difficulty: config.init_vdf_difficulty,
-            max_difficulty_adjustment: config.max_difficulty_adjustment,
-            storage_mode: config.storage_mode,
-            vdf_params: config.vdf_params,
-        };
-
-        let engine_config = engine::Config {
-            gossip_topic: GOSSIP_TOPIC,
-            heartbeat_interval: config.heartbeat_interval,
-        };
-
-        let engine = Engine::new(transport, peers, timeout, graph_config, engine_config).await?;
-
-        Ok(Self { engine })
-    }
-
     pub async fn propose(
         &self,
         code: u8,
