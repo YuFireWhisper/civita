@@ -56,11 +56,11 @@ impl Transport {
 
         let swarm = Arc::new(Mutex::new(swarm));
 
-        let gossipsub_config = gossipsub::NetworkConfig {
+        let gossipsub_config = gossipsub::Config {
             timeout: config.wait_for_gossipsub_peer_timeout,
             channel_size: config.channel_capacity,
         };
-        let gossipsub = Gossipsub::new_network(swarm.clone(), peer_id, gossipsub_config).await;
+        let gossipsub = Gossipsub::new(swarm.clone(), peer_id, gossipsub_config).await;
         let gossipsub = Arc::new(gossipsub);
 
         let req_resp = request_response::RequestResponse::new_network(swarm.clone());
