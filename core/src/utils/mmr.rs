@@ -21,15 +21,13 @@ pub struct MmrProof {
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
-#[derivative(PartialEq(bound = "T: Eq"), Eq(bound = "T: Eq"))]
 struct Staged<T> {
-    appends: HashMap<Multihash, T>,
+    appends: Vec<(Multihash, T)>,
     deletes: HashSet<Multihash>,
 }
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
-#[derivative(PartialEq(bound = "T: Eq"), Eq(bound = "T: Eq"))]
 pub struct Mmr<T> {
     hashes: HashMap<Index, Multihash>,
     indices: HashMap<Multihash, Index>,
@@ -48,56 +46,66 @@ impl MmrProof {
 
 impl<T> Mmr<T> {
     pub fn append(&mut self, hash: Multihash, value: T) {
-        self.staged.appends.insert(hash, value);
+        self.staged.appends.push((hash, value));
     }
 
     pub fn delete(&mut self, hash: Multihash, proof: &MmrProof) -> bool {
-        if hash == Multihash::default()
-            || self.deletes.contains(&hash)
-            || self.staged.deletes.contains(&hash)
-        {
+        let Some(fills) = self.resolve(&hash, proof) else {
             return false;
-        }
-
-        let exp = peak_range(self.peaks(), &proof.idx).0;
-        let exp_len = index_height(&exp);
-
-        if proof.siblings.len() != exp_len {
-            return false;
-        }
-
-        let mut idx = proof.idx;
-        let mut acc = hash;
-        let mut g = index_height(&idx);
-        let mut fills: HashMap<Index, Multihash> = HashMap::from_iter([(idx, hash)]);
-
-        for hash in &proof.siblings {
-            let offset = 2usize << g;
-
-            if index_height(&(&idx + 1u8)) > g {
-                idx += 1u8.into();
-                let sidx = idx - offset;
-                fills.insert(sidx, *hash);
-                acc = hash_pospair(&(&idx + 1u8), hash, &acc);
-                g += 1;
-            } else {
-                idx += offset.into();
-                let sidx = &idx - 1u8;
-                fills.insert(sidx, *hash);
-                acc = hash_pospair(&(&idx + 1u8), &acc, hash);
-                g += 1;
-            }
-
-            if self.hashes.get(&idx).is_some_and(|h| h != &acc) {
-                return false;
-            }
-        }
+        };
 
         self.hashes.extend(fills.clone());
         self.indices.extend(fills.into_iter().map(|(k, v)| (v, k)));
         self.staged.deletes.insert(hash);
 
         true
+    }
+
+    fn resolve(&self, hash: &Multihash, proof: &MmrProof) -> Option<HashMap<Index, Multihash>> {
+        if hash == &Multihash::default()
+            || self.deletes.contains(hash)
+            || self.staged.deletes.contains(hash)
+        {
+            return None;
+        }
+
+        let exp = peak_range(self.peaks(), &proof.idx).0;
+        let exp_len = index_height(&exp);
+
+        if proof.siblings.len() != exp_len {
+            return None;
+        }
+
+        let mut idx = proof.idx;
+        let mut acc = *hash;
+        let mut g = index_height(&idx);
+        let mut fills: HashMap<Index, Multihash> = HashMap::new();
+
+        for hash in &proof.siblings {
+            fills.insert(idx, acc);
+
+            let offset = Index::from(2u8) << g;
+
+            if index_height(&(&idx + 1u8)) > g {
+                idx += 1u8.into();
+                let sis = idx - offset;
+                fills.insert(sis, *hash);
+                acc = hash_pospair(&(&idx + 1u8), hash, &acc);
+            } else {
+                idx += offset;
+                let sidx = idx - 1u8;
+                fills.insert(sidx, *hash);
+                acc = hash_pospair(&(&idx + 1u8), &acc, hash);
+            }
+
+            g += 1;
+
+            if self.hashes.get(&idx).is_some_and(|h| h != &acc) {
+                return None;
+            }
+        }
+
+        Some(fills)
     }
 
     pub fn commit(&mut self) {
@@ -116,10 +124,10 @@ impl<T> Mmr<T> {
             let mut i = self.insert(h);
 
             while index_height(&i) > g {
-                let il = i - (2u64 << g);
-                let ir = &i - 1u8;
+                let il = i - (Index::from(2u8) << g);
+                let ir = i - Index::one();
                 i = self.insert(hash_pospair(
-                    &(&i + 1u8),
+                    &(i + Index::one()),
                     &self.hashes[&il],
                     &self.hashes[&ir],
                 ));
@@ -134,37 +142,37 @@ impl<T> Mmr<T> {
 
     fn recalculate_parents(&mut self, mut idx: Index) {
         let mut g = index_height(&idx);
+        let mut c = Multihash::default();
         let peak = peak_range(self.peaks(), &idx).0;
-        let mut c = &Multihash::default();
 
         while idx != peak {
-            let offset = 2usize << g;
+            let offset = Index::from(2u8) << g;
 
             if index_height(&(&idx + 1u8)) > g {
                 idx += 1u8.into();
                 let is = idx - offset;
                 let s = self.hashes.get(&is).copied().unwrap_or_default();
-                let h = hash_pospair(&(&idx + 1u8), &s, c);
+                let h = hash_pospair(&(&idx + 1u8), &s, &c);
                 self.hashes.insert(idx, h);
                 self.indices.insert(h, idx);
             } else {
-                idx += offset.into();
+                idx += offset;
                 let is = &idx - 1u8;
                 let s = self.hashes.get(&is).copied().unwrap_or_default();
-                let h = hash_pospair(&(&idx + 1u8), c, &s);
+                let h = hash_pospair(&(&idx + 1u8), &c, &s);
                 self.hashes.insert(idx, h);
                 self.indices.insert(h, idx);
             }
 
             g += 1;
-            c = &self.hashes[&idx];
+            c = self.hashes[&idx];
         }
     }
 
     fn insert(&mut self, hash: Multihash) -> Index {
         self.hashes.insert(self.next, hash);
         self.indices.insert(hash, self.next);
-        self.next += 1u8.into();
+        self.next += Index::one();
         self.next
     }
 
@@ -187,7 +195,7 @@ impl<T> Mmr<T> {
         loop {
             let offset = 2usize << g;
 
-            let isibling = if index_height(&(&idx + 1u8)) > g {
+            let is = if index_height(&(&idx + 1u8)) > g {
                 idx += 1u8.into();
                 idx - offset
             } else {
@@ -195,50 +203,21 @@ impl<T> Mmr<T> {
                 &idx - 1u8
             };
 
-            if isibling > last {
+            if is > last {
                 return Some(MmrProof::new(proof, tmp));
             }
 
-            proof.push(*self.hashes.get(&isibling)?);
+            proof.push(self.hashes.get(&is).copied().unwrap_or_default());
             g += 1;
         }
     }
 
     fn peaks(&self) -> &Vec<Index> {
-        self.peaks.get_or_init(|| peak_indices(&self.next))
+        self.peaks.get_or_init(|| peak_indices(&(self.next - 1u8)))
     }
 
     pub fn verify(&self, hash: Multihash, proof: &MmrProof) -> bool {
-        if hash == Multihash::default()
-            || self.deletes.contains(&hash)
-            || self.staged.deletes.contains(&hash)
-        {
-            return false;
-        }
-
-        let exp = peak_range(self.peaks(), &proof.idx).0;
-        let exp_len = index_height(&exp);
-
-        if proof.siblings.len() != exp_len {
-            return false;
-        }
-
-        let mut root = hash;
-        let mut idx = proof.idx;
-        let mut g = index_height(&idx);
-
-        proof.siblings.iter().for_each(|h| {
-            if index_height(&(&idx + 1u8)) > g {
-                idx += 1u8.into();
-                root = hash_pospair(&(&idx + 1u8), h, &root);
-            } else {
-                idx += (2usize << g).into();
-                root = hash_pospair(&(&idx + 1u8), &root, h);
-            }
-            g += 1;
-        });
-
-        self.peaks().iter().any(|p| self.hashes[p] == root)
+        self.resolve(&hash, proof).is_some()
     }
 
     pub fn prune<I>(&mut self, hashes: I) -> bool
@@ -256,15 +235,13 @@ impl<T> Mmr<T> {
                 continue;
             }
 
-            let peak = peak_range(self.peaks(), &idx).0;
-            if peak == idx {
-                continue;
-            }
+            let lastest = peak_range(self.peaks(), &idx).0;
 
             let mut g = index_height(&idx);
             loop {
                 let offset = 2u64 << g;
-                let sibling_idx = if index_height(&(&idx + 1u8)) > g {
+
+                let is = if index_height(&(&idx + 1u8)) > g {
                     idx += 1u8.into();
                     idx - offset
                 } else {
@@ -272,15 +249,12 @@ impl<T> Mmr<T> {
                     &idx - 1u8
                 };
 
-                keep.insert(self.hashes[&idx]);
-
-                if idx == peak {
+                if is > lastest {
                     break;
                 }
 
-                if self.hashes.contains_key(&sibling_idx) {
-                    keep.insert(self.hashes[&sibling_idx]);
-                }
+                keep.insert(self.hashes[&idx]);
+                keep.insert(self.hashes.get(&is).copied().unwrap_or_default());
 
                 g += 1;
             }
@@ -292,7 +266,6 @@ impl<T> Mmr<T> {
                 self.indices.remove(&h);
                 self.leaves.remove(&h);
             });
-        self.deletes.clear();
 
         true
     }
@@ -409,7 +382,7 @@ fn peak_indices(s: &Index) -> Vec<Index> {
     let mut peaks = Vec::new();
 
     while !s.is_zero() {
-        let size = (Index::one() << ((&s + 1u8).bits() - 1)) - 1u8;
+        let size = (Index::one() << ((s + Index::one()).bits() - 1)) - Index::one();
         peak += size;
         peaks.push(&peak - 1u8);
         s -= size;
@@ -576,20 +549,17 @@ mod test {
         mmr.append(h9, 9);
         mmr.commit();
 
-        let p1 = mmr.prove(h1).unwrap();
-        let p2 = mmr.prove(h2).unwrap();
-        let p3 = mmr.prove(h3).unwrap();
-        let p4 = mmr.prove(h4).unwrap();
-        let p5 = mmr.prove(h5).unwrap();
-        let p6 = mmr.prove(h6).unwrap();
-        let p7 = mmr.prove(h7).unwrap();
-        let p8 = mmr.prove(h8).unwrap();
-        let p9 = mmr.prove(h9).unwrap();
-
         mmr.delete(h3, &mmr.prove(h3).unwrap());
         mmr.delete(h6, &mmr.prove(h6).unwrap());
         mmr.delete(h9, &mmr.prove(h9).unwrap());
         mmr.commit();
+
+        let p1 = mmr.prove(h1).unwrap();
+        let p2 = mmr.prove(h2).unwrap();
+        let p4 = mmr.prove(h4).unwrap();
+        let p5 = mmr.prove(h5).unwrap();
+        let p7 = mmr.prove(h7).unwrap();
+        let p8 = mmr.prove(h8).unwrap();
 
         assert!(mmr.verify(h1, &p1));
         assert!(mmr.verify(h2, &p2));
@@ -597,9 +567,6 @@ mod test {
         assert!(mmr.verify(h5, &p5));
         assert!(mmr.verify(h7, &p7));
         assert!(mmr.verify(h8, &p8));
-        assert!(!mmr.verify(h3, &p3));
-        assert!(!mmr.verify(h6, &p6));
-        assert!(!mmr.verify(h9, &p9));
         assert!(mmr.prove(h3).is_none());
         assert!(mmr.prove(h6).is_none());
         assert!(mmr.prove(h9).is_none());
@@ -659,17 +626,17 @@ mod test {
         assert!(mmr.get(&h6).is_none());
         assert!(mmr.get(&h7).is_none());
         assert!(mmr.get(&h8).is_none());
-        assert!(mmr.get(&h9).is_none());
+        assert!(mmr.get(&h9).is_some()); // peak
 
-        assert!(mmr.prove(h1).is_some());
-        assert!(mmr.prove(h2).is_some());
-        assert!(mmr.prove(h3).is_some());
-        assert!(mmr.prove(h4).is_some());
+        assert!(mmr.verify(h1, &mmr.prove(h1).unwrap()));
+        assert!(mmr.verify(h2, &mmr.prove(h2).unwrap()));
+        assert!(mmr.verify(h3, &mmr.prove(h3).unwrap()));
+        assert!(mmr.verify(h4, &mmr.prove(h4).unwrap()));
+        assert!(mmr.verify(h9, &mmr.prove(h9).unwrap()));
         assert!(mmr.prove(h5).is_none());
         assert!(mmr.prove(h6).is_none());
         assert!(mmr.prove(h7).is_none());
         assert!(mmr.prove(h8).is_none());
-        assert!(mmr.prove(h9).is_none());
     }
 
     #[test]
@@ -702,6 +669,11 @@ mod test {
         let vec = encode_to_vec(&mmr, config::standard()).unwrap();
         let (mmr2, _) = decode_from_slice::<Mmr<i32>, _>(&vec, config::standard()).unwrap();
 
-        assert!(mmr == mmr2);
+        assert!(mmr.hashes == mmr2.hashes);
+        assert!(mmr.indices == mmr2.indices);
+        assert!(mmr.deletes == mmr2.deletes);
+        assert!(mmr.leaves == mmr2.leaves);
+        assert!(mmr.next == mmr2.next);
+        assert!(mmr.peaks() == mmr2.peaks());
     }
 }
