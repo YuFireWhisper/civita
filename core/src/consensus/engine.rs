@@ -85,7 +85,15 @@ impl<V: Validator> Engine<V> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let graph = Self::bootstrap(&request_response, graph_config, bootstrap_config).await?;
+        let mut req_resp_rx = request_response.subscribe(config.request_response_topic);
+        let graph = Self::bootstrap(
+            &request_response,
+            &mut req_resp_rx,
+            config.request_response_topic,
+            graph_config,
+            bootstrap_config,
+        )
+        .await?;
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
@@ -102,7 +110,9 @@ impl<V: Validator> Engine<V> {
 
         let engine_clone = engine.clone();
         tokio::spawn(async move {
-            engine_clone.run(gossip_rx, atom_result_rx).await;
+            engine_clone
+                .run(gossip_rx, req_resp_rx, atom_result_rx)
+                .await;
         });
 
         Ok(engine)
@@ -110,6 +120,8 @@ impl<V: Validator> Engine<V> {
 
     async fn bootstrap(
         req_resp: &RequestResponse,
+        rx: &mut Receiver<Message>,
+        topic: u8,
         graph_config: graph::Config,
         bootstrap_config: BootstrapConfig,
     ) -> Result<Graph<V>> {
@@ -124,13 +136,9 @@ impl<V: Validator> Engine<V> {
             _ => None,
         };
 
-        let mut rx = req_resp.subscribe(bootstrap_config.topic);
-
         let msg = encode_to_vec(Request::Sync(target), config::standard()).unwrap();
         for &peer in &bootstrap_config.peers {
-            req_resp
-                .send_request(peer, msg.clone(), bootstrap_config.topic)
-                .await;
+            req_resp.send_request(peer, msg.clone(), topic).await;
         }
 
         let graph = tokio::time::timeout(bootstrap_config.timeout, async {
@@ -153,8 +161,6 @@ impl<V: Validator> Engine<V> {
         .await
         .map_err(|_| Error::BootstrapTimeout)?;
 
-        req_resp.unsubscribe(bootstrap_config.topic);
-
         graph
     }
 
@@ -168,6 +174,7 @@ impl<V: Validator> Engine<V> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
+        let req_resp_rx = request_response.subscribe(config.request_response_topic);
         let graph = Graph::with_genesis(atom, mmr, graph_config);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
@@ -185,7 +192,9 @@ impl<V: Validator> Engine<V> {
 
         let engine_clone = engine.clone();
         tokio::spawn(async move {
-            engine_clone.run(gossip_rx, atom_result_rx).await;
+            engine_clone
+                .run(gossip_rx, req_resp_rx, atom_result_rx)
+                .await;
         });
 
         Ok(engine)
@@ -217,9 +226,9 @@ impl<V: Validator> Engine<V> {
     async fn run(
         &self,
         mut gossip_rx: Receiver<gossipsub::Message>,
+        mut req_resp_rx: Receiver<Message>,
         mut atom_result_rx: Receiver<Atom>,
     ) {
-        let mut request_response_rx = self.request_response.subscribe(self.req_resp_topic);
         let mut hb_interval = self.heartbeat_interval.map(tokio::time::interval);
 
         loop {
@@ -232,7 +241,7 @@ impl<V: Validator> Engine<V> {
                 Some(msg) = gossip_rx.recv() => {
                     gossip_msg = Some(msg);
                 }
-                Some(msg) = request_response_rx.recv() => {
+                Some(msg) = req_resp_rx.recv() => {
                     req_resp_msg = Some(msg);
                 }
                 Some(atom) = atom_result_rx.recv() => {
