@@ -258,7 +258,7 @@ impl Storage {
                     });
                 } else {
                     let tmp = &self.others.front().unwrap();
-                    let len = self.atoms.len() as u32 - 1;
+                    let len = self.others.len() as u32 - 1;
                     encode_into_std_write(tmp, &mut buf, config::standard()).unwrap();
                     encode_into_std_write(len, &mut buf, config::standard()).unwrap();
                     self.others.iter().skip(1).for_each(|v| {
