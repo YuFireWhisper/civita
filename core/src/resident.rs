@@ -107,7 +107,25 @@ impl GenesisBuilder {
         atom.hash = Hasher::default().digest(&atom.hash_input());
         self.mmr.commit();
 
-        Resident::with_genesis(transport, atom, self.mmr, config).await
+        let graph_config = graph::Config {
+            block_threshold: config.block_threshold,
+            checkpoint_distance: config.checkpoint_distance,
+            target_block_time: config.target_block_time,
+            init_vdf_difficulty: config.init_vdf_difficulty,
+            max_difficulty_adjustment: config.max_difficulty_adjustment,
+            storage_mode: config.storage_mode,
+            vdf_params: config.vdf_params,
+        };
+
+        let engine_config = engine::Config {
+            gossip_topic: GOSSIP_TOPIC,
+            heartbeat_interval: config.heartbeat_interval,
+        };
+
+        let engine =
+            Engine::with_genesis(transport, atom, self.mmr, graph_config, engine_config).await?;
+
+        Ok(Resident { engine })
     }
 }
 
@@ -134,33 +152,6 @@ impl<V: Validator> Resident<V> {
         };
 
         let engine = Engine::new(transport, peers, timeout, graph_config, engine_config).await?;
-
-        Ok(Self { engine })
-    }
-
-    pub async fn with_genesis(
-        transport: Arc<Transport>,
-        atom: Atom,
-        mmr: Mmr<Token>,
-        config: Config,
-    ) -> Result<Self> {
-        let graph_config = graph::Config {
-            block_threshold: config.block_threshold,
-            checkpoint_distance: config.checkpoint_distance,
-            target_block_time: config.target_block_time,
-            init_vdf_difficulty: config.init_vdf_difficulty,
-            max_difficulty_adjustment: config.max_difficulty_adjustment,
-            storage_mode: config.storage_mode,
-            vdf_params: config.vdf_params,
-        };
-
-        let engine_config = engine::Config {
-            gossip_topic: GOSSIP_TOPIC,
-            heartbeat_interval: config.heartbeat_interval,
-        };
-
-        let engine =
-            Engine::with_genesis(transport, atom, mmr, graph_config, engine_config).await?;
 
         Ok(Self { engine })
     }
