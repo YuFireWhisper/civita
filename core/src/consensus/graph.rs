@@ -3,6 +3,7 @@ use std::{
     time::SystemTime,
 };
 
+use bincode::error::DecodeError;
 use derivative::Derivative;
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
@@ -66,7 +67,7 @@ pub enum Error {
     EmptyStorage,
 
     #[error(transparent)]
-    Decode(#[from] bincode::error::DecodeError),
+    Decode(#[from] DecodeError),
 
     #[error("Invalid atoms")]
     InvalidAtoms,
@@ -192,58 +193,39 @@ impl Storage {
             .insert(atom.hash, encode_to_vec(atom, config::standard()).unwrap());
     }
 
-    pub fn finalize<I>(&mut self, hashes: I, last: Multihash, difficulty: u64, mmr: Mmr<Token>)
-    where
-        I: IntoIterator<Item = Multihash>,
-    {
+    pub fn finalize(&mut self, hashes: &[Multihash], difficulty: u64, mmr: Mmr<Token>) {
         use bincode::{config, serde::encode_into_std_write};
 
-        if self.mode.len() == 1 {
-            self.difficulty = difficulty;
-            self.mmr = mmr;
-            hashes.into_iter().for_each(|_| {
-                self.atoms.pop_first();
+        if self.mode.len() != 1 {
+            let mut buf_1 = Vec::new();
+            encode_into_std_write(self.difficulty, &mut buf_1, config::standard()).unwrap();
+            encode_into_std_write(&self.mmr, &mut buf_1, config::standard()).unwrap();
+
+            let mut buf_2 = Vec::new();
+            encode_into_std_write(hashes.len() as u32 - 1, &mut buf_2, config::standard()).unwrap();
+            hashes.iter().take(hashes.len() - 1).for_each(|h| {
+                let atom = self.atoms.pop_first().unwrap().1.remove(h).unwrap();
+                encode_into_std_write(&atom, &mut buf_2, config::standard()).unwrap();
             });
 
-            let map = self.atoms.iter_mut().next().unwrap().1;
-            let atom = map.remove(&last).unwrap();
-            *map = HashMap::from([(last, atom)]);
+            self.others.push_back((buf_1, buf_2));
 
-            return;
+            if self.mode.len() != 0 && self.others.len() > (self.mode.len() - 1) as usize {
+                self.others.pop_front();
+            }
+        } else {
+            for _ in 0..hashes.len() - 1 {
+                self.atoms.pop_first();
+            }
         }
 
-        let mut buf_1 = Vec::new();
-        let atom = self
-            .atoms
-            .pop_first()
-            .unwrap()
-            .1
-            .into_values()
-            .next()
-            .unwrap();
-        encode_into_std_write(&atom, &mut buf_1, config::standard()).unwrap();
-        encode_into_std_write(self.difficulty, &mut buf_1, config::standard()).unwrap();
-        encode_into_std_write(&self.mmr, &mut buf_1, config::standard()).unwrap();
-
-        let mut buf_2 = Vec::new();
-        hashes.into_iter().for_each(|h| {
-            self.atoms.pop_first().unwrap().1.remove(&h).unwrap();
-            encode_into_std_write(&atom, &mut buf_2, config::standard()).unwrap();
-        });
-
-        {
-            let map = self.atoms.iter_mut().next().unwrap().1;
-            let atom = map.remove(&last).unwrap();
-            *map = HashMap::from([(last, atom)]);
-        }
-
-        self.others.push_back((buf_1, buf_2));
         self.difficulty = difficulty;
         self.mmr = mmr;
 
-        if self.mode.len() != 0 && self.others.len() > (self.mode.len() - 1) as usize {
-            self.others.pop_front();
-        }
+        let map = self.atoms.iter_mut().next().unwrap().1;
+        let hash = *hashes.last().unwrap();
+        let atom = map.remove(&hash).unwrap();
+        *map = HashMap::from([(hash, atom)]);
     }
 
     pub fn export<I>(&self, idxs: Option<I>) -> Option<Vec<u8>>
@@ -256,36 +238,34 @@ impl Storage {
 
         match idxs {
             Some(idxs) => {
-                let map = self.atoms.iter().next().unwrap().1;
-                let atom = map.values().next().unwrap();
                 let mmr = self.mmr.to_pruned(idxs)?;
-                encode_into_std_write(atom, &mut buf, config::standard()).unwrap();
+                let len = self.atoms.len() as u32;
                 encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
                 encode_into_std_write(&mmr, &mut buf, config::standard()).unwrap();
+                encode_into_std_write(len, &mut buf, config::standard()).unwrap();
+                self.atoms.values().flatten().for_each(|(_, v)| {
+                    encode_into_std_write(v, &mut buf, config::standard()).unwrap();
+                });
             }
-
             None => {
                 if self.others.is_empty() {
-                    let map = self.atoms.iter().next().unwrap().1;
-                    let atom = map.values().next().unwrap();
-                    encode_into_std_write(atom, &mut buf, config::standard()).unwrap();
+                    let len = self.atoms.len() as u32;
                     encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
                     encode_into_std_write(&self.mmr, &mut buf, config::standard()).unwrap();
-                    self.atoms.iter().skip(1).for_each(|(_, map)| {
-                        map.values().for_each(|v| {
-                            encode_into_std_write(v, &mut buf, config::standard()).unwrap();
-                        });
+                    encode_into_std_write(len, &mut buf, config::standard()).unwrap();
+                    self.atoms.values().flatten().for_each(|(_, v)| {
+                        encode_into_std_write(v, &mut buf, config::standard()).unwrap();
                     });
                 } else {
                     let tmp = &self.others.front().unwrap();
+                    let len = self.atoms.len() as u32 - 1;
                     encode_into_std_write(tmp, &mut buf, config::standard()).unwrap();
+                    encode_into_std_write(len, &mut buf, config::standard()).unwrap();
                     self.others.iter().skip(1).for_each(|v| {
                         encode_into_std_write(&v.1, &mut buf, config::standard()).unwrap();
                     });
-                    self.atoms.iter().for_each(|(_, map)| {
-                        map.values().for_each(|v| {
-                            encode_into_std_write(v, &mut buf, config::standard()).unwrap();
-                        });
+                    self.atoms.values().flatten().for_each(|(_, v)| {
+                        encode_into_std_write(v, &mut buf, config::standard()).unwrap();
                     });
                 }
             }
@@ -300,17 +280,23 @@ impl Storage {
             serde::{decode_from_slice, decode_from_std_read},
         };
 
-        let atom = decode_from_std_read::<Atom, _, _>(&mut data, config::standard())?;
         let difficulty = decode_from_std_read(&mut data, config::standard())?;
         let mmr = decode_from_std_read(&mut data, config::standard())?;
-        let atoms: Vec<Vec<u8>> = decode_from_std_read(&mut data, config::standard())?;
-        let atoms = atoms
-            .into_iter()
-            .try_fold(Vec::new(), |mut acc, atom| {
-                acc.push(decode_from_slice::<Atom, _>(&atom, config::standard())?.0);
-                Ok(acc)
-            })
-            .map_err(Error::Decode)?;
+        let len: u32 = decode_from_std_read(&mut data, config::standard())?;
+
+        if len == 0 {
+            return Err(Error::Decode(DecodeError::Other("Atom length is zero")));
+        }
+
+        let atom_bytes: Vec<u8> = decode_from_std_read(&mut data, config::standard())?;
+        let atom = decode_from_slice::<Atom, _>(&atom_bytes, config::standard())?.0;
+
+        let mut atoms = Vec::new();
+        for _ in 1..len {
+            let atom_bytes: Vec<u8> = decode_from_std_read(&mut data, config::standard())?;
+            let atom = decode_from_slice::<Atom, _>(&atom_bytes, config::standard())?.0;
+            atoms.push(atom);
+        }
 
         Graph::new(atom, difficulty, mmr, atoms, config)
     }
@@ -812,12 +798,8 @@ impl<V: Validator> Graph<V> {
         let (times, hashes) = self.collect_times_and_hashes(next_hash, self.checkpoint);
         let difficulty = self.adjust_difficulty(times);
 
-        self.storage.finalize(
-            hashes,
-            next_hash,
-            difficulty,
-            self.entries[&next_hash].mmr.clone(),
-        );
+        self.storage
+            .finalize(&hashes, difficulty, self.entries[&next_hash].mmr.clone());
         self.entries.retain(|_, e| e.atom.checkpoint == next_hash);
         self.checkpoint_height = next_height;
         self.checkpoint = next_hash;
@@ -840,7 +822,7 @@ impl<V: Validator> Graph<V> {
         end: Multihash,
     ) -> (Vec<u64>, Vec<Multihash>) {
         let mut times = Vec::new();
-        let mut hashes = Vec::new();
+        let mut hashes = vec![start];
 
         let (mut cur, mut next_time) = {
             let entry = &self.entries[&start];
