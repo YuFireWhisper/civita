@@ -315,7 +315,7 @@ impl Storage {
         }
 
         {
-            let len = decode_from_std_read(&mut data, config::standard())?;
+            let len: u32 = decode_from_std_read(&mut data, config::standard())?;
             if len == 0 {
                 return Err(Error::Decode(DecodeError::Other("Atom length is zero")));
             }
