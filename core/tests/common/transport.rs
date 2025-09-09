@@ -1,7 +1,4 @@
-use civita_core::{
-    crypto::SecretKey,
-    network::{transport::NetworkConfig, Transport},
-};
+use civita_core::network::{transport::NetworkConfig, Transport};
 use libp2p::Multiaddr;
 
 const LISTEN_ADDRESS: &str = "/ip4/0.0.0.0/tcp/0";
@@ -10,7 +7,7 @@ pub async fn create_transports(n: usize) -> Vec<Transport> {
     let mut transports = Vec::with_capacity(n);
 
     for _ in 0..n {
-        let sk = SecretKey::random_secp256k1();
+        let sk = libp2p::identity::Keypair::generate_ed25519();
         let listen_addr: Multiaddr = LISTEN_ADDRESS.parse().unwrap();
         let config = NetworkConfig::default();
         if let Ok(transport) = Transport::new_network(sk, listen_addr, config).await {
