@@ -47,11 +47,6 @@ enum Request {
     Sync(Option<PeerId>),
 }
 
-pub struct BootstrapConfig {
-    pub peers: Vec<PeerId>,
-    pub timeout: tokio::time::Duration,
-}
-
 pub struct Config {
     pub gossip_topic: u8,
     pub heartbeat_interval: Option<tokio::time::Duration>,
@@ -75,27 +70,23 @@ pub struct Engine<V> {
 impl<V: Validator> Engine<V> {
     pub async fn new(
         transport: Arc<Transport>,
+        peers: Vec<PeerId>,
+        timeout: tokio::time::Duration,
         graph_config: graph::Config,
-        bootstrap_config: BootstrapConfig,
         config: Config,
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
-        let request_response = transport.request_response();
+        let req_resp = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let mut req_resp_rx = request_response.take_receiver().await.unwrap();
-        let graph = Self::bootstrap(
-            &request_response,
-            &mut req_resp_rx,
-            graph_config,
-            bootstrap_config,
-        )
-        .await?;
+        let mut req_resp_rx = req_resp.take_receiver().await.unwrap();
+        let graph =
+            Self::bootstrap(&req_resp, &mut req_resp_rx, peers, timeout, graph_config).await?;
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
             transport,
             gossipsub,
-            request_response,
+            request_response: req_resp,
             gossip_topic: config.gossip_topic,
             graph: RwLock::new(graph),
             pending_atoms: DashMap::new(),
@@ -116,14 +107,13 @@ impl<V: Validator> Engine<V> {
     async fn bootstrap(
         req_resp: &RequestResponse,
         rx: &mut Receiver<Message>,
+        peers: Vec<PeerId>,
+        timeout: tokio::time::Duration,
         graph_config: graph::Config,
-        bootstrap_config: BootstrapConfig,
     ) -> Result<Graph<V>> {
         use bincode::{config, serde::encode_to_vec};
 
-        if bootstrap_config.peers.is_empty() {
-            return Err(Error::NoBootstrapPeers);
-        }
+        debug_assert!(!peers.is_empty());
 
         let target = match graph_config.storage_mode {
             StorageMode::General(peer_id) => Some(peer_id),
@@ -131,17 +121,17 @@ impl<V: Validator> Engine<V> {
         };
 
         let msg = encode_to_vec(Request::Sync(target), config::standard()).unwrap();
-        for &peer in &bootstrap_config.peers {
-            req_resp.send_request(peer, msg.clone()).await;
+        for peer in &peers {
+            req_resp.send_request(*peer, msg.clone()).await;
         }
 
-        let graph = tokio::time::timeout(bootstrap_config.timeout, async {
+        let graph = tokio::time::timeout(timeout, async {
             while let Some(msg) = rx.recv().await {
                 let Message::Response { response, peer } = &msg else {
                     continue;
                 };
 
-                if !bootstrap_config.peers.contains(peer) {
+                if !peers.contains(peer) {
                     continue;
                 }
 
@@ -149,7 +139,6 @@ impl<V: Validator> Engine<V> {
                     return Ok(graph);
                 }
             }
-
             panic!("Channel closed before receiving response");
         })
         .await

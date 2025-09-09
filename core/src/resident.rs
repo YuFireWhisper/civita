@@ -66,8 +66,6 @@ impl<V: Validator> Resident<V> {
             vdf_params: config.vdf_params,
         };
 
-        let bootstrap_config = engine::BootstrapConfig { peers, timeout };
-
         let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
             heartbeat_interval: config.heartbeat_interval,
@@ -75,8 +73,9 @@ impl<V: Validator> Resident<V> {
 
         let engine = Engine::new(
             transport.clone(),
+            peers,
+            timeout,
             graph_config,
-            bootstrap_config,
             engine_config,
         )
         .await?;
