@@ -575,10 +575,11 @@ impl<V: Validator> Graph<V> {
             return Err(RejectReason::BlockInAtoms);
         }
 
-        if self
-            .vdf
-            .verify(&hash.to_bytes(), self.difficulty, &atom.nonce)
-            .is_err()
+        if std::panic::catch_unwind(|| {
+            self.vdf
+                .verify(&hash.to_bytes(), self.difficulty, &atom.nonce)
+        })
+        .is_err()
         {
             return Err(RejectReason::InvalidNonce);
         }
