@@ -234,6 +234,10 @@ impl Storage {
     {
         use bincode::{config, serde::encode_into_std_write};
 
+        // | difficulty: u64 | mmr: Mmr<Token> |
+        // | other_len: u32 | other_1: Vec<u8> | ... | other_n: Vec<u8> |
+        // | atom_len: u32 | atom_1: Vec<u8> | ... | atom_n: Vec<u8> |
+
         let mut buf = Vec::new();
 
         match idxs {
@@ -242,6 +246,7 @@ impl Storage {
                 let len = self.atoms.len() as u32;
                 encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
                 encode_into_std_write(&mmr, &mut buf, config::standard()).unwrap();
+                encode_into_std_write(0u32, &mut buf, config::standard()).unwrap();
                 encode_into_std_write(len, &mut buf, config::standard()).unwrap();
                 self.atoms.values().flatten().for_each(|(_, v)| {
                     encode_into_std_write(v, &mut buf, config::standard()).unwrap();
@@ -252,18 +257,20 @@ impl Storage {
                     let len = self.atoms.len() as u32;
                     encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
                     encode_into_std_write(&self.mmr, &mut buf, config::standard()).unwrap();
+                    encode_into_std_write(0u32, &mut buf, config::standard()).unwrap();
                     encode_into_std_write(len, &mut buf, config::standard()).unwrap();
                     self.atoms.values().flatten().for_each(|(_, v)| {
                         encode_into_std_write(v, &mut buf, config::standard()).unwrap();
                     });
                 } else {
-                    let tmp = &self.others.front().unwrap();
-                    let len = self.others.len() as u32 - 1;
-                    encode_into_std_write(tmp, &mut buf, config::standard()).unwrap();
-                    encode_into_std_write(len, &mut buf, config::standard()).unwrap();
-                    self.others.iter().skip(1).for_each(|v| {
+                    let other_len = self.others.len() as u32;
+                    let len = self.atoms.len() as u32;
+                    buf.extend_from_slice(&self.others.front().unwrap().0);
+                    encode_into_std_write(other_len, &mut buf, config::standard()).unwrap();
+                    self.others.iter().for_each(|v| {
                         encode_into_std_write(&v.1, &mut buf, config::standard()).unwrap();
                     });
+                    encode_into_std_write(len, &mut buf, config::standard()).unwrap();
                     self.atoms.values().flatten().for_each(|(_, v)| {
                         encode_into_std_write(v, &mut buf, config::standard()).unwrap();
                     });
@@ -282,34 +289,59 @@ impl Storage {
 
         let difficulty = decode_from_std_read(&mut data, config::standard())?;
         let mmr = decode_from_std_read(&mut data, config::standard())?;
-        let len: u32 = decode_from_std_read(&mut data, config::standard())?;
+        let mut atoms = VecDeque::new();
 
-        if len == 0 {
-            return Err(Error::Decode(DecodeError::Other("Atom length is zero")));
+        {
+            let len: u32 = decode_from_std_read(&mut data, config::standard())?;
+            if let StorageMode::General(_) = config.storage_mode {
+                if len != 0 {
+                    return Err(Error::Decode(DecodeError::Other(
+                        "Non-zero other length in General mode",
+                    )));
+                }
+            }
+
+            for _ in 0..len {
+                let bytes: Vec<u8> = decode_from_std_read(&mut data, config::standard())?;
+                let mut data = bytes.as_slice();
+
+                let len: u32 = decode_from_std_read(&mut data, config::standard())?;
+                for _ in 0..len {
+                    let bytes: Vec<u8> = decode_from_std_read(&mut data, config::standard())?;
+                    let atom: Atom = decode_from_slice(&bytes, config::standard())?.0;
+                    atoms.push_back(atom);
+                }
+            }
         }
 
-        let atom_bytes: Vec<u8> = decode_from_std_read(&mut data, config::standard())?;
-        let atom = decode_from_slice::<Atom, _>(&atom_bytes, config::standard())?.0;
+        {
+            let len = decode_from_std_read(&mut data, config::standard())?;
+            if len == 0 {
+                return Err(Error::Decode(DecodeError::Other("Atom length is zero")));
+            }
 
-        let mut atoms = Vec::new();
-        for _ in 1..len {
-            let atom_bytes: Vec<u8> = decode_from_std_read(&mut data, config::standard())?;
-            let atom = decode_from_slice::<Atom, _>(&atom_bytes, config::standard())?.0;
-            atoms.push(atom);
+            for _ in 0..len {
+                let bytes: Vec<u8> = decode_from_std_read(&mut data, config::standard())?;
+                let atom: Atom = decode_from_slice(&bytes, config::standard())?.0;
+                atoms.push_back(atom);
+            }
         }
 
-        Graph::new(atom, difficulty, mmr, atoms, config)
+        Graph::new(atoms.pop_front().unwrap(), difficulty, mmr, atoms, config)
     }
 }
 
 impl<V: Validator> Graph<V> {
-    pub fn new(
+    pub fn new<I>(
         atom: Atom,
         difficulty: u64,
         mmr: Mmr<Token>,
-        atoms: Vec<Atom>,
+        atoms: I,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = Atom>,
+    {
         let mut graph = {
             let entry = {
                 let indices = Self::resolve_related(&mmr, &config.storage_mode)
