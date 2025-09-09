@@ -50,12 +50,10 @@ enum Request {
 pub struct BootstrapConfig {
     pub peers: Vec<PeerId>,
     pub timeout: tokio::time::Duration,
-    pub topic: u8,
 }
 
 pub struct Config {
     pub gossip_topic: u8,
-    pub request_response_topic: u8,
     pub heartbeat_interval: Option<tokio::time::Duration>,
 }
 
@@ -65,7 +63,6 @@ pub struct Engine<V> {
     request_response: Arc<RequestResponse>,
 
     gossip_topic: u8,
-    req_resp_topic: u8,
 
     graph: RwLock<Graph<V>>,
 
@@ -85,11 +82,10 @@ impl<V: Validator> Engine<V> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let mut req_resp_rx = request_response.subscribe(config.request_response_topic);
+        let mut req_resp_rx = request_response.take_receiver().await.unwrap();
         let graph = Self::bootstrap(
             &request_response,
             &mut req_resp_rx,
-            config.request_response_topic,
             graph_config,
             bootstrap_config,
         )
@@ -101,7 +97,6 @@ impl<V: Validator> Engine<V> {
             gossipsub,
             request_response,
             gossip_topic: config.gossip_topic,
-            req_resp_topic: config.request_response_topic,
             graph: RwLock::new(graph),
             pending_atoms: DashMap::new(),
             atom_result_tx,
@@ -121,7 +116,6 @@ impl<V: Validator> Engine<V> {
     async fn bootstrap(
         req_resp: &RequestResponse,
         rx: &mut Receiver<Message>,
-        topic: u8,
         graph_config: graph::Config,
         bootstrap_config: BootstrapConfig,
     ) -> Result<Graph<V>> {
@@ -138,7 +132,7 @@ impl<V: Validator> Engine<V> {
 
         let msg = encode_to_vec(Request::Sync(target), config::standard()).unwrap();
         for &peer in &bootstrap_config.peers {
-            req_resp.send_request(peer, msg.clone(), topic).await;
+            req_resp.send_request(peer, msg.clone()).await;
         }
 
         let graph = tokio::time::timeout(bootstrap_config.timeout, async {
@@ -174,16 +168,15 @@ impl<V: Validator> Engine<V> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let req_resp_rx = request_response.subscribe(config.request_response_topic);
         let graph = Graph::with_genesis(atom, mmr, graph_config);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
+        let req_resp_rx = request_response.take_receiver().await.unwrap();
 
         let engine = Arc::new(Self {
             transport,
             gossipsub,
             request_response,
             gossip_topic: config.gossip_topic,
-            req_resp_topic: config.request_response_topic,
             graph: RwLock::new(graph),
             pending_atoms: DashMap::new(),
             atom_result_tx,
@@ -457,11 +450,7 @@ impl<V: Validator> Engine<V> {
             bincode::serde::encode_to_vec(&atoms, bincode::config::standard()).unwrap()
         };
 
-        if let Err(e) = self
-            .request_response
-            .send_response(channel, vec, self.req_resp_topic)
-            .await
-        {
+        if let Err(e) = self.request_response.send_response(channel, vec).await {
             log::error!("Failed to send response: {e}");
         }
     }
@@ -479,7 +468,7 @@ impl<V: Validator> Engine<V> {
 
         if let Err(e) = self
             .request_response
-            .send_response(channel, data.to_vec(), self.req_resp_topic)
+            .send_response(channel, data.to_vec())
             .await
         {
             log::error!("Failed to send response: {e}");

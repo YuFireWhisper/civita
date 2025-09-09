@@ -61,35 +61,21 @@ impl RequestResponse {
         }
     }
 
-    pub fn subscribe(&self, topic: u8) -> mpsc::Receiver<Message> {
+    pub async fn send_request(&self, peer_id: libp2p::PeerId, request: Vec<u8>) {
         match self {
-            Self::Network(n) => n.subscribe(topic),
+            Self::Network(n) => n.send_request(peer_id, request).await,
         }
     }
 
-    pub fn unsubscribe(&self, topic: u8) {
+    pub async fn send_response(&self, ch: ResponseChannel, response: Vec<u8>) -> Result<()> {
         match self {
-            Self::Network(n) => n.unsubscribe(topic),
+            Self::Network(n) => n.send_response(ch, response).await.map_err(Error::from),
         }
     }
 
-    pub async fn send_request(&self, peer_id: libp2p::PeerId, request: Vec<u8>, topic: u8) {
+    pub async fn take_receiver(&self) -> Option<mpsc::Receiver<Message>> {
         match self {
-            Self::Network(n) => n.send_request(peer_id, request, topic).await,
-        }
-    }
-
-    pub async fn send_response(
-        &self,
-        ch: ResponseChannel,
-        response: Vec<u8>,
-        topic: u8,
-    ) -> Result<()> {
-        match self {
-            Self::Network(n) => n
-                .send_response(ch, response, topic)
-                .await
-                .map_err(Error::from),
+            Self::Network(n) => n.take_receiver().await,
         }
     }
 }

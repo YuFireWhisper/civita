@@ -19,8 +19,6 @@ use crate::{
 };
 
 const GOSSIP_TOPIC: u8 = 0;
-const REQUEST_RESPONSE_TOPIC: u8 = 1;
-const BOOTSTRAP_TOPIC: u8 = 2;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -68,15 +66,10 @@ impl<V: Validator> Resident<V> {
             vdf_params: config.vdf_params,
         };
 
-        let bootstrap_config = engine::BootstrapConfig {
-            peers,
-            timeout,
-            topic: BOOTSTRAP_TOPIC,
-        };
+        let bootstrap_config = engine::BootstrapConfig { peers, timeout };
 
         let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
-            request_response_topic: REQUEST_RESPONSE_TOPIC,
             heartbeat_interval: config.heartbeat_interval,
         };
 
@@ -109,7 +102,6 @@ impl<V: Validator> Resident<V> {
 
         let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
-            request_response_topic: REQUEST_RESPONSE_TOPIC,
             heartbeat_interval: config.heartbeat_interval,
         };
 
