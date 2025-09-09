@@ -53,7 +53,6 @@ pub struct GenesisBuilder {
 }
 
 pub struct Resident<V> {
-    transport: Arc<Transport>,
     engine: Arc<Engine<V>>,
 }
 
@@ -134,16 +133,9 @@ impl<V: Validator> Resident<V> {
             heartbeat_interval: config.heartbeat_interval,
         };
 
-        let engine = Engine::new(
-            transport.clone(),
-            peers,
-            timeout,
-            graph_config,
-            engine_config,
-        )
-        .await?;
+        let engine = Engine::new(transport, peers, timeout, graph_config, engine_config).await?;
 
-        Ok(Self { transport, engine })
+        Ok(Self { engine })
     }
 
     pub async fn with_genesis(
@@ -168,9 +160,9 @@ impl<V: Validator> Resident<V> {
         };
 
         let engine =
-            Engine::with_genesis(transport.clone(), atom, mmr, graph_config, engine_config).await?;
+            Engine::with_genesis(transport, atom, mmr, graph_config, engine_config).await?;
 
-        Ok(Self { transport, engine })
+        Ok(Self { engine })
     }
 
     pub async fn propose(
