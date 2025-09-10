@@ -1018,6 +1018,7 @@ impl<V: Validator> Graph<V> {
             checkpoint: self.checkpoint,
             height: self.entries[&self.main_head].atom.height + 1,
             nonce: Vec::new(),
+            random: rand::random(),
             timestamp: SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

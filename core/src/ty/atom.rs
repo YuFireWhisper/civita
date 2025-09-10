@@ -27,6 +27,7 @@ pub struct Atom {
     pub checkpoint: Multihash,
     pub height: Height,
     pub nonce: Vec<u8>,
+    pub random: u64,
     pub timestamp: Timestamp,
     pub cmd: Option<Command>,
     pub atoms: Vec<Multihash>,
@@ -50,6 +51,7 @@ impl Atom {
         encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.nonce, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
@@ -64,6 +66,7 @@ impl Atom {
         encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
         buf

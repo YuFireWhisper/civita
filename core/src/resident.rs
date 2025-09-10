@@ -144,6 +144,8 @@ impl Builder {
                 .unwrap()
                 .as_secs();
 
+            let random: u64 = rand::random();
+
             let mut atom = Atom {
                 hash: Multihash::default(),
                 parent: Multihash::default(),
@@ -151,6 +153,7 @@ impl Builder {
                 height: 0,
                 nonce: vec![],
                 timestamp,
+                random,
                 cmd: Some(cmd),
                 atoms: vec![],
             };
