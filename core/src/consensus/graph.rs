@@ -562,15 +562,16 @@ impl<V: Validator> Graph<V> {
             atoms
         };
 
-        for parent in parents {
-            if self.dismissed.contains(&parent) {
+        for hash in parents {
+            if self.dismissed.contains(&hash) {
                 return Err(RejectReason::DismissedParent);
             }
 
-            let parent = self.entries.entry(parent).or_insert_with(|| {
-                missing.insert(parent);
-                Entry::default()
-            });
+            let parent = self.entries.entry(hash).or_default();
+
+            if parent.is_missing {
+                missing.insert(hash);
+            }
 
             parent.children.insert(hash);
         }
