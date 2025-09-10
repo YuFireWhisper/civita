@@ -373,7 +373,7 @@ impl<V: Validator> Engine<V> {
         }
 
         if !result.missing.is_empty() {
-            let req = Request::Atoms(result.missing.into_iter().collect());
+            let req = Request::Atoms(result.missing);
             let msg = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
             self.request_response.send_request(peer, msg).await;
         }
