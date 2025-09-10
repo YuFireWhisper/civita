@@ -481,7 +481,9 @@ impl<V: Validator> Engine<V> {
     async fn on_atom_ready(&self, atom: Atom) -> bool {
         let hash = atom.hash;
         let vec = bincode::serde::encode_to_vec(&atom, bincode::config::standard()).unwrap();
-        let result = self.graph.write().await.upsert(atom).unwrap();
+        let Some(result) = self.graph.write().await.upsert(atom) else {
+            return false;
+        };
 
         if !result.rejected.is_empty() {
             debug_assert!(result.rejected.len() == 1);
