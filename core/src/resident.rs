@@ -57,6 +57,7 @@ pub struct Builder {
 }
 
 pub struct Resident<V> {
+    transport: Arc<Transport>,
     engine: Arc<Engine<V>>,
 }
 
@@ -114,7 +115,7 @@ impl Builder {
 
     pub async fn build<V: Validator>(self) -> Result<Resident<V>> {
         let (keypair, listen_addr, config) = self.tx_info.expect("Transport info is required");
-        let tx = Arc::new(Transport::new(keypair, listen_addr, config).await?);
+        let transport = Arc::new(Transport::new(keypair, listen_addr, config).await?);
 
         let config = self.config.expect("Config is required");
         let graph_config = graph::Config {
@@ -156,13 +157,22 @@ impl Builder {
 
             atom.hash = Hasher::default().digest(&atom.hash_input());
 
-            let engine = Engine::with_genesis(tx, atom, mmr, graph_config, engine_config).await?;
-            return Ok(Resident { engine });
+            let engine =
+                Engine::with_genesis(transport.clone(), atom, mmr, graph_config, engine_config)
+                    .await?;
+            return Ok(Resident { transport, engine });
         }
 
         if let Some((peers, timeout)) = self.normal {
-            let engine = Engine::new(tx, peers, timeout, graph_config, engine_config).await?;
-            return Ok(Resident { engine });
+            let engine = Engine::new(
+                transport.clone(),
+                peers,
+                timeout,
+                graph_config,
+                engine_config,
+            )
+            .await?;
+            return Ok(Resident { transport, engine });
         }
 
         panic!("Either genesis info or normal info must be set");
@@ -184,5 +194,9 @@ impl<V: Validator> Resident<V> {
 
     pub async fn tokens(&self) -> Vec<Token> {
         self.engine.tokens().await
+    }
+
+    pub fn listen_addr(&self) -> Multiaddr {
+        self.transport.listen_addr()
     }
 }
