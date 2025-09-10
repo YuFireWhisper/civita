@@ -310,16 +310,19 @@ impl<V: Validator> Engine<V> {
             return;
         }
 
-        self.pending_atoms
-            .entry(atom.hash)
-            .or_default()
-            .push((Some(msg.id), msg.propagation_source));
-
-        self.on_recv_atom(atom).await;
+        self.on_recv_atom(atom, Some(msg.id), msg.propagation_source)
+            .await;
     }
 
-    async fn on_recv_atom(&self, atom: Atom) {
+    async fn on_recv_atom(&self, atom: Atom, msg_id: Option<MessageId>, peer: PeerId) {
         let hash = atom.hash;
+
+        for hash in atom.atoms.iter().chain(&[atom.hash, atom.parent]) {
+            self.pending_atoms
+                .entry(*hash)
+                .or_default()
+                .push((msg_id.clone(), peer));
+        }
 
         let Some(result) = self.graph.write().await.upsert(atom) else {
             log::info!("Atom {hash:?} is already existing");
@@ -368,6 +371,12 @@ impl<V: Validator> Engine<V> {
                 }
             }
         }
+
+        if !result.missing.is_empty() {
+            let req = Request::Atoms(result.missing.into_iter().collect());
+            let msg = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+            self.request_response.send_request(peer, msg).await;
+        }
     }
 
     async fn disconnect_peer(&self, source: PeerId) {
@@ -415,12 +424,7 @@ impl<V: Validator> Engine<V> {
                         return;
                     }
 
-                    self.pending_atoms
-                        .entry(atom.hash)
-                        .or_default()
-                        .push((None, peer));
-
-                    self.on_recv_atom(atom).await;
+                    self.on_recv_atom(atom, None, peer).await;
                 }
             }
         }
