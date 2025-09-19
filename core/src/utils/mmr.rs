@@ -26,8 +26,8 @@ struct Staged<T> {
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 pub struct Mmr<T> {
-    hashes: HashMap<u64, Multihash>,
-    indices: HashMap<Multihash, u64>,
+    idx_to_hash: HashMap<u64, Multihash>,
+    hash_to_idx: HashMap<Multihash, u64>,
     leaves: HashMap<Multihash, T>,
     next: u64,
     staged: Staged<T>,
@@ -50,8 +50,9 @@ impl<T> Mmr<T> {
             return false;
         };
 
-        self.hashes.extend(fills.clone());
-        self.indices.extend(fills.into_iter().map(|(k, v)| (v, k)));
+        self.idx_to_hash.extend(fills.clone());
+        self.hash_to_idx
+            .extend(fills.into_iter().map(|(k, v)| (v, k)));
         self.staged.deletes.insert(hash);
 
         true
@@ -93,7 +94,7 @@ impl<T> Mmr<T> {
 
             g += 1;
 
-            if self.hashes.get(&idx).is_some_and(|h| h != &acc) {
+            if self.idx_to_hash.get(&idx).is_some_and(|h| h != &acc) {
                 return None;
             }
         }
@@ -105,8 +106,8 @@ impl<T> Mmr<T> {
         let staged = std::mem::take(&mut self.staged);
 
         staged.deletes.into_iter().for_each(|hash| {
-            let idx = self.indices.remove(&hash).unwrap();
-            self.hashes.insert(idx, Multihash::default());
+            let idx = self.hash_to_idx.remove(&hash).unwrap();
+            self.idx_to_hash.insert(idx, Multihash::default());
             self.leaves.remove(&hash);
             self.recalculate_parents(idx);
         });
@@ -118,7 +119,11 @@ impl<T> Mmr<T> {
             while index_height(i) > g {
                 let il = i - (2u64 << g);
                 let ir = i - 1;
-                i = self.insert(hash_pospair(i + 1, &self.hashes[&il], &self.hashes[&ir]));
+                i = self.insert(hash_pospair(
+                    i + 1,
+                    &self.idx_to_hash[&il],
+                    &self.idx_to_hash[&ir],
+                ));
                 g += 1;
             }
 
@@ -139,27 +144,27 @@ impl<T> Mmr<T> {
             if index_height(idx + 1) > g {
                 idx += 1;
                 let is = idx - offset;
-                let s = self.hashes[&is];
+                let s = self.idx_to_hash[&is];
                 let h = hash_pospair(idx + 1, &s, &c);
-                self.hashes.insert(idx, h);
-                self.indices.insert(h, idx);
+                self.idx_to_hash.insert(idx, h);
+                self.hash_to_idx.insert(h, idx);
             } else {
                 idx += offset;
                 let is = idx - 1;
-                let s = self.hashes[&is];
+                let s = self.idx_to_hash[&is];
                 let h = hash_pospair(idx + 1, &c, &s);
-                self.hashes.insert(idx, h);
-                self.indices.insert(h, idx);
+                self.idx_to_hash.insert(idx, h);
+                self.hash_to_idx.insert(h, idx);
             }
 
             g += 1;
-            c = self.hashes[&idx];
+            c = self.idx_to_hash[&idx];
         }
     }
 
     fn insert(&mut self, hash: Multihash) -> u64 {
-        self.hashes.insert(self.next, hash);
-        self.indices.insert(hash, self.next);
+        self.idx_to_hash.insert(self.next, hash);
+        self.hash_to_idx.insert(hash, self.next);
         self.next += 1;
         self.next
     }
@@ -169,7 +174,7 @@ impl<T> Mmr<T> {
     }
 
     pub fn prove(&self, hash: Multihash) -> Option<MmrProof> {
-        let mut idx = self.indices.get(&hash).cloned()?;
+        let mut idx = self.hash_to_idx.get(&hash).cloned()?;
         let tmp = idx;
 
         let (peak, last) = peak_range(self.peaks(), &idx);
@@ -195,7 +200,7 @@ impl<T> Mmr<T> {
                 return Some(MmrProof::new(proof, tmp));
             }
 
-            proof.push(self.hashes.get(&is).copied().unwrap_or_default());
+            proof.push(self.idx_to_hash.get(&is).copied().unwrap_or_default());
             g += 1;
         }
     }
@@ -223,7 +228,7 @@ impl<T> Mmr<T> {
         let mut leaves = HashMap::new();
 
         self.peaks().clone().into_iter().for_each(|p| {
-            let h = self.hashes[&p];
+            let h = self.idx_to_hash[&p];
             hashes.insert(p, h);
             indices.insert(h, p);
             if let Some(v) = self.leaves.remove(&h) {
@@ -236,7 +241,7 @@ impl<T> Mmr<T> {
                 continue;
             }
 
-            let mut idx = if let Some(idx) = self.indices.get(&hash) {
+            let mut idx = if let Some(idx) = self.hash_to_idx.get(&hash) {
                 *idx
             } else {
                 return false;
@@ -248,8 +253,8 @@ impl<T> Mmr<T> {
                     break;
                 }
 
-                let hash = self.hashes.remove(&idx).unwrap();
-                self.indices.remove(&hash);
+                let hash = self.idx_to_hash.remove(&idx).unwrap();
+                self.hash_to_idx.remove(&hash);
                 hashes.insert(idx, hash);
                 indices.insert(hash, idx);
 
@@ -266,8 +271,8 @@ impl<T> Mmr<T> {
                     &idx - 1
                 };
 
-                let hash = self.hashes.remove(&is).unwrap();
-                self.indices.remove(&hash);
+                let hash = self.idx_to_hash.remove(&is).unwrap();
+                self.hash_to_idx.remove(&hash);
                 hashes.insert(is, hash);
                 indices.insert(hash, is);
 
@@ -279,8 +284,8 @@ impl<T> Mmr<T> {
             }
         }
 
-        self.hashes = hashes;
-        self.indices = indices;
+        self.idx_to_hash = hashes;
+        self.hash_to_idx = indices;
         self.leaves = leaves;
 
         true
@@ -301,7 +306,7 @@ impl<T: Clone> Mmr<T> {
         let mut leaves: HashMap<Multihash, T> = HashMap::new();
 
         self.peaks().iter().copied().for_each(|p| {
-            let h = self.hashes[&p];
+            let h = self.idx_to_hash[&p];
             hashes.insert(p, h);
             indices.insert(h, p);
             if let Some(v) = self.leaves.get(&h) {
@@ -314,7 +319,7 @@ impl<T: Clone> Mmr<T> {
                 continue;
             }
 
-            let mut idx = self.indices.get(&hash).cloned()?;
+            let mut idx = self.hash_to_idx.get(&hash).cloned()?;
             let mut g = index_height(idx);
 
             loop {
@@ -322,7 +327,7 @@ impl<T: Clone> Mmr<T> {
                     break;
                 }
 
-                let hash = *self.hashes.get(&idx).unwrap();
+                let hash = *self.idx_to_hash.get(&idx).unwrap();
                 hashes.insert(idx, hash);
                 indices.insert(hash, idx);
 
@@ -339,7 +344,7 @@ impl<T: Clone> Mmr<T> {
                     idx - 1
                 };
 
-                let hash = *self.hashes.get(&is).unwrap();
+                let hash = *self.idx_to_hash.get(&is).unwrap();
                 hashes.insert(is, hash);
                 indices.insert(hash, is);
 
@@ -352,8 +357,8 @@ impl<T: Clone> Mmr<T> {
         }
 
         Some(Mmr {
-            hashes,
-            indices,
+            idx_to_hash: hashes,
+            hash_to_idx: indices,
             leaves,
             next: self.next,
             staged: Staged::default(),
@@ -407,8 +412,8 @@ fn peak_range(peaks: &[u64], idx: &u64) -> (u64, u64) {
 impl<T: Clone> Clone for Mmr<T> {
     fn clone(&self) -> Self {
         Self {
-            hashes: self.hashes.clone(),
-            indices: self.indices.clone(),
+            idx_to_hash: self.idx_to_hash.clone(),
+            hash_to_idx: self.hash_to_idx.clone(),
             leaves: self.leaves.clone(),
             next: self.next,
             peaks: self.peaks.clone(),
@@ -423,7 +428,7 @@ impl<T: serde::Serialize> serde::Serialize for Mmr<T> {
         S: serde::Serializer,
     {
         let map: HashMap<&Multihash, (&u64, Option<&T>)> = self
-            .indices
+            .hash_to_idx
             .iter()
             .map(|(k, idx)| (k, (idx, self.leaves.get(k))))
             .collect();
@@ -454,8 +459,8 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
         }
 
         Ok(Mmr {
-            hashes,
-            indices,
+            idx_to_hash: hashes,
+            hash_to_idx: indices,
             leaves,
             next,
             staged: Staged::default(),
@@ -665,8 +670,8 @@ mod test {
         let vec = encode_to_vec(&mmr, config::standard()).unwrap();
         let (mmr2, _) = decode_from_slice::<Mmr<i32>, _>(&vec, config::standard()).unwrap();
 
-        assert!(mmr.hashes == mmr2.hashes);
-        assert!(mmr.indices == mmr2.indices);
+        assert!(mmr.idx_to_hash == mmr2.idx_to_hash);
+        assert!(mmr.hash_to_idx == mmr2.hash_to_idx);
         assert!(mmr.leaves == mmr2.leaves);
         assert!(mmr.next == mmr2.next);
         assert!(mmr.peaks() == mmr2.peaks());
