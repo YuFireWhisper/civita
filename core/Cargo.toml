@@ -31,5 +31,6 @@ multihash = { version = "0.19", features = ["serde"] }
 multihash-derive = "0.9"
 multihash-codetable = { version = "0.1", features = ["sha2", "sha3", "blake3"] }
 rand = "0.9"
+rocksdb = "0.24"
 
 [dev-dependencies]
