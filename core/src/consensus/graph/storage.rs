@@ -18,7 +18,7 @@ use crate::{
 
 #[derive(Clone, Copy)]
 #[derive(PartialEq, Eq)]
-pub enum StorageMode {
+pub enum Mode {
     General(PeerId),
     Archive(u32),
 }
@@ -28,15 +28,15 @@ pub struct Storage {
     pub mmr: Mmr<Token>,
     pub atoms: BTreeMap<Height, HashMap<Multihash, Vec<u8>>>,
     pub others: VecDeque<(Vec<u8>, Vec<u8>)>,
-    pub mode: StorageMode,
+    pub mode: Mode,
 }
 
-impl StorageMode {
+impl Mode {
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u32 {
         match self {
-            StorageMode::General(_) => 1,
-            StorageMode::Archive(l) => *l,
+            Mode::General(_) => 1,
+            Mode::Archive(l) => *l,
         }
     }
 }
@@ -151,7 +151,7 @@ impl Storage {
 
         {
             let len: u32 = decode_from_std_read(&mut data, config::standard())?;
-            if let StorageMode::General(_) = config.storage_mode {
+            if let Mode::General(_) = config.storage_mode {
                 if len != 0 {
                     return Err(graph::Error::Decode(DecodeError::Other(
                         "Non-zero other length in General mode",

@@ -22,7 +22,7 @@ use crate::{
 
 mod storage;
 
-pub use storage::StorageMode;
+pub use storage::Mode as StorageMode;
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
