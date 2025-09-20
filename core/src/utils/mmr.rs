@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::OnceLock,
-};
+use std::{collections::HashMap, sync::OnceLock};
 
 use derivative::Derivative;
 use multihash_derive::MultihashDigest;
@@ -18,19 +15,12 @@ pub struct MmrProof {
 
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
-struct Staged<T> {
-    appends: Vec<(Multihash, T)>,
-    deletes: HashSet<Multihash>,
-}
-
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
 pub struct Mmr<T> {
     idx_to_hash: HashMap<u64, Multihash>,
     hash_to_idx: HashMap<Multihash, u64>,
     leaves: HashMap<Multihash, T>,
     next: u64,
-    staged: Staged<T>,
+    staged: Vec<(Multihash, Option<T>)>,
     peaks: OnceLock<Vec<u64>>,
 }
 
@@ -42,24 +32,23 @@ impl MmrProof {
 
 impl<T> Mmr<T> {
     pub fn append(&mut self, hash: Multihash, value: T) {
-        self.staged.appends.push((hash, value));
+        self.staged.push((hash, Some(value)));
     }
 
     pub fn delete(&mut self, hash: Multihash, proof: &MmrProof) -> bool {
-        let Some(fills) = self.resolve(&hash, proof) else {
+        let Some(fs) = self.resolve(&hash, proof) else {
             return false;
         };
 
-        self.idx_to_hash.extend(fills.clone());
-        self.hash_to_idx
-            .extend(fills.into_iter().map(|(k, v)| (v, k)));
-        self.staged.deletes.insert(hash);
+        self.idx_to_hash.extend(fs.clone());
+        self.hash_to_idx.extend(fs.into_iter().map(|(k, v)| (v, k)));
+        self.staged.push((hash, None));
 
         true
     }
 
     fn resolve(&self, hash: &Multihash, proof: &MmrProof) -> Option<HashMap<u64, Multihash>> {
-        if hash == &Multihash::default() || self.staged.deletes.contains(hash) {
+        if hash == &Multihash::default() {
             return None;
         }
 
@@ -105,29 +94,31 @@ impl<T> Mmr<T> {
     pub fn commit(&mut self) {
         let staged = std::mem::take(&mut self.staged);
 
-        staged.deletes.into_iter().for_each(|hash| {
-            let idx = self.hash_to_idx.remove(&hash).unwrap();
-            self.idx_to_hash.insert(idx, Multihash::default());
-            self.leaves.remove(&hash);
-            self.recalculate_parents(idx);
-        });
+        staged.into_iter().for_each(|(h, v)| {
+            if let Some(v) = v {
+                // Insertion
+                let mut g = 0usize;
+                let mut i = self.insert(h);
 
-        staged.appends.into_iter().for_each(|(h, v)| {
-            let mut g = 0usize;
-            let mut i = self.insert(h);
+                while index_height(i) > g {
+                    let il = i - (2u64 << g);
+                    let ir = i - 1;
+                    i = self.insert(hash_pospair(
+                        i + 1,
+                        &self.idx_to_hash[&il],
+                        &self.idx_to_hash[&ir],
+                    ));
+                    g += 1;
+                }
 
-            while index_height(i) > g {
-                let il = i - (2u64 << g);
-                let ir = i - 1;
-                i = self.insert(hash_pospair(
-                    i + 1,
-                    &self.idx_to_hash[&il],
-                    &self.idx_to_hash[&ir],
-                ));
-                g += 1;
+                self.leaves.insert(h, v);
+            } else {
+                // Deletion
+                let idx = self.hash_to_idx.remove(&h).unwrap();
+                self.idx_to_hash.insert(idx, Multihash::default());
+                self.leaves.remove(&h);
+                self.recalculate_parents(idx);
             }
-
-            self.leaves.insert(h, v);
         });
 
         self.peaks = OnceLock::new();
@@ -361,7 +352,7 @@ impl<T: Clone> Mmr<T> {
             hash_to_idx: indices,
             leaves,
             next: self.next,
-            staged: Staged::default(),
+            staged: Vec::new(),
             peaks: self.peaks.clone(),
         })
     }
@@ -463,7 +454,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
             hash_to_idx: indices,
             leaves,
             next,
-            staged: Staged::default(),
+            staged: Vec::new(),
             peaks: {
                 let lock = OnceLock::new();
                 lock.set(peaks).unwrap();
