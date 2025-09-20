@@ -152,16 +152,6 @@ pub struct Graph<V> {
     _marker: std::marker::PhantomData<V>,
 }
 
-impl StorageMode {
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> u32 {
-        match self {
-            StorageMode::General(_) => 1,
-            StorageMode::Archive(l) => *l,
-        }
-    }
-}
-
 impl Entry {
     pub fn new(atom: Atom) -> Self {
         Self {

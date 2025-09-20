@@ -31,6 +31,16 @@ pub struct Storage {
     pub mode: StorageMode,
 }
 
+impl StorageMode {
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> u32 {
+        match self {
+            StorageMode::General(_) => 1,
+            StorageMode::Archive(l) => *l,
+        }
+    }
+}
+
 impl Storage {
     pub fn push_atom(&mut self, atom: &Atom) {
         use bincode::{config, serde::encode_to_vec};
