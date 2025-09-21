@@ -1,5 +1,5 @@
 use bincode::error::DecodeError;
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, DB};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, SstFileWriter, DB};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -36,6 +36,9 @@ pub enum Error {
 
     #[error("Attempting to put non-strictly increasing epoch")]
     NonStrictlyIncreasingPut,
+
+    #[error("Export epoch exceeds current snapshot end")]
+    ExportEpochExceedsSnapshotEnd,
 }
 
 #[derive(Clone, Copy)]
@@ -235,91 +238,78 @@ impl Storage {
         Ok(())
     }
 
-    // pub fn export_to_sst<P: AsRef<Path>>(
-    //     &self,
-    //     start_epoch: u32,
-    //     atoms: Vec<Atom>,
-    //     mmr: Option<Mmr<Token>>,
-    //     path: P,
-    // ) -> Result<()> {
-    //     let mut known_epochs = self.get_all_epochs()?;
-    //
-    //     if known_epochs.is_empty() {
-    //         return Err(Error::NoEpochsFound);
-    //     }
-    //
-    //     known_epochs.sort_unstable();
-    //     let min_known = *known_epochs.first().unwrap();
-    //     let max_known = *known_epochs.last().unwrap();
-    //
-    //     let actual_start = start_epoch.max(min_known);
-    //
-    //     let path_str = path.as_ref().to_string_lossy().to_string();
-    //     let opt = Options::default();
-    //     let mut sst_writer = SstFileWriter::create(&opt);
-    //     sst_writer.open(&path_str)?;
-    //
-    //     self.write_first_snapshot_to_sst(&mut sst_writer, actual_start, mmr)?;
-    //     self.write_epochs_to_sst(&mut sst_writer, actual_start, max_known)?;
-    //
-    //     let next_epoch = max_known + 1;
-    //     let key = Key::Epoch(next_epoch);
-    //     let value = Value::Epoch { atoms };
-    //     sst_writer.put(key.to_bytes(), value.to_bytes())?;
-    //
-    //     sst_writer.finish()?;
-    //
-    //     Ok(())
-    // }
-    //
-    // fn write_first_snapshot_to_sst(
-    //     &self,
-    //     sst_writer: &mut SstFileWriter,
-    //     first_epoch: u32,
-    //     replacement_mmr: Option<Mmr<Token>>,
-    // ) -> Result<()> {
-    //     use bincode::{config, serde::decode_from_slice};
-    //
-    //     let cf_name = ColumnName::Snapshot.to_string();
-    //     let cf = self.db.cf_handle(&cf_name).unwrap();
-    //
-    //     let key = first_epoch.to_be_bytes();
-    //     let value = self.db.get_cf(cf, &key)?.unwrap();
-    //     let mut value: Value = decode_from_slice(&value, config::standard())?.0;
-    //
-    //     if let Some(mmr) = replacement_mmr {
-    //         if let Value::Snapshot { mmr: ori, .. } = &mut value {
-    //             *ori = mmr;
-    //         } else {
-    //             panic!("Expected a Snapshot value");
-    //         }
-    //     }
-    //
-    //     let key = Key::Snapshot(first_epoch);
-    //     sst_writer.put(key.to_bytes(), value.to_bytes())?;
-    //
-    //     Ok(())
-    // }
-    //
-    // fn write_epochs_to_sst(
-    //     &self,
-    //     sst_writer: &mut SstFileWriter,
-    //     start: u32,
-    //     end: u32,
-    // ) -> Result<()> {
-    //     let cf_name = ColumnName::Epochs.to_string();
-    //     let cf = self.db.cf_handle(&cf_name).unwrap();
-    //
-    //     for epoch in start..=end {
-    //         let key = epoch.to_be_bytes();
-    //         if let Some(value) = self.db.get_cf(cf, &key)? {
-    //             let key = Key::Epoch(epoch);
-    //             sst_writer.put(key.to_bytes(), &value)?;
-    //         }
-    //     }
-    //
-    //     Ok(())
-    // }
+    pub fn export_to_sst(
+        &self,
+        epoch: u32,
+        atoms: Vec<Atom>,
+        mmr: Option<Mmr<Token>>,
+        path: &str,
+    ) -> Result<()> {
+        if epoch > self.snapshot_end {
+            return Err(Error::ExportEpochExceedsSnapshotEnd);
+        }
+
+        let start = self.start.max(epoch);
+
+        let opt = Options::default();
+        let mut sst_writer = SstFileWriter::create(&opt);
+        sst_writer.open(&path)?;
+
+        self.write_first_snapshot_to_sst(&mut sst_writer, start, mmr)?;
+        self.write_epochs_to_sst(&mut sst_writer, start)?;
+
+        let key = Key::Epoch(self.snapshot_end).to_bytes();
+        let value = Value::Epoch { atoms }.to_bytes();
+        sst_writer.put(key, value)?;
+
+        sst_writer.finish()?;
+
+        Ok(())
+    }
+
+    fn write_first_snapshot_to_sst(
+        &self,
+        writer: &mut SstFileWriter,
+        epoch: u32,
+        replacement_mmr: Option<Mmr<Token>>,
+    ) -> Result<()> {
+        use bincode::{config, serde::decode_from_slice};
+
+        let cf_name = ColumnName::Snapshot.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+
+        let key = epoch.to_be_bytes();
+        let value = self.db.get_cf(cf, &key)?.unwrap();
+        let mut value: Value = decode_from_slice(&value, config::standard())?.0;
+
+        if let Some(mmr) = replacement_mmr {
+            if let Value::Snapshot { mmr: ori, .. } = &mut value {
+                *ori = mmr;
+            } else {
+                panic!("Expected a Snapshot value");
+            }
+        }
+
+        let key = Key::Snapshot(epoch);
+        writer.put(key.to_bytes(), value.to_bytes())?;
+
+        Ok(())
+    }
+
+    fn write_epochs_to_sst(&self, sst_writer: &mut SstFileWriter, start: u32) -> Result<()> {
+        let cf_name = ColumnName::Epochs.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+
+        for epoch in start..=self.epoch_end {
+            let key = epoch.to_be_bytes();
+            if let Some(value) = self.db.get_cf(cf, &key)? {
+                let key = Key::Epoch(epoch);
+                sst_writer.put(key.to_bytes(), &value)?;
+            }
+        }
+
+        Ok(())
+    }
 
     pub fn current_number(&self) -> u32 {
         self.snapshot_end
