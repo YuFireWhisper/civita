@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use bincode::error::DecodeError;
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, SstFileWriter, DB};
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +8,10 @@ use crate::{
     ty::{atom::Atom, token::Token},
     utils::mmr::Mmr,
 };
+
+mod sst_reader;
+
+pub use sst_reader::SstReader;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -61,7 +66,7 @@ impl Key {
         encode_to_vec(self, config::standard()).expect("Failed to serialize key")
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         use bincode::{config, serde::decode_from_slice};
         Ok(decode_from_slice(bytes, config::standard())?.0)
     }
@@ -78,6 +83,11 @@ impl Value {
     pub fn to_bytes(&self) -> Vec<u8> {
         use bincode::{config, serde::encode_to_vec};
         encode_to_vec(self, config::standard()).expect("Failed to serialize value")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        use bincode::{config, serde::decode_from_slice};
+        Ok(decode_from_slice(bytes, config::standard())?.0)
     }
 }
 
