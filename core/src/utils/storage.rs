@@ -1,3 +1,11 @@
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, DB};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    ty::{atom::Atom, token::Token},
+    utils::mmr::Mmr,
+};
+
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
@@ -6,73 +14,150 @@ pub enum Error {
     #[error(transparent)]
     RocksDb(#[from] rocksdb::Error),
 
-    #[error("Directory not found")]
-    DirNotFound,
+    #[error(transparent)]
+    Decode(#[from] bincode::error::DecodeError),
+
+    #[error("Invalid Key format")]
+    InvalidKeyFormat,
 }
 
-pub trait Storage {
-    fn put<K, V>(&self, key: K, value: V) -> Result<()>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>;
-    fn put_with_dir<K, V>(&self, dir: &str, key: K, value: V) -> Result<()>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>;
-    fn get<K>(&self, key: K) -> Result<Option<Vec<u8>>>
-    where
-        K: AsRef<[u8]>;
-    fn get_with_dir<K>(&self, dir: &str, key: K) -> Result<Option<Vec<u8>>>
-    where
-        K: AsRef<[u8]>;
-    fn write<K, V, I>(&self, items: I) -> Result<()>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-        I: IntoIterator<Item = (K, V)>;
+#[derive(Clone, Copy)]
+enum ColumnName {
+    Snapshot,
+    Epochs,
 }
 
-impl Storage for rocksdb::DB {
-    fn put<K, V>(&self, key: K, value: V) -> Result<()>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-    {
-        self.put(key, value).map_err(Error::from)
+#[derive(Clone, Copy)]
+#[derive(Serialize, Deserialize)]
+pub enum Key {
+    Snapshot(u32),
+    Epoch(u32),
+}
+
+#[derive(Clone)]
+#[derive(Serialize, Deserialize)]
+pub enum Value {
+    Snapshot { difficulty: u64, mmr: Mmr<Token> },
+    Epoch { atoms: Vec<Atom> },
+}
+
+pub struct Storage(DB);
+
+impl Key {
+    pub fn to_column(&self) -> ColumnName {
+        match self {
+            Key::Snapshot(_) => ColumnName::Snapshot,
+            Key::Epoch(_) => ColumnName::Epochs,
+        }
     }
 
-    fn put_with_dir<K, V>(&self, dir: &str, key: K, value: V) -> Result<()>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-    {
-        let cf = self.cf_handle(dir).ok_or(Error::DirNotFound)?;
-        self.put_cf(cf, key, value).map_err(Error::from)
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use bincode::{config, serde::encode_to_vec};
+        encode_to_vec(self, config::standard()).expect("Failed to serialize key")
     }
 
-    fn get<K>(&self, key: K) -> Result<Option<Vec<u8>>>
-    where
-        K: AsRef<[u8]>,
-    {
-        self.get(key).map_err(Error::from)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        use bincode::{config, serde::decode_from_slice};
+        Ok(decode_from_slice(bytes, config::standard())?.0)
     }
 
-    fn get_with_dir<K>(&self, dir: &str, key: K) -> Result<Option<Vec<u8>>>
-    where
-        K: AsRef<[u8]>,
-    {
-        let cf = self.cf_handle(dir).ok_or(Error::DirNotFound)?;
-        self.get_cf(cf, key).map_err(Error::from)
+    pub fn epoch(&self) -> u32 {
+        match self {
+            Key::Snapshot(epoch) => *epoch,
+            Key::Epoch(epoch) => *epoch,
+        }
+    }
+}
+
+impl Value {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use bincode::{config, serde::encode_to_vec};
+        encode_to_vec(self, config::standard()).expect("Failed to serialize value")
+    }
+}
+
+impl Storage {
+    pub fn new(path: &str) -> Result<Self> {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+
+        let s_cf = ColumnFamilyDescriptor::new(ColumnName::Snapshot, Options::default());
+        let e_cf = ColumnFamilyDescriptor::new(ColumnName::Epochs, Options::default());
+
+        DB::open_cf_descriptors(&opts, path, vec![s_cf, e_cf])
+            .map(Storage)
+            .map_err(Error::from)
     }
 
-    fn write<K, V, I>(&self, items: I) -> Result<()>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-        I: IntoIterator<Item = (K, V)>,
-    {
-        let mut batch = rocksdb::WriteBatch::default();
-        items.into_iter().for_each(|(k, v)| batch.put(k, v));
-        self.write(batch).map_err(Error::from)
+    pub fn put(&self, key: Key, value: Value) -> Result<()> {
+        let cf_name = key.to_column().to_string();
+        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
+
+        self.0
+            .put_cf(cf, key.epoch().to_be_bytes(), value.to_bytes())?;
+
+        Ok(())
+    }
+
+    pub fn prune(&self, len: u32) -> Result<()> {
+        let mut epochs = self.get_all_epochs()?;
+        epochs.sort_unstable();
+
+        let to_delete = &epochs[..epochs.len() - len as usize];
+        for epoch in to_delete {
+            self.delete_epoch(*epoch)?;
+            self.delete_snapshot(*epoch)?;
+        }
+
+        Ok(())
+    }
+
+    fn get_all_epochs(&self) -> Result<Vec<u32>> {
+        let cf_name = ColumnName::Snapshot.to_string();
+        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
+
+        let mut epochs = Vec::new();
+        let iter = self.0.iterator_cf(cf, IteratorMode::Start);
+
+        for item in iter {
+            let (bytes, _) = item?;
+            let arr: [u8; 4] = bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| Error::InvalidKeyFormat)?;
+            epochs.push(u32::from_be_bytes(arr));
+        }
+
+        Ok(epochs)
+    }
+
+    fn delete_snapshot(&self, epoch: u32) -> Result<()> {
+        let cf_name = ColumnName::Snapshot.to_string();
+        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
+        self.0.delete_cf(cf, epoch.to_be_bytes())?;
+        Ok(())
+    }
+
+    fn delete_epoch(&self, epoch: u32) -> Result<()> {
+        let cf_name = ColumnName::Epochs.to_string();
+        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
+        self.0.delete_cf(cf, epoch.to_be_bytes())?;
+        Ok(())
+    }
+}
+
+impl ToString for ColumnName {
+    fn to_string(&self) -> String {
+        match self {
+            ColumnName::Snapshot => "snapshot".to_string(),
+            ColumnName::Epochs => "epochs".to_string(),
+        }
+    }
+}
+
+impl From<ColumnName> for String {
+    fn from(col: ColumnName) -> Self {
+        col.to_string()
     }
 }
