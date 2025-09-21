@@ -1,7 +1,5 @@
-use std::path::Path;
-
 use bincode::error::DecodeError;
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, SstFileWriter, DB};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, DB};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -29,6 +27,15 @@ pub enum Error {
 
     #[error("No epochs found")]
     NoEpochsFound,
+
+    #[error("Snapshots are not strictly increasing")]
+    NonStrictlyIncreasingNumbers,
+
+    #[error("Invalid Count Relation between Snapshots and Epochs")]
+    InvalidCountRelation,
+
+    #[error("Attempting to put non-strictly increasing epoch")]
+    NonStrictlyIncreasingPut,
 }
 
 #[derive(Clone, Copy)]
@@ -51,7 +58,15 @@ pub enum Value {
     Epoch { atoms: Vec<Atom> },
 }
 
-pub struct Storage(DB);
+pub struct Storage {
+    db: DB,
+
+    start: u32,
+    snapshot_end: u32,
+    epoch_end: u32,
+
+    len: u32,
+}
 
 impl Key {
     pub fn to_column(&self) -> ColumnName {
@@ -92,7 +107,7 @@ impl Value {
 }
 
 impl Storage {
-    pub fn new(path: &str) -> Result<Self> {
+    pub fn new(len: u32, path: &str) -> Result<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -100,40 +115,54 @@ impl Storage {
         let s_cf = ColumnFamilyDescriptor::new(ColumnName::Snapshot, Options::default());
         let e_cf = ColumnFamilyDescriptor::new(ColumnName::Epochs, Options::default());
 
-        DB::open_cf_descriptors(&opts, path, vec![s_cf, e_cf])
-            .map(Storage)
-            .map_err(Error::from)
+        let db = DB::open_cf_descriptors(&opts, path, vec![s_cf, e_cf])?;
+
+        let mut storage = Storage {
+            db,
+            start: 0,
+            snapshot_end: 0,
+            epoch_end: 0,
+            len,
+        };
+
+        storage.initialize_bounds()?;
+
+        Ok(storage)
     }
 
-    pub fn put(&self, key: Key, value: Value) -> Result<()> {
-        let cf_name = key.to_column().to_string();
-        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
+    fn initialize_bounds(&mut self) -> Result<()> {
+        let snapshots = self.get_all_numbers(ColumnName::Snapshot)?;
+        let epochs = self.get_all_numbers(ColumnName::Epochs)?;
 
-        self.0
-            .put_cf(cf, key.epoch().to_be_bytes(), value.to_bytes())?;
+        if snapshots.is_empty() && epochs.is_empty() {
+            return Ok(());
+        }
 
-        Ok(())
-    }
+        if !snapshots.windows(2).all(|w| w[0] < w[1]) || !epochs.windows(2).all(|w| w[0] < w[1]) {
+            return Err(Error::NonStrictlyIncreasingNumbers);
+        }
 
-    pub fn prune(&self, len: u32) -> Result<()> {
-        let mut epochs = self.get_all_epochs()?;
-        epochs.sort_unstable();
+        if snapshots.len() != epochs.len() && snapshots.len() + 1 != epochs.len() {
+            return Err(Error::InvalidCountRelation);
+        }
 
-        let to_delete = &epochs[..epochs.len() - len as usize];
-        for epoch in to_delete {
-            self.delete_epoch(*epoch)?;
-            self.delete_snapshot(*epoch)?;
+        self.start = *snapshots.first().unwrap();
+        self.snapshot_end = *snapshots.last().unwrap();
+        self.epoch_end = *epochs.last().unwrap();
+
+        if self.snapshot_end - self.start + 1 > self.len {
+            self.prune()?;
         }
 
         Ok(())
     }
 
-    fn get_all_epochs(&self) -> Result<Vec<u32>> {
-        let cf_name = ColumnName::Snapshot.to_string();
-        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
+    fn get_all_numbers(&self, name: ColumnName) -> Result<Vec<u32>> {
+        let cf_name = name.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
 
         let mut epochs = Vec::new();
-        let iter = self.0.iterator_cf(cf, IteratorMode::Start);
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
 
         for item in iter {
             let (bytes, _) = item?;
@@ -144,115 +173,156 @@ impl Storage {
             epochs.push(u32::from_be_bytes(arr));
         }
 
+        epochs.sort_unstable();
         Ok(epochs)
     }
 
-    fn delete_snapshot(&self, epoch: u32) -> Result<()> {
-        let cf_name = ColumnName::Snapshot.to_string();
-        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
-        self.0.delete_cf(cf, epoch.to_be_bytes())?;
-        Ok(())
-    }
+    fn prune(&mut self) -> Result<()> {
+        let total = self.snapshot_end - self.start + 1;
 
-    fn delete_epoch(&self, epoch: u32) -> Result<()> {
-        let cf_name = ColumnName::Epochs.to_string();
-        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
-        self.0.delete_cf(cf, epoch.to_be_bytes())?;
-        Ok(())
-    }
-
-    pub fn export_to_sst<P: AsRef<Path>>(
-        &self,
-        start_epoch: u32,
-        atoms: Vec<Atom>,
-        mmr: Option<Mmr<Token>>,
-        path: P,
-    ) -> Result<()> {
-        let mut known_epochs = self.get_all_epochs()?;
-
-        if known_epochs.is_empty() {
-            return Err(Error::NoEpochsFound);
+        if total < self.len {
+            return Ok(());
         }
 
-        known_epochs.sort_unstable();
-        let min_known = *known_epochs.first().unwrap();
-        let max_known = *known_epochs.last().unwrap();
+        let end = self.start + total - self.len;
 
-        let actual_start = start_epoch.max(min_known);
+        for epoch in self.start..end {
+            self.delete_cf(ColumnName::Snapshot, epoch)?;
+            self.delete_cf(ColumnName::Epochs, epoch)?;
+        }
 
-        let path_str = path.as_ref().to_string_lossy().to_string();
-        let opt = Options::default();
-        let mut sst_writer = SstFileWriter::create(&opt);
-        sst_writer.open(&path_str)?;
-
-        self.write_first_snapshot_to_sst(&mut sst_writer, actual_start, mmr)?;
-        self.write_epochs_to_sst(&mut sst_writer, actual_start, max_known)?;
-
-        let next_epoch = max_known + 1;
-        let key = Key::Epoch(next_epoch);
-        let value = Value::Epoch { atoms };
-        sst_writer.put(key.to_bytes(), value.to_bytes())?;
-
-        sst_writer.finish()?;
+        self.start = end;
 
         Ok(())
     }
 
-    fn write_first_snapshot_to_sst(
-        &self,
-        sst_writer: &mut SstFileWriter,
-        first_epoch: u32,
-        replacement_mmr: Option<Mmr<Token>>,
-    ) -> Result<()> {
-        use bincode::{config, serde::decode_from_slice};
+    fn delete_cf(&self, name: ColumnName, epoch: u32) -> Result<()> {
+        let cf = self.db.cf_handle(&name.to_string()).unwrap();
+        self.db.delete_cf(cf, epoch.to_be_bytes())?;
+        Ok(())
+    }
 
-        let cf_name = ColumnName::Snapshot.to_string();
-        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
+    pub fn put(&mut self, key: Key, value: Value) -> Result<()> {
+        let epoch = key.epoch();
 
-        let key_bytes = first_epoch.to_be_bytes();
-        let original_value = self
-            .0
-            .get_cf(cf, &key_bytes)?
-            .expect("First snapshot must exist");
-
-        let value = if let Some(new_mmr) = replacement_mmr {
-            let original: Value = decode_from_slice(&original_value, config::standard())?.0;
-
-            match original {
-                Value::Snapshot { difficulty, .. } => Value::Snapshot {
-                    difficulty,
-                    mmr: new_mmr,
-                },
-                _ => unreachable!("Expected a Snapshot value"),
+        match key {
+            Key::Snapshot(_) => {
+                if epoch != self.snapshot_end + 1 || epoch.abs_diff(self.epoch_end) > 1 {
+                    return Err(Error::NonStrictlyIncreasingPut);
+                }
             }
-        } else {
-            decode_from_slice(&original_value, config::standard())?.0
-        };
-
-        let key = Key::Snapshot(first_epoch);
-        sst_writer.put(key.to_bytes(), value.to_bytes())?;
-
-        Ok(())
-    }
-
-    fn write_epochs_to_sst(
-        &self,
-        sst_writer: &mut SstFileWriter,
-        start: u32,
-        end: u32,
-    ) -> Result<()> {
-        let cf_name = ColumnName::Epochs.to_string();
-        let cf = self.0.cf_handle(&cf_name).expect("Column family not found");
-
-        for epoch in start..=end {
-            let key_bytes = epoch.to_be_bytes();
-            if let Some(value) = self.0.get_cf(cf, &key_bytes)? {
-                let key = Key::Epoch(epoch);
-                sst_writer.put(key.to_bytes(), &value)?;
+            Key::Epoch(_) => {
+                if epoch != self.epoch_end + 1 || epoch > self.snapshot_end {
+                    return Err(Error::NonStrictlyIncreasingPut);
+                }
             }
         }
 
+        let cf_name = key.to_column().to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+
+        self.db.put_cf(cf, epoch.to_be_bytes(), value.to_bytes())?;
+
+        match key {
+            Key::Snapshot(_) => self.snapshot_end = epoch,
+            Key::Epoch(_) => self.epoch_end = epoch,
+        }
+
+        if self.snapshot_end - self.start + 1 > self.len {
+            self.prune()?;
+        }
+
         Ok(())
+    }
+
+    // pub fn export_to_sst<P: AsRef<Path>>(
+    //     &self,
+    //     start_epoch: u32,
+    //     atoms: Vec<Atom>,
+    //     mmr: Option<Mmr<Token>>,
+    //     path: P,
+    // ) -> Result<()> {
+    //     let mut known_epochs = self.get_all_epochs()?;
+    //
+    //     if known_epochs.is_empty() {
+    //         return Err(Error::NoEpochsFound);
+    //     }
+    //
+    //     known_epochs.sort_unstable();
+    //     let min_known = *known_epochs.first().unwrap();
+    //     let max_known = *known_epochs.last().unwrap();
+    //
+    //     let actual_start = start_epoch.max(min_known);
+    //
+    //     let path_str = path.as_ref().to_string_lossy().to_string();
+    //     let opt = Options::default();
+    //     let mut sst_writer = SstFileWriter::create(&opt);
+    //     sst_writer.open(&path_str)?;
+    //
+    //     self.write_first_snapshot_to_sst(&mut sst_writer, actual_start, mmr)?;
+    //     self.write_epochs_to_sst(&mut sst_writer, actual_start, max_known)?;
+    //
+    //     let next_epoch = max_known + 1;
+    //     let key = Key::Epoch(next_epoch);
+    //     let value = Value::Epoch { atoms };
+    //     sst_writer.put(key.to_bytes(), value.to_bytes())?;
+    //
+    //     sst_writer.finish()?;
+    //
+    //     Ok(())
+    // }
+    //
+    // fn write_first_snapshot_to_sst(
+    //     &self,
+    //     sst_writer: &mut SstFileWriter,
+    //     first_epoch: u32,
+    //     replacement_mmr: Option<Mmr<Token>>,
+    // ) -> Result<()> {
+    //     use bincode::{config, serde::decode_from_slice};
+    //
+    //     let cf_name = ColumnName::Snapshot.to_string();
+    //     let cf = self.db.cf_handle(&cf_name).unwrap();
+    //
+    //     let key = first_epoch.to_be_bytes();
+    //     let value = self.db.get_cf(cf, &key)?.unwrap();
+    //     let mut value: Value = decode_from_slice(&value, config::standard())?.0;
+    //
+    //     if let Some(mmr) = replacement_mmr {
+    //         if let Value::Snapshot { mmr: ori, .. } = &mut value {
+    //             *ori = mmr;
+    //         } else {
+    //             panic!("Expected a Snapshot value");
+    //         }
+    //     }
+    //
+    //     let key = Key::Snapshot(first_epoch);
+    //     sst_writer.put(key.to_bytes(), value.to_bytes())?;
+    //
+    //     Ok(())
+    // }
+    //
+    // fn write_epochs_to_sst(
+    //     &self,
+    //     sst_writer: &mut SstFileWriter,
+    //     start: u32,
+    //     end: u32,
+    // ) -> Result<()> {
+    //     let cf_name = ColumnName::Epochs.to_string();
+    //     let cf = self.db.cf_handle(&cf_name).unwrap();
+    //
+    //     for epoch in start..=end {
+    //         let key = epoch.to_be_bytes();
+    //         if let Some(value) = self.db.get_cf(cf, &key)? {
+    //             let key = Key::Epoch(epoch);
+    //             sst_writer.put(key.to_bytes(), &value)?;
+    //         }
+    //     }
+    //
+    //     Ok(())
+    // }
+
+    pub fn current_number(&self) -> u32 {
+        self.snapshot_end
     }
 }
 
