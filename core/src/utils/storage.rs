@@ -37,9 +37,6 @@ pub enum Error {
     #[error("Attempting to put non-strictly increasing epoch")]
     NonStrictlyIncreasingPut,
 
-    #[error("Export epoch exceeds current snapshot end")]
-    ExportEpochExceedsSnapshotEnd,
-
     #[error("Cannot provide required data: remote needs data before local start")]
     CannotProvideRequiredData,
 
@@ -58,13 +55,6 @@ enum ColumnName {
 pub enum Key {
     Snapshot(u32),
     Epoch(u32),
-}
-
-#[derive(Clone)]
-#[derive(Serialize, Deserialize)]
-pub enum Value {
-    Snapshot { difficulty: u64, mmr: Mmr<Token> },
-    Epoch { atoms: Vec<Atom> },
 }
 
 pub struct Storage {
@@ -100,18 +90,6 @@ impl Key {
             Key::Snapshot(epoch) => *epoch,
             Key::Epoch(epoch) => *epoch,
         }
-    }
-}
-
-impl Value {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        use bincode::{config, serde::encode_to_vec};
-        encode_to_vec(self, config::standard()).expect("Failed to serialize value")
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        use bincode::{config, serde::decode_from_slice};
-        Ok(decode_from_slice(bytes, config::standard())?.0)
     }
 }
 
@@ -211,35 +189,40 @@ impl Storage {
         Ok(())
     }
 
-    pub fn put(&mut self, key: Key, value: Value) -> Result<()> {
-        let epoch = key.epoch();
+    pub fn put_snapshot(&mut self, epoch: u32, difficulty: u32, mmr: &Mmr<Token>) -> Result<()> {
+        use bincode::{config, serde::encode_to_vec};
 
-        match key {
-            Key::Snapshot(_) => {
-                if epoch != self.snapshot_end + 1 || epoch.abs_diff(self.epoch_end) > 1 {
-                    return Err(Error::NonStrictlyIncreasingPut);
-                }
-            }
-            Key::Epoch(_) => {
-                if epoch != self.epoch_end + 1 || epoch > self.snapshot_end {
-                    return Err(Error::NonStrictlyIncreasingPut);
-                }
-            }
+        if epoch != self.snapshot_end + 1 || epoch.abs_diff(self.epoch_end) > 1 {
+            return Err(Error::NonStrictlyIncreasingPut);
         }
 
-        let cf_name = key.to_column().to_string();
+        let cf_name = ColumnName::Snapshot.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
+        let bytes = encode_to_vec((difficulty, mmr), config::standard()).unwrap();
 
-        self.db.put_cf(cf, epoch.to_be_bytes(), value.to_bytes())?;
-
-        match key {
-            Key::Snapshot(_) => self.snapshot_end = epoch,
-            Key::Epoch(_) => self.epoch_end = epoch,
-        }
+        self.db.put_cf(cf, epoch.to_be_bytes(), bytes)?;
+        self.snapshot_end = epoch;
 
         if self.snapshot_end - self.start + 1 > self.len {
             self.prune()?;
         }
+
+        Ok(())
+    }
+
+    pub fn put_epoch(&mut self, epoch: u32, atoms: &[Atom]) -> Result<()> {
+        use bincode::{config, serde::encode_to_vec};
+
+        if epoch != self.epoch_end + 1 || epoch > self.snapshot_end {
+            return Err(Error::NonStrictlyIncreasingPut);
+        }
+
+        let cf_name = ColumnName::Epochs.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+        let bytes = encode_to_vec(&atoms, config::standard()).unwrap();
+
+        self.db.put_cf(cf, epoch.to_be_bytes(), bytes)?;
+        self.epoch_end = epoch;
 
         Ok(())
     }
@@ -283,9 +266,11 @@ impl Storage {
     fn export_full_from_start(
         &self,
         replacement_mmr: Option<Mmr<Token>>,
-        last_epoch_atoms: &[Atom],
+        atoms: &[Atom],
         path: &str,
     ) -> Result<()> {
+        use bincode::{config, serde::encode_to_vec};
+
         let opt = Options::default();
         let mut sst_writer = SstFileWriter::create(&opt);
         sst_writer.open(path)?;
@@ -296,22 +281,17 @@ impl Storage {
             self.write_epoch_to_sst(&mut sst_writer, epoch)?;
         }
 
-        let atoms_value = Value::Epoch {
-            atoms: last_epoch_atoms.to_vec(),
-        }
-        .to_bytes();
-        sst_writer.put(self.snapshot_end.to_be_bytes(), atoms_value)?;
+        let bytes = encode_to_vec(atoms, config::standard()).unwrap();
+        sst_writer.put(self.snapshot_end.to_be_bytes(), bytes)?;
 
         sst_writer.finish()?;
+
         Ok(())
     }
 
-    fn export_incremental(
-        &self,
-        remote_number: u32,
-        last_epoch_atoms: &[Atom],
-        path: &str,
-    ) -> Result<()> {
+    fn export_incremental(&self, remote_number: u32, atoms: &[Atom], path: &str) -> Result<()> {
+        use bincode::{config, serde::encode_to_vec};
+
         let opt = Options::default();
         let mut sst_writer = SstFileWriter::create(&opt);
         sst_writer.open(path)?;
@@ -320,11 +300,8 @@ impl Storage {
             self.write_epoch_to_sst(&mut sst_writer, epoch)?;
         }
 
-        let atoms_value = Value::Epoch {
-            atoms: last_epoch_atoms.to_vec(),
-        }
-        .to_bytes();
-        sst_writer.put(self.snapshot_end.to_be_bytes(), atoms_value)?;
+        let bytes = encode_to_vec(atoms, config::standard()).unwrap();
+        sst_writer.put(self.snapshot_end.to_be_bytes(), bytes)?;
 
         sst_writer.finish()?;
         Ok(())
@@ -338,7 +315,7 @@ impl Storage {
     ) -> Result<()> {
         use bincode::{
             config,
-            serde::{decode_from_slice, encode_to_vec},
+            serde::{decode_from_slice, encode_into_slice},
         };
 
         const KEY: &[u8] = b"snapshot";
@@ -347,16 +324,15 @@ impl Storage {
         let cf = self.db.cf_handle(&cf_name).unwrap();
 
         let key = epoch.to_be_bytes();
-        let value = self.db.get_cf(cf, &key)?.unwrap();
+        let mut value = self.db.get_cf(cf, &key)?.unwrap();
 
-        let Value::Snapshot { difficulty, mmr } = decode_from_slice(&value, config::standard())?.0
-        else {
-            panic!("Expected a Snapshot value");
-        };
-        let mmr = replacement_mmr.unwrap_or(mmr);
-        let bytes = encode_to_vec((difficulty, mmr), config::standard()).unwrap();
-
-        writer.put(KEY, &bytes)?;
+        if let Some(replacement_mmr) = &replacement_mmr {
+            value.truncate(decode_from_slice::<u64, _>(&value, config::standard())?.1);
+            encode_into_slice(replacement_mmr, &mut value, config::standard()).unwrap();
+            writer.put(KEY, &value)?;
+        } else {
+            writer.put(KEY, &value)?;
+        }
 
         Ok(())
     }
