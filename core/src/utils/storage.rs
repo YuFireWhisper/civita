@@ -37,11 +37,8 @@ pub enum Error {
     #[error("Attempting to put non-strictly increasing epoch")]
     NonStrictlyIncreasingPut,
 
-    #[error("Cannot provide required data: remote needs data before local start")]
-    CannotProvideRequiredData,
-
-    #[error("Remote epoch exceeds local end")]
-    RemoteEpochExceedsLocalEnd,
+    #[error("Value {0} is out of range [{1}, {2}]")]
+    OutOfRange(u32, u32, u32),
 }
 
 #[derive(Clone, Copy)]
@@ -229,81 +226,46 @@ impl Storage {
 
     pub fn export_to_sst(
         &self,
-        remote_last_snapshot: Option<u32>,
-        last_epoch_atoms: &[Atom],
-        replacement_mmr: Option<Mmr<Token>>,
-        remote_len_limit: u32,
-        path: &str,
-    ) -> Result<()> {
-        let local_len = self.snapshot_end - self.start + 1;
-
-        if let Some(remote_number) = remote_last_snapshot {
-            if remote_number < self.start && remote_len_limit > local_len {
-                return Err(Error::CannotProvideRequiredData);
-            }
-
-            if remote_number > self.snapshot_end {
-                return Err(Error::RemoteEpochExceedsLocalEnd);
-            }
-
-            let min = (self.snapshot_end.saturating_sub(remote_len_limit - 1)).max(self.start);
-
-            if remote_number >= min && remote_number <= self.snapshot_end {
-                self.export_incremental(remote_number, last_epoch_atoms, path)?;
-                return Ok(());
-            }
-        }
-
-        if remote_len_limit <= local_len {
-            self.export_full_from_start(replacement_mmr, last_epoch_atoms, path)?;
-        } else {
-            return Err(Error::CannotProvideRequiredData);
-        }
-
-        Ok(())
-    }
-
-    fn export_full_from_start(
-        &self,
-        replacement_mmr: Option<Mmr<Token>>,
+        remote_end: Option<u32>,
         atoms: &[Atom],
+        replacement_mmr: Option<Mmr<Token>>,
+        remote_len: u32,
         path: &str,
     ) -> Result<()> {
-        use bincode::{config, serde::encode_to_vec};
+        assert_ne!(remote_len, 0);
 
         let opt = Options::default();
         let mut sst_writer = SstFileWriter::create(&opt);
         sst_writer.open(path)?;
 
-        self.write_snapshot_to_sst(&mut sst_writer, self.start, replacement_mmr)?;
+        let mut actual_start = self.snapshot_end.saturating_sub(remote_len - 1);
+        let mut add_snap = true;
 
-        for epoch in self.start..self.snapshot_end {
-            self.write_epoch_to_sst(&mut sst_writer, epoch)?;
+        if let Some(remote_end) = remote_end {
+            if remote_end > self.snapshot_end {
+                return Err(Error::OutOfRange(remote_end, self.start, self.snapshot_end));
+            }
+
+            if actual_start <= remote_end {
+                actual_start = remote_end;
+                add_snap = false;
+            }
         }
 
-        let bytes = encode_to_vec(atoms, config::standard()).unwrap();
-        sst_writer.put(self.snapshot_end.to_be_bytes(), bytes)?;
-
-        sst_writer.finish()?;
-
-        Ok(())
-    }
-
-    fn export_incremental(&self, remote_number: u32, atoms: &[Atom], path: &str) -> Result<()> {
-        use bincode::{config, serde::encode_to_vec};
-
-        let opt = Options::default();
-        let mut sst_writer = SstFileWriter::create(&opt);
-        sst_writer.open(path)?;
-
-        for epoch in remote_number..self.snapshot_end {
-            self.write_epoch_to_sst(&mut sst_writer, epoch)?;
+        if actual_start < self.start {
+            return Err(Error::OutOfRange(
+                actual_start,
+                self.start,
+                self.snapshot_end,
+            ));
         }
 
-        let bytes = encode_to_vec(atoms, config::standard()).unwrap();
-        sst_writer.put(self.snapshot_end.to_be_bytes(), bytes)?;
+        if add_snap {
+            self.write_snapshot_to_sst(&mut sst_writer, actual_start, replacement_mmr)?;
+        }
 
-        sst_writer.finish()?;
+        self.write_epoch_to_sst(&mut sst_writer, actual_start, atoms)?;
+
         Ok(())
     }
 
@@ -337,14 +299,26 @@ impl Storage {
         Ok(())
     }
 
-    fn write_epoch_to_sst(&self, writer: &mut SstFileWriter, epoch: u32) -> Result<()> {
+    fn write_epoch_to_sst(
+        &self,
+        writer: &mut SstFileWriter,
+        start: u32,
+        atoms: &[Atom],
+    ) -> Result<()> {
+        use bincode::{config, serde::encode_to_vec};
+
         let cf_name = ColumnName::Epochs.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
 
-        let key = epoch.to_be_bytes();
-        if let Some(value) = self.db.get_cf(cf, &key)? {
-            writer.put(epoch.to_be_bytes(), &value)?;
+        for epoch in start..self.snapshot_end {
+            let key = epoch.to_be_bytes();
+            let value = self.db.get_cf(cf, &key)?.unwrap();
+            writer.put(key, &value)?;
         }
+
+        let key = self.snapshot_end.to_be_bytes();
+        let value = encode_to_vec(atoms, config::standard()).unwrap();
+        writer.put(key, &value)?;
 
         Ok(())
     }
