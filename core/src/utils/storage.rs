@@ -7,9 +7,9 @@ use crate::{
     utils::mmr::Mmr,
 };
 
-mod sst_reader;
+mod reader;
 
-pub use sst_reader::SstReader;
+pub use reader::Reader;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -222,6 +222,46 @@ impl Storage {
         self.epoch_end = epoch;
 
         Ok(())
+    }
+
+    pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(u64, Mmr<Token>)>> {
+        use bincode::{config, serde::decode_from_std_read};
+
+        if epoch < self.start || epoch > self.snapshot_end {
+            return Err(Error::OutOfRange(epoch, self.start, self.snapshot_end));
+        }
+
+        let cf_name = ColumnName::Snapshot.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+        let key = epoch.to_be_bytes();
+
+        if let Some(value) = self.db.get_cf(cf, &key)? {
+            let mut bytes: &[u8] = &value;
+            let difficulty: u64 = decode_from_std_read(&mut bytes, config::standard())?;
+            let mmr: Mmr<Token> = decode_from_std_read(&mut bytes, config::standard())?;
+            Ok(Some((difficulty, mmr)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_epoch(&self, epoch: u32) -> Result<Option<Vec<Atom>>> {
+        use bincode::{config, serde::decode_from_slice};
+
+        if epoch < self.start || epoch > self.epoch_end {
+            return Err(Error::OutOfRange(epoch, self.start, self.epoch_end));
+        }
+
+        let cf_name = ColumnName::Epochs.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+        let key = epoch.to_be_bytes();
+
+        if let Some(value) = self.db.get_cf(cf, &key)? {
+            let atoms: Vec<Atom> = decode_from_slice(&value, config::standard())?.0;
+            Ok(Some(atoms))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn export_to_sst(
