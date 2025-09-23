@@ -241,7 +241,11 @@ impl Storage {
         }
     }
 
-    pub fn current_number(&self) -> u32 {
+    pub fn start(&self) -> u32 {
+        self.start
+    }
+
+    pub fn end(&self) -> u32 {
         self.end
     }
 }
