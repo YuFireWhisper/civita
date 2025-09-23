@@ -29,6 +29,7 @@ pub enum Error {
 enum ColumnName {
     Snapshot,
     Epochs,
+    Mmr,
 }
 
 #[derive(Clone, Copy)]
@@ -173,6 +174,18 @@ impl Storage {
         Ok(())
     }
 
+    pub fn put_mmr(&mut self, hash: &Multihash, value: &MmrValue) -> Result<()> {
+        use bincode::{config, serde::encode_to_vec};
+
+        let cf_name = ColumnName::Mmr.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+        let bytes = encode_to_vec(value, config::standard()).unwrap();
+
+        self.db.put_cf(cf, hash.to_bytes(), bytes)?;
+
+        Ok(())
+    }
+
     pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(Atom, u64, Vec<u64>)>> {
         use bincode::{config, serde::decode_from_slice};
 
@@ -213,6 +226,21 @@ impl Storage {
         }
     }
 
+    pub fn get_mmr(&self, hash: &Multihash) -> Result<Option<MmrValue>> {
+        use bincode::{config, serde::decode_from_slice};
+
+        let cf_name = ColumnName::Mmr.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+
+        if let Some(value) = self.db.get_cf(cf, hash.to_bytes())? {
+            decode_from_slice(&value, config::standard())
+                .map(|(res, _)| Some(res))
+                .map_err(Error::from)
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn current_number(&self) -> u32 {
         self.end
     }
@@ -223,6 +251,7 @@ impl ToString for ColumnName {
         match self {
             ColumnName::Snapshot => "snapshot".to_string(),
             ColumnName::Epochs => "epochs".to_string(),
+            ColumnName::Mmr => "mmr".to_string(),
         }
     }
 }
