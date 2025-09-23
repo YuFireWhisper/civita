@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use bincode::error::DecodeError;
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, DB};
 use serde::{Deserialize, Serialize};
@@ -48,8 +50,8 @@ pub enum MmrValue {
 
 pub struct Storage {
     db: DB,
-    start: u32,
-    end: u32,
+    start: AtomicU32,
+    end: AtomicU32,
     len: u32,
 }
 
@@ -112,8 +114,8 @@ impl Storage {
 
         let mut storage = Storage {
             db,
-            start: 0,
-            end: 0,
+            start: AtomicU32::new(0),
+            end: AtomicU32::new(0),
             len,
         };
 
@@ -123,17 +125,17 @@ impl Storage {
     }
 
     fn prune_and_set_bound(&mut self) -> Result<()> {
-        let mut snapshots = self.get_all_numbers(ColumnName::Snapshot)?;
-        snapshots.sort_by(|a, b| b.cmp(a));
+        let mut snaps = self.get_all_numbers(ColumnName::Snapshot)?;
+        snaps.sort_by(|a, b| b.cmp(a));
 
-        while snapshots.len() > self.len as usize {
-            let epoch = snapshots.pop().unwrap();
+        while snaps.len() > self.len as usize {
+            let epoch = snaps.pop().unwrap();
             self.delete_cf(ColumnName::Snapshot, epoch)?;
             self.delete_cf(ColumnName::Epochs, epoch)?;
         }
 
-        self.start = *snapshots.last().unwrap();
-        self.end = *snapshots.first().unwrap();
+        self.start.store(*snaps.last().unwrap(), Ordering::Relaxed);
+        self.end.store(*snaps.first().unwrap(), Ordering::Relaxed);
 
         Ok(())
     }
@@ -209,8 +211,8 @@ impl Storage {
     pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(Atom, u64, Vec<Multihash>)>> {
         use bincode::{config, serde::decode_from_slice};
 
-        if epoch < self.start || epoch > self.end {
-            return Err(Error::OutOfRange(epoch, self.start, self.end));
+        if epoch < self.start() || epoch > self.end() {
+            return Err(Error::OutOfRange(epoch, self.start(), self.end()));
         }
 
         let cf_name = ColumnName::Snapshot.to_string();
@@ -229,8 +231,8 @@ impl Storage {
     pub fn get_epoch(&self, epoch: u32) -> Result<Option<Vec<Atom>>> {
         use bincode::{config, serde::decode_from_slice};
 
-        if epoch < self.start || epoch > self.end {
-            return Err(Error::OutOfRange(epoch, self.start, self.end));
+        if epoch < self.start() || epoch > self.end() {
+            return Err(Error::OutOfRange(epoch, self.start(), self.end()));
         }
 
         let cf_name = ColumnName::Epochs.to_string();
@@ -262,8 +264,8 @@ impl Storage {
     }
 
     pub fn contains_snapshot(&self, epoch: u32) -> Result<bool> {
-        if epoch < self.start || epoch > self.end {
-            return Err(Error::OutOfRange(epoch, self.start, self.end));
+        if epoch < self.start() || epoch > self.end() {
+            return Err(Error::OutOfRange(epoch, self.start(), self.end()));
         }
         let cf_name = ColumnName::Snapshot.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
@@ -271,8 +273,8 @@ impl Storage {
     }
 
     pub fn contains_epoch(&self, epoch: u32) -> Result<bool> {
-        if epoch < self.start || epoch > self.end {
-            return Err(Error::OutOfRange(epoch, self.start, self.end));
+        if epoch < self.start() || epoch > self.end() {
+            return Err(Error::OutOfRange(epoch, self.start(), self.end()));
         }
         let cf_name = ColumnName::Epochs.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
@@ -286,11 +288,11 @@ impl Storage {
     }
 
     pub fn start(&self) -> u32 {
-        self.start
+        self.start.load(Ordering::Relaxed)
     }
 
     pub fn end(&self) -> u32 {
-        self.end
+        self.end.load(Ordering::Relaxed)
     }
 }
 
