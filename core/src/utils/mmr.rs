@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::OnceLock,
+};
 
 use derivative::Derivative;
 use multihash_derive::MultihashDigest;
@@ -398,6 +401,48 @@ fn peak_range(peaks: &[u64], idx: &u64) -> (u64, u64) {
     let peak = &peaks[pos];
     let next_peak = peaks.get(pos + 1).unwrap_or(peak);
     (*peak, *next_peak)
+}
+
+pub fn prune_indices(size: u64, leaves: &[u64]) -> Vec<u64> {
+    let peaks = HashSet::<u64>::from_iter(peak_indices(size - 1));
+    let mut indices = HashMap::<u64, bool>::new();
+
+    leaves.iter().filter(|l| !peaks.contains(l)).for_each(|l| {
+        let mut cur = *l;
+        let mut path = Vec::new();
+        let mut g = index_height(cur);
+
+        while !indices.contains_key(&cur) {
+            path.push((cur, true));
+
+            let offset = 2u64 << g;
+            let is = if index_height(cur + 1) > g {
+                cur += 1;
+                cur - offset
+            } else {
+                cur += offset;
+                cur - 1
+            };
+
+            path.push((is, true));
+
+            if peaks.contains(&cur) {
+                break;
+            }
+
+            path.push((cur, false));
+            g += 1;
+        }
+
+        path.into_iter().for_each(|(i, v)| {
+            indices.entry(i).and_modify(|e| *e &= v).or_insert(v);
+        });
+    });
+
+    indices
+        .into_iter()
+        .filter_map(|(k, v)| v.then_some(k))
+        .collect()
 }
 
 impl<T: Clone> Clone for Mmr<T> {
