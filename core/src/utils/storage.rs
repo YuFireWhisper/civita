@@ -1,15 +1,11 @@
 use bincode::error::DecodeError;
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, SstFileWriter, DB};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, DB};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    crypto::Multihash,
     ty::{atom::Atom, token::Token},
-    utils::mmr::Mmr,
 };
-
-mod reader;
-
-pub use reader::Reader;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -54,13 +50,17 @@ pub enum Key {
     Epoch(u32),
 }
 
+#[derive(Clone)]
+#[derive(Serialize, Deserialize)]
+pub enum MmrValue {
+    Internal(u64, Multihash, Multihash),
+    Leaf(Token),
+}
+
 pub struct Storage {
     db: DB,
-
     start: u32,
-    snapshot_end: u32,
-    epoch_end: u32,
-
+    end: u32,
     len: u32,
 }
 
@@ -104,39 +104,27 @@ impl Storage {
         let mut storage = Storage {
             db,
             start: 0,
-            snapshot_end: 0,
-            epoch_end: 0,
+            end: 0,
             len,
         };
 
-        storage.initialize_bounds()?;
+        storage.prune_and_set_bound()?;
 
         Ok(storage)
     }
 
-    fn initialize_bounds(&mut self) -> Result<()> {
-        let snapshots = self.get_all_numbers(ColumnName::Snapshot)?;
-        let epochs = self.get_all_numbers(ColumnName::Epochs)?;
+    fn prune_and_set_bound(&mut self) -> Result<()> {
+        let mut snapshots = self.get_all_numbers(ColumnName::Snapshot)?;
+        snapshots.sort_by(|a, b| b.cmp(a));
 
-        if snapshots.is_empty() && epochs.is_empty() {
-            return Ok(());
+        while snapshots.len() > self.len as usize {
+            let epoch = snapshots.pop().unwrap();
+            self.delete_cf(ColumnName::Snapshot, epoch)?;
+            self.delete_cf(ColumnName::Epochs, epoch)?;
         }
 
-        if !snapshots.windows(2).all(|w| w[0] < w[1]) || !epochs.windows(2).all(|w| w[0] < w[1]) {
-            return Err(Error::NonStrictlyIncreasingNumbers);
-        }
-
-        if snapshots.len() != epochs.len() && snapshots.len() + 1 != epochs.len() {
-            return Err(Error::InvalidCountRelation);
-        }
-
-        self.start = *snapshots.first().unwrap();
-        self.snapshot_end = *snapshots.last().unwrap();
-        self.epoch_end = *epochs.last().unwrap();
-
-        if self.snapshot_end - self.start + 1 > self.len {
-            self.prune()?;
-        }
+        self.start = *snapshots.last().unwrap();
+        self.end = *snapshots.first().unwrap();
 
         Ok(())
     }
@@ -157,27 +145,7 @@ impl Storage {
             epochs.push(u32::from_be_bytes(arr));
         }
 
-        epochs.sort_unstable();
         Ok(epochs)
-    }
-
-    fn prune(&mut self) -> Result<()> {
-        let total = self.snapshot_end - self.start + 1;
-
-        if total < self.len {
-            return Ok(());
-        }
-
-        let end = self.start + total - self.len;
-
-        for epoch in self.start..end {
-            self.delete_cf(ColumnName::Snapshot, epoch)?;
-            self.delete_cf(ColumnName::Epochs, epoch)?;
-        }
-
-        self.start = end;
-
-        Ok(())
     }
 
     fn delete_cf(&self, name: ColumnName, epoch: u32) -> Result<()> {
@@ -186,23 +154,21 @@ impl Storage {
         Ok(())
     }
 
-    pub fn put_snapshot(&mut self, epoch: u32, difficulty: u32, mmr: &Mmr<Token>) -> Result<()> {
+    pub fn put_snapshot(
+        &mut self,
+        epoch: u32,
+        atom: &Atom,
+        difficulty: u32,
+        peaks: &[u64],
+    ) -> Result<()> {
         use bincode::{config, serde::encode_to_vec};
-
-        if epoch != self.snapshot_end + 1 || epoch.abs_diff(self.epoch_end) > 1 {
-            return Err(Error::NonStrictlyIncreasingPut);
-        }
 
         let cf_name = ColumnName::Snapshot.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
-        let bytes = encode_to_vec((difficulty, mmr), config::standard()).unwrap();
+        let bytes = encode_to_vec((atom, difficulty, peaks), config::standard()).unwrap();
 
         self.db.put_cf(cf, epoch.to_be_bytes(), bytes)?;
-        self.snapshot_end = epoch;
-
-        if self.snapshot_end - self.start + 1 > self.len {
-            self.prune()?;
-        }
+        self.prune_and_set_bound()?;
 
         Ok(())
     }
@@ -210,25 +176,20 @@ impl Storage {
     pub fn put_epoch(&mut self, epoch: u32, atoms: &[Atom]) -> Result<()> {
         use bincode::{config, serde::encode_to_vec};
 
-        if epoch != self.epoch_end + 1 || epoch > self.snapshot_end {
-            return Err(Error::NonStrictlyIncreasingPut);
-        }
-
         let cf_name = ColumnName::Epochs.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
         let bytes = encode_to_vec(&atoms, config::standard()).unwrap();
 
         self.db.put_cf(cf, epoch.to_be_bytes(), bytes)?;
-        self.epoch_end = epoch;
 
         Ok(())
     }
 
-    pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(u64, Mmr<Token>)>> {
-        use bincode::{config, serde::decode_from_std_read};
+    pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(Atom, u64, Vec<u64>)>> {
+        use bincode::{config, serde::decode_from_slice};
 
-        if epoch < self.start || epoch > self.snapshot_end {
-            return Err(Error::OutOfRange(epoch, self.start, self.snapshot_end));
+        if epoch < self.start || epoch > self.end {
+            return Err(Error::OutOfRange(epoch, self.start, self.end));
         }
 
         let cf_name = ColumnName::Snapshot.to_string();
@@ -236,10 +197,9 @@ impl Storage {
         let key = epoch.to_be_bytes();
 
         if let Some(value) = self.db.get_cf(cf, &key)? {
-            let mut bytes: &[u8] = &value;
-            let difficulty: u64 = decode_from_std_read(&mut bytes, config::standard())?;
-            let mmr: Mmr<Token> = decode_from_std_read(&mut bytes, config::standard())?;
-            Ok(Some((difficulty, mmr)))
+            decode_from_slice(&value, config::standard())
+                .map(|(res, _)| Some(res))
+                .map_err(Error::from)
         } else {
             Ok(None)
         }
@@ -248,8 +208,8 @@ impl Storage {
     pub fn get_epoch(&self, epoch: u32) -> Result<Option<Vec<Atom>>> {
         use bincode::{config, serde::decode_from_slice};
 
-        if epoch < self.start || epoch > self.epoch_end {
-            return Err(Error::OutOfRange(epoch, self.start, self.epoch_end));
+        if epoch < self.start || epoch > self.end {
+            return Err(Error::OutOfRange(epoch, self.start, self.end));
         }
 
         let cf_name = ColumnName::Epochs.to_string();
@@ -257,114 +217,16 @@ impl Storage {
         let key = epoch.to_be_bytes();
 
         if let Some(value) = self.db.get_cf(cf, &key)? {
-            let atoms: Vec<Atom> = decode_from_slice(&value, config::standard())?.0;
-            Ok(Some(atoms))
+            decode_from_slice(&value, config::standard())
+                .map(|(res, _)| Some(res))
+                .map_err(Error::from)
         } else {
             Ok(None)
         }
     }
 
-    pub fn export_to_sst(
-        &self,
-        remote_end: Option<u32>,
-        atoms: &[Atom],
-        replacement_mmr: Option<Mmr<Token>>,
-        remote_len: u32,
-        path: &str,
-    ) -> Result<()> {
-        assert_ne!(remote_len, 0);
-
-        let opt = Options::default();
-        let mut sst_writer = SstFileWriter::create(&opt);
-        sst_writer.open(path)?;
-
-        let mut actual_start = self.snapshot_end.saturating_sub(remote_len - 1);
-        let mut add_snap = true;
-
-        if let Some(remote_end) = remote_end {
-            if remote_end > self.snapshot_end {
-                return Err(Error::OutOfRange(remote_end, self.start, self.snapshot_end));
-            }
-
-            if actual_start <= remote_end {
-                actual_start = remote_end;
-                add_snap = false;
-            }
-        }
-
-        if actual_start < self.start {
-            return Err(Error::OutOfRange(
-                actual_start,
-                self.start,
-                self.snapshot_end,
-            ));
-        }
-
-        if add_snap {
-            self.write_snapshot_to_sst(&mut sst_writer, actual_start, replacement_mmr)?;
-        }
-
-        self.write_epoch_to_sst(&mut sst_writer, actual_start, atoms)?;
-
-        Ok(())
-    }
-
-    fn write_snapshot_to_sst(
-        &self,
-        writer: &mut SstFileWriter,
-        epoch: u32,
-        replacement_mmr: Option<Mmr<Token>>,
-    ) -> Result<()> {
-        use bincode::{
-            config,
-            serde::{decode_from_slice, encode_into_slice},
-        };
-
-        const KEY: &[u8] = b"snapshot";
-
-        let cf_name = ColumnName::Snapshot.to_string();
-        let cf = self.db.cf_handle(&cf_name).unwrap();
-
-        let key = epoch.to_be_bytes();
-        let mut value = self.db.get_cf(cf, &key)?.unwrap();
-
-        if let Some(replacement_mmr) = &replacement_mmr {
-            value.truncate(decode_from_slice::<u64, _>(&value, config::standard())?.1);
-            encode_into_slice(replacement_mmr, &mut value, config::standard()).unwrap();
-            writer.put(KEY, &value)?;
-        } else {
-            writer.put(KEY, &value)?;
-        }
-
-        Ok(())
-    }
-
-    fn write_epoch_to_sst(
-        &self,
-        writer: &mut SstFileWriter,
-        start: u32,
-        atoms: &[Atom],
-    ) -> Result<()> {
-        use bincode::{config, serde::encode_to_vec};
-
-        let cf_name = ColumnName::Epochs.to_string();
-        let cf = self.db.cf_handle(&cf_name).unwrap();
-
-        for epoch in start..self.snapshot_end {
-            let key = epoch.to_be_bytes();
-            let value = self.db.get_cf(cf, &key)?.unwrap();
-            writer.put(key, &value)?;
-        }
-
-        let key = self.snapshot_end.to_be_bytes();
-        let value = encode_to_vec(atoms, config::standard()).unwrap();
-        writer.put(key, &value)?;
-
-        Ok(())
-    }
-
     pub fn current_number(&self) -> u32 {
-        self.snapshot_end
+        self.end
     }
 }
 
