@@ -112,7 +112,7 @@ impl Storage {
 
         let db = DB::open_cf_descriptors(&opts, path, vec![s_cf, e_cf])?;
 
-        let mut storage = Storage {
+        let storage = Storage {
             db,
             start: AtomicU32::new(0),
             end: AtomicU32::new(0),
@@ -124,7 +124,7 @@ impl Storage {
         Ok(storage)
     }
 
-    fn prune_and_set_bound(&mut self) -> Result<()> {
+    fn prune_and_set_bound(&self) -> Result<()> {
         let mut snaps = self.get_all_numbers(ColumnName::Snapshot)?;
         snaps.sort_by(|a, b| b.cmp(a));
 
@@ -166,7 +166,7 @@ impl Storage {
     }
 
     pub fn put_snapshot(
-        &mut self,
+        &self,
         epoch: u32,
         atom: &Atom,
         difficulty: u32,
@@ -184,7 +184,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn put_epoch(&mut self, epoch: u32, atoms: &[Atom]) -> Result<()> {
+    pub fn put_epoch(&self, epoch: u32, atoms: &[Atom]) -> Result<()> {
         use bincode::{config, serde::encode_to_vec};
 
         let cf_name = ColumnName::Epochs.to_string();
@@ -196,7 +196,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn put_mmr(&mut self, hash: &Multihash, value: &MmrValue) -> Result<()> {
+    pub fn put_mmr(&self, hash: &Multihash, value: &MmrValue) -> Result<()> {
         use bincode::{config, serde::encode_to_vec};
 
         let cf_name = ColumnName::Mmr.to_string();
