@@ -36,7 +36,7 @@ pub enum Message {
 pub struct RequestResponse {
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     tx: mpsc::Sender<Message>,
-    rx: Mutex<Option<mpsc::Receiver<Message>>>,
+    rx: Mutex<mpsc::Receiver<Message>>,
 }
 
 impl Message {
@@ -59,7 +59,7 @@ impl RequestResponse {
         Self {
             swarm,
             tx,
-            rx: Mutex::new(Some(rx)),
+            rx: Mutex::new(rx),
         }
     }
 
@@ -102,7 +102,7 @@ impl RequestResponse {
         Ok(())
     }
 
-    pub async fn take_receiver(&self) -> Option<mpsc::Receiver<Message>> {
-        self.rx.lock().await.take()
+    pub async fn recv(&self) -> Option<Message> {
+        self.rx.lock().await.recv().await
     }
 }
