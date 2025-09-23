@@ -21,18 +21,6 @@ pub enum Error {
     #[error("Invalid Key format")]
     InvalidKeyFormat,
 
-    #[error("No epochs found")]
-    NoEpochsFound,
-
-    #[error("Snapshots are not strictly increasing")]
-    NonStrictlyIncreasingNumbers,
-
-    #[error("Invalid Count Relation between Snapshots and Epochs")]
-    InvalidCountRelation,
-
-    #[error("Attempting to put non-strictly increasing epoch")]
-    NonStrictlyIncreasingPut,
-
     #[error("Value {0} is out of range [{1}, {2}]")]
     OutOfRange(u32, u32, u32),
 }
