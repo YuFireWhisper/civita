@@ -302,7 +302,7 @@ fn index_height(i: u64) -> usize {
     (u64::BITS - pos.leading_zeros()).saturating_sub(1) as usize
 }
 
-fn hash_pospair(idx: u64, l: &Multihash, r: &Multihash) -> Multihash {
+pub fn hash_pospair(idx: u64, l: &Multihash, r: &Multihash) -> Multihash {
     use bincode::{config, serde::encode_into_std_write};
 
     let mut buf = Vec::new();
