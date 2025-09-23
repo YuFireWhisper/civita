@@ -148,7 +148,7 @@ impl Storage {
         epoch: u32,
         atom: &Atom,
         difficulty: u32,
-        peaks: &[u64],
+        peaks: &[Multihash],
     ) -> Result<()> {
         use bincode::{config, serde::encode_to_vec};
 
@@ -186,7 +186,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(Atom, u64, Vec<u64>)>> {
+    pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(Atom, u64, Vec<Multihash>)>> {
         use bincode::{config, serde::decode_from_slice};
 
         if epoch < self.start || epoch > self.end {
