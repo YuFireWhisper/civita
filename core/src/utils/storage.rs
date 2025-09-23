@@ -79,6 +79,26 @@ impl Key {
     }
 }
 
+impl MmrValue {
+    pub fn to_hash_data(&self) -> Vec<u8> {
+        use bincode::{
+            config,
+            serde::{encode_into_std_write, encode_to_vec},
+        };
+
+        match self {
+            Self::Internal(idx, l, r) => {
+                let mut buf = Vec::new();
+                encode_into_std_write(idx, &mut buf, config::standard()).unwrap();
+                encode_into_std_write(l, &mut buf, config::standard()).unwrap();
+                encode_into_std_write(r, &mut buf, config::standard()).unwrap();
+                buf
+            }
+            Self::Leaf(token) => encode_to_vec(token, config::standard()).unwrap(),
+        }
+    }
+}
+
 impl Storage {
     pub fn new(len: u32, path: &str) -> Result<Self> {
         let mut opts = Options::default();
