@@ -241,6 +241,30 @@ impl Storage {
         }
     }
 
+    pub fn contains_snapshot(&self, epoch: u32) -> Result<bool> {
+        if epoch < self.start || epoch > self.end {
+            return Err(Error::OutOfRange(epoch, self.start, self.end));
+        }
+        let cf_name = ColumnName::Snapshot.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+        Ok(self.db.get_pinned_cf(cf, epoch.to_be_bytes())?.is_some())
+    }
+
+    pub fn contains_epoch(&self, epoch: u32) -> Result<bool> {
+        if epoch < self.start || epoch > self.end {
+            return Err(Error::OutOfRange(epoch, self.start, self.end));
+        }
+        let cf_name = ColumnName::Epochs.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+        Ok(self.db.get_pinned_cf(cf, epoch.to_be_bytes())?.is_some())
+    }
+
+    pub fn contains_mmr(&self, hash: &Multihash) -> Result<bool> {
+        let cf_name = ColumnName::Mmr.to_string();
+        let cf = self.db.cf_handle(&cf_name).unwrap();
+        Ok(self.db.get_pinned_cf(cf, hash.to_bytes())?.is_some())
+    }
+
     pub fn start(&self) -> u32 {
         self.start
     }
