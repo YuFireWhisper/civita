@@ -217,69 +217,33 @@ impl<T> Mmr<T> {
     where
         I: IntoIterator<Item = Multihash>,
     {
-        let mut hashes = HashMap::new();
-        let mut indices = HashMap::new();
+        let indices = {
+            let mut indices = Vec::new();
+            for l in iter.into_iter() {
+                if let Some(idx) = self.hash_to_idx.remove(&l) {
+                    indices.push(idx);
+                } else {
+                    return false;
+                }
+            }
+            prune_indices(self.next, &indices)
+        };
+
+        let mut idx_to_hash = HashMap::new();
+        let mut hash_to_idx = HashMap::new();
         let mut leaves = HashMap::new();
 
-        self.peaks().clone().into_iter().for_each(|p| {
-            let h = self.idx_to_hash[&p];
-            hashes.insert(p, h);
-            indices.insert(h, p);
+        for i in indices {
+            let h = self.idx_to_hash.remove(&i).unwrap();
+            idx_to_hash.insert(i, h);
+            hash_to_idx.insert(h, i);
             if let Some(v) = self.leaves.remove(&h) {
                 leaves.insert(h, v);
             }
-        });
-
-        for hash in iter {
-            if indices.contains_key(&hash) {
-                continue;
-            }
-
-            let mut idx = if let Some(idx) = self.hash_to_idx.get(&hash) {
-                *idx
-            } else {
-                return false;
-            };
-            let mut g = index_height(idx);
-
-            loop {
-                if hashes.contains_key(&idx) {
-                    break;
-                }
-
-                let hash = self.idx_to_hash.remove(&idx).unwrap();
-                self.hash_to_idx.remove(&hash);
-                hashes.insert(idx, hash);
-                indices.insert(hash, idx);
-
-                if let Some(v) = self.leaves.remove(&hash) {
-                    leaves.insert(hash, v);
-                }
-
-                let offset = 2u64 << g;
-                let is = if index_height(idx + 1) > g {
-                    idx += 1;
-                    idx - offset
-                } else {
-                    idx += offset;
-                    &idx - 1
-                };
-
-                let hash = self.idx_to_hash.remove(&is).unwrap();
-                self.hash_to_idx.remove(&hash);
-                hashes.insert(is, hash);
-                indices.insert(hash, is);
-
-                if let Some(v) = self.leaves.remove(&hash) {
-                    leaves.insert(hash, v);
-                }
-
-                g += 1;
-            }
         }
 
-        self.idx_to_hash = hashes;
-        self.hash_to_idx = indices;
+        self.idx_to_hash = idx_to_hash;
+        self.hash_to_idx = hash_to_idx;
         self.leaves = leaves;
 
         true
@@ -295,64 +259,31 @@ impl<T: Clone> Mmr<T> {
     where
         I: IntoIterator<Item = Multihash>,
     {
-        let mut hashes: HashMap<u64, Multihash> = HashMap::new();
-        let mut indices: HashMap<Multihash, u64> = HashMap::new();
+        let indices = {
+            let mut indices = Vec::new();
+            for l in iter.into_iter() {
+                let idx = self.hash_to_idx.get(&l).cloned()?;
+                indices.push(idx);
+            }
+            prune_indices(self.next, &indices)
+        };
+
+        let mut idx_to_hash: HashMap<u64, Multihash> = HashMap::new();
+        let mut hash_to_idx: HashMap<Multihash, u64> = HashMap::new();
         let mut leaves: HashMap<Multihash, T> = HashMap::new();
 
-        self.peaks().iter().copied().for_each(|p| {
-            let h = self.idx_to_hash[&p];
-            hashes.insert(p, h);
-            indices.insert(h, p);
+        for i in indices {
+            let h = self.idx_to_hash.get(&i).copied()?;
+            idx_to_hash.insert(i, h);
+            hash_to_idx.insert(h, i);
             if let Some(v) = self.leaves.get(&h) {
                 leaves.insert(h, v.clone());
-            }
-        });
-
-        for hash in iter {
-            if indices.contains_key(&hash) {
-                continue;
-            }
-
-            let mut idx = self.hash_to_idx.get(&hash).cloned()?;
-            let mut g = index_height(idx);
-
-            loop {
-                if hashes.contains_key(&idx) {
-                    break;
-                }
-
-                let hash = *self.idx_to_hash.get(&idx).unwrap();
-                hashes.insert(idx, hash);
-                indices.insert(hash, idx);
-
-                if let Some(v) = self.leaves.get(&hash) {
-                    leaves.insert(hash, v.clone());
-                }
-
-                let offset = 2u64 << g;
-                let is = if index_height(idx + 1) > g {
-                    idx += 1;
-                    idx - offset
-                } else {
-                    idx += offset;
-                    idx - 1
-                };
-
-                let hash = *self.idx_to_hash.get(&is).unwrap();
-                hashes.insert(is, hash);
-                indices.insert(hash, is);
-
-                if let Some(v) = self.leaves.get(&hash) {
-                    leaves.insert(hash, v.clone());
-                }
-
-                g += 1;
             }
         }
 
         Some(Mmr {
-            idx_to_hash: hashes,
-            hash_to_idx: indices,
+            idx_to_hash,
+            hash_to_idx,
             leaves,
             next: self.next,
             staged: Vec::new(),
