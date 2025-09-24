@@ -20,4 +20,12 @@ impl Snapshot {
             peaks,
         }
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map(|(s, _)| s)
+    }
 }
