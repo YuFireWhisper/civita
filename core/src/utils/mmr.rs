@@ -292,7 +292,7 @@ impl<T: Clone> Mmr<T> {
     }
 }
 
-fn index_height(i: u64) -> usize {
+pub fn index_height(i: u64) -> usize {
     let mut pos = i + 1;
 
     while !(pos + 1).is_power_of_two() {
