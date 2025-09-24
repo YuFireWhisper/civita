@@ -336,9 +336,9 @@ fn peak_range(peaks: &[u64], idx: &u64) -> (u64, u64) {
 
 pub fn prune_indices(size: u64, leaves: &[u64]) -> Vec<u64> {
     let peaks = HashSet::<u64>::from_iter(peak_indices(size - 1));
-    let mut indices = HashMap::<u64, bool>::new();
+    let mut indices = HashMap::<u64, bool>::from_iter(peaks.iter().map(|p| (*p, true)));
 
-    leaves.iter().filter(|l| !peaks.contains(l)).for_each(|l| {
+    leaves.iter().for_each(|l| {
         let mut cur = *l;
         let mut path = Vec::new();
         let mut g = index_height(cur);
@@ -356,12 +356,8 @@ pub fn prune_indices(size: u64, leaves: &[u64]) -> Vec<u64> {
             };
 
             path.push((is, true));
-
-            if peaks.contains(&cur) {
-                break;
-            }
-
             path.push((cur, false));
+
             g += 1;
         }
 
