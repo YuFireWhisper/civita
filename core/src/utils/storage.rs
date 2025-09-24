@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     crypto::Multihash,
-    ty::{atom::Atom, token::Token},
+    ty::{atom::Atom, snapshot::Snapshot, token::Token},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -82,6 +82,18 @@ impl Key {
 }
 
 impl MmrValue {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map(|(s, _)| s)
+    }
+
+    pub fn hash(&self) -> Multihash {
+        unimplemented!()
+    }
+
     pub fn to_hash_data(&self) -> Vec<u8> {
         use bincode::{
             config,
@@ -165,20 +177,13 @@ impl Storage {
         Ok(())
     }
 
-    pub fn put_snapshot(
-        &self,
-        epoch: u32,
-        atom: &Atom,
-        difficulty: u32,
-        peaks: &[Multihash],
-    ) -> Result<()> {
-        use bincode::{config, serde::encode_to_vec};
-
+    pub fn put_snapshot(&self, epoch: u32, snapshot: &Snapshot) -> Result<()> {
         let cf_name = ColumnName::Snapshot.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
-        let bytes = encode_to_vec((atom, difficulty, peaks), config::standard()).unwrap();
+        let key = epoch.to_be_bytes();
+        let value = snapshot.to_bytes();
 
-        self.db.put_cf(cf, epoch.to_be_bytes(), bytes)?;
+        self.db.put_cf(cf, key, value)?;
         self.prune_and_set_bound()?;
 
         Ok(())
@@ -189,28 +194,26 @@ impl Storage {
 
         let cf_name = ColumnName::Epochs.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
-        let bytes = encode_to_vec(&atoms, config::standard()).unwrap();
+        let key = epoch.to_be_bytes();
+        let value = encode_to_vec(atoms, config::standard()).unwrap();
 
-        self.db.put_cf(cf, epoch.to_be_bytes(), bytes)?;
+        self.db.put_cf(cf, key, value)?;
 
         Ok(())
     }
 
     pub fn put_mmr(&self, hash: &Multihash, value: &MmrValue) -> Result<()> {
-        use bincode::{config, serde::encode_to_vec};
-
         let cf_name = ColumnName::Mmr.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
-        let bytes = encode_to_vec(value, config::standard()).unwrap();
+        let key = hash.to_bytes();
+        let value = value.to_bytes();
 
-        self.db.put_cf(cf, hash.to_bytes(), bytes)?;
+        self.db.put_cf(cf, key, value)?;
 
         Ok(())
     }
 
-    pub fn get_snapshot(&self, epoch: u32) -> Result<Option<(Atom, u64, Vec<Multihash>)>> {
-        use bincode::{config, serde::decode_from_slice};
-
+    pub fn get_snapshot(&self, epoch: u32) -> Result<Option<Snapshot>> {
         if epoch < self.start() || epoch > self.end() {
             return Err(Error::OutOfRange(epoch, self.start(), self.end()));
         }
@@ -220,9 +223,7 @@ impl Storage {
         let key = epoch.to_be_bytes();
 
         if let Some(value) = self.db.get_cf(cf, &key)? {
-            decode_from_slice(&value, config::standard())
-                .map(|(res, _)| Some(res))
-                .map_err(Error::from)
+            Snapshot::from_bytes(&value).map(Some).map_err(Error::from)
         } else {
             Ok(None)
         }
@@ -249,15 +250,12 @@ impl Storage {
     }
 
     pub fn get_mmr(&self, hash: &Multihash) -> Result<Option<MmrValue>> {
-        use bincode::{config, serde::decode_from_slice};
-
         let cf_name = ColumnName::Mmr.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
+        let key = hash.to_bytes();
 
-        if let Some(value) = self.db.get_cf(cf, hash.to_bytes())? {
-            decode_from_slice(&value, config::standard())
-                .map(|(res, _)| Some(res))
-                .map_err(Error::from)
+        if let Some(value) = self.db.get_cf(cf, &key)? {
+            MmrValue::from_bytes(&value).map(Some).map_err(Error::from)
         } else {
             Ok(None)
         }
@@ -267,24 +265,32 @@ impl Storage {
         if epoch < self.start() || epoch > self.end() {
             return Err(Error::OutOfRange(epoch, self.start(), self.end()));
         }
+
         let cf_name = ColumnName::Snapshot.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
-        Ok(self.db.get_pinned_cf(cf, epoch.to_be_bytes())?.is_some())
+        let key = epoch.to_be_bytes();
+
+        Ok(self.db.get_pinned_cf(cf, key)?.is_some())
     }
 
     pub fn contains_epoch(&self, epoch: u32) -> Result<bool> {
         if epoch < self.start() || epoch > self.end() {
             return Err(Error::OutOfRange(epoch, self.start(), self.end()));
         }
+
         let cf_name = ColumnName::Epochs.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
-        Ok(self.db.get_pinned_cf(cf, epoch.to_be_bytes())?.is_some())
+        let key = epoch.to_be_bytes();
+
+        Ok(self.db.get_pinned_cf(cf, key)?.is_some())
     }
 
     pub fn contains_mmr(&self, hash: &Multihash) -> Result<bool> {
         let cf_name = ColumnName::Mmr.to_string();
         let cf = self.db.cf_handle(&cf_name).unwrap();
-        Ok(self.db.get_pinned_cf(cf, hash.to_bytes())?.is_some())
+        let key = hash.to_bytes();
+
+        Ok(self.db.get_pinned_cf(cf, key)?.is_some())
     }
 
     pub fn start(&self) -> u32 {
