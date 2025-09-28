@@ -18,7 +18,7 @@ use tokio::sync::{
 
 use crate::{
     consensus::{
-        graph::{self, Graph, HISTORY},
+        graph::{self, Graph, Status, HISTORY},
         validator::Validator,
     },
     crypto::{hasher::Hasher, Multihash},
@@ -540,5 +540,9 @@ impl<V: Validator> Engine<V> {
             .read()
             .await
             .tokens_for(&self.transport.local_peer_id())
+    }
+
+    pub async fn status(&self) -> Status {
+        self.graph.read().await.status()
     }
 }

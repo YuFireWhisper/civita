@@ -3,7 +3,12 @@ use std::sync::Arc;
 use libp2p::{Multiaddr, PeerId};
 
 use crate::{
-    consensus::{engine, graph, validator::Validator, Engine},
+    consensus::{
+        engine,
+        graph::{self, Status},
+        validator::Validator,
+        Engine,
+    },
     crypto::Multihash,
     network::{transport, Transport},
     ty::{atom::Height, token::Token},
@@ -110,5 +115,9 @@ impl<V: Validator> Resident<V> {
 
     pub fn listen_addr(&self) -> Multiaddr {
         self.transport.listen_addr()
+    }
+
+    pub async fn status(&self) -> Status {
+        self.engine.status().await
     }
 }
