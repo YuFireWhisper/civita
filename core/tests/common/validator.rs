@@ -1,5 +1,8 @@
-use civita_core::{consensus, crypto::Hasher, ty::token::Token};
-use multihash::Multihash;
+use civita_core::{
+    consensus,
+    crypto::{Hasher, Multihash},
+    ty::token::Token,
+};
 
 use crate::common::constants::*;
 
@@ -17,7 +20,7 @@ impl consensus::validator::Validator for Validator {
         (Hasher::default(), 0, tokens)
     }
 
-    fn validate_script_sig(script_pk: &[u8], script_sig: &[u8]) -> bool {
+    fn validate_script_sig(_: Multihash, script_pk: &[u8], script_sig: &[u8]) -> bool {
         script_pk == script_sig
     }
 
