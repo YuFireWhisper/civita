@@ -873,3 +873,198 @@ impl<V: Validator> Graph<V> {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INIT_DIFFICULTY: u64 = 5;
+    const PEER1: [u8; 39] = [
+        0, 37, 8, 2, 18, 33, 3, 37, 231, 146, 221, 228, 232, 82, 157, 2, 152, 38, 140, 247, 207, 5,
+        201, 79, 98, 185, 119, 244, 169, 196, 94, 184, 85, 238, 234, 254, 136, 6, 81,
+    ];
+    const PEER2: [u8; 39] = [
+        0, 37, 8, 2, 18, 33, 3, 215, 10, 51, 166, 159, 134, 74, 248, 169, 95, 230, 245, 12, 116,
+        122, 68, 95, 157, 233, 179, 114, 84, 200, 57, 227, 138, 230, 88, 254, 185, 162, 42,
+    ];
+
+    struct TestValidator;
+
+    impl Validator for TestValidator {
+        fn genesis() -> Atom {
+            let tokens = vec![
+                Token::new(&Multihash::default(), 0, [1], PEER1),
+                Token::new(&Multihash::default(), 1, [1], PEER2),
+                Token::new(&Multihash::default(), 2, [1], PEER2),
+            ];
+
+            let cmd = Command {
+                code: 0,
+                inputs: vec![],
+                created: tokens.clone(),
+            };
+
+            let mut atom = Atom {
+                hash: Multihash::default(),
+                parent: Multihash::default(),
+                checkpoint: Multihash::default(),
+                height: 0,
+                nonce: vec![],
+                random: 0,
+                timestamp: 0,
+                cmd: Some(cmd),
+                atoms: vec![],
+            };
+
+            atom.hash = Hasher::default().digest(&atom.hash_input());
+            atom
+        }
+
+        fn validate_script_sig(sig: &[u8], script_pk: &[u8]) -> bool {
+            sig == script_pk
+        }
+
+        fn validate_conversion(code: u8, _inputs: &[Token], _created: &[Token]) -> bool {
+            code == 0
+        }
+
+        fn related_peers(script_pk: &[u8]) -> Vec<PeerId> {
+            vec![PeerId::from_bytes(script_pk).unwrap()]
+        }
+
+        fn is_related(script_pk: &[u8], peer_id: &PeerId) -> bool {
+            script_pk == peer_id.to_bytes()
+        }
+    }
+
+    fn create_config(dir: &'static str) -> Config {
+        Config {
+            block_threshold: 3,
+            checkpoint_distance: 10,
+            target_block_time: 15,
+            max_difficulty_adjustment: 5.0,
+            init_vdf_difficulty: INIT_DIFFICULTY,
+            vdf_params: 1024,
+            storage_dir: dir,
+        }
+    }
+
+    fn generate_atom(atom: Atom, difficulty: u64) -> Atom {
+        let vdf = WesolowskiVDFParams(1024).new();
+        let nonce = vdf.solve(&atom.vdf_input(), difficulty).unwrap();
+
+        let mut atom = Atom {
+            nonce,
+            hash: Multihash::default(),
+            ..atom
+        };
+
+        atom.hash = Hasher::default().digest(&atom.hash_input());
+        atom
+    }
+
+    fn genesis_hash() -> Multihash {
+        TestValidator::genesis().hash
+    }
+
+    #[test]
+    fn initialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
+        let config = create_config(str);
+        let exp_hash = genesis_hash();
+
+        let graph = Graph::<TestValidator>::genesis(config);
+
+        assert_eq!(graph.entries.len(), 1);
+        assert!(graph.dismissed.is_empty());
+        assert_eq!(graph.main_head, exp_hash);
+        assert_eq!(graph.checkpoint, exp_hash);
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+    }
+
+    #[test]
+    fn upsert_normal_atom() {
+        let dir = tempfile::tempdir().unwrap();
+        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
+        let config = create_config(str);
+        let mut graph = Graph::<TestValidator>::genesis(config);
+
+        let atom1 = {
+            let base = Atom {
+                parent: graph.main_head,
+                checkpoint: graph.checkpoint,
+                height: 1,
+                timestamp: 1,
+                random: 1,
+                cmd: None,
+                atoms: vec![],
+                ..Default::default()
+            };
+            generate_atom(base, graph.difficulty)
+        };
+
+        let atom2 = {
+            let base = Atom {
+                parent: graph.main_head,
+                checkpoint: graph.checkpoint,
+                height: 1,
+                timestamp: 2,
+                random: 2,
+                cmd: None,
+                atoms: vec![atom1.hash],
+                ..Default::default()
+            };
+            generate_atom(base, graph.difficulty)
+        };
+
+        let atom3 = {
+            let base = Atom {
+                parent: graph.main_head,
+                checkpoint: graph.checkpoint,
+                height: 1,
+                timestamp: 3,
+                random: 3,
+                cmd: None,
+                atoms: vec![atom1.hash, atom2.hash],
+                ..Default::default()
+            };
+            generate_atom(base, graph.difficulty)
+        };
+
+        let res = graph.upsert(atom1.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom1.hash));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 2);
+        assert_eq!(graph.main_head, genesis_hash());
+        assert_eq!(graph.checkpoint, graph.main_head);
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+
+        let res = graph.upsert(atom2.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom2.hash));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 3);
+        assert_eq!(graph.main_head, genesis_hash());
+        assert_eq!(graph.checkpoint, graph.main_head);
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+
+        // Atom 3 contains 3 atoms, so it becomes a block
+        let res = graph.upsert(atom3.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom3.hash));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 4);
+        assert_eq!(graph.main_head, atom3.hash);
+        assert_eq!(graph.checkpoint, genesis_hash());
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+    }
+}
