@@ -1,5 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    path::Path,
     time::SystemTime,
 };
 
@@ -7,22 +9,22 @@ use bincode::error::DecodeError;
 use derivative::Derivative;
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
+use rocksdb::DB;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
-    consensus::{graph::storage::Storage, validator::Validator},
+    consensus::validator::Validator,
     crypto::{hasher::Hasher, Multihash},
     ty::{
-        atom::{Atom, Command, Height, Input},
+        atom::{Atom, Command, Height},
         token::Token,
     },
-    utils::mmr::Mmr,
+    utils::mmr::{Mmr, MmrProof},
 };
 
-mod storage;
-
-pub use storage::Mode as StorageMode;
+const HISTORY: &str = "history";
+const OWNNER: &str = "owner";
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
@@ -93,15 +95,15 @@ pub struct UpdateResult {
 struct Entry {
     pub atom: Atom,
     pub children: HashSet<Multihash>,
+    pub excluded: bool,
 
     // Block only
     pub is_block: bool,
     pub mmr: Mmr<Token>,
-
-    pub confirmed: HashMap<PeerId, HashSet<Multihash>>,
-    pub unconfirmed: HashMap<Multihash, Option<Token>>,
-
+    pub confirmed: HashMap<PeerId, HashMap<Multihash, u64>>,
+    pub unconfirmed_consumed: HashSet<Multihash>,
     pub cmd_hashes: HashSet<Multihash>,
+    pub accumulated_diff: HashMap<Multihash, (Vec<u8>, Option<u64>)>,
 
     // Pending only
     pub pending_parents: usize,
@@ -128,11 +130,11 @@ pub struct Config {
     #[derivative(Default(value = "0.1"))]
     pub max_difficulty_adjustment: f32,
 
-    #[derivative(Default(value = "StorageMode::Archive(1)"))]
-    pub storage_mode: StorageMode,
-
     #[derivative(Default(value = "1024"))]
     pub vdf_params: u16,
+
+    #[derivative(Default(value = "\"graph\""))]
+    pub storage_dir: &'static str,
 }
 
 pub struct Graph<V> {
@@ -142,8 +144,6 @@ pub struct Graph<V> {
     main_head: Multihash,
     checkpoint: Multihash,
     checkpoint_height: Height,
-
-    storage: Storage,
 
     vdf: WesolowskiVDF,
     difficulty: u64,
@@ -163,96 +163,109 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
-    pub fn new<I>(
-        atom: Atom,
-        difficulty: u64,
-        mmr: Mmr<Token>,
-        atoms: I,
-        config: Config,
-    ) -> Result<Self, Error>
-    where
-        I: IntoIterator<Item = Atom>,
-    {
-        let mut graph = {
-            let entry = {
-                let indices = Self::resolve_related(&mmr, &config.storage_mode)
-                    .ok_or(Error::InvalidTokens)?;
-                Entry {
-                    atom: atom.clone(),
-                    is_block: true,
-                    mmr: mmr.clone(),
-                    confirmed: indices,
-                    is_missing: false,
-                    ..Default::default()
-                }
-            };
+    pub fn new<I>(atoms: Vec<Atom>, config: Config) -> Result<Self, Error> {
+        use bincode::{config, serde::decode_from_slice};
 
-            let vec = bincode::serde::encode_to_vec(&atom, bincode::config::standard()).unwrap();
-            let storage = Storage {
-                difficulty,
-                mmr,
-                atoms: BTreeMap::from_iter([(atom.height, HashMap::from_iter([(atom.hash, vec)]))]),
-                others: VecDeque::new(),
-                mode: config.storage_mode,
-            };
+        let dir = Path::new(config.storage_dir).join(HISTORY);
+        fs::create_dir_all(&dir).unwrap();
 
-            Self {
-                entries: HashMap::from_iter([(atom.hash, entry)]),
-                dismissed: HashSet::new(),
-                main_head: atom.hash,
-                checkpoint: atom.hash,
-                checkpoint_height: atom.height,
-                storage,
-                vdf: WesolowskiVDFParams(config.vdf_params).new(),
-                difficulty,
-                config,
-                _marker: std::marker::PhantomData,
+        let mut graph = Self::genesis(config);
+
+        let entries = fs::read_dir(&dir).expect("Failed to read history directory");
+
+        let mut file_names = Vec::new();
+        for entry in entries {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let file_name = path.file_name().unwrap().to_str().unwrap();
+            let num = file_name.parse::<u32>().expect("Invalid history file name");
+            file_names.push(num);
+        }
+        file_names.sort_unstable();
+
+        let mut epoch = 0;
+        let mut local_atoms = Vec::new();
+        for num in file_names {
+            epoch += 1;
+            assert_eq!(num, epoch);
+
+            let path = dir.join(num.to_string());
+            let data = fs::read(&path).expect("Failed to read history file");
+            let atoms_in_file: Vec<Atom> = decode_from_slice(&data, config::standard()).unwrap().0;
+
+            let mut cur = epoch * (graph.config.checkpoint_distance - 1);
+            for atom in atoms_in_file {
+                assert_eq!(atom.height, cur);
+                local_atoms.push(atom);
+                cur += 1;
             }
-        };
+            assert_eq!(cur, epoch * graph.config.checkpoint_distance);
+        }
 
-        if atoms
-            .into_iter()
-            .any(|a| graph.upsert(a).is_none_or(|r| !r.rejected.is_empty()))
-        {
-            return Err(Error::InvalidAtoms);
+        let mut exp = graph.config.checkpoint_distance * epoch + 1;
+        if !atoms.iter().all(|a| {
+            if a.height == exp {
+                exp += 1;
+                true
+            } else {
+                a.height == exp - 1 && a.height % graph.config.checkpoint_distance != 0
+            }
+        }) {
+            panic!("Invalid atoms");
+        }
+
+        local_atoms.extend(atoms);
+
+        for atom in local_atoms {
+            if graph.upsert(atom).is_none_or(|r| !r.rejected.is_empty()) {
+                panic!("Invalid atoms");
+            }
         }
 
         Ok(graph)
     }
 
-    fn resolve_related(
-        mmr: &Mmr<Token>,
-        mode: &StorageMode,
-    ) -> Option<HashMap<PeerId, HashSet<Multihash>>> {
-        let target = match mode {
-            StorageMode::General(p) => Some(*p),
-            StorageMode::Archive(..) => None,
+    pub fn genesis(config: Config) -> Self {
+        let atom = V::genesis();
+        assert_eq!(atom.height, 0);
+
+        let mut confirmed = HashMap::<PeerId, HashMap<Multihash, u64>>::new();
+        let mut mmr = Mmr::default();
+
+        if let Some(cmd) = &atom.cmd {
+            for token in &cmd.created {
+                let idx = mmr.append(token.id, token.clone());
+                V::related_peers(&token.script_pk)
+                    .into_iter()
+                    .for_each(|p| {
+                        confirmed.entry(p).or_default().insert(token.id, idx);
+                    });
+            }
+            mmr.commit();
+        }
+
+        let hash = atom.hash;
+        let height = atom.height;
+        let entry = Entry {
+            atom,
+            is_block: true,
+            mmr,
+            confirmed,
+            is_missing: false,
+            ..Default::default()
         };
 
-        mmr.leaves()
-            .try_fold(HashMap::<_, HashSet<_>>::new(), |mut acc, (_, token)| {
-                if let Some(p) = target {
-                    if V::is_related(&token.script_pk, &p) {
-                        acc.entry(p).or_default().insert(token.id);
-                    }
-                } else {
-                    V::related_peers(&token.script_pk)
-                        .into_iter()
-                        .for_each(|p| {
-                            acc.entry(p).or_default().insert(token.id);
-                        });
-                }
-
-                Some(acc)
-            })
-    }
-
-    pub fn empty(config: Config) -> Self {
-        Self::with_genesis(Atom::default(), Mmr::default(), config)
-    }
-
-    pub fn with_genesis(atom: Atom, mmr: Mmr<Token>, config: Config) -> Self {
-        Self::new(atom, config.init_vdf_difficulty, mmr, Vec::new(), config).unwrap()
+        Self {
+            entries: HashMap::from_iter([(hash, entry)]),
+            dismissed: HashSet::new(),
+            main_head: hash,
+            checkpoint: hash,
+            checkpoint_height: height,
+            vdf: WesolowskiVDFParams(config.vdf_params).new(),
+            difficulty: config.init_vdf_difficulty,
+            config,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {
@@ -434,11 +447,7 @@ impl<V: Validator> Graph<V> {
             return Err(RejectReason::InvalidNonce);
         }
 
-        let is_block = self.validate_execution(&hash)?;
-
-        self.storage.push_atom(&self.entries[&hash].atom);
-
-        if !is_block {
+        if !self.validate_execution(&hash)? {
             return Ok(());
         }
 
@@ -449,151 +458,126 @@ impl<V: Validator> Graph<V> {
     }
 
     fn validate_execution(&mut self, target_hash: &Multihash) -> Result<bool, RejectReason> {
-        let mut created: Vec<Token> = Vec::new();
-        let mut consumed = HashSet::new();
-
-        let mut excluded = false;
+        let mut consumed = HashMap::<Multihash, (Vec<u8>, MmrProof)>::new();
+        let mut created = Vec::<Token>::new();
         let mut cmd_hashes = HashSet::new();
-        let parent_hash = self.entries[target_hash].atom.parent;
-        let mut mmr = self.entries[&parent_hash].mmr.clone();
+        let mut excluded = false;
 
-        for hash in self.entries[target_hash]
+        let parent_hash = self.entries[target_hash].atom.parent;
+        let parent = &self.entries[&parent_hash];
+        let target = &self.entries[target_hash];
+
+        for entry in target
             .atom
             .atoms
-            .clone()
             .iter()
-            .chain(std::iter::once(target_hash))
+            .map(|h| &self.entries[h])
+            .chain(std::iter::once(target))
+            .filter(|e| e.atom.cmd.is_some())
         {
-            let (cur, parent) = self.get_two_entries_mut(hash, &parent_hash);
-
-            let Some(cmd) = &cur.atom.cmd else {
-                continue;
-            };
-
-            if cmd.inputs.is_empty() {
+            let atom = &entry.atom;
+            let cmd = atom.cmd.as_ref().unwrap();
+            if cmd.created.is_empty() {
                 return Err(RejectReason::EmptyInput);
             }
+            cmd_hashes.insert(atom.hash);
 
-            cmd_hashes.insert(*hash);
+            let mut inputs = Vec::new();
+            for (token, proof, sig) in &cmd.inputs {
+                if !parent.mmr.verify(token.id, &proof) {
+                    return Err(RejectReason::MissingProof);
+                }
 
-            let inputs = cmd
-                .inputs
-                .iter()
-                .cloned()
-                .try_fold(Vec::new(), |mut acc, input| match input {
-                    Input::Confirmed(token, proof, sig) => {
-                        if !consumed.insert(token.id) {
-                            return Err(RejectReason::DoubleSpend);
-                        }
-
-                        if !mmr.delete(token.id, &proof) {
-                            return Err(RejectReason::InvalidProof);
-                        }
-
-                        if hash == target_hash && !V::validate_script_sig(&sig, &token.script_pk) {
-                            return Err(RejectReason::InvalidScriptSig);
-                        }
-
-                        excluded |= parent
-                            .unconfirmed
-                            .get(&token.id)
-                            .is_some_and(|t| t.is_none());
-
-                        acc.push(token);
-                        Ok(acc)
-                    }
-                    Input::Unconfirmed(token_id, sig) => {
-                        let Some(token) = created
-                            .binary_search_by_key(&&token_id, |t| &t.id)
-                            .ok()
-                            .map(|i| created.remove(i))
-                        else {
-                            return Err(RejectReason::MissingInput);
-                        };
-
-                        if hash == target_hash && !V::validate_script_sig(&sig, &token.script_pk) {
-                            return Err(RejectReason::InvalidScriptSig);
-                        }
-
-                        excluded |= parent
-                            .unconfirmed
-                            .get(&token.id)
-                            .is_some_and(|t| t.is_none());
-
-                        acc.push(token);
-
-                        Ok(acc)
-                    }
-                })?;
-
-            if hash == target_hash {
-                if cmd
-                    .created
-                    .iter()
-                    .enumerate()
-                    .any(|(i, t)| !t.validate_id(cmd.inputs[0].id(), i as u32))
+                if consumed
+                    .insert(token.id, (token.script_pk.clone(), proof.clone()))
+                    .is_some()
                 {
-                    return Err(RejectReason::InvalidTokenId);
+                    return Err(RejectReason::DoubleSpend);
                 }
 
-                if !V::validate_conversion(cmd.code, &inputs, &cmd.created) {
-                    return Err(RejectReason::InvalidConversion);
+                if !V::validate_script_sig(&sig, &token.script_pk) {
+                    return Err(RejectReason::InvalidScriptSig);
                 }
+
+                inputs.push(token.clone());
+                excluded |= entry.excluded;
             }
 
-            cmd.created.iter().cloned().for_each(|token| {
-                created.push(token);
-            });
+            if cmd
+                .created
+                .iter()
+                .enumerate()
+                .any(|(i, t)| !t.validate_id(&cmd.inputs[0].0.id, i as u32))
+            {
+                return Err(RejectReason::InvalidTokenId);
+            }
+
+            if !V::validate_conversion(cmd.code, &inputs, &cmd.created) {
+                return Err(RejectReason::InvalidConversion);
+            }
+
+            created.extend(cmd.created.iter().cloned());
         }
 
         let threshold = self.config.block_threshold as usize;
+        let length = target.atom.atoms.len() + 1;
 
-        let (target, parent) = self.get_two_entries_mut(target_hash, &parent_hash);
+        if length < threshold {
+            excluded |= target.atom.cmd.as_ref().is_some_and(|cmd| {
+                cmd.inputs
+                    .iter()
+                    .any(|(t, _, _)| parent.unconfirmed_consumed.contains(&t.id))
+            });
 
-        if target.atom.atoms.len() + 1 < threshold {
+            let parent = self.entries.get_mut(&parent_hash).unwrap();
+
             if excluded {
                 parent.children.remove(target_hash);
             } else {
-                let iter = consumed.into_iter().map(|id| (id, None));
-                parent.unconfirmed.extend(iter);
+                parent.unconfirmed_consumed.extend(consumed.keys().copied());
             }
+
             return Ok(false);
         }
 
         let mut confirmed = parent.confirmed.clone();
+        let mut mmr = parent.mmr.clone();
+        let mut diff = parent.accumulated_diff.clone();
 
-        consumed.into_iter().for_each(|id| {
-            confirmed.values_mut().for_each(|v| {
-                v.remove(&id);
+        consumed.into_iter().for_each(|(id, (sig, proof))| {
+            mmr.delete(id, &proof);
+            diff.insert(id, (sig.clone(), None));
+            V::related_peers(&sig).into_iter().for_each(|p| {
+                let mut empty = false;
+                if let Some(set) = confirmed.get_mut(&p) {
+                    set.remove(&id);
+                    empty = set.is_empty();
+                }
+                if empty {
+                    confirmed.remove(&p);
+                }
             });
         });
 
         created.into_iter().for_each(|token| {
-            match &self.config.storage_mode {
-                StorageMode::General(p) => {
-                    if V::is_related(&token.script_pk, p) {
-                        confirmed.entry(*p).or_default().insert(token.id);
-                    }
-                }
-                StorageMode::Archive(..) => {
-                    V::related_peers(&token.script_pk)
-                        .into_iter()
-                        .for_each(|p| {
-                            confirmed.entry(p).or_default().insert(token.id);
-                        });
-                }
-            }
-            mmr.append(token.id, token);
+            let id = token.id;
+            let script_pk = token.script_pk.clone();
+            let idx = mmr.append(token.id, token);
+            diff.insert(id, (script_pk.clone(), Some(idx)));
+            V::related_peers(&script_pk).into_iter().for_each(|p| {
+                confirmed.entry(p).or_default().insert(id, idx);
+            });
         });
 
         mmr.commit();
-        mmr.prune(confirmed.values().flat_map(|m| m.iter()).cloned());
 
         let cur = self.entries.get_mut(target_hash).unwrap();
         cur.mmr = mmr;
         cur.confirmed = confirmed;
         cur.cmd_hashes = cmd_hashes;
+        cur.accumulated_diff = diff;
         cur.is_block = true;
+        cur.excluded = false;
 
         Ok(true)
     }
@@ -649,6 +633,11 @@ impl<V: Validator> Graph<V> {
     }
 
     fn maybe_advance_checkpoint(&mut self) {
+        use bincode::{
+            config,
+            serde::{encode_into_std_write, encode_to_vec},
+        };
+
         let prev_height = self.entries[&self.checkpoint].atom.height;
         let head_height = self.entries[&self.main_head].atom.height;
 
@@ -659,11 +648,33 @@ impl<V: Validator> Graph<V> {
         let next_height = prev_height + self.config.checkpoint_distance;
         let next_hash = self.get_block_at_height(self.main_head, next_height);
 
-        let (times, hashes) = self.collect_times_and_hashes(next_hash, self.checkpoint);
+        let (times, atoms) = self.collect_times_and_atoms(next_hash, self.checkpoint);
         let difficulty = self.adjust_difficulty(times);
 
-        self.storage
-            .finalize(&hashes, difficulty, self.entries[&next_hash].mmr.clone());
+        let dir = Path::new(self.config.storage_dir).join(HISTORY);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join((next_height / self.config.checkpoint_distance).to_string());
+        let data = encode_to_vec(&atoms, config::standard()).unwrap();
+        fs::write(&path, &data).expect("Failed to write history file");
+
+        let dir = Path::new(self.config.storage_dir).join(OWNNER);
+        let db = DB::open_default(&dir).expect("Failed to open owner DB");
+
+        for (hash, (sig, idx)) in &self.entries[&next_hash].accumulated_diff {
+            V::related_peers(sig).into_iter().for_each(|p| {
+                let mut key = Vec::new();
+                encode_into_std_write(&p, &mut key, config::standard()).unwrap();
+                encode_into_std_write(hash, &mut key, config::standard()).unwrap();
+
+                if let Some(idx) = idx {
+                    let value = encode_to_vec(idx, config::standard()).unwrap();
+                    db.put(key, value).expect("Failed to update owner DB");
+                } else {
+                    db.delete(key).expect("Failed to update owner DB");
+                }
+            });
+        }
+
         self.entries.retain(|_, e| e.atom.checkpoint == next_hash);
         self.checkpoint_height = next_height;
         self.checkpoint = next_hash;
@@ -680,16 +691,17 @@ impl<V: Validator> Graph<V> {
         }
     }
 
-    fn collect_times_and_hashes(
+    fn collect_times_and_atoms(
         &mut self,
         start: Multihash,
         end: Multihash,
-    ) -> (Vec<u64>, Vec<Multihash>) {
+    ) -> (Vec<u64>, Vec<Atom>) {
         let mut times = Vec::new();
-        let mut hashes = vec![start];
+        let mut atoms = Vec::new();
 
         let (mut cur, mut next_time) = {
             let entry = &self.entries[&start];
+            atoms.push(entry.atom.clone());
             (entry.atom.parent, entry.atom.timestamp)
         };
 
@@ -708,10 +720,12 @@ impl<V: Validator> Graph<V> {
                 break;
             }
 
-            hashes.push(cur);
+            atoms.push(entry.atom.clone());
         }
 
-        (times, hashes)
+        atoms.reverse();
+
+        (times, atoms)
     }
 
     fn adjust_difficulty(&self, mut times: Vec<u64>) -> u64 {
@@ -749,91 +763,41 @@ impl<V: Validator> Graph<V> {
     pub fn tokens_for(&self, peer: &PeerId) -> Vec<Token> {
         let entry = &self.entries[&self.main_head];
         let mmr = &entry.mmr;
-
-        match self.config.storage_mode {
-            StorageMode::General(p) => {
-                debug_assert_eq!(&p, peer);
-                mmr.leaves()
-                    .filter(|(h, _)| !entry.unconfirmed.contains_key(h))
-                    .map(|(_, t)| t.clone())
-                    .chain(
-                        entry
-                            .unconfirmed
-                            .iter()
-                            .filter_map(|(h, t)| t.as_ref().map(|t| (h, t)))
-                            .filter(|(_, t)| V::is_related(&t.script_pk, peer))
-                            .map(|(_, t)| t.clone()),
-                    )
-                    .collect()
-            }
-            StorageMode::Archive(..) => entry
-                .confirmed
-                .get(peer)
-                .into_iter()
-                .flat_map(|hs| {
-                    hs.iter()
-                        .filter(|h| !entry.unconfirmed.contains_key(h))
-                        .map(|h| mmr.get(h).cloned().unwrap())
-                })
-                .chain(
-                    entry
-                        .unconfirmed
-                        .iter()
-                        .filter_map(|(h, t)| t.as_ref().map(|t| (h, t)))
-                        .filter(|(_, t)| V::is_related(&t.script_pk, peer))
-                        .map(|(_, t)| t.clone()),
-                )
-                .collect(),
-        }
-    }
-
-    pub fn export(&self, peer_id: Option<PeerId>) -> Option<Vec<u8>> {
-        self.storage.export(peer_id.map(|p| {
-            self.entries[&self.checkpoint]
-                .confirmed
-                .get(&p)
-                .map(|m| m.iter().cloned())
-                .unwrap_or_default()
-        }))
-    }
-
-    pub fn import(data: &[u8], config: Config) -> Result<Self, Error> {
-        Storage::import(data, config)
+        entry
+            .confirmed
+            .get(peer)
+            .into_iter()
+            .flat_map(|hs| {
+                hs.iter()
+                    .filter(|(h, _)| !entry.unconfirmed_consumed.contains(h))
+                    .map(|(_, idx)| mmr.get(*idx).unwrap().1.as_ref().unwrap().clone())
+            })
+            .collect()
     }
 
     pub fn create_command(
         &self,
         code: u8,
-        inputs: impl IntoIterator<Item = (Multihash, impl Into<Vec<u8>>)>,
-        created: impl IntoIterator<Item = (impl Into<Vec<u8>>, impl Into<Vec<u8>>)>,
+        input_iter: impl IntoIterator<Item = (Multihash, impl Into<Vec<u8>>)>,
+        created_iter: impl IntoIterator<Item = (impl Into<Vec<u8>>, impl Into<Vec<u8>>)>,
+        peer: &PeerId,
     ) -> Result<Command, Error> {
         let head = &self.entries[&self.main_head];
+        let set = head.confirmed.get(peer).ok_or(Error::NoInput)?;
 
-        let inputs = inputs
-            .into_iter()
-            .try_fold(Vec::new(), |mut acc, (id, sig)| {
-                match head.mmr.get(&id) {
-                    Some(token) => {
-                        let proof = head.mmr.prove(id).ok_or(Error::FailedToProveInput)?;
-                        acc.push(Input::Confirmed(token.clone(), proof, sig.into()));
-                    }
-                    None => {
-                        head.unconfirmed
-                            .get(&id)
-                            .ok_or(Error::UnknownTokenId)?
-                            .as_ref()
-                            .ok_or(Error::InputConsumed)?;
-                        acc.push(Input::Unconfirmed(id, sig.into()));
-                    }
-                }
-                Ok::<_, Error>(acc)
-            })?;
+        let mut inputs = Vec::new();
+        for (id, sig) in input_iter {
+            let idx = *set.get(&id).ok_or(Error::UnknownTokenId)?;
+            let token = head.mmr.get(idx).unwrap().1.as_ref().unwrap().clone();
+            let proof = head.mmr.prove(idx).ok_or(Error::FailedToProveInput)?;
+            inputs.push((token, proof, sig.into()));
+        }
 
-        let first_input_id = inputs.first().ok_or(Error::NoInput)?.id();
-        let created = created
+        let first_input_id = inputs.first().ok_or(Error::NoInput)?.0.id;
+        let created = created_iter
             .into_iter()
             .enumerate()
-            .map(|(idx, (pk, sig))| Token::new(first_input_id, idx as u32, pk, sig))
+            .map(|(idx, (pk, sig))| Token::new(&first_input_id, idx as u32, pk, sig))
             .collect();
 
         Ok(Command {
