@@ -180,4 +180,60 @@ impl AtomBuilder {
             }
         })
     }
+
+    pub fn build_sync(self, vdf_param: u16, difficulty: u64) -> Atom {
+        use bincode::{config, serde::encode_into_std_write};
+
+        let random = self.random.unwrap_or_else(|| rand::random());
+        let timestamp = self.timestamp.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        });
+
+        if let Some(nonce) = self.nonce {
+            return Atom {
+                hasher: self.hasher,
+                parent: self.parent,
+                checkpoint: self.checkpoint,
+                height: self.height,
+                nonce,
+                random,
+                timestamp,
+                cmd: self.cmd,
+                atoms: self.atoms,
+                cache: OnceLock::new(),
+            };
+        }
+
+        let mut buf = Vec::new();
+
+        encode_into_std_write(self.hasher, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(random, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(timestamp, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
+
+        let nonce = WesolowskiVDFParams(vdf_param)
+            .new()
+            .solve(&buf, difficulty)
+            .expect("VDF should work");
+
+        Atom {
+            hasher: self.hasher,
+            parent: self.parent,
+            checkpoint: self.checkpoint,
+            height: self.height,
+            nonce,
+            random,
+            timestamp,
+            cmd: self.cmd,
+            atoms: self.atoms,
+            cache: OnceLock::new(),
+        }
+    }
 }
