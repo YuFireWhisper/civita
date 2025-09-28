@@ -96,19 +96,16 @@ impl AtomBuilder {
         self
     }
 
-    #[cfg(test)]
     pub fn with_random(mut self, random: u64) -> Self {
         self.random = Some(random);
         self
     }
 
-    #[cfg(test)]
     pub fn with_nonce(mut self, nonce: Vec<u8>) -> Self {
         self.nonce = Some(nonce);
         self
     }
 
-    #[cfg(test)]
     pub fn with_timestamp(mut self, timestamp: Timestamp) -> Self {
         self.timestamp = Some(timestamp);
         self
