@@ -5,16 +5,9 @@ pub type Timestamp = u64;
 
 #[derive(Clone)]
 #[derive(serde::Serialize, serde::Deserialize)]
-pub enum Input {
-    Confirmed(Token, MmrProof, Vec<u8>),
-    Unconfirmed(Multihash, Vec<u8>),
-}
-
-#[derive(Clone)]
-#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Command {
     pub code: u8,
-    pub inputs: Vec<Input>,
+    pub inputs: Vec<(Token, MmrProof, Vec<u8>)>,
     pub created: Vec<Token>,
 }
 
@@ -31,15 +24,6 @@ pub struct Atom {
     pub timestamp: Timestamp,
     pub cmd: Option<Command>,
     pub atoms: Vec<Multihash>,
-}
-
-impl Input {
-    pub fn id(&self) -> &Multihash {
-        match self {
-            Input::Confirmed(t, ..) => &t.id,
-            Input::Unconfirmed(id, ..) => id,
-        }
-    }
 }
 
 impl Atom {
