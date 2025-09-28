@@ -9,7 +9,6 @@ use derivative::Derivative;
 use libp2p::PeerId;
 use rocksdb::DB;
 use tokio::task::JoinHandle;
-use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
     consensus::validator::Validator,
@@ -152,7 +151,6 @@ pub struct Graph<V> {
     checkpoint: Multihash,
     checkpoint_height: Height,
 
-    vdf: WesolowskiVDF,
     difficulty: u64,
 
     config: Config,
@@ -279,7 +277,6 @@ impl<V: Validator> Graph<V> {
             main_head: hash,
             checkpoint: hash,
             checkpoint_height: height,
-            vdf: WesolowskiVDFParams(config.vdf_params).new(),
             difficulty: config.init_vdf_difficulty,
             config,
             _marker: std::marker::PhantomData,
@@ -456,12 +453,7 @@ impl<V: Validator> Graph<V> {
             return Err(RejectReason::BlockInAtoms);
         }
 
-        if std::panic::catch_unwind(|| {
-            self.vdf
-                .verify(&atom.vdf_input(), self.difficulty, &atom.nonce)
-        })
-        .is_err()
-        {
+        if !atom.verify_nonce(self.config.vdf_params, self.difficulty) {
             return Err(RejectReason::InvalidNonce);
         }
 
@@ -825,6 +817,7 @@ impl<V: Validator> Graph<V> {
             self.entries[&self.main_head].atom.height + 1,
         )
         .with_command(cmd)
+        .with_atoms(self.get_children(self.main_head))
         .build(self.config.vdf_params, self.difficulty)
     }
 

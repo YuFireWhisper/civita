@@ -21,7 +21,7 @@ use crate::{
         graph::{self, Graph, Status, HISTORY},
         validator::Validator,
     },
-    crypto::{hasher::Hasher, Multihash},
+    crypto::Multihash,
     network::{
         gossipsub,
         request_response::{Message, RequestResponse},
@@ -210,7 +210,7 @@ impl<V: Validator> Engine<V> {
     ) -> Result<(), graph::Error> {
         let graph = self.graph.read().await;
         let cmd = graph.create_command(code, inputs, created, &self.transport.local_peer_id())?;
-        let handle = graph.create_atom(Some(cmd))?;
+        let handle = graph.create_atom(Some(cmd));
         drop(graph);
 
         let tx = self.atom_result_tx.clone();
@@ -276,13 +276,8 @@ impl<V: Validator> Engine<V> {
             }
 
             if hb_tick {
-                let Ok(handle) = self.graph.read().await.create_atom(None) else {
-                    log::error!("Failed to create heartbeat atom");
-                    continue;
-                };
-
+                let handle = self.graph.read().await.create_atom(None);
                 let tx = self.atom_result_tx.clone();
-
                 tokio::spawn(async move {
                     let atom = handle.await.expect("Atom creation failed");
                     if let Err(e) = tx.send(atom).await {
@@ -308,26 +303,14 @@ impl<V: Validator> Engine<V> {
             return;
         };
 
-        if !Hasher::validate(&atom.hash, &atom.hash_input()) {
-            log::warn!("Invalid atom hash from peer {}", msg.propagation_source);
-            self.gossipsub
-                .report_validation_result(
-                    &msg.id,
-                    &msg.propagation_source,
-                    MessageAcceptance::Reject,
-                )
-                .await;
-            return;
-        }
-
         self.on_recv_atom(atom, Some(msg.id), msg.propagation_source)
             .await;
     }
 
     async fn on_recv_atom(&self, atom: Atom, msg_id: Option<MessageId>, peer: PeerId) {
-        let hash = atom.hash;
+        let hash = atom.hash();
 
-        for hash in atom.atoms.iter().chain(&[atom.hash, atom.parent]) {
+        for hash in atom.atoms.iter().chain(&[atom.hash(), atom.parent]) {
             self.pending_atoms
                 .entry(*hash)
                 .or_default()
@@ -428,12 +411,6 @@ impl<V: Validator> Engine<V> {
                 }
 
                 for atom in atoms {
-                    if !Hasher::validate(&atom.hash, &atom.hash_input()) {
-                        log::warn!("Invalid atom hash from peer {peer}");
-                        self.disconnect_peer(peer).await;
-                        return;
-                    }
-
                     self.on_recv_atom(atom, None, peer).await;
                 }
             }
@@ -514,7 +491,7 @@ impl<V: Validator> Engine<V> {
     }
 
     async fn on_atom_ready(&self, atom: Atom) -> bool {
-        let hash = atom.hash;
+        let hash = atom.hash();
         let vec = bincode::serde::encode_to_vec(&atom, bincode::config::standard()).unwrap();
         let Some(result) = self.graph.write().await.upsert(atom) else {
             return false;
