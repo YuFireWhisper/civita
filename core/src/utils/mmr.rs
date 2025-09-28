@@ -71,7 +71,7 @@ impl<T> Mmr<T> {
         let mut g = index_height(idx);
         let mut fills: HashMap<u64, Multihash> = HashMap::new();
 
-        for hash in proof.hashes.iter().skip(1) {
+        for hash in &proof.hashes {
             fills.insert(idx, acc);
 
             let offset = 2u64 << g;
@@ -406,6 +406,7 @@ mod test {
         mmr: Mmr<u32>,
         hash_to_idx: HashMap<Multihash, u64>,
         proof_cache: HashMap<u64, (Multihash, MmrProof)>,
+        deleted: Vec<u64>,
     }
 
     impl Context {
@@ -424,17 +425,24 @@ mod test {
                 let idx = self.hash_to_idx[&h];
                 let p = self.mmr.prove(idx).unwrap();
                 assert!(self.mmr.delete(h, &p));
+                self.deleted.push(idx);
             }
             self.mmr.commit();
         }
 
-        pub fn verify_all(&self, start: u64, end: u64, exp: bool) {
+        pub fn verify(&self, start: u64, end: u64) {
             for i in start..end {
                 let h = Hasher::default().digest(&i.to_le_bytes());
                 let idx = self.hash_to_idx[&h];
                 let p = self.mmr.prove(idx).unwrap();
                 assert!(self.mmr.verify(h, &p));
-                assert_eq!(p.hashes[0] != Multihash::default(), exp);
+            }
+        }
+
+        pub fn verify_deleted(&self) {
+            for idx in &self.deleted {
+                let p = self.mmr.prove(*idx).unwrap();
+                assert!(self.mmr.verify(Multihash::default(), &p));
             }
         }
 
@@ -467,7 +475,7 @@ mod test {
     fn append_and_verify() {
         let mut ctx = Context::default();
         ctx.append(0, 1000);
-        ctx.verify_all(0, 1000, true);
+        ctx.verify(0, 1000);
     }
 
     #[test]
@@ -475,9 +483,9 @@ mod test {
         let mut ctx = Context::default();
         ctx.append(0, 1000);
         ctx.delete(200, 800);
-        ctx.verify_all(0, 200, true);
-        ctx.verify_all(800, 1000, true);
-        ctx.verify_all(200, 800, false);
+        ctx.verify(0, 200);
+        ctx.verify(800, 1000);
+        ctx.verify_deleted();
     }
 
     #[test]
