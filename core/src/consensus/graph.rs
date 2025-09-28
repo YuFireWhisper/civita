@@ -582,13 +582,6 @@ impl<V: Validator> Graph<V> {
         Ok(true)
     }
 
-    fn get_two_entries_mut(&mut self, a: &Multihash, b: &Multihash) -> (&mut Entry, &mut Entry) {
-        match self.entries.get_disjoint_mut([a, b]) {
-            [Some(e1), Some(e2)] => (e1, e2),
-            _ => unreachable!(),
-        }
-    }
-
     fn update_weight(&mut self, start: Multihash) {
         let (cmds, mut cur) = {
             let e = self.entries.get(&start).unwrap();
