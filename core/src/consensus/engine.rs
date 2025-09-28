@@ -482,9 +482,20 @@ impl<V: Validator> Engine<V> {
             max = max.max(num);
         }
 
-        if epoch >= max {
+        if epoch > max {
             return;
         }
+
+        if epoch == max {
+            let atoms: Vec<Atom> = Vec::new();
+            let data = encode_to_vec(&atoms, config::standard()).unwrap();
+            if let Err(e) = self.request_response.send_response(channel, data).await {
+                log::error!("Failed to send response: {e}");
+            }
+            return;
+        }
+
+        // epoch < max
 
         let mut atoms = Vec::new();
         for i in (epoch + 1)..=max {
