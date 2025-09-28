@@ -1,4 +1,15 @@
-use civita_core::{consensus, ty::token::Token};
+use civita_core::{
+    consensus,
+    crypto::Hasher,
+    ty::{
+        atom::{Atom, Command},
+        token::Token,
+    },
+};
+use multihash::Multihash;
+use multihash_derive::MultihashDigest;
+
+use crate::common::constants::*;
 
 pub struct Validator;
 
@@ -31,4 +42,41 @@ impl consensus::validator::Validator for Validator {
     fn related_peers(script_pk: &[u8]) -> Vec<libp2p::PeerId> {
         vec![libp2p::PeerId::from_bytes(script_pk).unwrap()]
     }
+
+    fn genesis() -> Atom {
+        let mut tokens = Vec::new();
+        let value = INIT_VALUE.to_be_bytes();
+        tokens.push(Token::new(&Multihash::default(), 0, value, PEER_ID_1));
+        tokens.push(Token::new(&Multihash::default(), 1, value, PEER_ID_2));
+        tokens.push(Token::new(&Multihash::default(), 2, value, PEER_ID_3));
+        tokens.push(Token::new(&Multihash::default(), 3, value, PEER_ID_4));
+        tokens.push(Token::new(&Multihash::default(), 4, value, PEER_ID_5));
+
+        let cmd = Command {
+            code: 0,
+            inputs: vec![],
+            created: tokens,
+        };
+
+        let mut atom = Atom {
+            hash: Multihash::default(),
+            parent: Multihash::default(),
+            checkpoint: Multihash::default(),
+            height: 0,
+            nonce: vec![],
+            random: 0,
+            timestamp: 0,
+            cmd: Some(cmd),
+            atoms: vec![],
+        };
+
+        let hash = Hasher::default().digest(&atom.hash_input());
+        atom.hash = hash;
+        atom
+    }
+}
+
+pub fn token_0() -> Token {
+    let value = INIT_VALUE.to_be_bytes();
+    Token::new(&Multihash::default(), 0, value, PEER_ID_1)
 }

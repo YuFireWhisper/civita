@@ -1,31 +1,26 @@
 use civita_core::network::{transport::Config, Transport};
-use libp2p::Multiaddr;
+use libp2p::{identity::Keypair, Multiaddr};
+
+use crate::common::constants::*;
 
 const LISTEN_ADDRESS: &str = "/ip4/0.0.0.0/tcp/0";
 
-pub async fn create_transports(n: usize) -> Vec<Transport> {
-    let mut transports = Vec::with_capacity(n);
+pub async fn create_transports() -> Vec<Transport> {
+    let mut txs = Vec::with_capacity(5);
 
-    for _ in 0..n {
-        let sk = libp2p::identity::Keypair::generate_ed25519();
-        let listen_addr: Multiaddr = LISTEN_ADDRESS.parse().unwrap();
-        let config = Config::default();
-        if let Ok(transport) = Transport::new(sk, listen_addr, config).await {
-            transports.push(transport);
-        }
-    }
+    let sk1 = Keypair::from_protobuf_encoding(&SK_1).unwrap();
+    let sk2 = Keypair::from_protobuf_encoding(&SK_2).unwrap();
+    let sk3 = Keypair::from_protobuf_encoding(&SK_3).unwrap();
+    let sk4 = Keypair::from_protobuf_encoding(&SK_4).unwrap();
+    let sk5 = Keypair::from_protobuf_encoding(&SK_5).unwrap();
 
-    dial_transports(&transports).await;
+    let addr: Multiaddr = LISTEN_ADDRESS.parse().unwrap();
+    let config = Config::default();
+    txs.push(Transport::new(sk1, addr.clone(), config).await.unwrap());
+    txs.push(Transport::new(sk2, addr.clone(), config).await.unwrap());
+    txs.push(Transport::new(sk3, addr.clone(), config).await.unwrap());
+    txs.push(Transport::new(sk4, addr.clone(), config).await.unwrap());
+    txs.push(Transport::new(sk5, addr, config).await.unwrap());
 
-    transports
-}
-
-async fn dial_transports(transports: &[Transport]) {
-    for (i, cur) in transports.iter().enumerate() {
-        for target_transport in transports.iter().skip(i + 1) {
-            let target_addr = target_transport.listen_addr();
-            let target_peer_id = target_transport.local_peer_id();
-            cur.dial(target_peer_id, target_addr).await.unwrap();
-        }
-    }
+    txs
 }
