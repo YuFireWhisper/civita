@@ -2,22 +2,20 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
     path::Path,
-    time::SystemTime,
 };
 
 use bincode::error::DecodeError;
 use derivative::Derivative;
 use libp2p::PeerId;
-use multihash_derive::MultihashDigest;
 use rocksdb::DB;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDF, WesolowskiVDFParams, VDF};
 
 use crate::{
     consensus::validator::Validator,
-    crypto::{hasher::Hasher, Multihash},
+    crypto::Multihash,
     ty::{
-        atom::{Atom, Command, Height},
+        atom::{Atom, AtomBuilder, Command, Height},
         token::Token,
     },
     utils::mmr::{Mmr, MmrProof},
@@ -235,8 +233,19 @@ impl<V: Validator> Graph<V> {
     }
 
     pub fn genesis(config: Config) -> Self {
-        let atom = V::genesis();
-        assert_eq!(atom.height, 0);
+        let (hasher, code, tokens) = V::genesis();
+
+        let atom = AtomBuilder::new(Multihash::default(), Multihash::default(), 0)
+            .with_hasher(hasher)
+            .with_nonce(vec![])
+            .with_random(0)
+            .with_timestamp(0)
+            .with_command((!tokens.is_empty()).then(|| Command {
+                code,
+                inputs: vec![],
+                created: tokens,
+            }))
+            .build_sync(config.vdf_params, config.init_vdf_difficulty);
 
         let mut confirmed = HashMap::<PeerId, HashMap<Multihash, u64>>::new();
         let mut mmr = Mmr::default();
@@ -253,7 +262,7 @@ impl<V: Validator> Graph<V> {
             mmr.commit();
         }
 
-        let hash = atom.hash;
+        let hash = atom.hash();
         let height = atom.height;
         let entry = Entry {
             atom,
@@ -279,7 +288,7 @@ impl<V: Validator> Graph<V> {
 
     pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {
         let mut result = UpdateResult::default();
-        let hash = atom.hash;
+        let hash = atom.hash();
 
         if self.contains(&hash) {
             return None;
@@ -489,7 +498,7 @@ impl<V: Validator> Graph<V> {
             if cmd.created.is_empty() {
                 return Err(RejectReason::EmptyInput);
             }
-            cmd_hashes.insert(atom.hash);
+            cmd_hashes.insert(atom.hash());
 
             let mut inputs = Vec::new();
             for (token, proof, sig) in &cmd.inputs {
@@ -687,7 +696,7 @@ impl<V: Validator> Graph<V> {
         loop {
             let e = &self.entries[&cur];
             if e.atom.height == height {
-                break e.atom.hash;
+                break e.atom.hash();
             }
             cur = e.atom.parent;
         }
@@ -809,32 +818,14 @@ impl<V: Validator> Graph<V> {
         })
     }
 
-    pub fn create_atom(&self, cmd: Option<Command>) -> Result<JoinHandle<Atom>, Error> {
-        let mut atom = Atom {
-            hash: Multihash::default(),
-            parent: self.main_head,
-            checkpoint: self.checkpoint,
-            height: self.entries[&self.main_head].atom.height + 1,
-            nonce: Vec::new(),
-            random: rand::random(),
-            timestamp: SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            cmd,
-            atoms: self.get_children(self.main_head),
-        };
-
-        let vdf = self.vdf.clone();
-        let difficulty = self.difficulty;
-
-        Ok(tokio::spawn(async move {
-            atom.nonce = vdf
-                .solve(&atom.vdf_input(), difficulty)
-                .expect("VDF must be solved");
-            atom.hash = Hasher::default().digest(&atom.hash_input());
-            atom
-        }))
+    pub fn create_atom(&self, cmd: Option<Command>) -> JoinHandle<Atom> {
+        AtomBuilder::new(
+            self.main_head,
+            self.checkpoint,
+            self.entries[&self.main_head].atom.height + 1,
+        )
+        .with_command(cmd)
+        .build(self.config.vdf_params, self.difficulty)
     }
 
     fn get_children(&self, h: Multihash) -> Vec<Multihash> {
@@ -895,6 +886,8 @@ impl<V: Validator> Graph<V> {
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::Hasher;
+
     use super::*;
 
     const INIT_DIFFICULTY: u64 = 5;
@@ -910,33 +903,13 @@ mod tests {
     struct TestValidator;
 
     impl Validator for TestValidator {
-        fn genesis() -> Atom {
+        fn genesis() -> (Hasher, u8, Vec<Token>) {
             let tokens = vec![
                 Token::new(&Multihash::default(), 0, [1], PEER1),
                 Token::new(&Multihash::default(), 1, [1], PEER2),
                 Token::new(&Multihash::default(), 2, [1], PEER2),
             ];
-
-            let cmd = Command {
-                code: 0,
-                inputs: vec![],
-                created: tokens.clone(),
-            };
-
-            let mut atom = Atom {
-                hash: Multihash::default(),
-                parent: Multihash::default(),
-                checkpoint: Multihash::default(),
-                height: 0,
-                nonce: vec![],
-                random: 0,
-                timestamp: 0,
-                cmd: Some(cmd),
-                atoms: vec![],
-            };
-
-            atom.hash = Hasher::default().digest(&atom.hash_input());
-            atom
+            (Hasher::default(), 0, tokens)
         }
 
         fn validate_script_sig(sig: &[u8], script_pk: &[u8]) -> bool {
@@ -968,22 +941,22 @@ mod tests {
         }
     }
 
-    fn generate_atom(atom: Atom, difficulty: u64) -> Atom {
-        let vdf = WesolowskiVDFParams(1024).new();
-        let nonce = vdf.solve(&atom.vdf_input(), difficulty).unwrap();
-
-        let mut atom = Atom {
-            nonce,
-            hash: Multihash::default(),
-            ..atom
-        };
-
-        atom.hash = Hasher::default().digest(&atom.hash_input());
-        atom
-    }
-
     fn genesis_hash() -> Multihash {
-        TestValidator::genesis().hash
+        let (hasher, code, tokens) = TestValidator::genesis();
+
+        let atom = AtomBuilder::new(Multihash::default(), Multihash::default(), 0)
+            .with_hasher(hasher)
+            .with_nonce(vec![])
+            .with_random(0)
+            .with_timestamp(0)
+            .with_command((!tokens.is_empty()).then(|| Command {
+                code,
+                inputs: vec![],
+                created: tokens,
+            }))
+            .build_sync(1024, INIT_DIFFICULTY);
+
+        atom.hash()
     }
 
     #[test]
@@ -1010,51 +983,24 @@ mod tests {
         let config = create_config(str);
         let mut graph = Graph::<TestValidator>::genesis(config);
 
-        let atom1 = {
-            let base = Atom {
-                parent: graph.main_head,
-                checkpoint: graph.checkpoint,
-                height: 1,
-                timestamp: 1,
-                random: 1,
-                cmd: None,
-                atoms: vec![],
-                ..Default::default()
-            };
-            generate_atom(base, graph.difficulty)
-        };
-
-        let atom2 = {
-            let base = Atom {
-                parent: graph.main_head,
-                checkpoint: graph.checkpoint,
-                height: 1,
-                timestamp: 2,
-                random: 2,
-                cmd: None,
-                atoms: vec![atom1.hash],
-                ..Default::default()
-            };
-            generate_atom(base, graph.difficulty)
-        };
-
-        let atom3 = {
-            let base = Atom {
-                parent: graph.main_head,
-                checkpoint: graph.checkpoint,
-                height: 1,
-                timestamp: 3,
-                random: 3,
-                cmd: None,
-                atoms: vec![atom1.hash, atom2.hash],
-                ..Default::default()
-            };
-            generate_atom(base, graph.difficulty)
-        };
+        let atom1 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
+            .with_random(1)
+            .with_timestamp(1)
+            .build_sync(graph.config.vdf_params, graph.difficulty);
+        let atom2 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
+            .with_random(2)
+            .with_timestamp(2)
+            .with_atoms(vec![atom1.hash()])
+            .build_sync(graph.config.vdf_params, graph.difficulty);
+        let atom3 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
+            .with_random(3)
+            .with_timestamp(3)
+            .with_atoms(vec![atom1.hash(), atom2.hash()])
+            .build_sync(graph.config.vdf_params, graph.difficulty);
 
         let res = graph.upsert(atom1.clone()).unwrap();
         assert_eq!(res.accepted.len(), 1);
-        assert!(res.accepted.contains(&atom1.hash));
+        assert!(res.accepted.contains(&atom1.hash()));
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert_eq!(graph.entries.len(), 2);
@@ -1065,7 +1011,7 @@ mod tests {
 
         let res = graph.upsert(atom2.clone()).unwrap();
         assert_eq!(res.accepted.len(), 1);
-        assert!(res.accepted.contains(&atom2.hash));
+        assert!(res.accepted.contains(&atom2.hash()));
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert_eq!(graph.entries.len(), 3);
@@ -1077,11 +1023,11 @@ mod tests {
         // Atom 3 contains 3 atoms, so it becomes a block
         let res = graph.upsert(atom3.clone()).unwrap();
         assert_eq!(res.accepted.len(), 1);
-        assert!(res.accepted.contains(&atom3.hash));
+        assert!(res.accepted.contains(&atom3.hash()));
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert_eq!(graph.entries.len(), 4);
-        assert_eq!(graph.main_head, atom3.hash);
+        assert_eq!(graph.main_head, atom3.hash());
         assert_eq!(graph.checkpoint, genesis_hash());
         assert_eq!(graph.checkpoint_height, 0);
         assert_eq!(graph.difficulty, INIT_DIFFICULTY);
