@@ -4,6 +4,7 @@ use multihash_derive::MultihashDigest;
 #[derive(Debug)]
 #[derive(Default)]
 #[derive(Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[derive(MultihashDigest)]
 #[mh(alloc_size = 64)]
 #[repr(u8)]
