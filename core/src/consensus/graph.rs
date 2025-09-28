@@ -82,6 +82,15 @@ pub enum Error {
     InvalidTokens,
 }
 
+#[derive(Clone, Copy)]
+pub struct Status {
+    pub main_head: Multihash,
+    pub main_height: Height,
+    pub checkpoint: Multihash,
+    pub checkpoint_height: Height,
+    pub difficulty: u64,
+}
+
 #[derive(Default)]
 #[derive(Debug)]
 pub struct UpdateResult {
@@ -871,6 +880,16 @@ impl<V: Validator> Graph<V> {
             .filter(|e| !e.is_missing)
             .map(|e| e.atom.clone())
             .collect()
+    }
+
+    pub fn status(&self) -> Status {
+        Status {
+            main_head: self.main_head,
+            main_height: self.entries[&self.main_head].atom.height,
+            checkpoint: self.checkpoint,
+            checkpoint_height: self.checkpoint_height,
+            difficulty: self.difficulty,
+        }
     }
 }
 
