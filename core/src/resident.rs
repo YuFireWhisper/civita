@@ -1,22 +1,12 @@
 use std::sync::Arc;
 
-use libp2p::{identity::Keypair, Multiaddr, PeerId};
-use multihash_derive::MultihashDigest;
+use libp2p::{Multiaddr, PeerId};
 
 use crate::{
-    consensus::{
-        engine,
-        graph::{self, StorageMode},
-        validator::Validator,
-        Engine,
-    },
-    crypto::{Hasher, Multihash},
+    consensus::{engine, graph, validator::Validator, Engine},
+    crypto::Multihash,
     network::{transport, Transport},
-    ty::{
-        atom::{Atom, Command, Height},
-        token::Token,
-    },
-    utils::mmr::Mmr,
+    ty::{atom::Height, token::Token},
 };
 
 const GOSSIP_TOPIC: u8 = 0;
@@ -44,16 +34,8 @@ pub struct Config {
     pub target_block_time: u64,
     pub init_vdf_difficulty: u64,
     pub max_difficulty_adjustment: f32,
-    pub storage_mode: StorageMode,
     pub vdf_params: u16,
-}
-
-#[derive(Default)]
-pub struct Builder {
-    tx_info: Option<(Keypair, libp2p::Multiaddr, transport::Config)>,
-    genesis_info: Option<(u8, Vec<Token>, Mmr<Token>)>,
-    normal: Option<(Vec<(PeerId, Multiaddr)>, tokio::time::Duration)>,
-    config: Option<Config>,
+    pub storage_dir: &'static str,
 }
 
 pub struct Resident<V> {
@@ -61,128 +43,55 @@ pub struct Resident<V> {
     engine: Arc<Engine<V>>,
 }
 
-impl Builder {
-    pub fn with_transport_info(
-        mut self,
-        keypair: Keypair,
-        listen_addr: libp2p::Multiaddr,
-        config: transport::Config,
-    ) -> Self {
-        self.tx_info = Some((keypair, listen_addr, config));
-        self
-    }
-
-    pub fn with_genesis_info<I, T, U>(mut self, code: u8, tokens: I) -> Self
-    where
-        I: IntoIterator<Item = (T, U)>,
-        T: Into<Vec<u8>>,
-        U: Into<Vec<u8>>,
-    {
-        assert!(self.normal.is_none(), "Normal info is already set");
-        assert!(self.genesis_info.is_none(), "Genesis info is already set");
-
-        let (mut mmr, tokens) = tokens.into_iter().enumerate().fold(
-            (Mmr::default(), vec![]),
-            |(mut mmr, mut tokens), (idx, (value, sig))| {
-                let token = Token::new(&Multihash::default(), idx as u32, value.into(), sig);
-                mmr.append(token.id, token.clone());
-                tokens.push(token);
-                (mmr, tokens)
-            },
-        );
-        mmr.commit();
-
-        self.genesis_info = Some((code, tokens, mmr));
-        self
-    }
-
-    pub fn with_normal_info(
-        mut self,
+impl<V: Validator> Resident<V> {
+    pub async fn new(
+        transport: Arc<Transport>,
         peers: Vec<(PeerId, Multiaddr)>,
         timeout: tokio::time::Duration,
-    ) -> Self {
-        assert!(self.genesis_info.is_none(), "Genesis info is already set");
-        assert!(self.normal.is_none(), "Normal info is already set");
-
-        self.normal = Some((peers, timeout));
-        self
-    }
-
-    pub fn with_config(mut self, config: Config) -> Self {
-        self.config = Some(config);
-        self
-    }
-
-    pub async fn build<V: Validator>(self) -> Result<Resident<V>> {
-        let (keypair, listen_addr, config) = self.tx_info.expect("Transport info is required");
-        let transport = Arc::new(Transport::new(keypair, listen_addr, config).await?);
-
-        let config = self.config.expect("Config is required");
+        config: Config,
+    ) -> Result<Self> {
         let graph_config = graph::Config {
             block_threshold: config.block_threshold,
             checkpoint_distance: config.checkpoint_distance,
             target_block_time: config.target_block_time,
             init_vdf_difficulty: config.init_vdf_difficulty,
             max_difficulty_adjustment: config.max_difficulty_adjustment,
-            storage_mode: config.storage_mode,
             vdf_params: config.vdf_params,
+            storage_dir: config.storage_dir,
         };
         let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
             heartbeat_interval: config.heartbeat_interval,
         };
-
-        if let Some((code, tokens, mmr)) = self.genesis_info {
-            let cmd = Command {
-                code,
-                inputs: vec![],
-                created: tokens,
-            };
-
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            let random: u64 = rand::random();
-
-            let mut atom = Atom {
-                hash: Multihash::default(),
-                parent: Multihash::default(),
-                checkpoint: Multihash::default(),
-                height: 0,
-                nonce: vec![],
-                timestamp,
-                random,
-                cmd: Some(cmd),
-                atoms: vec![],
-            };
-
-            atom.hash = Hasher::default().digest(&atom.hash_input());
-
-            let engine =
-                Engine::with_genesis(transport.clone(), atom, mmr, graph_config, engine_config)
-                    .await?;
-            return Ok(Resident { transport, engine });
-        }
-
-        if let Some((peers, timeout)) = self.normal {
-            let engine = Engine::new(
-                transport.clone(),
-                peers,
-                timeout,
-                graph_config,
-                engine_config,
-            )
-            .await?;
-            return Ok(Resident { transport, engine });
-        }
-
-        panic!("Either genesis info or normal info must be set");
+        let engine = Engine::new(
+            transport.clone(),
+            peers,
+            timeout,
+            graph_config,
+            engine_config,
+        )
+        .await?;
+        Ok(Resident { transport, engine })
     }
-}
 
-impl<V: Validator> Resident<V> {
+    pub async fn genesis(transport: Arc<Transport>, config: Config) -> Result<Self> {
+        let graph_config = graph::Config {
+            block_threshold: config.block_threshold,
+            checkpoint_distance: config.checkpoint_distance,
+            target_block_time: config.target_block_time,
+            init_vdf_difficulty: config.init_vdf_difficulty,
+            max_difficulty_adjustment: config.max_difficulty_adjustment,
+            vdf_params: config.vdf_params,
+            storage_dir: config.storage_dir,
+        };
+        let engine_config = engine::Config {
+            gossip_topic: GOSSIP_TOPIC,
+            heartbeat_interval: config.heartbeat_interval,
+        };
+        let engine = Engine::with_genesis(transport.clone(), graph_config, engine_config).await?;
+        Ok(Resident { transport, engine })
+    }
+
     pub async fn propose(
         &self,
         code: u8,
