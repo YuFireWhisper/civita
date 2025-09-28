@@ -44,8 +44,8 @@ impl<T> Mmr<T> {
         idx
     }
 
-    pub fn delete(&mut self, proof: &MmrProof) -> bool {
-        let Some(fs) = self.resolve(proof) else {
+    pub fn delete(&mut self, hash: Multihash, proof: &MmrProof) -> bool {
+        let Some(fs) = self.resolve(hash, proof) else {
             return false;
         };
 
@@ -58,16 +58,16 @@ impl<T> Mmr<T> {
         true
     }
 
-    fn resolve(&self, proof: &MmrProof) -> Option<HashMap<u64, Multihash>> {
+    fn resolve(&self, hash: Multihash, proof: &MmrProof) -> Option<HashMap<u64, Multihash>> {
         let exp = peak_range(self.peaks(), &proof.idx).0;
-        let exp_len = index_height(exp) + 1;
+        let exp_len = index_height(exp);
 
         if proof.hashes.len() != exp_len {
             return None;
         }
 
         let mut idx = proof.idx;
-        let mut acc = *proof.hashes.first().unwrap();
+        let mut acc = hash;
         let mut g = index_height(idx);
         let mut fills: HashMap<u64, Multihash> = HashMap::new();
 
@@ -156,7 +156,7 @@ impl<T> Mmr<T> {
 
     pub fn prove(&self, idx: u64) -> Option<MmrProof> {
         let peak = peak_range(self.peaks(), &idx).0;
-        let mut proof = MmrProof::new(vec![self.entries.get(&idx)?.0], idx);
+        let mut proof = MmrProof::new(vec![], idx);
 
         if peak == idx {
             return Some(proof);
@@ -195,8 +195,8 @@ impl<T> Mmr<T> {
         })
     }
 
-    pub fn verify(&self, proof: &MmrProof) -> bool {
-        self.resolve(proof).is_some()
+    pub fn verify(&self, hash: Multihash, proof: &MmrProof) -> bool {
+        self.resolve(hash, proof).is_some()
     }
 
     pub fn prune(&mut self, indices: &[u64]) -> bool {
@@ -405,7 +405,7 @@ mod test {
     struct Context {
         mmr: Mmr<u32>,
         hash_to_idx: HashMap<Multihash, u64>,
-        proof_cache: HashMap<u64, MmrProof>,
+        proof_cache: HashMap<u64, (Multihash, MmrProof)>,
     }
 
     impl Context {
@@ -423,7 +423,7 @@ mod test {
                 let h = Hasher::default().digest(&i.to_le_bytes());
                 let idx = self.hash_to_idx[&h];
                 let p = self.mmr.prove(idx).unwrap();
-                assert!(self.mmr.delete(&p));
+                assert!(self.mmr.delete(h, &p));
             }
             self.mmr.commit();
         }
@@ -433,7 +433,7 @@ mod test {
                 let h = Hasher::default().digest(&i.to_le_bytes());
                 let idx = self.hash_to_idx[&h];
                 let p = self.mmr.prove(idx).unwrap();
-                assert!(self.mmr.verify(&p));
+                assert!(self.mmr.verify(h, &p));
                 assert_eq!(p.hashes[0] != Multihash::default(), exp);
             }
         }
@@ -443,7 +443,7 @@ mod test {
                 let h = Hasher::default().digest(&i.to_le_bytes());
                 let idx = self.hash_to_idx[&h];
                 let p = self.mmr.prove(idx).unwrap();
-                self.proof_cache.insert(idx, p);
+                self.proof_cache.insert(idx, (h, p));
             }
         }
 
@@ -457,8 +457,8 @@ mod test {
         }
 
         pub fn verify_cached(&self) {
-            for (idx, p) in &self.proof_cache {
-                assert!(self.mmr.verify(p), "failed to verify idx {}", idx);
+            for (idx, (h, p)) in &self.proof_cache {
+                assert!(self.mmr.verify(*h, p), "failed to verify idx {}", idx);
             }
         }
     }
