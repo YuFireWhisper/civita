@@ -852,9 +852,11 @@ impl<V: Validator> Graph<V> {
             result.push(u);
             self.entries[&u].children.iter().for_each(|c| {
                 if let Some(d) = indeg.get_mut(c) {
-                    *d -= 1;
-                    if *d == 0 {
-                        stk.push_back(*c);
+                    if *d > 0 {
+                        *d -= 1;
+                        if *d == 0 {
+                            stk.push_back(*c);
+                        }
                     }
                 }
             });
