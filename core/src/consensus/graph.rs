@@ -23,7 +23,7 @@ use crate::{
     utils::mmr::{Mmr, MmrProof},
 };
 
-const HISTORY: &str = "history";
+pub const HISTORY: &str = "history";
 const OWNNER: &str = "owner";
 
 #[derive(Clone, Copy)]
@@ -163,7 +163,7 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
-    pub fn new<I>(atoms: Vec<Atom>, config: Config) -> Result<Self, Error> {
+    pub fn new(atoms: Vec<Atom>, config: Config) -> Result<Self, Error> {
         use bincode::{config, serde::decode_from_slice};
 
         let dir = Path::new(config.storage_dir).join(HISTORY);
@@ -484,7 +484,7 @@ impl<V: Validator> Graph<V> {
 
             let mut inputs = Vec::new();
             for (token, proof, sig) in &cmd.inputs {
-                if !parent.mmr.verify(token.id, &proof) {
+                if !parent.mmr.verify(token.id, proof) {
                     return Err(RejectReason::MissingProof);
                 }
 
@@ -495,7 +495,7 @@ impl<V: Validator> Graph<V> {
                     return Err(RejectReason::DoubleSpend);
                 }
 
-                if !V::validate_script_sig(&sig, &token.script_pk) {
+                if !V::validate_script_sig(sig, &token.script_pk) {
                     return Err(RejectReason::InvalidScriptSig);
                 }
 
@@ -663,7 +663,7 @@ impl<V: Validator> Graph<V> {
         for (hash, (sig, idx)) in &self.entries[&next_hash].accumulated_diff {
             V::related_peers(sig).into_iter().for_each(|p| {
                 let mut key = Vec::new();
-                encode_into_std_write(&p, &mut key, config::standard()).unwrap();
+                encode_into_std_write(p, &mut key, config::standard()).unwrap();
                 encode_into_std_write(hash, &mut key, config::standard()).unwrap();
 
                 if let Some(idx) = idx {
@@ -868,5 +868,13 @@ impl<V: Validator> Graph<V> {
         }
 
         result
+    }
+
+    pub fn current_atoms(&self) -> Vec<Atom> {
+        self.entries
+            .values()
+            .filter(|e| !e.is_missing)
+            .map(|e| e.atom.clone())
+            .collect()
     }
 }

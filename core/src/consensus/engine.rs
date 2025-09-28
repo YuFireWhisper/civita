@@ -1,4 +1,9 @@
-use std::{collections::HashSet, future, sync::Arc};
+use std::{
+    collections::HashSet,
+    fs, future,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use dashmap::DashMap;
 use libp2p::{
@@ -13,7 +18,7 @@ use tokio::sync::{
 
 use crate::{
     consensus::{
-        graph::{self, Graph, StorageMode},
+        graph::{self, Graph, HISTORY},
         validator::Validator,
     },
     crypto::{hasher::Hasher, Multihash},
@@ -23,7 +28,6 @@ use crate::{
         transport, Gossipsub, Transport,
     },
     ty::{atom::Atom, token::Token},
-    utils::mmr::Mmr,
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -42,12 +46,15 @@ pub enum Error {
 
     #[error("Bootstrap timeout")]
     BootstrapTimeout,
+
+    #[error(transparent)]
+    Graph(#[from] graph::Error),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 enum Request {
     Atoms(HashSet<Multihash>),
-    Sync(Option<PeerId>),
+    Sync(u32),
 }
 
 pub struct Config {
@@ -68,6 +75,7 @@ pub struct Engine<V> {
     atom_result_tx: Sender<Atom>,
 
     heartbeat_interval: Option<tokio::time::Duration>,
+    path: PathBuf,
 }
 
 impl<V: Validator> Engine<V> {
@@ -81,9 +89,8 @@ impl<V: Validator> Engine<V> {
         let gossipsub = transport.gossipsub();
         let req_resp = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let mut req_resp_rx = req_resp.take_receiver().await.unwrap();
-        let graph =
-            Self::bootstrap(&transport, &mut req_resp_rx, peers, timeout, graph_config).await?;
+        let path = Path::new(graph_config.storage_dir).join(HISTORY);
+        let graph = Self::bootstrap(&transport, peers, timeout, graph_config).await?;
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
@@ -95,13 +102,12 @@ impl<V: Validator> Engine<V> {
             pending_atoms: DashMap::new(),
             atom_result_tx,
             heartbeat_interval: config.heartbeat_interval,
+            path,
         });
 
         let engine_clone = engine.clone();
         tokio::spawn(async move {
-            engine_clone
-                .run(gossip_rx, req_resp_rx, atom_result_rx)
-                .await;
+            engine_clone.run(gossip_rx, atom_result_rx).await;
         });
 
         Ok(engine)
@@ -109,23 +115,29 @@ impl<V: Validator> Engine<V> {
 
     async fn bootstrap(
         transport: &Transport,
-        rx: &mut Receiver<Message>,
         peers: Vec<(PeerId, Multiaddr)>,
         timeout: tokio::time::Duration,
         graph_config: graph::Config,
     ) -> Result<Graph<V>> {
-        use bincode::{config, serde::encode_to_vec};
+        use bincode::{
+            config,
+            serde::{decode_from_slice, encode_to_vec},
+        };
 
         debug_assert!(!peers.is_empty());
 
-        let msg = {
-            let target = match graph_config.storage_mode {
-                StorageMode::General(peer_id) => Some(peer_id),
-                _ => None,
-            };
-            encode_to_vec(Request::Sync(target), config::standard()).unwrap()
-        };
+        let dir = Path::new(graph_config.storage_dir).join(HISTORY);
+        fs::create_dir_all(&dir).expect("Failed to create storage dir");
+        let entries = std::fs::read_dir(&dir).expect("Failed to read storage dir");
 
+        let mut latest = 0;
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().into_string().unwrap();
+            let num = file_name.parse::<u32>().unwrap();
+            latest = latest.max(num);
+        }
+
+        let msg = encode_to_vec(Request::Sync(latest), config::standard()).unwrap();
         let req_resp = transport.request_response();
         let mut peers_set = HashSet::new();
 
@@ -135,8 +147,8 @@ impl<V: Validator> Engine<V> {
             peers_set.insert(*peer);
         }
 
-        let graph = tokio::time::timeout(timeout, async {
-            while let Some(msg) = rx.recv().await {
+        let atoms = tokio::time::timeout(timeout, async {
+            while let Some(msg) = req_resp.recv().await {
                 let Message::Response { response, peer } = &msg else {
                     continue;
                 };
@@ -145,31 +157,32 @@ impl<V: Validator> Engine<V> {
                     continue;
                 }
 
-                if let Ok(graph) = Graph::import(response, graph_config.clone()) {
-                    return Ok(graph);
+                if let Ok((atoms, _)) =
+                    decode_from_slice::<Vec<Atom>, _>(response.as_slice(), config::standard())
+                {
+                    return atoms;
                 }
             }
-            panic!("Channel closed before receiving response");
+
+            panic!("Channel closed");
         })
         .await
         .map_err(|_| Error::BootstrapTimeout)?;
 
-        graph
+        Graph::new(atoms, graph_config).map_err(Error::from)
     }
 
     pub async fn with_genesis(
         transport: Arc<Transport>,
-        atom: Atom,
-        mmr: Mmr<Token>,
         graph_config: graph::Config,
         config: Config,
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let graph = Graph::with_genesis(atom, mmr, graph_config);
+        let path = Path::new(graph_config.storage_dir).join(HISTORY);
+        let graph = Graph::genesis(graph_config);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
-        let req_resp_rx = request_response.take_receiver().await.unwrap();
 
         let engine = Arc::new(Self {
             transport,
@@ -180,14 +193,11 @@ impl<V: Validator> Engine<V> {
             pending_atoms: DashMap::new(),
             atom_result_tx,
             heartbeat_interval: config.heartbeat_interval,
+            path,
         });
 
         let engine_clone = engine.clone();
-        tokio::spawn(async move {
-            engine_clone
-                .run(gossip_rx, req_resp_rx, atom_result_rx)
-                .await;
-        });
+        tokio::spawn(async move { engine_clone.run(gossip_rx, atom_result_rx).await });
 
         Ok(engine)
     }
@@ -199,7 +209,7 @@ impl<V: Validator> Engine<V> {
         created: impl IntoIterator<Item = (impl Into<Vec<u8>>, impl Into<Vec<u8>>)>,
     ) -> Result<(), graph::Error> {
         let graph = self.graph.read().await;
-        let cmd = graph.create_command(code, inputs, created)?;
+        let cmd = graph.create_command(code, inputs, created, &self.transport.local_peer_id())?;
         let handle = graph.create_atom(Some(cmd))?;
         drop(graph);
 
@@ -218,10 +228,10 @@ impl<V: Validator> Engine<V> {
     async fn run(
         &self,
         mut gossip_rx: Receiver<gossipsub::Message>,
-        mut req_resp_rx: Receiver<Message>,
         mut atom_result_rx: Receiver<Atom>,
     ) {
         let mut hb_interval = self.heartbeat_interval.map(tokio::time::interval);
+        let req_resp = self.transport.request_response();
 
         loop {
             let mut gossip_msg = None;
@@ -233,7 +243,7 @@ impl<V: Validator> Engine<V> {
                 Some(msg) = gossip_rx.recv() => {
                     gossip_msg = Some(msg);
                 }
-                Some(msg) = req_resp_rx.recv() => {
+                Some(msg) = req_resp.recv() => {
                     req_resp_msg = Some(msg);
                 }
                 Some(atom) = atom_result_rx.recv() => {
@@ -402,7 +412,7 @@ impl<V: Validator> Engine<V> {
 
                 match req {
                     Request::Atoms(hashes) => self.handle_atom_request(peer, hashes, channel).await,
-                    Request::Sync(target) => self.handle_sync_request(peer, target, channel).await,
+                    Request::Sync(epoch) => self.handle_sync_request(epoch, channel).await,
                 }
             }
             Message::Response { peer, response } => {
@@ -458,22 +468,36 @@ impl<V: Validator> Engine<V> {
         }
     }
 
-    async fn handle_sync_request(
-        &self,
-        peer: PeerId,
-        target: Option<PeerId>,
-        channel: ResponseChannel<Vec<u8>>,
-    ) {
-        let Some(data) = self.graph.read().await.export(target) else {
-            self.disconnect_peer(peer).await;
-            return;
+    async fn handle_sync_request(&self, epoch: u32, channel: ResponseChannel<Vec<u8>>) {
+        use bincode::{
+            config,
+            serde::{decode_from_slice, encode_to_vec},
         };
 
-        if let Err(e) = self
-            .request_response
-            .send_response(channel, data.to_vec())
-            .await
-        {
+        let mut max = 0;
+        let entries = fs::read_dir(&self.path).expect("Failed to read storage dir");
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().into_string().unwrap();
+            let num = file_name.parse::<u32>().unwrap();
+            max = max.max(num);
+        }
+
+        if epoch > max {
+            return;
+        }
+
+        let mut atoms = Vec::new();
+        for i in (epoch + 1)..=max {
+            let file_path = self.path.join(i.to_string());
+            let data = fs::read(&file_path).expect("Failed to read storage file");
+            let ats: Vec<Atom> = decode_from_slice(&data, config::standard()).unwrap().0;
+            atoms.extend(ats);
+        }
+        atoms.extend(self.graph.read().await.current_atoms());
+
+        let data = encode_to_vec(&atoms, config::standard()).unwrap();
+
+        if let Err(e) = self.request_response.send_response(channel, data).await {
             log::error!("Failed to send response: {e}");
         }
     }
