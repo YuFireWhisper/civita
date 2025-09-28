@@ -505,7 +505,7 @@ impl<V: Validator> Graph<V> {
                     return Err(RejectReason::DoubleSpend);
                 }
 
-                if !V::validate_script_sig(sig, &token.script_pk) {
+                if !V::validate_script_sig(token.id, sig, &token.script_pk) {
                     return Err(RejectReason::InvalidScriptSig);
                 }
 
@@ -905,8 +905,8 @@ mod tests {
             (Hasher::default(), 0, tokens)
         }
 
-        fn validate_script_sig(sig: &[u8], script_pk: &[u8]) -> bool {
-            sig == script_pk
+        fn validate_script_sig(_: Multihash, pk: &[u8], sig: &[u8]) -> bool {
+            pk == sig
         }
 
         fn validate_conversion(code: u8, _inputs: &[Token], _created: &[Token]) -> bool {
