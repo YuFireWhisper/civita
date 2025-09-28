@@ -1,6 +1,8 @@
 use std::sync::OnceLock;
 
 use multihash_derive::MultihashDigest;
+use tokio::task::JoinHandle;
+use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
 use crate::{
     crypto::{Hasher, Multihash},
@@ -37,6 +39,18 @@ pub struct Atom {
     cache: OnceLock<Multihash>,
 }
 
+pub struct AtomBuilder {
+    hasher: Hasher,
+    parent: Multihash,
+    checkpoint: Multihash,
+    height: Height,
+    nonce: Option<Vec<u8>>,
+    random: Option<u64>,
+    timestamp: Option<Timestamp>,
+    cmd: Option<Command>,
+    atoms: Vec<Multihash>,
+}
+
 impl Atom {
     pub fn vdf_input(&self) -> Vec<u8> {
         use bincode::{config, serde::encode_into_std_write};
@@ -58,6 +72,115 @@ impl Atom {
         *self.cache.get_or_init(|| {
             let data = encode_to_vec(self, config::standard()).unwrap();
             self.hasher.digest(&data)
+        })
+    }
+}
+
+impl AtomBuilder {
+    pub fn new(parent: Multihash, checkpoint: Multihash, height: Height) -> Self {
+        Self {
+            hasher: Hasher::default(),
+            parent,
+            checkpoint,
+            height,
+            nonce: None,
+            random: None,
+            timestamp: None,
+            cmd: None,
+            atoms: vec![],
+        }
+    }
+
+    pub fn with_hasher(mut self, hasher: Hasher) -> Self {
+        self.hasher = hasher;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_random(mut self, random: u64) -> Self {
+        self.random = Some(random);
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_nonce(mut self, nonce: Vec<u8>) -> Self {
+        self.nonce = Some(nonce);
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_timestamp(mut self, timestamp: Timestamp) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    pub fn with_command(mut self, cmd: Option<Command>) -> Self {
+        self.cmd = cmd;
+        self
+    }
+
+    pub fn with_atoms(mut self, atoms: Vec<Multihash>) -> Self {
+        self.atoms = atoms;
+        self
+    }
+
+    pub fn build(self, vdf_param: u16, difficulty: u64) -> JoinHandle<Atom> {
+        use bincode::{config, serde::encode_into_std_write};
+
+        let random = self.random.unwrap_or_else(|| rand::random());
+        let timestamp = self.timestamp.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        });
+
+        if let Some(nonce) = self.nonce {
+            return tokio::spawn(async move {
+                Atom {
+                    hasher: self.hasher,
+                    parent: self.parent,
+                    checkpoint: self.checkpoint,
+                    height: self.height,
+                    nonce,
+                    random,
+                    timestamp,
+                    cmd: self.cmd,
+                    atoms: self.atoms,
+                    cache: OnceLock::new(),
+                }
+            });
+        }
+
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+
+            encode_into_std_write(self.hasher, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(random, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(timestamp, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
+
+            let nonce = WesolowskiVDFParams(vdf_param)
+                .new()
+                .solve(&buf, difficulty)
+                .expect("VDF should work");
+
+            Atom {
+                hasher: self.hasher,
+                parent: self.parent,
+                checkpoint: self.checkpoint,
+                height: self.height,
+                nonce,
+                random,
+                timestamp,
+                cmd: self.cmd,
+                atoms: self.atoms,
+                cache: OnceLock::new(),
+            }
         })
     }
 }
