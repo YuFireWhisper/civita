@@ -124,7 +124,7 @@ impl AtomBuilder {
     pub fn build(self, vdf_param: u16, difficulty: u64) -> JoinHandle<Atom> {
         use bincode::{config, serde::encode_into_std_write};
 
-        let random = self.random.unwrap_or_else(|| rand::random());
+        let random = self.random.unwrap_or_else(rand::random);
         let timestamp = self.timestamp.unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -184,7 +184,7 @@ impl AtomBuilder {
     pub fn build_sync(self, vdf_param: u16, difficulty: u64) -> Atom {
         use bincode::{config, serde::encode_into_std_write};
 
-        let random = self.random.unwrap_or_else(|| rand::random());
+        let random = self.random.unwrap_or_else(rand::random);
         let timestamp = self.timestamp.unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
