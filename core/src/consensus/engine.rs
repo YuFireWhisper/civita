@@ -482,7 +482,7 @@ impl<V: Validator> Engine<V> {
             max = max.max(num);
         }
 
-        if epoch > max {
+        if epoch >= max {
             return;
         }
 
