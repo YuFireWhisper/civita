@@ -52,7 +52,15 @@ pub struct AtomBuilder {
 }
 
 impl Atom {
-    pub fn vdf_input(&self) -> Vec<u8> {
+    pub fn hash(&self) -> Multihash {
+        use bincode::{config, serde::encode_to_vec};
+        *self.cache.get_or_init(|| {
+            let data = encode_to_vec(self, config::standard()).unwrap();
+            self.hasher.digest(&data)
+        })
+    }
+
+    pub fn verify_nonce(&self, vdf_param: u16, difficulty: u64) -> bool {
         use bincode::{config, serde::encode_into_std_write};
 
         let mut buf = Vec::new();
@@ -60,19 +68,18 @@ impl Atom {
         encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
-        buf
-    }
 
-    pub fn hash(&self) -> Multihash {
-        use bincode::{config, serde::encode_to_vec};
-        *self.cache.get_or_init(|| {
-            let data = encode_to_vec(self, config::standard()).unwrap();
-            self.hasher.digest(&data)
+        std::panic::catch_unwind(|| {
+            WesolowskiVDFParams(vdf_param)
+                .new()
+                .verify(&buf, difficulty, &self.nonce)
+                .is_ok()
         })
+        .is_ok_and(|r| r)
     }
 }
 
