@@ -383,7 +383,6 @@ impl<V: Validator> Graph<V> {
             } else if height == exp - 1 && height % distance == 0 {
                 // Do nothing
             } else {
-                println!("Expected height {}, got {}", exp, height,);
                 return Err(ImportError::MismatchedHeight);
             }
 
