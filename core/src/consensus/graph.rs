@@ -211,8 +211,8 @@ impl<V: Validator> Graph<V> {
         file_names.sort_unstable();
 
         assert!(
-            file_names.is_empty() || file_names.len() % 2 == 0,
-            "Should have even number of history files"
+            file_names.is_empty() || file_names.len() % 2 == 1,
+            "Should have odd number of history files"
         );
 
         let distance = config.checkpoint_distance;
@@ -247,12 +247,16 @@ impl<V: Validator> Graph<V> {
                 epoch += 1;
                 end = "1";
             } else {
-                for i in 0..(distance - 1) {
-                    let atom: Atom = decode_from_slice(&data, config::standard()).unwrap().0;
+                let mut pos = 0;
+
+                for i in 1..distance {
+                    let (atom, n): (Atom, _) =
+                        decode_from_slice(&data[pos..], config::standard()).unwrap();
+                    pos += n;
 
                     assert_eq!(
                         atom.height,
-                        epoch * distance + i + 1,
+                        epoch * distance + i,
                         "Mismatched history height"
                     );
                     assert_eq!(atom.parent, graph.main_head, "Mismatched parent hash");
@@ -790,22 +794,27 @@ impl<V: Validator> Graph<V> {
         let dir = Path::new(&self.dir).join(HISTORY);
         let epoch = next_height / self.config.checkpoint_distance;
 
-        {
+        if prev_height != 0 {
             // Write checkpoint
             let file_name = format!("{}0", epoch);
             let path = dir.join(file_name);
             let mut file = fs::File::create(&path).expect("Failed to create checkpoint file");
-            encode_into_std_write(&atoms[0], &mut file, config::standard())
-                .expect("Failed to write checkpoint file");
+            encode_into_std_write(
+                &self.entries[&next_hash].atom,
+                &mut file,
+                config::standard(),
+            )
+            .expect("Failed to write checkpoint file");
         }
 
         {
             // Write Others
-            let file_name = format!("{}1", epoch);
+            let file_name = format!("{}1", epoch - 1);
             let path = dir.join(file_name);
             let mut file = fs::File::create(&path).expect("Failed to create history file");
 
-            for atom in atoms[1..].iter().rev() {
+            for atom in atoms.iter().rev() {
+                println!("Writing history atom at height {}", atom.height);
                 encode_into_std_write(atom, &mut file, config::standard())
                     .expect("Failed to write history file");
             }
@@ -856,7 +865,6 @@ impl<V: Validator> Graph<V> {
 
         let (mut cur, mut next_time) = {
             let entry = &self.entries[&start];
-            atoms.push(entry.atom.clone());
             (entry.atom.parent, entry.atom.timestamp)
         };
 
