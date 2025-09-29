@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use derivative::Derivative;
-use libp2p::Multiaddr;
+use libp2p::{identity::Keypair, Multiaddr, PeerId};
 
 use crate::{
     consensus::{
@@ -34,7 +34,7 @@ pub enum Error {
     Transport(#[from] transport::Error),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 #[derive(Derivative)]
 #[derivative(Default)]
 pub struct Config {
@@ -82,21 +82,41 @@ pub struct Config {
 
     #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
     pub receive_interval: tokio::time::Duration,
+
+    #[derivative(Default(value = "\"/ip4/0.0.0.0/tcp/0\".parse().unwrap()"))]
+    pub listen_addr: Multiaddr,
+
+    #[derivative(Default(value = "\"./data\".to_string()"))]
+    pub storage_dir: String,
+
+    pub bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+
+    #[derivative(Default(value = "tokio::time::Duration::from_secs(5)"))]
+    pub bootstrap_timeout: tokio::time::Duration,
 }
 
 pub struct Resident<V> {
-    transport: Arc<Transport>,
     engine: Arc<Engine<V>>,
+    listen_addr: Multiaddr,
 }
 
 impl<V: Validator> Resident<V> {
-    pub async fn new(
-        transport: Arc<Transport>,
-        dir: &str,
-        bootstrap_config: Option<BootstrapConfig>,
-        config: Config,
-    ) -> Result<Self> {
-        let config = engine::Config {
+    pub async fn new(keypair: Keypair, config: Config) -> Result<Self> {
+        let transport_config = transport::Config {
+            check_listen_timeout: config.check_listen_timeout,
+            channel_capacity: config.channel_size,
+            get_swarm_lock_timeout: config.get_swarm_lock_timeout,
+            wait_for_gossipsub_peer_timeout: config.wait_for_gossipsub_peer_timeout,
+            wait_for_gossipsub_peer_interval: config.wait_for_gossipsub_peer_interval,
+            wait_next_event_timeout: config.wait_next_event_timeout,
+            receive_interval: config.receive_interval,
+        };
+
+        let tranpsort = Transport::new(keypair, config.listen_addr, transport_config).await?;
+        let transport = Arc::new(tranpsort);
+        let listen_addr = transport.listen_addr();
+
+        let engine_config = engine::Config {
             gossip_topic: GOSSIP_TOPIC,
             block_threshold: config.block_threshold,
             checkpoint_distance: config.checkpoint_distance,
@@ -107,8 +127,21 @@ impl<V: Validator> Resident<V> {
             heartbeat_interval: config.heartbeat_interval,
         };
 
-        let engine = Engine::new(transport.clone(), dir, bootstrap_config, config).await?;
-        Ok(Resident { transport, engine })
+        let bc = if config.bootstrap_peers.is_empty() {
+            None
+        } else {
+            Some(BootstrapConfig {
+                peers: config.bootstrap_peers.clone(),
+                timeout: config.bootstrap_timeout,
+            })
+        };
+
+        let engine = Engine::new(transport, &config.storage_dir, bc, engine_config).await?;
+
+        Ok(Self {
+            engine,
+            listen_addr,
+        })
     }
 
     pub async fn propose(
@@ -127,8 +160,8 @@ impl<V: Validator> Resident<V> {
         self.engine.tokens().await
     }
 
-    pub fn listen_addr(&self) -> Multiaddr {
-        self.transport.listen_addr()
+    pub fn listen_addr(&self) -> &Multiaddr {
+        &self.listen_addr
     }
 
     pub async fn status(&self) -> Status {

@@ -1,12 +1,13 @@
-use std::sync::Arc;
-
-use civita_core::resident::{BootstrapConfig, Config, Resident};
+use civita_core::resident::{self, Config};
+use libp2p::identity::Keypair;
 
 use crate::common::validator::{token_0, Validator};
 
 mod common;
 
-use common::{constants::*, transport::*};
+use common::constants::*;
+
+type Resident = resident::Resident<Validator>;
 
 #[tokio::test]
 async fn basic_operations() {
@@ -21,51 +22,42 @@ async fn basic_operations() {
         max_difficulty_adjustment: 5.0,
         init_vdf_difficulty: 5000,
         vdf_params: VDF_PARAMS,
+        storage_dir: str.to_string(),
         ..Default::default()
     };
 
-    let mut txs = create_transports()
-        .await
-        .into_iter()
-        .map(Arc::new)
-        .collect::<Vec<_>>();
-    let peers = vec![(txs[0].local_peer_id(), txs[0].listen_addr())];
+    let keypair1 = Keypair::from_protobuf_encoding(&SK_1).unwrap();
+    let resident1 = Resident::new(keypair1, config.clone()).await.unwrap();
 
-    assert_eq!(txs[0].local_peer_id(), peer_id_1());
+    let config = Config {
+        bootstrap_peers: vec![(peer_id_1(), resident1.listen_addr().clone())],
+        ..config
+    };
 
-    let mut residents: Vec<Resident<Validator>> = Vec::with_capacity(5);
-    residents.push(
-        Resident::new(txs.remove(0), str, None, config)
-            .await
-            .unwrap(),
-    );
+    let keypair2 = Keypair::from_protobuf_encoding(&SK_2).unwrap();
+    let resident2 = Resident::new(keypair2, config.clone()).await.unwrap();
 
-    let bc = Some(BootstrapConfig {
-        peers: peers.clone(),
-        timeout: tokio::time::Duration::from_secs(5),
-    });
+    let keypair3 = Keypair::from_protobuf_encoding(&SK_3).unwrap();
+    let _ = Resident::new(keypair3, config.clone()).await.unwrap();
 
-    for tx in txs {
-        let resident = Resident::new(tx, str, bc.clone(), config).await.unwrap();
-        residents.push(resident);
-    }
+    let keypair4 = Keypair::from_protobuf_encoding(&SK_4).unwrap();
+    let _ = Resident::new(keypair4, config.clone()).await.unwrap();
 
-    // Pee1 -> Peer 2
-    let tokens = residents[0].tokens().await;
+    let keypair5 = Keypair::from_protobuf_encoding(&SK_5).unwrap();
+    let _ = Resident::new(keypair5, config.clone()).await.unwrap();
+
+    // Resident1 -> Resident2
+    let tokens = resident1.tokens().await;
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].value, INIT_VALUE.to_be_bytes());
 
     let inputs = vec![(token_0().id, PEER_ID_1)];
     let created = vec![(INIT_VALUE.to_be_bytes(), PEER_ID_2)];
-
-    residents[0]
-        .propose(0, inputs, created)
-        .await
-        .expect("Failed to propose token transfer");
+    resident1.propose(0, inputs, created).await.unwrap();
 
     tokio::time::timeout(tokio::time::Duration::from_secs(20), async {
         loop {
-            if residents[1].tokens().await.len() == 2 {
+            if resident2.tokens().await.len() == 2 {
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -74,7 +66,7 @@ async fn basic_operations() {
     .await
     .expect("Timeout waiting for token transfer");
 
-    let tokens = residents[1].tokens().await;
+    let tokens = resident2.tokens().await;
     assert_eq!(tokens.len(), 2);
     assert_eq!(tokens[0].value, INIT_VALUE.to_be_bytes());
     assert_eq!(tokens[1].value, INIT_VALUE.to_be_bytes());
