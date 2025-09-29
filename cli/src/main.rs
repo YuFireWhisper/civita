@@ -19,6 +19,8 @@ static GENESIS_PEER_PK: OnceLock<PublicKey> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let matches = Command::new("civita-cli")
         .about("Civita blockchain CLI")
         .arg(
