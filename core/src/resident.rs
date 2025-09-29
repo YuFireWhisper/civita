@@ -38,6 +38,7 @@ pub enum Error {
 #[derive(Derivative)]
 #[derivative(Default)]
 pub struct Config {
+    // Graph config
     #[derivative(Default(value = "1000"))]
     pub block_threshold: u32,
 
@@ -56,8 +57,31 @@ pub struct Config {
     #[derivative(Default(value = "1024"))]
     pub vdf_params: u16,
 
+    // Engine config
     #[derivative(Default(value = "Some(tokio::time::Duration::from_mins(5))"))]
     pub heartbeat_interval: Option<tokio::time::Duration>,
+
+    // Transport config
+    #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
+    pub check_listen_timeout: tokio::time::Duration,
+
+    #[derivative(Default(value = "1000"))]
+    pub channel_size: usize,
+
+    #[derivative(Default(value = "tokio::time::Duration::from_secs(5)"))]
+    pub get_swarm_lock_timeout: tokio::time::Duration,
+
+    #[derivative(Default(value = "tokio::time::Duration::from_secs(10)"))]
+    pub wait_for_gossipsub_peer_timeout: tokio::time::Duration,
+
+    #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
+    pub wait_for_gossipsub_peer_interval: tokio::time::Duration,
+
+    #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
+    pub wait_next_event_timeout: tokio::time::Duration,
+
+    #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
+    pub receive_interval: tokio::time::Duration,
 }
 
 pub struct Resident<V> {

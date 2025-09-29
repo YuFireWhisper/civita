@@ -21,6 +21,7 @@ async fn basic_operations() {
         max_difficulty_adjustment: 5.0,
         init_vdf_difficulty: 5000,
         vdf_params: VDF_PARAMS,
+        ..Default::default()
     };
 
     let mut txs = create_transports()
