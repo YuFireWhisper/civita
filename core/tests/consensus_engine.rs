@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use civita_core::resident::{Config, Resident};
+use civita_core::resident::{BootstrapConfig, Config, Resident};
 
 use crate::common::validator::{token_0, Validator};
 
@@ -33,13 +33,19 @@ async fn basic_operations() {
     assert_eq!(txs[0].local_peer_id(), peer_id_1());
 
     let mut residents: Vec<Resident<Validator>> = Vec::with_capacity(5);
-    residents.push(Resident::genesis(txs.remove(0), str, config).await.unwrap());
+    residents.push(
+        Resident::new(txs.remove(0), str, None, config)
+            .await
+            .unwrap(),
+    );
+
+    let bc = Some(BootstrapConfig {
+        peers: peers.clone(),
+        timeout: tokio::time::Duration::from_secs(5),
+    });
 
     for tx in txs {
-        let t = tokio::time::Duration::from_secs(5);
-        let resident = Resident::new(tx, peers.clone(), t, str, config)
-            .await
-            .unwrap();
+        let resident = Resident::new(tx, str, bc.clone(), config).await.unwrap();
         residents.push(resident);
     }
 

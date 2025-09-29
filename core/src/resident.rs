@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use derivative::Derivative;
-use libp2p::{Multiaddr, PeerId};
+use libp2p::Multiaddr;
 
 use crate::{
     consensus::{
@@ -14,6 +14,8 @@ use crate::{
     network::{transport, Transport},
     ty::token::Token,
 };
+
+pub use engine::BootstrapConfig;
 
 const GOSSIP_TOPIC: u8 = 0;
 
@@ -66,9 +68,8 @@ pub struct Resident<V> {
 impl<V: Validator> Resident<V> {
     pub async fn new(
         transport: Arc<Transport>,
-        peers: Vec<(PeerId, Multiaddr)>,
-        timeout: tokio::time::Duration,
         dir: &str,
+        bootstrap_config: Option<BootstrapConfig>,
         config: Config,
     ) -> Result<Self> {
         let config = engine::Config {
@@ -82,23 +83,7 @@ impl<V: Validator> Resident<V> {
             heartbeat_interval: config.heartbeat_interval,
         };
 
-        let engine = Engine::new(transport.clone(), peers, timeout, dir, config).await?;
-        Ok(Resident { transport, engine })
-    }
-
-    pub async fn genesis(transport: Arc<Transport>, dir: &str, config: Config) -> Result<Self> {
-        let config = engine::Config {
-            gossip_topic: GOSSIP_TOPIC,
-            block_threshold: config.block_threshold,
-            checkpoint_distance: config.checkpoint_distance,
-            target_block_time: config.target_block_time,
-            init_vdf_difficulty: config.init_vdf_difficulty,
-            max_difficulty_adjustment: config.max_difficulty_adjustment,
-            vdf_params: config.vdf_params,
-            heartbeat_interval: config.heartbeat_interval,
-        };
-
-        let engine = Engine::with_genesis(transport.clone(), dir, config).await?;
+        let engine = Engine::new(transport.clone(), dir, bootstrap_config, config).await?;
         Ok(Resident { transport, engine })
     }
 

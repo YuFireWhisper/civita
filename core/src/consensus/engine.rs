@@ -69,6 +69,12 @@ pub struct Config {
     pub heartbeat_interval: Option<tokio::time::Duration>,
 }
 
+#[derive(Clone)]
+pub struct BootstrapConfig {
+    pub peers: Vec<(PeerId, Multiaddr)>,
+    pub timeout: tokio::time::Duration,
+}
+
 pub struct Engine<V> {
     transport: Arc<Transport>,
     gossipsub: Arc<Gossipsub>,
@@ -87,17 +93,34 @@ pub struct Engine<V> {
 impl<V: Validator> Engine<V> {
     pub async fn new(
         transport: Arc<Transport>,
-        peers: Vec<(PeerId, Multiaddr)>,
-        timeout: tokio::time::Duration,
         dir: &str,
+        bootstrap: Option<BootstrapConfig>,
         config: Config,
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let req_resp = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let path = Path::new(dir).join(HISTORY);
-        let graph = Self::bootstrap(&transport, peers, timeout, dir, config).await?;
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
+        let path = Path::new(dir).join(HISTORY);
+        fs::create_dir_all(&path).expect("Failed to create storage dir");
+
+        let graph = if let Some(bootstrap) = bootstrap {
+            if bootstrap.peers.is_empty() {
+                return Err(Error::NoBootstrapPeers);
+            }
+            Self::bootstrap(&transport, bootstrap.peers, bootstrap.timeout, dir, config).await?
+        } else {
+            let graph_config = graph::Config {
+                block_threshold: config.block_threshold,
+                checkpoint_distance: config.checkpoint_distance,
+                target_block_time: config.target_block_time,
+                init_vdf_difficulty: config.init_vdf_difficulty,
+                max_difficulty_adjustment: config.max_difficulty_adjustment,
+                vdf_params: config.vdf_params,
+            };
+
+            Graph::genesis(dir, graph_config)
+        };
 
         let engine = Arc::new(Self {
             transport,
@@ -112,9 +135,7 @@ impl<V: Validator> Engine<V> {
         });
 
         let engine_clone = engine.clone();
-        tokio::spawn(async move {
-            engine_clone.run(gossip_rx, atom_result_rx).await;
-        });
+        tokio::spawn(async move { engine_clone.run(gossip_rx, atom_result_rx).await });
 
         Ok(engine)
     }
@@ -186,47 +207,6 @@ impl<V: Validator> Engine<V> {
         };
 
         Graph::new(atoms, dir, config).map_err(Error::from)
-    }
-
-    pub async fn with_genesis(
-        transport: Arc<Transport>,
-        storage_dir: &str,
-        config: Config,
-    ) -> Result<Arc<Self>> {
-        let gossipsub = transport.gossipsub();
-        let request_response = transport.request_response();
-        let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let path = Path::new(storage_dir).join(HISTORY);
-        fs::create_dir_all(&path).expect("Failed to create storage dir");
-
-        let graph_config = graph::Config {
-            block_threshold: config.block_threshold,
-            checkpoint_distance: config.checkpoint_distance,
-            target_block_time: config.target_block_time,
-            init_vdf_difficulty: config.init_vdf_difficulty,
-            max_difficulty_adjustment: config.max_difficulty_adjustment,
-            vdf_params: config.vdf_params,
-        };
-
-        let graph = Graph::genesis(storage_dir, graph_config);
-        let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
-
-        let engine = Arc::new(Self {
-            transport,
-            gossipsub,
-            request_response,
-            gossip_topic: config.gossip_topic,
-            graph: RwLock::new(graph),
-            pending_atoms: DashMap::new(),
-            atom_result_tx,
-            heartbeat_interval: config.heartbeat_interval,
-            path,
-        });
-
-        let engine_clone = engine.clone();
-        tokio::spawn(async move { engine_clone.run(gossip_rx, atom_result_rx).await });
-
-        Ok(engine)
     }
 
     pub async fn propose(
