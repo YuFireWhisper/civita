@@ -181,6 +181,8 @@ impl<V: Validator> Engine<V> {
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
         let path = Path::new(graph_config.storage_dir).join(HISTORY);
+        fs::create_dir_all(&path).expect("Failed to create storage dir");
+
         let graph = Graph::genesis(graph_config);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
