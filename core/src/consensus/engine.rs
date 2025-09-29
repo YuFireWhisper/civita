@@ -1,6 +1,8 @@
 use std::{
     collections::HashSet,
-    fs, future,
+    fs::{self, File},
+    future,
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -452,46 +454,64 @@ impl<V: Validator> Engine<V> {
     }
 
     async fn handle_sync_request(&self, epoch: u32, channel: ResponseChannel<Vec<u8>>) {
-        use bincode::{
-            config,
-            serde::{decode_from_slice, encode_to_vec},
-        };
+        use bincode::{config, serde::encode_into_std_write};
 
-        let mut max = 0;
-        let entries = fs::read_dir(&self.path).expect("Failed to read storage dir");
-        for entry in entries.flatten() {
-            let file_name = entry.file_name().into_string().unwrap();
-            let num = file_name.parse::<u32>().unwrap();
-            max = max.max(num);
-        }
+        let self_epoch = self.graph.read().await.epoch();
 
-        if epoch > max {
+        if epoch > self_epoch {
             return;
         }
 
-        if epoch == max {
-            let atoms: Vec<Atom> = Vec::new();
-            let data = encode_to_vec(&atoms, config::standard()).unwrap();
-            if let Err(e) = self.request_response.send_response(channel, data).await {
-                log::error!("Failed to send response: {e}");
+        let mut buf = Vec::new();
+        let mut cur = epoch;
+
+        while cur < self_epoch {
+            let name = format!("{cur}1");
+            let file_path = self.path.join(&name);
+
+            if !file_path.exists() {
+                log::error!("Storage file {name} not found");
+                return;
             }
-            return;
+
+            let Ok(mut file) = File::open(&file_path) else {
+                log::error!("Failed to open storage file {name}");
+                return;
+            };
+
+            if let Err(e) = file.read_to_end(&mut buf) {
+                log::error!("Failed to read storage file {name}: {e}");
+                return;
+            }
+
+            cur += 1;
+
+            let name = format!("{cur}0");
+            let file_path = self.path.join(&name);
+
+            if !file_path.exists() {
+                log::error!("Storage file {name} not found");
+                return;
+            }
+
+            let Ok(mut file) = File::open(&file_path) else {
+                log::error!("Failed to open storage file {name}");
+                return;
+            };
+
+            if let Err(e) = file.read_to_end(&mut buf) {
+                log::error!("Failed to read storage file {name}: {e}");
+                return;
+            }
         }
 
-        // epoch < max
+        let atoms = self.graph.read().await.current_atoms();
 
-        let mut atoms = Vec::new();
-        for i in (epoch + 1)..=max {
-            let file_path = self.path.join(i.to_string());
-            let data = fs::read(&file_path).expect("Failed to read storage file");
-            let ats: Vec<Atom> = decode_from_slice(&data, config::standard()).unwrap().0;
-            atoms.extend(ats);
-        }
-        atoms.extend(self.graph.read().await.current_atoms());
+        atoms.iter().for_each(|a| {
+            encode_into_std_write(a, &mut buf, config::standard()).unwrap();
+        });
 
-        let data = encode_to_vec(&atoms, config::standard()).unwrap();
-
-        if let Err(e) = self.request_response.send_response(channel, data).await {
+        if let Err(e) = self.request_response.send_response(channel, buf).await {
             log::error!("Failed to send response: {e}");
         }
     }
