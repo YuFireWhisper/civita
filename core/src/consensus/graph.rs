@@ -211,8 +211,8 @@ impl<V: Validator> Graph<V> {
         file_names.sort_unstable();
 
         assert!(
-            file_names.is_empty() || file_names.len() % 2 == 1,
-            "Should have odd number of history files"
+            file_names.is_empty() || file_names.len() % 2 == 0,
+            "Should have even number of history files"
         );
 
         let distance = config.checkpoint_distance;
