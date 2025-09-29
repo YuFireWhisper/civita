@@ -522,7 +522,7 @@ impl<V: Validator> Graph<V> {
                     return Err(RejectReason::DoubleSpend);
                 }
 
-                if !V::validate_script_sig(token.id, sig, &token.script_pk) {
+                if !V::validate_script_sig(token.id, &token.script_pk, sig) {
                     return Err(RejectReason::InvalidScriptSig);
                 }
 
@@ -937,8 +937,8 @@ mod tests {
         fn genesis() -> (Hasher, u8, Vec<Token>) {
             let tokens = vec![
                 Token::new(&Multihash::default(), 0, [1], PEER1),
-                Token::new(&Multihash::default(), 1, [1], PEER2),
-                Token::new(&Multihash::default(), 2, [1], PEER2),
+                Token::new(&Multihash::default(), 1, [1], PEER1),
+                Token::new(&Multihash::default(), 2, [1], PEER1),
             ];
             (Hasher::default(), 0, tokens)
         }
@@ -1062,5 +1062,136 @@ mod tests {
         assert_eq!(graph.checkpoint, genesis_hash());
         assert_eq!(graph.checkpoint_height, 0);
         assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+    }
+
+    #[test]
+    fn upsert_atom_with_valid_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
+        let config = create_config(str);
+        let mut graph = Graph::<TestValidator>::genesis(config);
+
+        let atom1 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
+            .with_random(1)
+            .with_timestamp(1)
+            .build_sync(graph.config.vdf_params, graph.difficulty);
+        let atom2 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
+            .with_random(2)
+            .with_timestamp(2)
+            .with_atoms(vec![atom1.hash()])
+            .build_sync(graph.config.vdf_params, graph.difficulty);
+        let cmd = graph
+            .create_command(
+                0,
+                vec![(
+                    Token::new(&Multihash::default(), 0, vec![1], PEER1).id,
+                    PEER1,
+                )],
+                vec![(vec![1], PEER2)],
+                &PeerId::from_bytes(&PEER1).unwrap(),
+            )
+            .unwrap();
+        let atom3 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
+            .with_random(3)
+            .with_timestamp(3)
+            .with_command(Some(cmd))
+            .with_atoms(vec![atom1.hash(), atom2.hash()])
+            .build_sync(graph.config.vdf_params, graph.difficulty);
+
+        let res = graph.upsert(atom1.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom1.hash()));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 2);
+        assert_eq!(graph.main_head, genesis_hash());
+        assert_eq!(graph.checkpoint, graph.main_head);
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+
+        let res = graph.upsert(atom2.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom2.hash()));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 3);
+        assert_eq!(graph.main_head, genesis_hash());
+        assert_eq!(graph.checkpoint, graph.main_head);
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+
+        let res = graph.upsert(atom3.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom3.hash()));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 4);
+        assert_eq!(graph.main_head, atom3.hash());
+        assert_eq!(graph.checkpoint, genesis_hash());
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+        assert_eq!(
+            graph.tokens_for(&PeerId::from_bytes(&PEER2).unwrap()).len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn create_atom() {
+        let dir = tempfile::tempdir().unwrap();
+        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
+        let config = create_config(str);
+        let mut graph = Graph::<TestValidator>::genesis(config);
+
+        let atom1 = graph.create_atom(None).await.unwrap();
+        let res = graph.upsert(atom1.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom1.hash()));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 2);
+        assert_eq!(graph.main_head, genesis_hash());
+        assert_eq!(graph.checkpoint, graph.main_head);
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+
+        let atom2 = graph.create_atom(None).await.unwrap();
+        let res = graph.upsert(atom2.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom2.hash()));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 3);
+        assert_eq!(graph.main_head, genesis_hash());
+        assert_eq!(graph.checkpoint, graph.main_head);
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+
+        let cmd = graph
+            .create_command(
+                0,
+                vec![(
+                    Token::new(&Multihash::default(), 0, vec![1], PEER1).id,
+                    PEER1,
+                )],
+                vec![(vec![1], PEER2)],
+                &PeerId::from_bytes(&PEER1).unwrap(),
+            )
+            .unwrap();
+        let atom3 = graph.create_atom(Some(cmd)).await.unwrap();
+        let res = graph.upsert(atom3.clone()).unwrap();
+        assert_eq!(res.accepted.len(), 1);
+        assert!(res.accepted.contains(&atom3.hash()));
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert_eq!(graph.entries.len(), 4);
+        assert_eq!(graph.main_head, atom3.hash());
+        assert_eq!(graph.checkpoint, genesis_hash());
+        assert_eq!(graph.checkpoint_height, 0);
+        assert_eq!(graph.difficulty, INIT_DIFFICULTY);
+        assert_eq!(
+            graph.tokens_for(&PeerId::from_bytes(&PEER2).unwrap()).len(),
+            1
+        );
     }
 }
