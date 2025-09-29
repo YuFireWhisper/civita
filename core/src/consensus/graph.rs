@@ -211,7 +211,7 @@ impl<V: Validator> Graph<V> {
         file_names.sort_unstable();
 
         assert!(
-            file_names.is_empty() || file_names.len() % 2 == 1,
+            file_names.is_empty() || file_names.len() % 2 == 0,
             "Should have odd number of history files"
         );
 
@@ -347,22 +347,30 @@ impl<V: Validator> Graph<V> {
 
             if height <= final_end {
                 if height != exp {
+                    log::error!("Expected height {}, got {} d", exp, height,);
                     return Err(ImportError::MismatchedHeight);
                 }
 
+                let original_checkpoint = self.checkpoint;
                 let res = self.upsert(atom).ok_or(ImportError::DuplicateAtom)?;
                 if !res.rejected.is_empty() {
                     return Err(ImportError::Rejected(
                         *res.rejected.values().next().unwrap(),
                     ));
                 }
+
                 if !res.missing.is_empty() {
                     return Err(ImportError::MissingParents);
                 }
+
                 if self.main_head != hash {
                     return Err(ImportError::NotMainHead);
                 }
-                if height % distance == 0 && height != distance && self.checkpoint != hash {
+
+                if height % distance == 0
+                    && height != distance
+                    && self.checkpoint != original_checkpoint
+                {
                     return Err(ImportError::NotCheckpoint);
                 }
 
@@ -372,9 +380,10 @@ impl<V: Validator> Graph<V> {
 
             if height == exp {
                 exp += 1;
-            } else if height == exp - 1 {
+            } else if height == exp - 1 && height % distance == 0 {
                 // Do nothing
             } else {
+                println!("Expected height {}, got {}", exp, height,);
                 return Err(ImportError::MismatchedHeight);
             }
 
