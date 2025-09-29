@@ -79,6 +79,28 @@ pub enum Error {
     InvalidTokens,
 }
 
+#[derive(Debug)]
+#[derive(thiserror::Error)]
+pub enum ImportError {
+    #[error("Mismatched atom height")]
+    MismatchedHeight,
+
+    #[error("Duplicate atom")]
+    DuplicateAtom,
+
+    #[error("Atom rejected: {0:?}")]
+    Rejected(RejectReason),
+
+    #[error("Missing parent atoms")]
+    MissingParents,
+
+    #[error("Atom should be the main head")]
+    NotMainHead,
+
+    #[error("Atom should be the checkpoint")]
+    NotCheckpoint,
+}
+
 #[derive(Clone, Copy)]
 pub struct Status {
     pub main_head: Multihash,
@@ -96,6 +118,7 @@ pub struct UpdateResult {
     pub missing: HashSet<Multihash>,
 }
 
+#[derive(Clone)]
 #[derive(Derivative)]
 #[derivative(Default(bound = ""))]
 struct Entry {
@@ -140,6 +163,8 @@ pub struct Config {
     pub vdf_params: u16,
 }
 
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
 pub struct Graph<V> {
     entries: HashMap<Multihash, Entry>,
     dismissed: HashSet<Multihash>,
@@ -166,7 +191,7 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
-    pub fn new(atoms: Vec<Atom>, dir_str: &str, config: Config) -> Result<Self, Error> {
+    pub fn new(dir_str: &str, config: Config) -> Result<Self, Error> {
         use bincode::{config, serde::decode_from_slice};
 
         let dir = Path::new(&dir_str).join(HISTORY);
@@ -245,53 +270,6 @@ impl<V: Validator> Graph<V> {
             }
         }
 
-        if atoms.is_empty() {
-            return Ok(graph);
-        }
-
-        let start = distance * epoch + 1;
-        let end = atoms.last().unwrap().height;
-        let final_end = start + distance * end / distance - 1;
-
-        let mut exp = start;
-        for atom in atoms {
-            let height = atom.height;
-            let hash = atom.hash();
-
-            if height <= final_end {
-                assert_eq!(height, exp, "Invalid atom height");
-
-                let origin_checkpoint_height = graph.checkpoint_height;
-                let res = graph.upsert(atom).expect("Duplicate Atom");
-                assert!(res.accepted.contains(&hash), "Atom not accepted");
-                assert!(res.rejected.is_empty(), "Invalid Atom");
-                assert!(res.missing.is_empty(), "Missing parents in Atom");
-                assert_eq!(graph.main_head, hash, "Atom should be the main head");
-                assert!(
-                    height % distance != 0
-                        || height != distance
-                        || graph.checkpoint_height != origin_checkpoint_height,
-                    "Atom should be the checkpoint"
-                );
-
-                exp += 1;
-                continue;
-            }
-
-            if height == exp {
-                exp += 1;
-            } else if height == exp - 1 {
-                // Do nothing
-            } else {
-                panic!("Provided atoms contain invalid height");
-            }
-
-            let res = graph.upsert(atom).expect("Duplicate Atom");
-            assert!(res.accepted.contains(&hash), "Atom not accepted");
-            assert!(res.rejected.is_empty(), "Invalid Atom");
-            assert!(res.missing.is_empty(), "Missing parents in Atom");
-        }
-
         Ok(graph)
     }
 
@@ -347,6 +325,67 @@ impl<V: Validator> Graph<V> {
             config,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    pub fn import(&mut self, atoms: Vec<Atom>) -> Result<(), ImportError> {
+        assert!(!atoms.is_empty(), "No atoms provided");
+
+        let distance = self.config.checkpoint_distance;
+        let epoch = self.checkpoint_height / distance;
+        let start = epoch * distance + 1;
+        let end = atoms.last().unwrap().height;
+        let final_end = start + distance * end / distance - 1;
+
+        let mut exp = start;
+        for atom in atoms {
+            let height = atom.height;
+            let hash = atom.hash();
+
+            if height <= final_end {
+                if height != exp {
+                    return Err(ImportError::MismatchedHeight);
+                }
+
+                let res = self.upsert(atom).ok_or(ImportError::DuplicateAtom)?;
+                if !res.rejected.is_empty() {
+                    return Err(ImportError::Rejected(
+                        *res.rejected.values().next().unwrap(),
+                    ));
+                }
+                if !res.missing.is_empty() {
+                    return Err(ImportError::MissingParents);
+                }
+                if self.main_head != hash {
+                    return Err(ImportError::NotMainHead);
+                }
+                if height % distance == 0 && height != distance && self.checkpoint != hash {
+                    return Err(ImportError::NotCheckpoint);
+                }
+
+                exp += 1;
+                continue;
+            }
+
+            if height == exp {
+                exp += 1;
+            } else if height == exp - 1 {
+                // Do nothing
+            } else {
+                return Err(ImportError::MismatchedHeight);
+            }
+
+            let res = self.upsert(atom).ok_or(ImportError::DuplicateAtom)?;
+            if !res.rejected.is_empty() {
+                return Err(ImportError::Rejected(
+                    *res.rejected.values().next().unwrap(),
+                ));
+            }
+            if !res.missing.is_empty() {
+                return Err(ImportError::MissingParents);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn upsert(&mut self, atom: Atom) -> Option<UpdateResult> {

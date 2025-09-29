@@ -175,28 +175,6 @@ impl<V: Validator> Engine<V> {
             peers_set.insert(*peer);
         }
 
-        let atoms = tokio::time::timeout(timeout, async {
-            while let Some(msg) = req_resp.recv().await {
-                let Message::Response { response, peer } = &msg else {
-                    continue;
-                };
-
-                if !peers_set.contains(peer) {
-                    continue;
-                }
-
-                if let Ok((atoms, _)) =
-                    decode_from_slice::<Vec<Atom>, _>(response.as_slice(), config::standard())
-                {
-                    return atoms;
-                }
-            }
-
-            panic!("Channel closed");
-        })
-        .await
-        .map_err(|_| Error::BootstrapTimeout)?;
-
         let config = graph::Config {
             block_threshold: config.block_threshold,
             checkpoint_distance: config.checkpoint_distance,
@@ -206,7 +184,38 @@ impl<V: Validator> Engine<V> {
             vdf_params: config.vdf_params,
         };
 
-        Graph::new(atoms, dir, config).map_err(Error::from)
+        let graph = Graph::new(dir, config)?;
+
+        tokio::time::timeout(timeout, async {
+            while let Some(msg) = req_resp.recv().await {
+                let Message::Response { response, peer } = &msg else {
+                    continue;
+                };
+
+                if !peers_set.contains(peer) {
+                    continue;
+                }
+
+                let Ok((atoms, _)) =
+                    decode_from_slice::<Vec<Atom>, _>(response, config::standard())
+                else {
+                    continue;
+                };
+
+                if atoms.is_empty() {
+                    return graph;
+                }
+
+                let mut tmp = graph.clone();
+                if tmp.import(atoms).is_ok() {
+                    return tmp;
+                }
+            }
+
+            panic!("Channel closed");
+        })
+        .await
+        .map_err(|_| Error::BootstrapTimeout)
     }
 
     pub async fn propose(
