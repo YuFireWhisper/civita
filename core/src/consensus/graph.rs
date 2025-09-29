@@ -678,7 +678,8 @@ impl<V: Validator> Graph<V> {
             });
         }
 
-        self.entries.retain(|_, e| e.atom.checkpoint == next_hash);
+        let nodes_to_keep = self.collect_subtree_from_checkpoint(next_hash);
+        self.entries.retain(|hash, _| nodes_to_keep.contains(hash));
         self.checkpoint_height = next_height;
         self.checkpoint = next_hash;
         self.difficulty = difficulty;
@@ -755,6 +756,26 @@ impl<V: Validator> Graph<V> {
         );
 
         ((self.difficulty as f32 * ratio) as u64).max(1)
+    }
+
+    fn collect_subtree_from_checkpoint(&self, checkpoint: Multihash) -> HashSet<Multihash> {
+        let mut nodes_to_keep = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        queue.push_back(checkpoint);
+        nodes_to_keep.insert(checkpoint);
+
+        while let Some(current) = queue.pop_front() {
+            if let Some(entry) = self.entries.get(&current) {
+                for child in &entry.children {
+                    if nodes_to_keep.insert(*child) {
+                        queue.push_back(*child);
+                    }
+                }
+            }
+        }
+
+        nodes_to_keep
     }
 
     pub fn get(&self, h: &Multihash) -> Option<&Atom> {
