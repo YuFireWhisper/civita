@@ -395,6 +395,17 @@ impl<V: Validator> Graph<V> {
             return;
         };
 
+        entry
+            .atom
+            .atoms
+            .iter()
+            .chain(std::iter::once(&entry.atom.parent))
+            .for_each(|p| {
+                if let Some(parent) = self.entries.get_mut(p) {
+                    parent.children.remove(&hash);
+                }
+            });
+
         let mut stk = VecDeque::new();
         stk.extend(entry.children);
 
