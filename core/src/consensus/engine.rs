@@ -1,8 +1,7 @@
 use std::{
     collections::HashSet,
-    fs::{self, File},
+    fs::{self},
     future,
-    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -166,7 +165,7 @@ impl<V: Validator> Engine<V> {
         };
 
         let graph = Graph::new(dir, config)?;
-        let epoch = graph.epoch();
+        let epoch = graph.max_epoch_in_dir();
 
         let msg = encode_to_vec(Request::Sync(epoch), config::standard()).unwrap();
         let req_resp = transport.request_response();
@@ -188,9 +187,9 @@ impl<V: Validator> Engine<V> {
                     continue;
                 }
 
-                let Ok((atoms, _)) =
-                    decode_from_slice::<Vec<Atom>, _>(response, config::standard())
+                let Ok((atoms, _)) = decode_from_slice::<Vec<_>, _>(response, config::standard())
                 else {
+                    log::error!("Failed to decode atoms from peer {peer}");
                     continue;
                 };
 
@@ -199,9 +198,12 @@ impl<V: Validator> Engine<V> {
                 }
 
                 let mut tmp = graph.clone();
-                if tmp.import(atoms).is_ok() {
-                    return tmp;
+                if let Err(e) = tmp.import(atoms) {
+                    log::error!("Failed to import atoms from peer {peer}: {e}");
+                    continue;
                 }
+
+                return tmp;
             }
 
             panic!("Channel closed");
@@ -454,7 +456,10 @@ impl<V: Validator> Engine<V> {
     }
 
     async fn handle_sync_request(&self, epoch: u32, channel: ResponseChannel<Vec<u8>>) {
-        use bincode::{config, serde::encode_into_std_write};
+        use bincode::{
+            config,
+            serde::{decode_from_slice, encode_to_vec},
+        };
 
         let self_epoch = self.graph.read().await.epoch();
 
@@ -462,56 +467,55 @@ impl<V: Validator> Engine<V> {
             return;
         }
 
-        let mut buf = Vec::new();
+        let mut atoms = Vec::new();
+        let mut seen = HashSet::new();
         let mut cur = epoch;
 
         while cur < self_epoch {
-            let name = format!("{cur}1");
-            let file_path = self.path.join(&name);
+            {
+                let name = format!("{cur}1");
+                let file_path = self.path.join(&name);
 
-            if !file_path.exists() {
-                log::error!("Storage file {name} not found");
-                return;
-            }
+                let Ok(data) = fs::read(&file_path) else {
+                    log::warn!("Failed to read storage file {name}");
+                    return;
+                };
 
-            let Ok(mut file) = File::open(&file_path) else {
-                log::error!("Failed to open storage file {name}");
-                return;
-            };
-
-            if let Err(e) = file.read_to_end(&mut buf) {
-                log::error!("Failed to read storage file {name}: {e}");
-                return;
+                let decodes: Vec<_> = decode_from_slice(&data, config::standard()).unwrap().0;
+                decodes.into_iter().for_each(|a: Atom| {
+                    seen.insert(a.hash());
+                    atoms.push(a);
+                });
             }
 
             cur += 1;
 
-            let name = format!("{cur}0");
-            let file_path = self.path.join(&name);
+            {
+                let name = format!("{cur}0");
+                let file_path = self.path.join(&name);
 
-            if !file_path.exists() {
-                log::error!("Storage file {name} not found");
-                return;
-            }
+                let Ok(data) = fs::read(&file_path) else {
+                    log::warn!("Failed to read storage file {name}");
+                    return;
+                };
 
-            let Ok(mut file) = File::open(&file_path) else {
-                log::error!("Failed to open storage file {name}");
-                return;
-            };
-
-            if let Err(e) = file.read_to_end(&mut buf) {
-                log::error!("Failed to read storage file {name}: {e}");
-                return;
+                let decode: Atom = decode_from_slice(&data, config::standard()).unwrap().0;
+                seen.insert(decode.hash());
+                atoms.push(decode);
             }
         }
 
-        let atoms = self.graph.read().await.current_atoms();
+        let graph = self.graph.read().await;
+        let cur_atoms = graph.current_atoms();
 
-        atoms.iter().for_each(|a| {
-            encode_into_std_write(a, &mut buf, config::standard()).unwrap();
-        });
+        cur_atoms
+            .iter()
+            .filter(|a| a.height > graph.checkpoint_height())
+            .for_each(|a| atoms.push(a.clone()));
+        atoms.sort_by_key(|a| a.height);
 
-        if let Err(e) = self.request_response.send_response(channel, buf).await {
+        let data = encode_to_vec(&atoms, config::standard()).unwrap();
+        if let Err(e) = self.request_response.send_response(channel, data).await {
             log::error!("Failed to send response: {e}");
         }
     }

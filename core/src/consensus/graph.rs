@@ -208,7 +208,17 @@ impl<V: Validator> Graph<V> {
                     .to_string()
             })
             .collect::<Vec<_>>();
-        file_names.sort_unstable();
+        file_names.sort_unstable_by(|a, b| {
+            let (ae, asuf) = a.split_at(a.len() - 1);
+            let (be, bsuf) = b.split_at(b.len() - 1);
+            let ae = ae.parse::<u32>().unwrap();
+            let be = be.parse::<u32>().unwrap();
+            if ae == be {
+                asuf.cmp(bsuf)
+            } else {
+                ae.cmp(&be)
+            }
+        });
 
         assert!(
             file_names.is_empty() || file_names.len() % 2 == 0,
@@ -244,19 +254,14 @@ impl<V: Validator> Graph<V> {
                 assert!(res.rejected.is_empty(), "Invalid checkpoint Atom");
                 assert!(res.missing.is_empty(), "Missing parents in checkpoint Atom");
 
-                epoch += 1;
                 end = "1";
             } else {
-                let mut pos = 0;
+                let atoms: Vec<Atom> = decode_from_slice(&data, config::standard()).unwrap().0;
 
-                for i in 1..distance {
-                    let (atom, n): (Atom, _) =
-                        decode_from_slice(&data[pos..], config::standard()).unwrap();
-                    pos += n;
-
+                for (i, atom) in atoms.into_iter().enumerate() {
                     assert_eq!(
                         atom.height,
-                        epoch * distance + i,
+                        epoch * distance + i as u32 + 1,
                         "Mismatched history height"
                     );
                     assert_eq!(atom.parent, graph.main_head, "Mismatched parent hash");
@@ -335,10 +340,10 @@ impl<V: Validator> Graph<V> {
         assert!(!atoms.is_empty(), "No atoms provided");
 
         let distance = self.config.checkpoint_distance;
-        let epoch = self.checkpoint_height / distance;
+        let epoch = self.max_epoch_in_dir();
         let start = epoch * distance + 1;
         let end = atoms.last().unwrap().height;
-        let final_end = start + distance * end / distance - 1;
+        let final_end = distance * (end / distance - 1);
 
         let mut exp = start;
         for atom in atoms {
@@ -347,7 +352,6 @@ impl<V: Validator> Graph<V> {
 
             if height <= final_end {
                 if height != exp {
-                    log::error!("Expected height {}, got {} d", exp, height,);
                     return Err(ImportError::MismatchedHeight);
                 }
 
@@ -369,7 +373,7 @@ impl<V: Validator> Graph<V> {
 
                 if height % distance == 0
                     && height != distance
-                    && self.checkpoint != original_checkpoint
+                    && self.checkpoint == original_checkpoint
                 {
                     return Err(ImportError::NotCheckpoint);
                 }
@@ -380,7 +384,7 @@ impl<V: Validator> Graph<V> {
 
             if height == exp {
                 exp += 1;
-            } else if height == exp - 1 && height % distance == 0 {
+            } else if height == exp - 1 && height % distance != 0 {
                 // Do nothing
             } else {
                 return Err(ImportError::MismatchedHeight);
@@ -796,7 +800,7 @@ impl<V: Validator> Graph<V> {
         let next_height = prev_height + self.config.checkpoint_distance;
         let next_hash = self.get_block_at_height(self.main_head, next_height);
 
-        let (times, atoms) = self.collect_times_and_atoms(next_hash, self.checkpoint);
+        let (times, mut atoms) = self.collect_times_and_atoms(next_hash, self.checkpoint);
         let difficulty = self.adjust_difficulty(times);
 
         let dir = Path::new(&self.dir).join(HISTORY);
@@ -807,12 +811,8 @@ impl<V: Validator> Graph<V> {
             let file_name = format!("{}0", epoch);
             let path = dir.join(file_name);
             let mut file = fs::File::create(&path).expect("Failed to create checkpoint file");
-            encode_into_std_write(
-                &self.entries[&next_hash].atom,
-                &mut file,
-                config::standard(),
-            )
-            .expect("Failed to write checkpoint file");
+            let atom = &self.entries[&next_hash].atom;
+            encode_into_std_write(atom, &mut file, config::standard()).unwrap();
         }
 
         {
@@ -820,12 +820,8 @@ impl<V: Validator> Graph<V> {
             let file_name = format!("{}1", epoch - 1);
             let path = dir.join(file_name);
             let mut file = fs::File::create(&path).expect("Failed to create history file");
-
-            for atom in atoms.iter().rev() {
-                println!("Writing history atom at height {}", atom.height);
-                encode_into_std_write(atom, &mut file, config::standard())
-                    .expect("Failed to write history file");
-            }
+            atoms.reverse();
+            encode_into_std_write(atoms, &mut file, config::standard()).unwrap();
         }
 
         let dir = Path::new(&self.dir).join(OWNNER);
@@ -1062,8 +1058,37 @@ impl<V: Validator> Graph<V> {
         self.checkpoint_height / self.config.checkpoint_distance
     }
 
+    pub fn max_epoch_in_dir(&self) -> u32 {
+        let dir = Path::new(&self.dir).join(HISTORY);
+        let mut max_epoch = 0;
+
+        fs::read_dir(&dir)
+            .expect("Failed to read history directory")
+            .for_each(|e| {
+                let file_name = e
+                    .unwrap()
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                if file_name.ends_with('0') {
+                    if let Ok(epoch) = file_name[..file_name.len() - 1].parse::<u32>() {
+                        max_epoch = max_epoch.max(epoch);
+                    }
+                }
+            });
+
+        max_epoch
+    }
+
     pub fn checkpoint(&self) -> Multihash {
         self.checkpoint
+    }
+
+    pub fn checkpoint_height(&self) -> Height {
+        self.checkpoint_height
     }
 }
 
