@@ -57,7 +57,14 @@ enum Request {
     Sync(u32),
 }
 
+#[derive(Clone, Copy)]
 pub struct Config {
+    pub block_threshold: u32,
+    pub checkpoint_distance: u32,
+    pub target_block_time: u64,
+    pub init_vdf_difficulty: u64,
+    pub max_difficulty_adjustment: f32,
+    pub vdf_params: u16,
     pub gossip_topic: u8,
     pub heartbeat_interval: Option<tokio::time::Duration>,
 }
@@ -67,13 +74,12 @@ pub struct Engine<V> {
     gossipsub: Arc<Gossipsub>,
     request_response: Arc<RequestResponse>,
 
-    gossip_topic: u8,
-
     graph: RwLock<Graph<V>>,
 
     pending_atoms: DashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
     atom_result_tx: Sender<Atom>,
 
+    gossip_topic: u8,
     heartbeat_interval: Option<tokio::time::Duration>,
     path: PathBuf,
 }
@@ -83,14 +89,14 @@ impl<V: Validator> Engine<V> {
         transport: Arc<Transport>,
         peers: Vec<(PeerId, Multiaddr)>,
         timeout: tokio::time::Duration,
-        graph_config: graph::Config,
+        dir: &str,
         config: Config,
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let req_resp = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let path = Path::new(graph_config.storage_dir).join(HISTORY);
-        let graph = Self::bootstrap(&transport, peers, timeout, graph_config).await?;
+        let path = Path::new(dir).join(HISTORY);
+        let graph = Self::bootstrap(&transport, peers, timeout, dir, config).await?;
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {
@@ -117,7 +123,8 @@ impl<V: Validator> Engine<V> {
         transport: &Transport,
         peers: Vec<(PeerId, Multiaddr)>,
         timeout: tokio::time::Duration,
-        graph_config: graph::Config,
+        dir: &str,
+        config: Config,
     ) -> Result<Graph<V>> {
         use bincode::{
             config,
@@ -126,9 +133,9 @@ impl<V: Validator> Engine<V> {
 
         debug_assert!(!peers.is_empty());
 
-        let dir = Path::new(graph_config.storage_dir).join(HISTORY);
-        fs::create_dir_all(&dir).expect("Failed to create storage dir");
-        let entries = std::fs::read_dir(&dir).expect("Failed to read storage dir");
+        let path = Path::new(dir).join(HISTORY);
+        fs::create_dir_all(&path).expect("Failed to create storage dir");
+        let entries = std::fs::read_dir(&path).expect("Failed to read storage dir");
 
         let mut latest = 0;
         for entry in entries.flatten() {
@@ -169,21 +176,39 @@ impl<V: Validator> Engine<V> {
         .await
         .map_err(|_| Error::BootstrapTimeout)?;
 
-        Graph::new(atoms, graph_config).map_err(Error::from)
+        let config = graph::Config {
+            block_threshold: config.block_threshold,
+            checkpoint_distance: config.checkpoint_distance,
+            target_block_time: config.target_block_time,
+            init_vdf_difficulty: config.init_vdf_difficulty,
+            max_difficulty_adjustment: config.max_difficulty_adjustment,
+            vdf_params: config.vdf_params,
+        };
+
+        Graph::new(atoms, dir, config).map_err(Error::from)
     }
 
     pub async fn with_genesis(
         transport: Arc<Transport>,
-        graph_config: graph::Config,
+        storage_dir: &str,
         config: Config,
     ) -> Result<Arc<Self>> {
         let gossipsub = transport.gossipsub();
         let request_response = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let path = Path::new(graph_config.storage_dir).join(HISTORY);
+        let path = Path::new(storage_dir).join(HISTORY);
         fs::create_dir_all(&path).expect("Failed to create storage dir");
 
-        let graph = Graph::genesis(graph_config);
+        let graph_config = graph::Config {
+            block_threshold: config.block_threshold,
+            checkpoint_distance: config.checkpoint_distance,
+            target_block_time: config.target_block_time,
+            init_vdf_difficulty: config.init_vdf_difficulty,
+            max_difficulty_adjustment: config.max_difficulty_adjustment,
+            vdf_params: config.vdf_params,
+        };
+
+        let graph = Graph::genesis(storage_dir, graph_config);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let engine = Arc::new(Self {

@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use bincode::error::DecodeError;
@@ -138,9 +138,6 @@ pub struct Config {
 
     #[derivative(Default(value = "1024"))]
     pub vdf_params: u16,
-
-    #[derivative(Default(value = "\"graph\""))]
-    pub storage_dir: &'static str,
 }
 
 pub struct Graph<V> {
@@ -153,6 +150,7 @@ pub struct Graph<V> {
 
     difficulty: u64,
 
+    dir: PathBuf,
     config: Config,
     _marker: std::marker::PhantomData<V>,
 }
@@ -168,14 +166,10 @@ impl Entry {
 }
 
 impl<V: Validator> Graph<V> {
-    pub fn new(atoms: Vec<Atom>, config: Config) -> Result<Self, Error> {
+    pub fn new(atoms: Vec<Atom>, dir_str: &str, config: Config) -> Result<Self, Error> {
         use bincode::{config, serde::decode_from_slice};
 
-        let dir = Path::new(config.storage_dir).join(HISTORY);
-        fs::create_dir_all(&dir).unwrap();
-
-        let mut graph = Self::genesis(config);
-
+        let dir = Path::new(&dir_str).join(HISTORY);
         let entries = fs::read_dir(&dir).expect("Failed to read history directory");
 
         let mut file_names = Vec::new();
@@ -198,22 +192,22 @@ impl<V: Validator> Graph<V> {
             let data = fs::read(&path).expect("Failed to read history file");
             let atoms_in_file: Vec<Atom> = decode_from_slice(&data, config::standard()).unwrap().0;
 
-            let mut cur = epoch * (graph.config.checkpoint_distance - 1);
+            let mut cur = epoch * (config.checkpoint_distance - 1);
             for atom in atoms_in_file {
                 assert_eq!(atom.height, cur);
                 local_atoms.push(atom);
                 cur += 1;
             }
-            assert_eq!(cur, epoch * graph.config.checkpoint_distance);
+            assert_eq!(cur, epoch * config.checkpoint_distance);
         }
 
-        let mut exp = graph.config.checkpoint_distance * epoch + 1;
+        let mut exp = config.checkpoint_distance * epoch + 1;
         if !atoms.iter().all(|a| {
             if a.height == exp {
                 exp += 1;
                 true
             } else {
-                a.height == exp - 1 && a.height % graph.config.checkpoint_distance != 0
+                a.height == exp - 1 && a.height % config.checkpoint_distance != 0
             }
         }) {
             panic!("Invalid atoms");
@@ -221,6 +215,7 @@ impl<V: Validator> Graph<V> {
 
         local_atoms.extend(atoms);
 
+        let mut graph = Self::genesis(dir_str, config);
         for atom in local_atoms {
             if graph.upsert(atom).is_none_or(|r| !r.rejected.is_empty()) {
                 panic!("Invalid atoms");
@@ -230,7 +225,7 @@ impl<V: Validator> Graph<V> {
         Ok(graph)
     }
 
-    pub fn genesis(config: Config) -> Self {
+    pub fn genesis(dir: &str, config: Config) -> Self {
         let (hasher, code, tokens) = V::genesis();
 
         let atom = AtomBuilder::new(Multihash::default(), Multihash::default(), 0)
@@ -278,6 +273,7 @@ impl<V: Validator> Graph<V> {
             checkpoint: hash,
             checkpoint_height: height,
             difficulty: config.init_vdf_difficulty,
+            dir: dir.into(),
             config,
             _marker: std::marker::PhantomData,
         }
@@ -682,13 +678,13 @@ impl<V: Validator> Graph<V> {
         let (times, atoms) = self.collect_times_and_atoms(next_hash, self.checkpoint);
         let difficulty = self.adjust_difficulty(times);
 
-        let dir = Path::new(self.config.storage_dir).join(HISTORY);
+        let dir = Path::new(&self.dir).join(HISTORY);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join((next_height / self.config.checkpoint_distance).to_string());
         let data = encode_to_vec(&atoms, config::standard()).unwrap();
         fs::write(&path, &data).expect("Failed to write history file");
 
-        let dir = Path::new(self.config.storage_dir).join(OWNNER);
+        let dir = Path::new(&self.dir).join(OWNNER);
         let db = DB::open_default(&dir).expect("Failed to open owner DB");
 
         for (hash, (sig, idx)) in &self.entries[&next_hash].accumulated_diff {
@@ -971,7 +967,7 @@ mod tests {
         }
     }
 
-    fn create_config(dir: &'static str) -> Config {
+    fn create_config() -> Config {
         Config {
             block_threshold: 3,
             checkpoint_distance: 10,
@@ -979,7 +975,6 @@ mod tests {
             max_difficulty_adjustment: 5.0,
             init_vdf_difficulty: INIT_DIFFICULTY,
             vdf_params: 1024,
-            storage_dir: dir,
         }
     }
 
@@ -1004,11 +999,11 @@ mod tests {
     #[test]
     fn initialization() {
         let dir = tempfile::tempdir().unwrap();
-        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
-        let config = create_config(str);
+        let str = dir.path().to_str().unwrap();
+        let config = create_config();
         let exp_hash = genesis_hash();
 
-        let graph = Graph::<TestValidator>::genesis(config);
+        let graph = Graph::<TestValidator>::genesis(str, config);
 
         assert_eq!(graph.entries.len(), 1);
         assert!(graph.dismissed.is_empty());
@@ -1021,9 +1016,9 @@ mod tests {
     #[test]
     fn upsert_normal_atom() {
         let dir = tempfile::tempdir().unwrap();
-        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
-        let config = create_config(str);
-        let mut graph = Graph::<TestValidator>::genesis(config);
+        let str = dir.path().to_str().unwrap();
+        let config = create_config();
+        let mut graph = Graph::<TestValidator>::genesis(str, config);
 
         let atom1 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
             .with_random(1)
@@ -1078,9 +1073,9 @@ mod tests {
     #[test]
     fn upsert_atom_with_valid_command() {
         let dir = tempfile::tempdir().unwrap();
-        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
-        let config = create_config(str);
-        let mut graph = Graph::<TestValidator>::genesis(config);
+        let str = dir.path().to_str().unwrap();
+        let config = create_config();
+        let mut graph = Graph::<TestValidator>::genesis(str, config);
 
         let atom1 = AtomBuilder::new(graph.main_head, graph.checkpoint, 1)
             .with_random(1)
@@ -1150,9 +1145,9 @@ mod tests {
     #[tokio::test]
     async fn create_atom() {
         let dir = tempfile::tempdir().unwrap();
-        let str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
-        let config = create_config(str);
-        let mut graph = Graph::<TestValidator>::genesis(config);
+        let str = dir.path().to_str().unwrap();
+        let config = create_config();
+        let mut graph = Graph::<TestValidator>::genesis(str, config);
 
         let atom1 = graph.create_atom(None).await.unwrap();
         let res = graph.upsert(atom1.clone()).unwrap();

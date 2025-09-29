@@ -11,7 +11,7 @@ use common::{constants::*, transport::*};
 #[tokio::test]
 async fn basic_operations() {
     let dir = tempfile::tempdir().unwrap();
-    let str: &'static str = Box::leak(dir.path().to_str().unwrap().to_string().into_boxed_str());
+    let str = dir.path().to_str().unwrap();
 
     let config = Config {
         heartbeat_interval: Some(tokio::time::Duration::from_secs(5)),
@@ -21,7 +21,6 @@ async fn basic_operations() {
         max_difficulty_adjustment: 5.0,
         init_vdf_difficulty: 5000,
         vdf_params: VDF_PARAMS,
-        storage_dir: str,
     };
 
     let mut txs = create_transports()
@@ -34,11 +33,13 @@ async fn basic_operations() {
     assert_eq!(txs[0].local_peer_id(), peer_id_1());
 
     let mut residents: Vec<Resident<Validator>> = Vec::with_capacity(5);
-    residents.push(Resident::genesis(txs.remove(0), config).await.unwrap());
+    residents.push(Resident::genesis(txs.remove(0), str, config).await.unwrap());
 
     for tx in txs {
         let t = tokio::time::Duration::from_secs(5);
-        let resident = Resident::new(tx, peers.clone(), t, config).await.unwrap();
+        let resident = Resident::new(tx, peers.clone(), t, str, config)
+            .await
+            .unwrap();
         residents.push(resident);
     }
 
