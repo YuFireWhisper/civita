@@ -1041,6 +1041,10 @@ impl<V: Validator> Graph<V> {
             difficulty: self.difficulty,
         }
     }
+
+    pub fn epoch(&self) -> u32 {
+        self.checkpoint_height / self.config.checkpoint_distance
+    }
 }
 
 #[cfg(test)]

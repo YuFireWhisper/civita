@@ -154,27 +154,6 @@ impl<V: Validator> Engine<V> {
 
         debug_assert!(!peers.is_empty());
 
-        let path = Path::new(dir).join(HISTORY);
-        fs::create_dir_all(&path).expect("Failed to create storage dir");
-        let entries = std::fs::read_dir(&path).expect("Failed to read storage dir");
-
-        let mut latest = 0;
-        for entry in entries.flatten() {
-            let file_name = entry.file_name().into_string().unwrap();
-            let num = file_name.parse::<u32>().unwrap();
-            latest = latest.max(num);
-        }
-
-        let msg = encode_to_vec(Request::Sync(latest), config::standard()).unwrap();
-        let req_resp = transport.request_response();
-        let mut peers_set = HashSet::new();
-
-        for (peer, addr) in &peers {
-            transport.dial(*peer, addr.clone()).await?;
-            req_resp.send_request(*peer, msg.clone()).await;
-            peers_set.insert(*peer);
-        }
-
         let config = graph::Config {
             block_threshold: config.block_threshold,
             checkpoint_distance: config.checkpoint_distance,
@@ -185,6 +164,17 @@ impl<V: Validator> Engine<V> {
         };
 
         let graph = Graph::new(dir, config)?;
+        let epoch = graph.epoch();
+
+        let msg = encode_to_vec(Request::Sync(epoch), config::standard()).unwrap();
+        let req_resp = transport.request_response();
+        let mut peers_set = HashSet::new();
+
+        for (peer, addr) in &peers {
+            transport.dial(*peer, addr.clone()).await?;
+            req_resp.send_request(*peer, msg.clone()).await;
+            peers_set.insert(*peer);
+        }
 
         tokio::time::timeout(timeout, async {
             while let Some(msg) = req_resp.recv().await {
