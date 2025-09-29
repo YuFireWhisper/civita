@@ -414,6 +414,17 @@ impl<V: Validator> Graph<V> {
             entry.children.into_iter().for_each(|p| {
                 stk.push_back(p);
             });
+
+            entry
+                .atom
+                .atoms
+                .iter()
+                .chain(std::iter::once(&entry.atom.parent))
+                .for_each(|p| {
+                    if let Some(parent) = self.entries.get_mut(p) {
+                        parent.children.remove(&u);
+                    }
+                });
         }
     }
 
