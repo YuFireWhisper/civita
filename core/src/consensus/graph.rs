@@ -327,15 +327,21 @@ impl<V: Validator> Graph<V> {
 
         result.accepted.insert(hash);
 
-        for child in self.entries[&hash].children.clone() {
-            let child_entry = self.entries.get_mut(&child).unwrap();
-            child_entry.pending_parents -= 1;
+        let mut stk = VecDeque::new();
+        stk.push_back(hash);
 
-            if child_entry.pending_parents == 0 {
-                if let Err(r) = self.final_validation(child) {
-                    self.remove_subgraph(child, r, &mut result);
-                } else {
-                    result.accepted.insert(child);
+        while let Some(u) = stk.pop_front() {
+            for child in self.entries[&u].children.clone() {
+                let entry = self.entries.get_mut(&child).unwrap();
+                entry.pending_parents -= 1;
+
+                if entry.pending_parents == 0 {
+                    if let Err(r) = self.final_validation(child) {
+                        self.remove_subgraph(child, r, &mut result);
+                    } else {
+                        result.accepted.insert(child);
+                        stk.push_back(child);
+                    }
                 }
             }
         }
