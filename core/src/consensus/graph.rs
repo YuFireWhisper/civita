@@ -170,56 +170,126 @@ impl<V: Validator> Graph<V> {
         use bincode::{config, serde::decode_from_slice};
 
         let dir = Path::new(&dir_str).join(HISTORY);
-        let entries = fs::read_dir(&dir).expect("Failed to read history directory");
 
-        let mut file_names = Vec::new();
-        for entry in entries {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-            let num = file_name.parse::<u32>().expect("Invalid history file name");
-            file_names.push(num);
-        }
+        let mut file_names = fs::read_dir(&dir)
+            .expect("Failed to read history directory")
+            .map(|e| {
+                e.unwrap()
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
         file_names.sort_unstable();
 
-        let mut epoch = 0;
-        let mut local_atoms = Vec::new();
-        for num in file_names {
-            epoch += 1;
-            assert_eq!(num, epoch);
+        assert!(
+            file_names.is_empty() || file_names.len() % 2 == 1,
+            "Should have odd number of history files"
+        );
 
-            let path = dir.join(num.to_string());
-            let data = fs::read(&path).expect("Failed to read history file");
-            let atoms_in_file: Vec<Atom> = decode_from_slice(&data, config::standard()).unwrap().0;
-
-            let mut cur = epoch * (config.checkpoint_distance - 1);
-            for atom in atoms_in_file {
-                assert_eq!(atom.height, cur);
-                local_atoms.push(atom);
-                cur += 1;
-            }
-            assert_eq!(cur, epoch * config.checkpoint_distance);
-        }
-
-        let mut exp = config.checkpoint_distance * epoch + 1;
-        if !atoms.iter().all(|a| {
-            if a.height == exp {
-                exp += 1;
-                true
-            } else {
-                a.height == exp - 1 && a.height % config.checkpoint_distance != 0
-            }
-        }) {
-            panic!("Invalid atoms");
-        }
-
-        local_atoms.extend(atoms);
-
+        let distance = config.checkpoint_distance;
         let mut graph = Self::genesis(dir_str, config);
-        for atom in local_atoms {
-            if graph.upsert(atom).is_none_or(|r| !r.rejected.is_empty()) {
-                panic!("Invalid atoms");
+        let mut end = "1";
+        let mut epoch = 0;
+
+        for file_name in file_names {
+            if !file_name.ends_with(end) {
+                let s = if end == "0" { "checkpoint" } else { "history" };
+                panic!("File is not a valid {} file: {}", s, file_name);
             }
+
+            let path = dir.join(file_name);
+            let data = fs::read(&path).expect("Failed to read history file");
+
+            if end == "0" {
+                let atom: Atom = decode_from_slice(&data, config::standard()).unwrap().0;
+
+                assert_eq!(
+                    atom.height,
+                    epoch * distance,
+                    "Mismatched checkpoint height"
+                );
+
+                let hash = atom.hash();
+                let res = graph.upsert(atom).expect("Duplicate Atom");
+                assert!(res.accepted.contains(&hash), "Checkpoint Atom not accepted");
+                assert!(res.rejected.is_empty(), "Invalid checkpoint Atom");
+                assert!(res.missing.is_empty(), "Missing parents in checkpoint Atom");
+
+                epoch += 1;
+                end = "1";
+            } else {
+                for i in 0..(distance - 1) {
+                    let atom: Atom = decode_from_slice(&data, config::standard()).unwrap().0;
+
+                    assert_eq!(
+                        atom.height,
+                        epoch * distance + i + 1,
+                        "Mismatched history height"
+                    );
+                    assert_eq!(atom.parent, graph.main_head, "Mismatched parent hash");
+
+                    let hash = atom.hash();
+                    let res = graph.upsert(atom).expect("Duplicate Atom");
+                    assert!(res.accepted.contains(&hash), "History Atom not accepted");
+                    assert!(res.rejected.is_empty(), "Invalid history Atom");
+                    assert!(res.missing.is_empty(), "Missing parents in history Atom");
+                    assert_eq!(graph.main_head, hash, "Atom should be the main head");
+                }
+
+                epoch += 1;
+                end = "0";
+            }
+        }
+
+        if atoms.is_empty() {
+            return Ok(graph);
+        }
+
+        let start = distance * epoch + 1;
+        let end = atoms.last().unwrap().height;
+        let final_end = start + distance * end / distance - 1;
+
+        let mut exp = start;
+        for atom in atoms {
+            let height = atom.height;
+            let hash = atom.hash();
+
+            if height <= final_end {
+                assert_eq!(height, exp, "Invalid atom height");
+
+                let origin_checkpoint_height = graph.checkpoint_height;
+                let res = graph.upsert(atom).expect("Duplicate Atom");
+                assert!(res.accepted.contains(&hash), "Atom not accepted");
+                assert!(res.rejected.is_empty(), "Invalid Atom");
+                assert!(res.missing.is_empty(), "Missing parents in Atom");
+                assert_eq!(graph.main_head, hash, "Atom should be the main head");
+                assert!(
+                    height % distance != 0
+                        || height != distance
+                        || graph.checkpoint_height != origin_checkpoint_height,
+                    "Atom should be the checkpoint"
+                );
+
+                exp += 1;
+                continue;
+            }
+
+            if height == exp {
+                exp += 1;
+            } else if height == exp - 1 {
+                // Do nothing
+            } else {
+                panic!("Provided atoms contain invalid height");
+            }
+
+            let res = graph.upsert(atom).expect("Duplicate Atom");
+            assert!(res.accepted.contains(&hash), "Atom not accepted");
+            assert!(res.rejected.is_empty(), "Invalid Atom");
+            assert!(res.missing.is_empty(), "Missing parents in Atom");
         }
 
         Ok(graph)
@@ -679,10 +749,28 @@ impl<V: Validator> Graph<V> {
         let difficulty = self.adjust_difficulty(times);
 
         let dir = Path::new(&self.dir).join(HISTORY);
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join((next_height / self.config.checkpoint_distance).to_string());
-        let data = encode_to_vec(&atoms, config::standard()).unwrap();
-        fs::write(&path, &data).expect("Failed to write history file");
+        let epoch = next_height / self.config.checkpoint_distance;
+
+        {
+            // Write checkpoint
+            let file_name = format!("{}0", epoch);
+            let path = dir.join(file_name);
+            let mut file = fs::File::create(&path).expect("Failed to create checkpoint file");
+            encode_into_std_write(&atoms[0], &mut file, config::standard())
+                .expect("Failed to write checkpoint file");
+        }
+
+        {
+            // Write Others
+            let file_name = format!("{}1", epoch);
+            let path = dir.join(file_name);
+            let mut file = fs::File::create(&path).expect("Failed to create history file");
+
+            for atom in atoms[1..].iter().rev() {
+                encode_into_std_write(atom, &mut file, config::standard())
+                    .expect("Failed to write history file");
+            }
+        }
 
         let dir = Path::new(&self.dir).join(OWNNER);
         let db = DB::open_default(&dir).expect("Failed to open owner DB");
@@ -733,7 +821,7 @@ impl<V: Validator> Graph<V> {
             (entry.atom.parent, entry.atom.timestamp)
         };
 
-        loop {
+        while cur != end {
             let entry = &self.entries[&cur];
 
             let dt = next_time.saturating_sub(entry.atom.timestamp);
@@ -744,14 +832,8 @@ impl<V: Validator> Graph<V> {
             next_time = entry.atom.timestamp;
             cur = entry.atom.parent;
 
-            if cur == end {
-                break;
-            }
-
             atoms.push(entry.atom.clone());
         }
-
-        atoms.reverse();
 
         (times, atoms)
     }
