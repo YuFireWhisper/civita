@@ -794,7 +794,7 @@ impl<V: Validator> Graph<V> {
         let dir = Path::new(&self.dir).join(HISTORY);
         let epoch = next_height / self.config.checkpoint_distance;
 
-        if prev_height != 0 {
+        {
             // Write checkpoint
             let file_name = format!("{}0", epoch);
             let path = dir.join(file_name);
@@ -1052,6 +1052,10 @@ impl<V: Validator> Graph<V> {
 
     pub fn epoch(&self) -> u32 {
         self.checkpoint_height / self.config.checkpoint_distance
+    }
+
+    pub fn checkpoint(&self) -> Multihash {
+        self.checkpoint
     }
 }
 
