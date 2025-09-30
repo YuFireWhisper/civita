@@ -21,6 +21,8 @@ pub struct Atom<T: Config> {
     pub nonce: Vec<u8>,
     pub random: u64,
     pub timestamp: Timestamp,
+    pub difficulty: u64,
+    pub mmr_peaks: Vec<Multihash>,
     pub cmd: Option<T::Command>,
     pub atoms: Vec<Multihash>,
 
@@ -35,6 +37,8 @@ pub struct AtomBuilder<T: Config> {
     nonce: Option<Vec<u8>>,
     random: Option<u64>,
     timestamp: Option<Timestamp>,
+    difficulty: u64,
+    mmr_peaks: Vec<Multihash>,
     cmd: Option<T::Command>,
     atoms: Vec<Multihash>,
 }
@@ -56,6 +60,8 @@ impl<T: Config> Atom<T> {
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.mmr_peaks, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
 
@@ -68,7 +74,13 @@ impl<T: Config> Atom<T> {
 }
 
 impl<T: Config> AtomBuilder<T> {
-    pub fn new(parent: Multihash, checkpoint: Multihash, height: u32) -> Self {
+    pub fn new(
+        parent: Multihash,
+        checkpoint: Multihash,
+        height: u32,
+        difficulty: u64,
+        mmr_peaks: Vec<Multihash>,
+    ) -> Self {
         Self {
             parent,
             checkpoint,
@@ -76,6 +88,8 @@ impl<T: Config> AtomBuilder<T> {
             nonce: None,
             random: None,
             timestamp: None,
+            difficulty,
+            mmr_peaks,
             cmd: None,
             atoms: vec![],
         }
@@ -106,7 +120,7 @@ impl<T: Config> AtomBuilder<T> {
         self
     }
 
-    pub fn build(self, difficulty: u64) -> JoinHandle<Atom<T>> {
+    pub fn build(self) -> JoinHandle<Atom<T>> {
         use bincode::{config, serde::encode_into_std_write};
 
         let random = self.random.unwrap_or_else(rand::random);
@@ -126,6 +140,8 @@ impl<T: Config> AtomBuilder<T> {
                     nonce,
                     random,
                     timestamp,
+                    difficulty: self.difficulty,
+                    mmr_peaks: self.mmr_peaks,
                     cmd: self.cmd,
                     atoms: self.atoms,
                     cache: OnceLock::new(),
@@ -141,12 +157,14 @@ impl<T: Config> AtomBuilder<T> {
             encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
             encode_into_std_write(random, &mut buf, config::standard()).unwrap();
             encode_into_std_write(timestamp, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
+            encode_into_std_write(&self.mmr_peaks, &mut buf, config::standard()).unwrap();
             encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
             encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
 
             let nonce = WesolowskiVDFParams(T::VDF_PARAM)
                 .new()
-                .solve(&buf, difficulty)
+                .solve(&buf, self.difficulty)
                 .expect("VDF should work");
 
             Atom {
@@ -156,6 +174,8 @@ impl<T: Config> AtomBuilder<T> {
                 nonce,
                 random,
                 timestamp,
+                difficulty: self.difficulty,
+                mmr_peaks: self.mmr_peaks,
                 cmd: self.cmd,
                 atoms: self.atoms,
                 cache: OnceLock::new(),
@@ -163,7 +183,7 @@ impl<T: Config> AtomBuilder<T> {
         })
     }
 
-    pub fn build_sync(self, difficulty: u64) -> Atom<T> {
+    pub fn build_sync(self) -> Atom<T> {
         use bincode::{config, serde::encode_into_std_write};
 
         let random = self.random.unwrap_or_else(rand::random);
@@ -182,6 +202,8 @@ impl<T: Config> AtomBuilder<T> {
                 nonce,
                 random,
                 timestamp,
+                difficulty: self.difficulty,
+                mmr_peaks: self.mmr_peaks,
                 cmd: self.cmd,
                 atoms: self.atoms,
                 cache: OnceLock::new(),
@@ -200,7 +222,7 @@ impl<T: Config> AtomBuilder<T> {
 
         let nonce = WesolowskiVDFParams(T::VDF_PARAM)
             .new()
-            .solve(&buf, difficulty)
+            .solve(&buf, self.difficulty)
             .expect("VDF should work");
 
         Atom {
@@ -210,6 +232,8 @@ impl<T: Config> AtomBuilder<T> {
             nonce,
             random,
             timestamp,
+            difficulty: self.difficulty,
+            mmr_peaks: self.mmr_peaks,
             cmd: self.cmd,
             atoms: self.atoms,
             cache: OnceLock::new(),
