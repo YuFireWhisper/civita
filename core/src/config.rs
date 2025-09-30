@@ -25,6 +25,10 @@ pub trait Config: Sized + Send + Sync + 'static {
 
     const HASHER: Hasher;
     const VDF_PARAM: u16;
+    const BLOCK_THRESHOLD: u32;
+    const CHECKPOINT_DISTANCE: u32;
+    const TARGET_BLOCK_TIME_SEC: u64;
+    const MAX_VDF_DIFFICULTY_ADJUSTMENT: f64;
 }
 
 pub trait GenesisConfig<T: Config>: Send + Sync + 'static {
