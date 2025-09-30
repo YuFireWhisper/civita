@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use derivative::Derivative;
 use multihash_derive::MultihashDigest;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
@@ -9,8 +10,9 @@ use crate::{config::Config, crypto::Multihash};
 pub type Height = u32;
 pub type Timestamp = u64;
 
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Derivative)]
+#[derivative(Clone(bound = "T: Config"))]
+#[derivative(Default(bound = ""))]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Atom<T: Config> {
     pub parent: Multihash,
