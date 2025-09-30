@@ -1,6 +1,9 @@
+use derivative::Derivative;
+
 use crate::config::Config;
 
-#[derive(Clone)]
+#[derive(Derivative)]
+#[derivative(Clone(bound = "T: Config"))]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Token<T: Config> {
     pub value: T::Value,
