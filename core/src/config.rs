@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::Hasher;
+use crate::{crypto::Hasher, ty::token::Token};
 
-type ValuePk<T> = (<T as Config>::Value, <T as Config>::ScriptPk);
-type Diff<T> = Vec<(<T as Config>::Address, Option<ValuePk<T>>)>; // None means deletion
+type Diff<T> = Vec<(<T as Config>::Address, Option<Token<T>>)>;
 
 #[derive(Debug)]
 #[derive(Clone, Copy)]
