@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{crypto::Hasher, ty::token::Token};
+use crate::{
+    crypto::{Hasher, Multihash},
+    ty::token::Token,
+};
 
-pub type Diff<T> = Vec<Option<Token<T>>>;
+pub type Diff<T> = (Vec<Token<T>>, Vec<Multihash>);
 
 #[derive(Debug)]
 #[derive(Clone, Copy)]
