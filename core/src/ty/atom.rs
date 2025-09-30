@@ -6,8 +6,8 @@ use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
 use crate::{config::Config, crypto::Multihash};
 
-type Height = u32;
-type Timestamp = u64;
+pub type Height = u32;
+pub type Timestamp = u64;
 
 #[derive(Clone)]
 #[derive(Default)]
