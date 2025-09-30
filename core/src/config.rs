@@ -28,7 +28,7 @@ pub trait Config: Sized + Send + Sync + 'static {
     type Value: Clone + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
     type ScriptPk: Clone + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
     type ScriptSig: Clone + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
-    type Command: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
+    type Command: Clone + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static;
     type Executor: Executor<Self> + Send + Sync + 'static;
     type GenesisConfig: GenesisConfig<Self>;
 
