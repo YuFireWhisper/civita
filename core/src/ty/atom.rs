@@ -4,67 +4,51 @@ use multihash_derive::MultihashDigest;
 use tokio::task::JoinHandle;
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
-use crate::{
-    crypto::{Hasher, Multihash},
-    ty::token::Token,
-    utils::mmr::MmrProof,
-};
+use crate::{config::Config, crypto::Multihash};
 
-pub type Height = u32;
-pub type Timestamp = u64;
-
-#[derive(Clone)]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Command {
-    pub code: u8,
-    pub inputs: Vec<(Token, MmrProof, Vec<u8>)>,
-    pub created: Vec<Token>,
-}
+type Height = u32;
+type Timestamp = u64;
 
 #[derive(Clone)]
 #[derive(Default)]
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct Atom {
-    pub hasher: Hasher,
+pub struct Atom<T: Config> {
     pub parent: Multihash,
     pub checkpoint: Multihash,
     pub height: Height,
     pub nonce: Vec<u8>,
     pub random: u64,
     pub timestamp: Timestamp,
-    pub cmd: Option<Command>,
+    pub cmd: Option<T::Event>,
     pub atoms: Vec<Multihash>,
 
     #[serde(skip)]
     cache: OnceLock<Multihash>,
 }
 
-pub struct AtomBuilder {
-    hasher: Hasher,
+pub struct AtomBuilder<T: Config> {
     parent: Multihash,
     checkpoint: Multihash,
     height: Height,
     nonce: Option<Vec<u8>>,
     random: Option<u64>,
     timestamp: Option<Timestamp>,
-    cmd: Option<Command>,
+    cmd: Option<T::Event>,
     atoms: Vec<Multihash>,
 }
 
-impl Atom {
+impl<T: Config> Atom<T> {
     pub fn hash(&self) -> Multihash {
         use bincode::{config, serde::encode_to_vec};
-        *self.cache.get_or_init(|| {
-            let data = encode_to_vec(self, config::standard()).unwrap();
-            self.hasher.digest(&data)
-        })
+        *self
+            .cache
+            .get_or_init(|| T::HASHER.digest(&encode_to_vec(&self, config::standard()).unwrap()))
     }
 
-    pub fn verify_nonce(&self, vdf_param: u16, difficulty: u64) -> bool {
+    pub fn verify_nonce(&self, difficulty: u64) -> bool {
         use bincode::{config, serde::encode_into_std_write};
 
         let mut buf = Vec::new();
-        encode_into_std_write(self.hasher, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
@@ -73,20 +57,17 @@ impl Atom {
         encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
 
-        std::panic::catch_unwind(|| {
-            WesolowskiVDFParams(vdf_param)
-                .new()
-                .verify(&buf, difficulty, &self.nonce)
-                .is_ok()
-        })
-        .is_ok_and(|r| r)
+        // TODO: verify maybe panics, consider forking vdf crate to return Result
+        WesolowskiVDFParams(T::VDF_PARAM)
+            .new()
+            .verify(&buf, difficulty, &self.nonce)
+            .is_ok()
     }
 }
 
-impl AtomBuilder {
-    pub fn new(parent: Multihash, checkpoint: Multihash, height: Height) -> Self {
+impl<T: Config> AtomBuilder<T> {
+    pub fn new(parent: Multihash, checkpoint: Multihash, height: u32) -> Self {
         Self {
-            hasher: Hasher::default(),
             parent,
             checkpoint,
             height,
@@ -96,11 +77,6 @@ impl AtomBuilder {
             cmd: None,
             atoms: vec![],
         }
-    }
-
-    pub fn with_hasher(mut self, hasher: Hasher) -> Self {
-        self.hasher = hasher;
-        self
     }
 
     pub fn with_random(mut self, random: u64) -> Self {
@@ -113,12 +89,12 @@ impl AtomBuilder {
         self
     }
 
-    pub fn with_timestamp(mut self, timestamp: Timestamp) -> Self {
+    pub fn with_timestamp(mut self, timestamp: u64) -> Self {
         self.timestamp = Some(timestamp);
         self
     }
 
-    pub fn with_command(mut self, cmd: Option<Command>) -> Self {
+    pub fn with_command(mut self, cmd: Option<T::Event>) -> Self {
         self.cmd = cmd;
         self
     }
@@ -128,7 +104,7 @@ impl AtomBuilder {
         self
     }
 
-    pub fn build(self, vdf_param: u16, difficulty: u64) -> JoinHandle<Atom> {
+    pub fn build(self, difficulty: u64) -> JoinHandle<Atom<T>> {
         use bincode::{config, serde::encode_into_std_write};
 
         let random = self.random.unwrap_or_else(rand::random);
@@ -142,7 +118,6 @@ impl AtomBuilder {
         if let Some(nonce) = self.nonce {
             return tokio::spawn(async move {
                 Atom {
-                    hasher: self.hasher,
                     parent: self.parent,
                     checkpoint: self.checkpoint,
                     height: self.height,
@@ -159,7 +134,6 @@ impl AtomBuilder {
         tokio::spawn(async move {
             let mut buf = Vec::new();
 
-            encode_into_std_write(self.hasher, &mut buf, config::standard()).unwrap();
             encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
             encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
             encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
@@ -168,13 +142,12 @@ impl AtomBuilder {
             encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
             encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
 
-            let nonce = WesolowskiVDFParams(vdf_param)
+            let nonce = WesolowskiVDFParams(T::VDF_PARAM)
                 .new()
                 .solve(&buf, difficulty)
                 .expect("VDF should work");
 
             Atom {
-                hasher: self.hasher,
                 parent: self.parent,
                 checkpoint: self.checkpoint,
                 height: self.height,
@@ -188,7 +161,7 @@ impl AtomBuilder {
         })
     }
 
-    pub fn build_sync(self, vdf_param: u16, difficulty: u64) -> Atom {
+    pub fn build_sync(self, difficulty: u64) -> Atom<T> {
         use bincode::{config, serde::encode_into_std_write};
 
         let random = self.random.unwrap_or_else(rand::random);
@@ -201,7 +174,6 @@ impl AtomBuilder {
 
         if let Some(nonce) = self.nonce {
             return Atom {
-                hasher: self.hasher,
                 parent: self.parent,
                 checkpoint: self.checkpoint,
                 height: self.height,
@@ -216,7 +188,6 @@ impl AtomBuilder {
 
         let mut buf = Vec::new();
 
-        encode_into_std_write(self.hasher, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.checkpoint, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
@@ -225,13 +196,12 @@ impl AtomBuilder {
         encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
 
-        let nonce = WesolowskiVDFParams(vdf_param)
+        let nonce = WesolowskiVDFParams(T::VDF_PARAM)
             .new()
             .solve(&buf, difficulty)
             .expect("VDF should work");
 
         Atom {
-            hasher: self.hasher,
             parent: self.parent,
             checkpoint: self.checkpoint,
             height: self.height,
