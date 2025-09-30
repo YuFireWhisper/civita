@@ -38,7 +38,6 @@ pub trait Config: Sized + Send + Sync + 'static {
     const CHECKPOINT_DISTANCE: u32;
     const TARGET_BLOCK_TIME_SEC: u64;
     const MAX_VDF_DIFFICULTY_ADJUSTMENT: f64;
-    const PRUNE_MODE: PruneMode;
 }
 
 pub trait GenesisConfig<T: Config>: Send + Sync + 'static {
