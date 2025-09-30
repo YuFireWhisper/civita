@@ -19,7 +19,7 @@ pub struct Atom<T: Config> {
     pub nonce: Vec<u8>,
     pub random: u64,
     pub timestamp: Timestamp,
-    pub cmd: Option<T::Event>,
+    pub cmd: Option<T::Command>,
     pub atoms: Vec<Multihash>,
 
     #[serde(skip)]
@@ -33,7 +33,7 @@ pub struct AtomBuilder<T: Config> {
     nonce: Option<Vec<u8>>,
     random: Option<u64>,
     timestamp: Option<Timestamp>,
-    cmd: Option<T::Event>,
+    cmd: Option<T::Command>,
     atoms: Vec<Multihash>,
 }
 
@@ -94,7 +94,7 @@ impl<T: Config> AtomBuilder<T> {
         self
     }
 
-    pub fn with_command(mut self, cmd: Option<T::Event>) -> Self {
+    pub fn with_command(mut self, cmd: Option<T::Command>) -> Self {
         self.cmd = cmd;
         self
     }
