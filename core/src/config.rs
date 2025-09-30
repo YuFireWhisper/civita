@@ -5,6 +5,15 @@ use crate::crypto::Hasher;
 type ValuePk<T> = (<T as Config>::Value, <T as Config>::ScriptPk);
 type Diff<T> = Vec<(<T as Config>::Address, Option<ValuePk<T>>)>; // None means deletion
 
+#[derive(Debug)]
+#[derive(Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum PruneMode {
+    All,
+    Recent(u32),
+    Lastest,
+}
+
 pub trait Executor<T: Config> {
     fn execute(
         &self,
@@ -29,6 +38,7 @@ pub trait Config: Sized + Send + Sync + 'static {
     const CHECKPOINT_DISTANCE: u32;
     const TARGET_BLOCK_TIME_SEC: u64;
     const MAX_VDF_DIFFICULTY_ADJUSTMENT: f64;
+    const PRUNE_MODE: PruneMode;
 }
 
 pub trait GenesisConfig<T: Config>: Send + Sync + 'static {
