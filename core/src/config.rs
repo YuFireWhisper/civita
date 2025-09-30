@@ -6,7 +6,12 @@ type ValuePk<T> = (<T as Config>::Value, <T as Config>::ScriptPk);
 type Diff<T> = Vec<(<T as Config>::Address, Option<ValuePk<T>>)>; // None means deletion
 
 pub trait Executor<T: Config> {
-    fn execute(&self, pk: &T::ScriptPk, sig: &T::ScriptSig) -> Result<Diff<T>, String>;
+    fn execute(
+        &self,
+        value: &T::Value,
+        pk: &T::ScriptPk,
+        sig: &T::ScriptSig,
+    ) -> Result<Diff<T>, String>;
 }
 
 pub trait Config: Sized + Send + Sync + 'static {
