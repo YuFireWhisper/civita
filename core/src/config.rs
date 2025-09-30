@@ -19,11 +19,11 @@ pub trait Config: Sized + Send + Sync + 'static {
     type GenesisConfig: GenesisConfig<Self>;
 
     const HASHER: Hasher;
+    const VDF_PARAM: u16;
 }
 
 pub trait GenesisConfig<T: Config>: Send + Sync + 'static {
     const HEIGHT: u32;
-    const VDF_PARAM: u16;
     const VAF_DIFFICULTY: u64;
 
     fn initial_state() -> Vec<(T::Address, ValuePk<T>)>;
