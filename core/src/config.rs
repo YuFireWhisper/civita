@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{crypto::Hasher, ty::token::Token};
 
-pub type Diff<T> = Vec<(<T as Config>::Address, Option<Token<T>>)>;
+pub type Diff<T> = Vec<Option<Token<T>>>;
 
 #[derive(Debug)]
 #[derive(Clone, Copy)]
