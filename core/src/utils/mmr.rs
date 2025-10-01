@@ -36,6 +36,23 @@ impl MmrProof {
 }
 
 impl<T> Mmr<T> {
+    pub fn with_peaks(peaks: Vec<(Multihash, u64)>) -> Self {
+        let mut entries = HashMap::with_capacity(peaks.len());
+        let mut next = 0u64;
+
+        for (h, idx) in peaks {
+            entries.insert(idx, (h, None));
+            next = next.max(idx + 1);
+        }
+
+        Mmr {
+            entries,
+            next,
+            vleaves: leaves_from_size(next),
+            ..Default::default()
+        }
+    }
+
     /// Returns index of appended leaf (not next index)
     pub fn append(&mut self, hash: Multihash, value: T) -> u64 {
         let idx = 2 * self.vleaves - self.vleaves.count_ones() as u64;
