@@ -4,16 +4,18 @@ use std::{
 };
 
 use bincode::error::DecodeError;
-use dashmap::DashMap;
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
     request_response::ResponseChannel,
     Multiaddr, PeerId,
 };
 use rocksdb::{Options, DB};
-use tokio::sync::{
-    mpsc::{Receiver, Sender},
-    RwLock,
+use tokio::{
+    sync::{
+        mpsc::{Receiver, Sender},
+        oneshot,
+    },
+    task::JoinHandle,
 };
 
 use crate::{
@@ -77,6 +79,9 @@ pub enum Error {
 
     #[error(transparent)]
     Storage(#[from] StorageError),
+
+    #[error("Engine has been stopped")]
+    EngineStopped,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -95,12 +100,6 @@ enum Response<T: Config> {
 }
 
 #[derive(Clone, Copy)]
-pub struct EngineConfig {
-    pub gossip_topic: u8,
-    pub heartbeat_interval: Option<tokio::time::Duration>,
-}
-
-#[derive(Clone, Copy)]
 pub enum NodeType {
     Archive,
     Regular(PeerId),
@@ -113,14 +112,34 @@ pub struct BootstrapConfig {
     pub node_type: NodeType,
 }
 
+#[derive(Clone, Copy)]
+pub struct EngineConfig {
+    pub gossip_topic: u8,
+    pub heartbeat_interval: Option<tokio::time::Duration>,
+}
+
+enum EngineRequest<T: Config> {
+    Propose {
+        code: u8,
+        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
+        off_chain_inputs: Vec<T::OffChainInput>,
+        outputs: Vec<Token<T>>,
+        response: oneshot::Sender<Result<(), graph::Error>>,
+    },
+    Tokens(oneshot::Sender<HashMap<Multihash, Token<T>>>),
+    Status(oneshot::Sender<Status>),
+    Stop(oneshot::Sender<()>),
+}
+
+pub struct Handle<T: Config>(Sender<EngineRequest<T>>);
 pub struct Engine<T: Config> {
     transport: Arc<Transport>,
     gossipsub: Arc<Gossipsub>,
     request_response: Arc<RequestResponse>,
 
-    graph: RwLock<Graph<T>>,
+    graph: Graph<T>,
 
-    pending_atoms: DashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
+    pending_atoms: HashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
     atom_result_tx: Sender<Atom<T>>,
 
     gossip_topic: u8,
@@ -130,13 +149,57 @@ pub struct Engine<T: Config> {
     node_type: NodeType,
 }
 
+impl<T: Config> Handle<T> {
+    pub async fn propose(
+        &self,
+        code: u8,
+        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
+        off_chain_inputs: Vec<T::OffChainInput>,
+        outputs: Vec<Token<T>>,
+    ) -> JoinHandle<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        let req = EngineRequest::Propose {
+            code,
+            on_chain_inputs,
+            off_chain_inputs,
+            outputs,
+            response: tx,
+        };
+        self.0.send(req).await.expect("Engine stopped");
+        tokio::spawn(async move { rx.await.expect("Engine stopped").map_err(|e| e.to_string()) })
+    }
+
+    pub async fn tokens(&self) -> JoinHandle<HashMap<Multihash, Token<T>>> {
+        let (tx, rx) = oneshot::channel();
+        let req = EngineRequest::Tokens(tx);
+        self.0.send(req).await.expect("Engine stopped");
+        tokio::spawn(async move { rx.await.expect("Engine stopped") })
+    }
+
+    pub async fn status(&self) -> JoinHandle<Status> {
+        let (tx, rx) = oneshot::channel();
+        let req = EngineRequest::Status(tx);
+        self.0.send(req).await.expect("Engine stopped");
+        tokio::spawn(async move { rx.await.expect("Engine stopped") })
+    }
+
+    pub async fn stop(self) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let req = EngineRequest::Stop(tx);
+        if self.0.send(req).await.is_ok() {
+            let _ = rx.await;
+        }
+        true
+    }
+}
+
 impl<T: Config> Engine<T> {
-    pub async fn new(
+    pub async fn spawn(
         transport: Arc<Transport>,
         dir: &str,
         bootstrap: Option<BootstrapConfig>,
         config: EngineConfig,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Handle<T>> {
         let gossipsub = transport.gossipsub();
         let req_resp = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
@@ -155,23 +218,26 @@ impl<T: Config> Engine<T> {
             (graph, Some(db), NodeType::Archive)
         };
 
-        let engine = Arc::new(Self {
-            transport,
+        let engine = Self {
+            transport: transport.clone(),
             gossipsub,
             request_response: req_resp,
             gossip_topic: config.gossip_topic,
-            graph: RwLock::new(graph),
-            pending_atoms: DashMap::new(),
+            graph,
+            pending_atoms: HashMap::new(),
             atom_result_tx,
             heartbeat_interval: config.heartbeat_interval,
             db: db.map(Arc::new),
             node_type,
+        };
+
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel(100);
+
+        tokio::spawn(async move {
+            engine.run(gossip_rx, atom_result_rx, request_rx).await;
         });
 
-        let engine_clone = engine.clone();
-        tokio::spawn(async move { engine_clone.run(gossip_rx, atom_result_rx).await });
-
-        Ok(engine)
+        Ok(Handle(request_tx))
     }
 
     fn create_genesis_atom() -> Atom<T> {
@@ -408,37 +474,11 @@ impl<T: Config> Engine<T> {
         panic!("channel closed");
     }
 
-    pub async fn propose(
-        &self,
-        code: u8,
-        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
-        off_chain_inputs: Vec<T::OffChainInput>,
-        outputs: Vec<Token<T>>,
-    ) -> Result<(), graph::Error> {
-        let graph = self.graph.read().await;
-        let peer_id = self.transport.local_peer_id();
-        let cmd =
-            graph.create_command(&peer_id, code, on_chain_inputs, off_chain_inputs, outputs)?;
-        let handle = graph.create_atom(Some(cmd));
-
-        drop(graph);
-
-        let tx = self.atom_result_tx.clone();
-
-        tokio::spawn(async move {
-            let atom = handle.await.expect("Atom creation failed");
-            if let Err(e) = tx.send(atom).await {
-                log::error!("Failed to send atom result: {e}");
-            }
-        });
-
-        Ok(())
-    }
-
     async fn run(
-        &self,
+        mut self,
         mut gossip_rx: Receiver<gossipsub::Message>,
         mut atom_result_rx: Receiver<Atom<T>>,
+        mut request_rx: Receiver<EngineRequest<T>>,
     ) {
         let mut hb_interval = self.heartbeat_interval.map(tokio::time::interval);
 
@@ -446,6 +486,7 @@ impl<T: Config> Engine<T> {
             let mut gossip_msg = None;
             let mut req_resp_msg = None;
             let mut atom_result = None;
+            let mut engine_request = None;
             let mut hb_tick = false;
 
             tokio::select! {
@@ -457,6 +498,9 @@ impl<T: Config> Engine<T> {
                 }
                 Some(atom) = atom_result_rx.recv() => {
                     atom_result = Some(atom);
+                }
+                Some(req) = request_rx.recv() => {
+                    engine_request = Some(req);
                 }
                 _ = async {
                     if let Some(ref mut interval) = hb_interval {
@@ -481,8 +525,14 @@ impl<T: Config> Engine<T> {
                 self.on_atom_ready(atom).await;
             }
 
+            if let Some(req) = engine_request {
+                if self.handle_engine_request(req).await {
+                    break;
+                }
+            }
+
             if hb_tick {
-                let status = self.graph.read().await.status();
+                let status = self.graph.status();
                 log::debug!(
                     "Heartbeat: finalized={}, height={}, difficulty={}",
                     status.finalized_height,
@@ -491,9 +541,73 @@ impl<T: Config> Engine<T> {
                 );
             }
         }
+
+        log::info!("Engine stopped");
     }
 
-    async fn handle_gossip_message(&self, msg: gossipsub::Message) {
+    async fn handle_engine_request(&mut self, request: EngineRequest<T>) -> bool {
+        match request {
+            EngineRequest::Propose {
+                code,
+                on_chain_inputs,
+                off_chain_inputs,
+                outputs,
+                response,
+            } => {
+                let result = self
+                    .propose_internal(code, on_chain_inputs, off_chain_inputs, outputs)
+                    .await;
+                let _ = response.send(result);
+                false
+            }
+            EngineRequest::Tokens(tx) => {
+                let peer_id = self.transport.local_peer_id();
+                let tokens = self.graph.tokens(&peer_id).unwrap();
+                let _ = tx.send(tokens);
+                false
+            }
+            EngineRequest::Status(tx) => {
+                let status = self.graph.status();
+                let _ = tx.send(status);
+                false
+            }
+            EngineRequest::Stop(tx) => {
+                let _ = tx.send(());
+                true
+            }
+        }
+    }
+
+    async fn propose_internal(
+        &mut self,
+        code: u8,
+        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
+        off_chain_inputs: Vec<T::OffChainInput>,
+        outputs: Vec<Token<T>>,
+    ) -> Result<(), graph::Error> {
+        let peer_id = self.transport.local_peer_id();
+        let cmd = self.graph.create_command(
+            &peer_id,
+            code,
+            on_chain_inputs,
+            off_chain_inputs,
+            outputs,
+        )?;
+        let handle = self.graph.create_atom(Some(cmd));
+
+        let tx = self.atom_result_tx.clone();
+
+        tokio::spawn(async move {
+            let atom = handle.await.expect("Atom creation failed");
+            if let Err(e) = tx.send(atom).await {
+                log::error!("Failed to send atom result: {e}");
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn handle_gossip_message(&mut self, msg: gossipsub::Message) {
         let Ok((atom, _)) = bincode::serde::decode_from_slice::<Atom<T>, _>(
             msg.data.as_slice(),
             bincode::config::standard(),
@@ -512,7 +626,7 @@ impl<T: Config> Engine<T> {
             .await;
     }
 
-    async fn on_recv_atom(&self, atom: Atom<T>, msg_id: Option<MessageId>, peer: PeerId) {
+    async fn on_recv_atom(&mut self, atom: Atom<T>, msg_id: Option<MessageId>, peer: PeerId) {
         let hash = atom.hash();
 
         for hash in atom.atoms.iter().chain(&[atom.hash(), atom.parent]) {
@@ -522,12 +636,11 @@ impl<T: Config> Engine<T> {
                 .push((msg_id.clone(), peer));
         }
 
-        let mut graph = self.graph.write().await;
-        let result = graph.upsert(atom);
+        let result = self.graph.upsert(atom);
 
         if let Some(ref db) = self.db {
             for finalized_hash in &result.finalized {
-                if let Some(atom) = graph.get(finalized_hash) {
+                if let Some(atom) = self.graph.get(finalized_hash) {
                     let height_key = atom.height.to_be_bytes();
                     let atom_data =
                         bincode::serde::encode_to_vec(atom, bincode::config::standard()).unwrap();
@@ -538,11 +651,9 @@ impl<T: Config> Engine<T> {
             }
         }
 
-        drop(graph);
-
         if result.existing {
             log::info!("Atom {hash:?} is already existing");
-            if let Some((_, infos)) = self.pending_atoms.remove(&hash) {
+            if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer) in infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p))) {
                     self.gossipsub
                         .report_validation_result(&msg_id, &peer, MessageAcceptance::Accept)
@@ -555,7 +666,7 @@ impl<T: Config> Engine<T> {
         for hash in result.accepted {
             log::info!("Atom {hash:?} accepted");
 
-            if let Some((_, infos)) = self.pending_atoms.remove(&hash) {
+            if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer_id) in
                     infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p)))
                 {
@@ -569,7 +680,7 @@ impl<T: Config> Engine<T> {
         for (hash, reason) in result.rejected {
             log::info!("Atom {hash:?} rejected: {reason:?}");
 
-            if let Some((_, infos)) = self.pending_atoms.remove(&hash) {
+            if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer_id) in infos {
                     if let Some(msg_id) = msg_id {
                         self.gossipsub
@@ -594,7 +705,7 @@ impl<T: Config> Engine<T> {
         }
     }
 
-    async fn on_recv_request_response(&self, msg: Message) {
+    async fn on_recv_request_response(&mut self, msg: Message) {
         use bincode::{config, serde::decode_from_slice};
 
         match msg {
@@ -649,12 +760,10 @@ impl<T: Config> Engine<T> {
             return;
         }
 
-        let graph = self.graph.read().await;
         let atoms: Vec<Atom<T>> = hashes
             .iter()
-            .filter_map(|h| graph.get(h).cloned())
+            .filter_map(|h| self.graph.get(h).cloned())
             .collect();
-        drop(graph);
 
         let response = Response::<T>::Atoms(atoms);
         let data = bincode::serde::encode_to_vec(&response, bincode::config::standard()).unwrap();
@@ -667,22 +776,18 @@ impl<T: Config> Engine<T> {
     async fn handle_blocks_request(&self, height: u32, channel: ResponseChannel<Vec<u8>>) {
         use bincode::{config, serde::encode_to_vec};
 
-        let graph = self.graph.read().await;
-        let finalized_height = graph.finalized_height();
+        let finalized_height = self.graph.finalized_height();
 
         if height > finalized_height {
-            let atoms = graph.current_atoms();
+            let atoms = self.graph.current_atoms();
             let response = Response::<T>::Blocks(atoms);
             let data = encode_to_vec(&response, config::standard()).unwrap();
-            drop(graph);
 
             if let Err(e) = self.request_response.send_response(channel, data).await {
                 log::error!("Failed to send blocks response: {e}");
             }
             return;
         }
-
-        drop(graph);
 
         let Some(ref db) = self.db else {
             let response = Response::<T>::Blocks(vec![]);
@@ -727,9 +832,7 @@ impl<T: Config> Engine<T> {
             return;
         }
 
-        let graph = self.graph.read().await;
-
-        let finalized_height = graph.finalized_height();
+        let finalized_height = self.graph.finalized_height();
         let start_height = finalized_height.saturating_sub(T::MAINTENANCE_WINDOW);
 
         let Some(ref db) = self.db else {
@@ -747,9 +850,7 @@ impl<T: Config> Engine<T> {
             return;
         };
 
-        let proofs = graph.tokens_and_proof(&peer_id).unwrap_or_default();
-
-        drop(graph);
+        let proofs = self.graph.tokens_and_proof(&peer_id).unwrap_or_default();
 
         let response = Response::InitialState(Box::new((initial_atom, proofs)));
         let data = encode_to_vec(&response, config::standard()).unwrap();
@@ -759,17 +860,16 @@ impl<T: Config> Engine<T> {
         }
     }
 
-    async fn on_atom_ready(&self, atom: Atom<T>) -> bool {
+    async fn on_atom_ready(&mut self, atom: Atom<T>) -> bool {
         use bincode::{config, serde::encode_to_vec};
 
         let vec = encode_to_vec(&atom, config::standard()).unwrap();
 
-        let mut graph = self.graph.write().await;
-        let result = graph.upsert(atom);
+        let result = self.graph.upsert(atom);
 
         if let Some(ref db) = self.db {
             for finalized_hash in &result.finalized {
-                if let Some(atom) = graph.get(finalized_hash) {
+                if let Some(atom) = self.graph.get(finalized_hash) {
                     let key = atom.height.to_be_bytes();
                     let value = encode_to_vec(atom, bincode::config::standard()).unwrap();
                     if let Err(e) = db.put(key, value) {
@@ -778,8 +878,6 @@ impl<T: Config> Engine<T> {
                 }
             }
         }
-
-        drop(graph);
 
         if result.existing {
             return false;
@@ -796,22 +894,6 @@ impl<T: Config> Engine<T> {
         }
 
         true
-    }
-
-    pub async fn tokens(&self, peer_id: &PeerId) -> Option<HashMap<Multihash, Token<T>>> {
-        self.graph.read().await.tokens(peer_id)
-    }
-
-    pub async fn status(&self) -> Status {
-        self.graph.read().await.status()
-    }
-
-    pub fn node_type(&self) -> &NodeType {
-        &self.node_type
-    }
-
-    pub fn is_archive(&self) -> bool {
-        matches!(self.node_type, NodeType::Archive)
     }
 }
 
