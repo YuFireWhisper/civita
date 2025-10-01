@@ -3,7 +3,6 @@ use std::{
     sync::OnceLock,
 };
 
-use derivative::Derivative;
 use multihash_derive::MultihashDigest;
 
 use crate::crypto::{hasher::Hasher, Multihash};
@@ -17,14 +16,14 @@ pub struct MmrProof {
 }
 
 #[derive(Clone)]
-#[derive(Derivative)]
-#[derivative(Default(bound = ""))]
-#[derivative(PartialEq(bound = "T: PartialEq"), Eq)]
-pub struct Mmr<T> {
-    entries: HashMap<u64, (Multihash, Option<T>)>,
+#[derive(Debug)]
+#[derive(Default)]
+#[derive(PartialEq, Eq)]
+pub struct Mmr {
+    entries: HashMap<u64, Multihash>,
     next: u64,
     vleaves: u64,
-    staged_create: Vec<(Multihash, T)>,
+    staged_create: Vec<Multihash>,
     staged_delete: Vec<u64>,
     peaks: OnceLock<Vec<u64>>,
 }
@@ -35,14 +34,14 @@ impl MmrProof {
     }
 }
 
-impl<T> Mmr<T> {
-    pub fn with_peaks(peaks: Vec<(Multihash, u64)>) -> Self {
+impl Mmr {
+    pub fn with_peaks(peaks: Vec<(u64, Multihash)>) -> Self {
         let mut entries = HashMap::with_capacity(peaks.len());
         let mut next = 0u64;
 
-        for (h, idx) in peaks {
-            entries.insert(idx, (h, None));
-            next = next.max(idx + 1);
+        for (i, h) in peaks {
+            entries.insert(i, h);
+            next = next.max(i + 1);
         }
 
         Mmr {
@@ -54,10 +53,10 @@ impl<T> Mmr<T> {
     }
 
     /// Returns index of appended leaf (not next index)
-    pub fn append(&mut self, hash: Multihash, value: T) -> u64 {
+    pub fn append(&mut self, hash: Multihash) -> u64 {
         let idx = 2 * self.vleaves - self.vleaves.count_ones() as u64;
         self.vleaves += 1;
-        self.staged_create.push((hash, value));
+        self.staged_create.push(hash);
         idx
     }
 
@@ -66,10 +65,7 @@ impl<T> Mmr<T> {
             return false;
         };
 
-        fs.into_iter().for_each(|(idx, h)| {
-            self.entries.entry(idx).and_modify(|e| e.0 = h);
-        });
-
+        self.entries.extend(fs);
         self.staged_delete.push(proof.idx);
 
         true
@@ -105,7 +101,7 @@ impl<T> Mmr<T> {
             g += 1;
         }
 
-        if idx != exp || acc != self.entries[&exp].0 {
+        if idx != exp || acc != self.entries[&exp] {
             return None;
         }
 
@@ -117,19 +113,19 @@ impl<T> Mmr<T> {
         let deleted = std::mem::take(&mut self.staged_delete);
 
         deleted.into_iter().for_each(|idx| {
-            self.entries.insert(idx, (Multihash::default(), None));
+            self.entries.insert(idx, Multihash::default());
             self.recalculate_parents(idx);
         });
 
-        created.into_iter().for_each(|(h, v)| {
+        created.into_iter().for_each(|h| {
             let mut g = 0usize;
-            let mut i = self.insert(h, Some(v));
+            let mut i = self.insert(h);
 
             while index_height(i) > g {
                 let il = i - (2u64 << g);
                 let ir = i - 1;
-                let h = hash_pospair(i + 1, &self.entries[&il].0, &self.entries[&ir].0);
-                i = self.insert(h, None);
+                let h = hash_pospair(i + 1, &self.entries[&il], &self.entries[&ir]);
+                i = self.insert(h);
                 g += 1;
             }
         });
@@ -147,28 +143,28 @@ impl<T> Mmr<T> {
 
             if index_height(idx + 1) > g {
                 idx += 1;
-                let s = &self.entries[&(idx - offset)].0;
-                *self.entries.get_mut(&idx).unwrap() = (hash_pospair(idx + 1, s, &c), None);
+                let s = &self.entries[&(idx - offset)];
+                *self.entries.get_mut(&idx).unwrap() = hash_pospair(idx + 1, s, &c);
             } else {
                 idx += offset;
-                let s = &self.entries[&(idx - 1)].0;
-                *self.entries.get_mut(&idx).unwrap() = (hash_pospair(idx + 1, &c, s), None);
+                let s = &self.entries[&(idx - 1)];
+                *self.entries.get_mut(&idx).unwrap() = hash_pospair(idx + 1, &c, s);
             }
 
             g += 1;
-            c = self.entries[&idx].0;
+            c = self.entries[&idx];
         }
     }
 
     /// Returns next index
-    fn insert(&mut self, hash: Multihash, value: Option<T>) -> u64 {
-        self.entries.insert(self.next, (hash, value));
+    fn insert(&mut self, hash: Multihash) -> u64 {
+        self.entries.insert(self.next, hash);
         self.next += 1;
         self.next
     }
 
-    pub fn get(&self, idx: u64) -> Option<&(Multihash, Option<T>)> {
-        self.entries.get(&idx)
+    pub fn get(&self, idx: u64) -> Option<Multihash> {
+        self.entries.get(&idx).copied()
     }
 
     pub fn prove(&self, idx: u64) -> Option<MmrProof> {
@@ -197,7 +193,7 @@ impl<T> Mmr<T> {
                 return Some(proof);
             }
 
-            proof.hashes.push(self.entries.get(&is)?.0);
+            proof.hashes.push(*self.entries.get(&is)?);
             g += 1;
         }
     }
@@ -212,11 +208,8 @@ impl<T> Mmr<T> {
         })
     }
 
-    pub fn peak_hashes(&self) -> Vec<(Multihash, u64)> {
-        self.peaks()
-            .iter()
-            .map(|i| (self.entries[i].0, *i))
-            .collect()
+    pub fn peak_hashes(&self) -> Vec<(u64, Multihash)> {
+        self.peaks().iter().map(|i| (*i, self.entries[i])).collect()
     }
 
     pub fn verify(&self, hash: Multihash, proof: &MmrProof) -> bool {
@@ -239,30 +232,22 @@ impl<T> Mmr<T> {
         true
     }
 
-    pub fn resolve_and_fill(&mut self, hash: Multihash, value: T, proof: &MmrProof) -> bool {
+    pub fn resolve_and_fill(&mut self, hash: Multihash, proof: &MmrProof) -> bool {
         let Some(fs) = self.resolve(hash, proof) else {
             return false;
         };
-
-        fs.into_iter().for_each(|(idx, h)| {
-            self.entries.entry(idx).and_modify(|e| e.0 = h);
-        });
-
-        self.entries
-            .entry(proof.idx)
-            .and_modify(|e| e.1 = Some(value));
-
+        self.entries.extend(fs);
         true
     }
 }
 
-impl<T: Clone> Mmr<T> {
-    pub fn to_pruned(&self, indices: &[u64]) -> Option<Mmr<T>> {
+impl Mmr {
+    pub fn to_pruned(&self, indices: &[u64]) -> Option<Mmr> {
         let indices = pruned_indices(self.next, indices);
         let mut entries = HashMap::with_capacity(indices.len());
 
         for i in indices {
-            entries.insert(i, self.entries.get(&i)?.clone());
+            entries.insert(i, *self.entries.get(&i)?);
         }
 
         Some(Mmr {
@@ -404,7 +389,7 @@ fn pruned_indices(size: u64, leaves: &[u64]) -> HashSet<u64> {
     indices
 }
 
-impl<T: serde::Serialize> serde::Serialize for Mmr<T> {
+impl serde::Serialize for Mmr {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -413,12 +398,12 @@ impl<T: serde::Serialize> serde::Serialize for Mmr<T> {
     }
 }
 
-impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Mmr<T> {
+impl<'de> serde::Deserialize<'de> for Mmr {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let (next, entries): (u64, HashMap<u64, (Multihash, Option<T>)>) =
+        let (next, entries): (u64, HashMap<u64, Multihash>) =
             serde::Deserialize::deserialize(deserializer)?;
 
         Ok(Mmr {
@@ -443,7 +428,7 @@ mod test {
 
     #[derive(Default)]
     struct Context {
-        mmr: Mmr<u32>,
+        mmr: Mmr,
         hash_to_idx: HashMap<Multihash, u64>,
         proof_cache: HashMap<u64, (Multihash, MmrProof)>,
         deleted: Vec<u64>,
@@ -453,7 +438,7 @@ mod test {
         pub fn append(&mut self, start: u64, end: u64) {
             for i in start..end {
                 let h = Hasher::default().digest(&i.to_le_bytes());
-                let idx = self.mmr.append(h, i as u32);
+                let idx = self.mmr.append(h);
                 self.hash_to_idx.insert(h, idx);
             }
             self.mmr.commit();
@@ -546,7 +531,7 @@ mod test {
         ctx.delete(200, 800);
 
         let encoded = encode_to_vec(&ctx.mmr, config::standard()).unwrap();
-        let decoded = decode_from_slice::<Mmr<u32>, _>(&encoded, config::standard())
+        let decoded = decode_from_slice::<Mmr, _>(&encoded, config::standard())
             .unwrap()
             .0;
 
