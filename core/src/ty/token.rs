@@ -1,6 +1,6 @@
 use derivative::Derivative;
 
-use crate::config::Config;
+use crate::traits::Config;
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = "T: Config"))]
