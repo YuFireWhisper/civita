@@ -195,6 +195,10 @@ impl<T> Mmr<T> {
         })
     }
 
+    pub fn peak_hashes(&self) -> Vec<Multihash> {
+        self.peaks().iter().map(|p| self.entries[p].0).collect()
+    }
+
     pub fn verify(&self, hash: Multihash, proof: &MmrProof) -> bool {
         self.resolve(hash, proof).is_some()
     }
