@@ -212,8 +212,11 @@ impl<T> Mmr<T> {
         })
     }
 
-    pub fn peak_hashes(&self) -> Vec<Multihash> {
-        self.peaks().iter().map(|p| self.entries[p].0).collect()
+    pub fn peak_hashes(&self) -> Vec<(Multihash, u64)> {
+        self.peaks()
+            .iter()
+            .map(|i| (self.entries[i].0, *i))
+            .collect()
     }
 
     pub fn verify(&self, hash: Multihash, proof: &MmrProof) -> bool {
@@ -233,6 +236,22 @@ impl<T> Mmr<T> {
         }
 
         self.entries = entries;
+        true
+    }
+
+    pub fn resolve_and_fill(&mut self, hash: Multihash, value: T, proof: &MmrProof) -> bool {
+        let Some(fs) = self.resolve(hash, proof) else {
+            return false;
+        };
+
+        fs.into_iter().for_each(|(idx, h)| {
+            self.entries.entry(idx).and_modify(|e| e.0 = h);
+        });
+
+        self.entries
+            .entry(proof.idx)
+            .and_modify(|e| e.1 = Some(value));
+
         true
     }
 }
