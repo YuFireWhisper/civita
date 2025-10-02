@@ -9,6 +9,7 @@ use libp2p::{
     request_response::ResponseChannel,
     Multiaddr, PeerId,
 };
+use multihash_derive::MultihashDigest;
 use rocksdb::{Options, DB};
 use tokio::{
     sync::{
@@ -28,7 +29,7 @@ use crate::{
     },
     traits::Config,
     ty::{atom::Atom, token::Token},
-    utils::mmr::MmrProof,
+    utils::mmr::{Mmr, MmrProof},
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -145,7 +146,7 @@ pub struct Engine<T: Config> {
     gossip_topic: u8,
     heartbeat_interval: Option<tokio::time::Duration>,
 
-    db: Option<Arc<DB>>,
+    db: Option<DB>,
     node_type: NodeType,
 }
 
@@ -211,8 +212,12 @@ impl<T: Config> Engine<T> {
             }
             Self::bootstrap(&transport, dir, bootstrap_config).await?
         } else {
-            let genesis = Self::create_genesis_atom();
-            let graph = Graph::new(genesis, None);
+            let (mmr, proofs) = Self::create_genesis_mmr();
+            let genesis = Self::create_genesis_atom(mmr.peak_hashes());
+
+            let mut graph = Graph::new(genesis, None);
+            graph.fill(proofs);
+
             let db = Self::open_db(dir)?;
 
             (graph, Some(db), NodeType::Archive)
@@ -227,7 +232,7 @@ impl<T: Config> Engine<T> {
             pending_atoms: HashMap::new(),
             atom_result_tx,
             heartbeat_interval: config.heartbeat_interval,
-            db: db.map(Arc::new),
+            db,
             node_type,
         };
 
@@ -240,7 +245,37 @@ impl<T: Config> Engine<T> {
         Ok(Handle(request_tx))
     }
 
-    fn create_genesis_atom() -> Atom<T> {
+    fn create_genesis_mmr() -> (Mmr, Proofs<T>) {
+        use bincode::{config, serde::encode_into_std_write};
+
+        let mut mmr = Mmr::default();
+
+        let Some(cmd) = T::genesis_command() else {
+            return (mmr, HashMap::new());
+        };
+
+        let mut tokens = HashMap::new();
+        for (i, token) in cmd.outputs.into_iter().enumerate() {
+            let mut buf = Vec::new();
+            encode_into_std_write(Multihash::default(), &mut buf, config::standard()).unwrap();
+            encode_into_std_write(i as u32, &mut buf, config::standard()).unwrap();
+            let id = T::HASHER.digest(&buf);
+            let idx = mmr.append(id);
+            tokens.insert(id, (token, idx));
+        }
+
+        mmr.commit();
+
+        let mut proofs = HashMap::new();
+        for (id, (token, idx)) in tokens {
+            let proof = mmr.prove(idx).expect("Proof should exist");
+            proofs.insert(id, (token, proof));
+        }
+
+        (mmr, proofs)
+    }
+
+    fn create_genesis_atom(peaks: Vec<(u64, Multihash)>) -> Atom<T> {
         use crate::ty::atom::AtomBuilder;
 
         let genesis_hash = Multihash::default();
@@ -248,7 +283,7 @@ impl<T: Config> Engine<T> {
             genesis_hash,
             T::GENESIS_HEIGHT,
             T::GENESIS_VAF_DIFFICULTY,
-            vec![],
+            peaks,
         )
         .with_command(T::genesis_command())
         .with_random(0)
@@ -299,8 +334,11 @@ impl<T: Config> Engine<T> {
             serde::{decode_from_slice, encode_to_vec},
         };
 
-        let genesis = Self::create_genesis_atom();
+        let (mmr, proofs) = Self::create_genesis_mmr();
+        let genesis = Self::create_genesis_atom(mmr.peak_hashes());
+
         let mut graph = Graph::new(genesis, None);
+        graph.fill(proofs);
 
         let db = Self::open_db(dir)?;
         let iter = db.iterator(rocksdb::IteratorMode::Start);
@@ -522,7 +560,11 @@ impl<T: Config> Engine<T> {
             }
 
             if let Some(atom) = atom_result {
-                self.on_atom_ready(atom).await;
+                if self.on_atom_ready(atom).await {
+                    if let Some(interval) = hb_interval.as_mut() {
+                        interval.reset();
+                    }
+                }
             }
 
             if let Some(req) = engine_request {
@@ -532,13 +574,14 @@ impl<T: Config> Engine<T> {
             }
 
             if hb_tick {
-                let status = self.graph.status();
-                log::debug!(
-                    "Heartbeat: finalized={}, height={}, difficulty={}",
-                    status.finalized_height,
-                    status.main_height,
-                    status.difficulty
-                );
+                let handle = self.graph.create_atom(None);
+                let tx = self.atom_result_tx.clone();
+                tokio::spawn(async move {
+                    let atom = handle.await.expect("Atom creation failed");
+                    if let Err(e) = tx.send(atom).await {
+                        log::error!("Failed to send atom result: {e}");
+                    }
+                });
             }
         }
 
@@ -555,7 +598,7 @@ impl<T: Config> Engine<T> {
                 response,
             } => {
                 let result = self
-                    .propose_internal(code, on_chain_inputs, off_chain_inputs, outputs)
+                    .propose(code, on_chain_inputs, off_chain_inputs, outputs)
                     .await;
                 let _ = response.send(result);
                 false
@@ -578,7 +621,7 @@ impl<T: Config> Engine<T> {
         }
     }
 
-    async fn propose_internal(
+    async fn propose(
         &mut self,
         code: u8,
         on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
