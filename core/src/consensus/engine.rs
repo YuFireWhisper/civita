@@ -720,7 +720,6 @@ impl<T: Config> Engine<T> {
         let result = self.graph.upsert(atom);
 
         if result.existing {
-            log::info!("Atom {hash:?} is already existing");
             if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer) in infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p))) {
                     self.gossipsub
@@ -732,8 +731,6 @@ impl<T: Config> Engine<T> {
         }
 
         for hash in result.accepted {
-            log::info!("Atom {hash:?} accepted");
-
             if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer_id) in
                     infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p)))
@@ -745,9 +742,7 @@ impl<T: Config> Engine<T> {
             }
         }
 
-        for (hash, reason) in result.rejected {
-            log::info!("Atom {hash:?} rejected: {reason:?}");
-
+        for (hash, _) in result.rejected {
             if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer_id) in infos {
                     if let Some(msg_id) = msg_id {
