@@ -940,11 +940,13 @@ impl Display for Status {
             .map(|b| format!("{:02x}", b))
             .collect::<String>();
 
-        write!(
-            f,
-            "Status {{ main_head: {}, main_height: {}, finalized: {}, finalized_height: {}, difficulty: {} }}",
-            main_head, self.main_height, finalized, self.finalized_height, self.difficulty
-        )
+        writeln!(f, "Status {{")?;
+        writeln!(f, "   main_head: {},", main_head)?;
+        writeln!(f, "   main_height: {},", self.main_height)?;
+        writeln!(f, "   finalized: {},", finalized)?;
+        writeln!(f, "   finalized_height: {},", self.finalized_height)?;
+        writeln!(f, "   difficulty: {}", self.difficulty)?;
+        write!(f, "}}")
     }
 }
 
