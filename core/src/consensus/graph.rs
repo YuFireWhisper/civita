@@ -78,7 +78,7 @@ pub struct Status {
 #[derive(Debug)]
 #[derive(Default)]
 pub struct UpdateResult {
-    pub accepted: Vec<Multihash>,
+    pub accepted: Vec<(Multihash, bool)>,
     pub rejected: HashMap<Multihash, RejectReason>,
     pub missing: HashSet<Multihash>,
     pub finalized: Vec<Multihash>,
@@ -188,12 +188,13 @@ impl<T: Config> Graph<T> {
             }
         }
 
-        if let Err(r) = self.final_validation(hash, &mut result) {
-            self.remove_subgraph(hash, r, &mut result);
-            return result;
+        match self.final_validation(hash, &mut result) {
+            Ok(is_block) => result.accepted.push((hash, is_block)),
+            Err(r) => {
+                self.remove_subgraph(hash, r, &mut result);
+                return result;
+            }
         }
-
-        result.accepted.push(hash);
 
         let mut stk = VecDeque::new();
         stk.push_back(hash);
@@ -202,13 +203,15 @@ impl<T: Config> Graph<T> {
             for child in self.entries[&u].children.clone() {
                 let entry = self.entries.get_mut(&child).unwrap();
                 entry.pending_parents -= 1;
-
                 if entry.pending_parents == 0 {
-                    if let Err(r) = self.final_validation(child, &mut result) {
-                        self.remove_subgraph(child, r, &mut result);
-                    } else {
-                        result.accepted.push(child);
-                        stk.push_back(child);
+                    match self.final_validation(child, &mut result) {
+                        Ok(is_block) => {
+                            result.accepted.push((child, is_block));
+                            stk.push_back(child);
+                        }
+                        Err(r) => {
+                            self.remove_subgraph(child, r, &mut result);
+                        }
                     }
                 }
             }
@@ -341,7 +344,7 @@ impl<T: Config> Graph<T> {
         &mut self,
         hash: Multihash,
         result: &mut UpdateResult,
-    ) -> Result<(), RejectReason> {
+    ) -> Result<bool, RejectReason> {
         let atom = &self.entries[&hash].atom;
 
         if atom.height != self.entries[&atom.parent].atom.height + 1 {
@@ -360,14 +363,13 @@ impl<T: Config> Graph<T> {
             return Err(RejectReason::IncompleteAtomHistory);
         }
 
-        if !self.validate_execution(&hash)? {
-            return Ok(());
+        if self.validate_execution(&hash)? {
+            self.update_weight(hash);
+            self.recompute_main_chain_and_finalized(result);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-
-        self.update_weight(hash);
-        self.recompute_main_chain_and_finalized(result);
-
-        Ok(())
     }
 
     fn validate_atom_history(&self, hash: Multihash) -> bool {
@@ -1094,7 +1096,7 @@ mod tests {
         let hash = atom.hash();
 
         let res = graph.upsert(atom);
-        assert_eq!(res.accepted, vec![hash]);
+        assert_eq!(res.accepted, vec![(hash, false)]);
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert!(!res.existing);
@@ -1131,7 +1133,7 @@ mod tests {
         let hash = block_atom.hash();
         let res = graph.upsert(block_atom);
 
-        assert_eq!(res.accepted, vec![hash]);
+        assert_eq!(res.accepted, vec![(hash, true)]);
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert!(!res.existing);
@@ -1184,7 +1186,7 @@ mod tests {
         let _ = graph.upsert(block_atom1);
         let res = graph.upsert(block_atom2);
 
-        assert_eq!(res.accepted, vec![hash2]);
+        assert_eq!(res.accepted, vec![(hash2, true)]);
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert!(!res.existing);
@@ -1263,7 +1265,7 @@ mod tests {
         let hash = atom3.hash();
         let res = graph.upsert(atom3);
 
-        assert_eq!(res.accepted, vec![hash]);
+        assert_eq!(res.accepted, vec![(hash, true)]);
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert!(!res.existing);
@@ -1301,7 +1303,7 @@ mod tests {
         let hash = atom3.hash();
         let res = graph.upsert(atom3);
 
-        assert_eq!(res.accepted, vec![hash]);
+        assert_eq!(res.accepted, vec![(hash, true)]);
         assert!(res.rejected.is_empty());
         assert!(res.missing.is_empty());
         assert!(!res.existing);

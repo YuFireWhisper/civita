@@ -704,7 +704,7 @@ impl<T: Config> Engine<T> {
             return;
         }
 
-        for hash in result.accepted {
+        for (hash, _) in result.accepted {
             log::info!("Atom {hash:?} accepted");
 
             if let Some(infos) = self.pending_atoms.remove(&hash) {
