@@ -156,4 +156,8 @@ impl<T: traits::Config> Resident<T> {
     pub async fn stop(self) {
         self.handle.stop().await
     }
+
+    pub fn handle(&self) -> engine::Handle<T> {
+        self.handle.clone()
+    }
 }

@@ -990,3 +990,9 @@ impl From<rocksdb::Error> for Error {
         Error::Storage(StorageError::Rocksdb(value))
     }
 }
+
+impl<T: Config> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
