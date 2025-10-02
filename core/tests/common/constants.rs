@@ -51,3 +51,7 @@ pub fn peer_id_1() -> libp2p::PeerId {
 pub fn peer_id_2() -> libp2p::PeerId {
     PeerId::from_bytes(&PEER_ID_2).unwrap()
 }
+
+pub fn peer_id_5() -> libp2p::PeerId {
+    PeerId::from_bytes(&PEER_ID_5).unwrap()
+}
