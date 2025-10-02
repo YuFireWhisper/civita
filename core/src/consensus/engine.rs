@@ -339,25 +339,52 @@ impl<T: Config> Engine<T> {
         graph.fill(proofs);
 
         let db = Self::open_db(dir)?;
-        let iter = db.iterator(rocksdb::IteratorMode::Start);
+        let mut height = 1u32;
 
-        let mut exp = T::GENESIS_HEIGHT;
-        for item in iter {
-            let (_, value) = item?;
-
-            let atom: Atom<T> = decode_from_slice(&value, config::standard())
+        while let Some(value) = db.get(height.to_be_bytes())? {
+            let block: Atom<T> = decode_from_slice(&value, config::standard())
                 .map_err(|e| Error::Storage(StorageError::Decode(e)))?
                 .0;
 
-            if atom.height != exp {
+            if block.height != height {
                 return Err(Error::Storage(StorageError::InvalidAtomHeight(
-                    exp,
-                    atom.height,
+                    height,
+                    block.height,
                 )));
             }
 
-            let hash = atom.hash();
-            let result = graph.upsert(atom);
+            for hash in &block.atoms {
+                let atoms = db
+                    .get(hash.to_bytes())?
+                    .ok_or(Error::Storage(StorageError::MissingDependencies))?;
+
+                let atom: Atom<T> = decode_from_slice(&atoms, config::standard())
+                    .map_err(|e| Error::Storage(StorageError::Decode(e)))?
+                    .0;
+
+                if atom.height != height {
+                    return Err(Error::Storage(StorageError::InvalidAtomHeight(
+                        height,
+                        atom.height,
+                    )));
+                }
+
+                let result = graph.upsert(atom);
+
+                if !result.rejected.is_empty() {
+                    return Err(Error::Storage(StorageError::Rejected(
+                        result.rejected.into_iter().next().unwrap().1,
+                    )));
+                }
+
+                if !result.missing.is_empty() {
+                    return Err(Error::Storage(StorageError::MissingDependencies));
+                }
+            }
+
+            let hash = block.hash();
+
+            let result = graph.upsert(block);
 
             if !result.rejected.is_empty() {
                 return Err(Error::Storage(StorageError::Rejected(
@@ -373,7 +400,7 @@ impl<T: Config> Engine<T> {
                 return Err(Error::Storage(StorageError::NotFinalized));
             }
 
-            exp += 1;
+            height += 1;
         }
 
         let req_resp = transport.request_response();
@@ -668,6 +695,8 @@ impl<T: Config> Engine<T> {
     }
 
     async fn on_recv_atom(&mut self, atom: Atom<T>, msg_id: Option<MessageId>, peer: PeerId) {
+        use bincode::{config, serde::encode_to_vec};
+
         let hash = atom.hash();
 
         for hash in atom.atoms.iter().chain(&[atom.hash(), atom.parent]) {
@@ -678,19 +707,6 @@ impl<T: Config> Engine<T> {
         }
 
         let result = self.graph.upsert(atom);
-
-        if let Some(ref db) = self.db {
-            for finalized_hash in &result.finalized {
-                if let Some(atom) = self.graph.get(finalized_hash) {
-                    let height_key = atom.height.to_be_bytes();
-                    let atom_data =
-                        bincode::serde::encode_to_vec(atom, bincode::config::standard()).unwrap();
-                    if let Err(e) = db.put(height_key, atom_data) {
-                        log::error!("Failed to store finalized atom: {e}");
-                    }
-                }
-            }
-        }
 
         if result.existing {
             log::info!("Atom {hash:?} is already existing");
@@ -735,8 +751,38 @@ impl<T: Config> Engine<T> {
 
         if !result.missing.is_empty() {
             let req = Request::Atoms(result.missing);
-            let msg = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+            let msg = encode_to_vec(&req, config::standard()).unwrap();
             self.request_response.send_request(peer, msg).await;
+        }
+
+        self.on_finalized(&result.finalized);
+    }
+
+    fn on_finalized(&self, hashes: &[Multihash]) {
+        use bincode::{config, serde::encode_to_vec};
+
+        let Some(ref db) = self.db else {
+            return;
+        };
+
+        for hash in hashes {
+            let atom = self.graph.get(hash).expect("Finalized atom should exist");
+            let key = atom.height.to_be_bytes();
+            let value = encode_to_vec(atom, config::standard()).unwrap();
+            if let Err(e) = db.put(key, value) {
+                log::error!("Failed to store finalized atom: {e}");
+                return;
+            }
+
+            for hash in &atom.atoms {
+                let atom = self.graph.get(hash).expect("Finalized atom should exist");
+                let key = atom.hash().to_bytes();
+                let value = encode_to_vec(atom, config::standard()).unwrap();
+                if let Err(e) = db.put(key, value) {
+                    log::error!("Failed to store finalized atom: {e}");
+                    return;
+                }
+            }
         }
     }
 
@@ -815,7 +861,14 @@ impl<T: Config> Engine<T> {
     }
 
     async fn handle_blocks_request(&self, height: u32, channel: ResponseChannel<Vec<u8>>) {
-        use bincode::{config, serde::encode_to_vec};
+        use bincode::{
+            config,
+            serde::{decode_from_slice, encode_to_vec},
+        };
+
+        let Some(ref db) = self.db else {
+            return;
+        };
 
         let finalized_height = self.graph.finalized_height();
 
@@ -823,35 +876,40 @@ impl<T: Config> Engine<T> {
             let atoms = self.graph.current_atoms();
             let response = Response::<T>::Blocks(atoms);
             let data = encode_to_vec(&response, config::standard()).unwrap();
-
             if let Err(e) = self.request_response.send_response(channel, data).await {
                 log::error!("Failed to send blocks response: {e}");
             }
             return;
         }
 
-        let Some(ref db) = self.db else {
-            let response = Response::<T>::Blocks(vec![]);
-            let data = encode_to_vec(&response, config::standard()).unwrap();
-            if let Err(e) = self.request_response.send_response(channel, data).await {
-                log::error!("Failed to send blocks response: {e}");
-            }
-            return;
-        };
-
         let mut atoms = Vec::new();
         let max_height = (height + T::MAX_BLOCKS_PER_SYNC).min(finalized_height);
 
         for h in height..=max_height {
-            let key = h.to_be_bytes();
-            if let Ok(Some(data)) = db.get(key) {
-                let Ok((atom, _)) =
-                    bincode::serde::decode_from_slice::<Atom<T>, _>(&data, config::standard())
-                else {
-                    continue;
+            let Ok(Some(data)) = db.get(h.to_be_bytes()) else {
+                log::warn!("Missing block at height {h}");
+                return;
+            };
+
+            let Ok((atom, _)) = decode_from_slice::<Atom<T>, _>(&data, config::standard()) else {
+                return;
+            };
+
+            for hash in &atom.atoms {
+                let Ok(Some(data)) = db.get(hash.to_bytes()) else {
+                    log::warn!("Missing atom {hash:?} at height {h}");
+                    return;
                 };
+
+                let Ok((atom, _)) = decode_from_slice::<Atom<T>, _>(&data, config::standard())
+                else {
+                    return;
+                };
+
                 atoms.push(atom);
             }
+
+            atoms.push(atom);
         }
 
         let response = Response::<T>::Blocks(atoms);
@@ -908,18 +966,6 @@ impl<T: Config> Engine<T> {
 
         let result = self.graph.upsert(atom);
 
-        if let Some(ref db) = self.db {
-            for finalized_hash in &result.finalized {
-                if let Some(atom) = self.graph.get(finalized_hash) {
-                    let key = atom.height.to_be_bytes();
-                    let value = encode_to_vec(atom, bincode::config::standard()).unwrap();
-                    if let Err(e) = db.put(key, value) {
-                        log::error!("Failed to store finalized atom: {e}");
-                    }
-                }
-            }
-        }
-
         if result.existing {
             return false;
         }
@@ -933,6 +979,8 @@ impl<T: Config> Engine<T> {
             log::error!("Failed to publish atom: {e}");
             return false;
         }
+
+        self.on_finalized(&result.finalized);
 
         true
     }
