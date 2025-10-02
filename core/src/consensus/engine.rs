@@ -183,13 +183,12 @@ impl<T: Config> Handle<T> {
         tokio::spawn(async move { rx.await.expect("Engine stopped") })
     }
 
-    pub async fn stop(self) -> bool {
+    pub async fn stop(self) {
         let (tx, rx) = oneshot::channel();
         let req = EngineRequest::Stop(tx);
         if self.0.send(req).await.is_ok() {
             let _ = rx.await;
         }
-        true
     }
 }
 
