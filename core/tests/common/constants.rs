@@ -43,8 +43,11 @@ pub const PEER_ID_5: [u8; 39] = [
 ];
 
 pub const INIT_VALUE: u64 = 10;
-pub const VDF_PARAMS: u16 = 1024;
 
 pub fn peer_id_1() -> libp2p::PeerId {
     PeerId::from_bytes(&PEER_ID_1).unwrap()
+}
+
+pub fn peer_id_2() -> libp2p::PeerId {
+    PeerId::from_bytes(&PEER_ID_2).unwrap()
 }
