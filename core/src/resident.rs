@@ -152,4 +152,8 @@ impl<T: traits::Config> Resident<T> {
     pub async fn status(&self) -> Result<Status> {
         self.handle.status().await.await.map_err(Error::from)
     }
+
+    pub async fn stop(self) {
+        self.handle.stop().await
+    }
 }
