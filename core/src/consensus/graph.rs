@@ -188,7 +188,7 @@ impl<T: Config> Graph<T> {
             }
         }
 
-        if let Err(r) = self.final_validation(hash) {
+        if let Err(r) = self.final_validation(hash, &mut result) {
             self.remove_subgraph(hash, r, &mut result);
             return result;
         }
@@ -204,7 +204,7 @@ impl<T: Config> Graph<T> {
                 entry.pending_parents -= 1;
 
                 if entry.pending_parents == 0 {
-                    if let Err(r) = self.final_validation(child) {
+                    if let Err(r) = self.final_validation(child, &mut result) {
                         self.remove_subgraph(child, r, &mut result);
                     } else {
                         result.accepted.push(child);
@@ -337,7 +337,11 @@ impl<T: Config> Graph<T> {
         Ok(missing)
     }
 
-    fn final_validation(&mut self, hash: Multihash) -> Result<(), RejectReason> {
+    fn final_validation(
+        &mut self,
+        hash: Multihash,
+        result: &mut UpdateResult,
+    ) -> Result<(), RejectReason> {
         let atom = &self.entries[&hash].atom;
 
         if atom.height != self.entries[&atom.parent].atom.height + 1 {
@@ -361,7 +365,7 @@ impl<T: Config> Graph<T> {
         }
 
         self.update_weight(hash);
-        self.recompute_main_chain_and_finalized();
+        self.recompute_main_chain_and_finalized(result);
 
         Ok(())
     }
@@ -466,7 +470,7 @@ impl<T: Config> Graph<T> {
         }
     }
 
-    fn recompute_main_chain_and_finalized(&mut self) {
+    fn recompute_main_chain_and_finalized(&mut self, result: &mut UpdateResult) {
         let start = self.finalized;
         let new_head = self.ghost_select(start);
 
@@ -475,7 +479,7 @@ impl<T: Config> Graph<T> {
         }
 
         self.main_head = new_head;
-        self.maybe_advance_finalized();
+        self.maybe_advance_finalized(result);
     }
 
     fn ghost_select(&self, mut cur: Multihash) -> Multihash {
@@ -497,7 +501,7 @@ impl<T: Config> Graph<T> {
         cur
     }
 
-    fn maybe_advance_finalized(&mut self) {
+    fn maybe_advance_finalized(&mut self, result: &mut UpdateResult) {
         let head_height = self.entries[&self.main_head].atom.height;
         let target_finalized_height = head_height.saturating_sub(T::CONFIRMATION_DEPTH);
 
@@ -534,6 +538,8 @@ impl<T: Config> Graph<T> {
         self.difficulty = self.calculate_difficulty();
         self.finalized = new_finalized;
         self.finalized_height = target_finalized_height;
+
+        result.finalized.push(new_finalized);
     }
 
     fn get_block_at_height(&self, mut cur: Multihash, height: Height) -> Multihash {
