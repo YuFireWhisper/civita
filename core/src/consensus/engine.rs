@@ -20,7 +20,7 @@ use tokio::{
 };
 
 use crate::{
-    consensus::graph::{self, Graph, RejectReason, Status},
+    consensus::graph::{self, Graph, Proofs, RejectReason, Status},
     crypto::Multihash,
     network::{
         gossipsub,
@@ -29,11 +29,10 @@ use crate::{
     },
     traits::Config,
     ty::{atom::Atom, token::Token},
-    utils::mmr::{Mmr, MmrProof},
+    utils::mmr::Mmr,
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
-type Proofs<T> = HashMap<Multihash, (Token<T>, MmrProof)>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]

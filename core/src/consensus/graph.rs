@@ -14,6 +14,8 @@ use crate::{
     utils::mmr::{Mmr, MmrProof},
 };
 
+pub type Proofs<T> = HashMap<Multihash, (Token<T>, MmrProof)>;
+
 #[derive(Clone, Copy)]
 #[derive(Debug)]
 pub enum RejectReason {
