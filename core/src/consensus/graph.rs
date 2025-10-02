@@ -35,6 +35,7 @@ pub enum RejectReason {
     MissingProof,
     DoubleSpend,
     EmptyInput,
+    IncompleteAtomHistory,
 }
 
 #[derive(Debug)]
@@ -351,6 +352,10 @@ impl<T: Config> Graph<T> {
             return Err(RejectReason::InvalidNonce);
         }
 
+        if !self.validate_atom_history(hash) {
+            return Err(RejectReason::IncompleteAtomHistory);
+        }
+
         if !self.validate_execution(&hash)? {
             return Ok(());
         }
@@ -359,6 +364,19 @@ impl<T: Config> Graph<T> {
         self.recompute_main_chain_and_finalized();
 
         Ok(())
+    }
+
+    fn validate_atom_history(&self, hash: Multihash) -> bool {
+        let atom = &self.entries[&hash].atom;
+        let mut seen = HashSet::new();
+        atom.atoms.iter().all(|hash| {
+            seen.insert(*hash);
+            self.entries[hash]
+                .atom
+                .atoms
+                .iter()
+                .all(|dep| seen.contains(dep))
+        })
     }
 
     fn validate_execution(&mut self, target_hash: &Multihash) -> Result<bool, RejectReason> {
@@ -763,7 +781,11 @@ impl<T: Config> Graph<T> {
             entry
                 .children
                 .iter()
-                .filter(|c| self.contains(c) && !self.entries[*c].is_block)
+                .filter(|c| {
+                    self.contains(c)
+                        && !self.entries[*c].is_block
+                        && self.entries[*c].pending_parents == 0
+                })
                 .map(|c| (*c, self.entries[c].atom.atoms.len())),
         );
 
