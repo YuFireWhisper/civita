@@ -903,12 +903,15 @@ impl<T: Config> Graph<T> {
             return Err(Error::PeerNotTracked);
         }
 
-        let indices = self.peer_tokens.get(peer_id).ok_or(Error::UnknownTokenId)?;
+        let indices = self.peer_tokens.get(peer_id);
         let mut inputs = Vec::with_capacity(on_chain_inputs.len() + off_chain_inputs.len());
 
-        for (id, sig) in on_chain_inputs {
-            let (idx, token) = indices.get(&id).ok_or(Error::UnknownTokenId)?.clone();
-            inputs.push(Input::OnChain(token, id, self.mmr.prove(idx).unwrap(), sig));
+        if !on_chain_inputs.is_empty() {
+            let indices = indices.ok_or(Error::UnknownTokenId)?;
+            for (id, sig) in on_chain_inputs {
+                let (idx, token) = indices.get(&id).ok_or(Error::UnknownTokenId)?.clone();
+                inputs.push(Input::OnChain(token, id, self.mmr.prove(idx).unwrap(), sig));
+            }
         }
 
         for input in off_chain_inputs {
