@@ -97,6 +97,7 @@ enum Response<T: Config> {
     Atoms(Vec<Atom<T>>),
     Blocks(Vec<Atom<T>>),
     InitialState(Box<(Atom<T>, Proofs<T>)>),
+    AlreadyUpToDate,
 }
 
 #[derive(Clone, Copy)]
@@ -449,6 +450,10 @@ impl<T: Config> Engine<T> {
                 continue;
             };
 
+            if let Response::AlreadyUpToDate = resp {
+                return Vec::new();
+            }
+
             if let Response::Blocks(atoms) = resp {
                 return atoms;
             } else {
@@ -526,6 +531,12 @@ impl<T: Config> Engine<T> {
                 log::warn!("Failed to decode response");
                 continue;
             };
+
+            if let Response::AlreadyUpToDate = resp {
+                let (mmr, proofs) = Self::create_genesis_mmr();
+                let atom = Self::create_genesis_atom(mmr.peak_hashes());
+                return (atom, proofs);
+            }
 
             if let Response::InitialState(boxed) = resp {
                 return *boxed;
@@ -873,8 +884,8 @@ impl<T: Config> Engine<T> {
         let finalized_height = self.graph.finalized_height();
 
         if height >= finalized_height {
-            let response = Response::<T>::Blocks(Vec::new());
-            let data = encode_to_vec(&response, config::standard()).unwrap();
+            let resp = Response::<T>::AlreadyUpToDate;
+            let data = encode_to_vec(&resp, config::standard()).unwrap();
             if let Err(e) = self.request_response.send_response(channel, data).await {
                 log::error!("Failed to send blocks response: {e}");
             }
@@ -924,7 +935,10 @@ impl<T: Config> Engine<T> {
         peer_id: PeerId,
         channel: ResponseChannel<Vec<u8>>,
     ) {
-        use bincode::{config, serde::encode_to_vec};
+        use bincode::{
+            config,
+            serde::{decode_from_slice, encode_to_vec},
+        };
 
         if !matches!(self.node_type, NodeType::Archive) {
             return;
@@ -933,24 +947,34 @@ impl<T: Config> Engine<T> {
         let finalized_height = self.graph.finalized_height();
         let start_height = finalized_height.saturating_sub(T::MAINTENANCE_WINDOW);
 
+        if start_height == 0 {
+            let resp = Response::<T>::AlreadyUpToDate;
+            let data = encode_to_vec(&resp, config::standard()).unwrap();
+            if let Err(e) = self.request_response.send_response(channel, data).await {
+                log::error!("Failed to send initial state response: {e}");
+            }
+            return;
+        }
+
         let Some(ref db) = self.db else {
             return;
         };
 
-        let initial_atom = if let Ok(Some(data)) = db.get(start_height.to_be_bytes()) {
-            let Ok((atom, _)) =
-                bincode::serde::decode_from_slice::<Atom<T>, _>(&data, config::standard())
-            else {
-                return;
-            };
-            atom
-        } else {
+        let Some(atom) = db
+            .get(start_height.to_be_bytes())
+            .ok()
+            .flatten()
+            .and_then(|res| {
+                decode_from_slice::<Atom<T>, _>(&res, config::standard())
+                    .map(|(atom, _)| atom)
+                    .ok()
+            })
+        else {
             return;
         };
 
         let proofs = self.graph.tokens_and_proof(&peer_id).unwrap_or_default();
-
-        let response = Response::InitialState(Box::new((initial_atom, proofs)));
+        let response = Response::InitialState(Box::new((atom, proofs)));
         let data = encode_to_vec(&response, config::standard()).unwrap();
 
         if let Err(e) = self.request_response.send_response(channel, data).await {
