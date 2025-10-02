@@ -819,7 +819,7 @@ impl<T: Config> Graph<T> {
         self.finalized_height
     }
 
-    pub fn fill(&mut self, proofs: HashMap<Multihash, (Token<T>, MmrProof)>) -> bool {
+    pub fn fill(&mut self, proofs: Proofs<T>) -> bool {
         for (id, (token, proof)) in proofs {
             if !self.mmr.resolve_and_fill(id, &proof) {
                 return false;
@@ -888,5 +888,394 @@ impl<T: Config> Graph<T> {
         }
 
         Ok(Command::new(code, inputs, outputs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+
+    use crate::crypto::Hasher;
+
+    use super::*;
+
+    const PEER1: [u8; 39] = [
+        0, 37, 8, 2, 18, 33, 3, 37, 231, 146, 221, 228, 232, 82, 157, 2, 152, 38, 140, 247, 207, 5,
+        201, 79, 98, 185, 119, 244, 169, 196, 94, 184, 85, 238, 234, 254, 136, 6, 81,
+    ];
+    const PEER2: [u8; 39] = [
+        0, 37, 8, 2, 18, 33, 3, 215, 10, 51, 166, 159, 134, 74, 248, 169, 95, 230, 245, 12, 116,
+        122, 68, 95, 157, 233, 179, 114, 84, 200, 57, 227, 138, 230, 88, 254, 185, 162, 42,
+    ];
+
+    struct TestConfig;
+
+    #[derive(Clone, Copy)]
+    #[derive(Serialize, Deserialize)]
+    struct ScriptPk(PeerId);
+
+    impl Config for TestConfig {
+        type Value = u32;
+        type ScriptPk = ScriptPk;
+        type ScriptSig = PeerId;
+        type OffChainInput = u32;
+
+        const HASHER: Hasher = Hasher::Sha2_256;
+        const VDF_PARAM: u16 = 1024;
+        const BLOCK_THRESHOLD: u32 = 2;
+        const CONFIRMATION_DEPTH: u32 = 1;
+        const MAINTENANCE_WINDOW: u32 = 3;
+        const TARGET_BLOCK_TIME_SEC: u64 = 10;
+        const MAX_VDF_DIFFICULTY_ADJUSTMENT: f64 = 1.0;
+        const GENESIS_HEIGHT: u32 = 0;
+        const GENESIS_VAF_DIFFICULTY: u64 = 1;
+        const MAX_BLOCKS_PER_SYNC: u32 = 10;
+
+        fn genesis_command() -> Option<Command<Self>> {
+            let tokens = vec![Token::new(
+                10,
+                ScriptPk(PeerId::from_bytes(&PEER1).unwrap()),
+            )];
+            Some(Command::new(0, vec![], tokens))
+        }
+
+        fn validate_command(cmd: &Command<Self>) -> bool {
+            cmd.code == 0
+        }
+    }
+
+    impl ScriptPubKey for ScriptPk {
+        type ScriptSig = PeerId;
+
+        fn verify(&self, script_sig: &Self::ScriptSig) -> bool {
+            &self.0 == script_sig
+        }
+
+        fn is_related(&self, peer_id: PeerId) -> bool {
+            self.0 == peer_id
+        }
+
+        fn related_peers(&self) -> Vec<PeerId> {
+            vec![self.0]
+        }
+    }
+
+    fn genesis_atom() -> (Atom<TestConfig>, Proofs<TestConfig>) {
+        use bincode::{
+            config,
+            serde::{encode_into_std_write, encode_to_vec},
+        };
+
+        let mut mmr = Mmr::default();
+        let mut tokens = Vec::new();
+
+        if let Some(cmd) = TestConfig::genesis_command() {
+            let first_input = encode_to_vec(Multihash::default(), config::standard()).unwrap();
+            cmd.outputs.into_iter().enumerate().for_each(|(i, t)| {
+                let mut buf = first_input.clone();
+                encode_into_std_write(i as u32, &mut buf, config::standard()).unwrap();
+                let id = TestConfig::HASHER.digest(&buf);
+                let idx = mmr.append(id);
+                tokens.push((id, (t, idx)));
+            });
+            mmr.commit();
+        }
+
+        let mut proofs = HashMap::new();
+        tokens.into_iter().for_each(|(id, (t, idx))| {
+            proofs.insert(id, (t, mmr.prove(idx).unwrap()));
+        });
+
+        let atom = AtomBuilder::new(
+            Multihash::default(),
+            TestConfig::GENESIS_HEIGHT,
+            TestConfig::GENESIS_VAF_DIFFICULTY,
+            mmr.peak_hashes(),
+        )
+        .with_command(TestConfig::genesis_command())
+        .with_random(0)
+        .with_timestamp(0)
+        .with_nonce(vec![])
+        .build_sync();
+
+        (atom, proofs)
+    }
+
+    fn generate_command() -> Command<TestConfig> {
+        let (_, proofs) = genesis_atom();
+        let (token_id, (token, proof)) = proofs.into_iter().next().unwrap();
+        let sig = PeerId::from_bytes(&PEER1).unwrap();
+        let new_pk = ScriptPk(PeerId::from_bytes(&PEER2).unwrap());
+        let inputs = vec![Input::OnChain(token, token_id, proof, sig)];
+        let outputs = vec![Token::new(5, new_pk)];
+        Command::new(0, inputs, outputs)
+    }
+
+    fn peaks_after_execute_command() -> Vec<(u64, Multihash)> {
+        use bincode::{
+            config,
+            serde::{encode_into_std_write, encode_to_vec},
+        };
+
+        let peaks = genesis_atom().0.peaks;
+        let mut mmr = Mmr::with_peaks(peaks);
+
+        let cmd = generate_command();
+        let first_input = encode_to_vec(cmd.inputs[0].id(), config::standard()).unwrap();
+        cmd.outputs.iter().enumerate().for_each(|(i, _)| {
+            let mut buf = first_input.clone();
+            encode_into_std_write(i as u32, &mut buf, config::standard()).unwrap();
+            let id = TestConfig::HASHER.digest(&buf);
+            mmr.append(id);
+        });
+
+        mmr.commit();
+        mmr.peak_hashes()
+    }
+
+    #[test]
+    fn initialize() {
+        let (atom, proofs) = genesis_atom();
+        let gensis_hash = atom.hash();
+        let mut graph = Graph::new(atom, None);
+
+        assert!(graph.fill(proofs));
+        assert_eq!(graph.entries.len(), 1);
+        assert!(graph.entries.contains_key(&gensis_hash));
+        assert_eq!(graph.main_head, gensis_hash);
+        assert_eq!(graph.finalized, gensis_hash);
+        assert_eq!(graph.entries[&graph.main_head].atom.height, 0);
+        assert_eq!(graph.finalized_height, 0);
+        assert_eq!(graph.difficulty, TestConfig::GENESIS_VAF_DIFFICULTY);
+    }
+
+    #[test]
+    fn upsert_normal_atom() {
+        let atom = genesis_atom().0;
+        let genesis_hash = atom.hash();
+        let peaks = atom.peaks.clone();
+        let mut graph = Graph::new(atom, None);
+
+        let atom = AtomBuilder::new(
+            graph.main_head,
+            TestConfig::GENESIS_HEIGHT + 1,
+            graph.difficulty,
+            graph.mmr.peak_hashes(),
+        )
+        .build_sync();
+        let hash = atom.hash();
+
+        let res = graph.upsert(atom);
+        assert_eq!(res.accepted, vec![hash]);
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert!(!res.existing);
+        assert_eq!(graph.entries.len(), 2);
+        // Atom do not reach block threshold, so main head and finalized remain the same
+        assert_eq!(graph.main_head, genesis_hash);
+        assert_eq!(graph.finalized, genesis_hash);
+        assert_eq!(graph.mmr.peak_hashes(), peaks);
+        assert_eq!(graph.difficulty, TestConfig::GENESIS_VAF_DIFFICULTY);
+    }
+
+    #[test]
+    fn upsert_block_atom() {
+        let atom = genesis_atom().0;
+        let genesis_hash = atom.hash();
+        let peaks = atom.peaks.clone();
+        let mut graph = Graph::new(atom, None);
+
+        let block_atom = {
+            let height = TestConfig::GENESIS_HEIGHT + 1;
+            let cmd = generate_command();
+            let normal = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
+                .with_command(Some(cmd))
+                .build_sync();
+            let hash = normal.hash();
+
+            let _ = graph.upsert(normal);
+
+            AtomBuilder::new(genesis_hash, height, graph.difficulty, peaks.clone())
+                .with_atoms(vec![hash])
+                .build_sync()
+        };
+
+        let hash = block_atom.hash();
+        let res = graph.upsert(block_atom);
+
+        assert_eq!(res.accepted, vec![hash]);
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert!(!res.existing);
+        assert_eq!(graph.entries.len(), 3);
+        // Atom2 reaches block threshold(2), so main head advances to atom2
+        assert_eq!(graph.main_head, hash);
+        // Atom2 is not finalized yet as confirmation depth is 2, so finalized remains the same
+        assert_eq!(graph.finalized, genesis_hash);
+        // Mmr will be updated after finalized advances
+        assert_eq!(graph.mmr.peak_hashes(), peaks);
+        assert_eq!(graph.difficulty, TestConfig::GENESIS_VAF_DIFFICULTY);
+    }
+
+    #[test]
+    fn finalized_advance() {
+        let atom = genesis_atom().0;
+        let genesis_hash = atom.hash();
+        let peaks = atom.peaks.clone();
+        let mut graph = Graph::new(atom, None);
+
+        let block_atom1 = {
+            let height = TestConfig::GENESIS_HEIGHT + 1;
+            let cmd = generate_command();
+
+            let normal = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
+                .with_command(Some(cmd))
+                .build_sync();
+
+            let hash = normal.hash();
+            let _ = graph.upsert(normal);
+
+            AtomBuilder::new(genesis_hash, height, graph.difficulty, peaks.clone())
+                .with_atoms(vec![hash])
+                .build_sync()
+        };
+        let hash1 = block_atom1.hash();
+
+        let block_atom2 = {
+            let height = TestConfig::GENESIS_HEIGHT + 2;
+            let normal =
+                AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone()).build_sync();
+            let block = AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone())
+                .with_atoms(vec![normal.hash()])
+                .build_sync();
+            let _ = graph.upsert(normal);
+            block
+        };
+        let hash2 = block_atom2.hash();
+
+        let _ = graph.upsert(block_atom1);
+        let res = graph.upsert(block_atom2);
+
+        assert_eq!(res.accepted, vec![hash2]);
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert!(!res.existing);
+        assert_eq!(graph.entries.len(), 5);
+        assert_eq!(graph.main_head, hash2);
+        // Atom1 is confirmed by Atom2, so finalized advances to Atom1
+        assert_eq!(graph.finalized, hash1);
+        // Mmr is updated after finalized advances
+        assert_eq!(graph.mmr.peak_hashes(), peaks_after_execute_command());
+    }
+
+    #[test]
+    fn get_tokens() {
+        let atom = genesis_atom().0;
+        let peaks = atom.peaks.clone();
+        let mut graph = Graph::new(atom, None);
+
+        let hash1 = {
+            let height = TestConfig::GENESIS_HEIGHT + 1;
+            let cmd = generate_command();
+            let normal = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
+                .with_command(Some(cmd))
+                .build_sync();
+            let block = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
+                .with_atoms(vec![normal.hash()])
+                .build_sync();
+            let hash = block.hash();
+            let _ = graph.upsert(normal);
+            let _ = graph.upsert(block);
+            hash
+        };
+
+        {
+            let height = TestConfig::GENESIS_HEIGHT + 2;
+            let normal =
+                AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone()).build_sync();
+            let block = AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone())
+                .with_atoms(vec![normal.hash()])
+                .build_sync();
+            let _ = graph.upsert(normal);
+            let _ = graph.upsert(block);
+        }
+
+        let peer1_tokens = graph.tokens(&PeerId::from_bytes(&PEER1).unwrap()).unwrap();
+        let peer2_tokens = graph.tokens(&PeerId::from_bytes(&PEER2).unwrap()).unwrap();
+
+        assert!(peer1_tokens.is_empty());
+        assert_eq!(peer2_tokens.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_atom_will_contain_other_normal_atoms() {
+        let atom = genesis_atom().0;
+        let peaks = atom.peaks.clone();
+        let mut graph = Graph::new(atom, None);
+
+        let height = TestConfig::GENESIS_HEIGHT + 1;
+        let atom1 =
+            AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone()).build_sync();
+        let atom2 = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks).build_sync();
+
+        let hash1 = atom1.hash();
+        let hash2 = atom2.hash();
+
+        let _ = graph.upsert(atom1);
+        let _ = graph.upsert(atom2);
+
+        let atom3 = graph.create_atom(None).await.unwrap();
+
+        assert_eq!(atom3.parent, graph.main_head);
+        assert_eq!(atom3.height, height);
+        assert_eq!(atom3.atoms.len(), 2);
+        assert!(atom3.atoms.contains(&hash1));
+        assert!(atom3.atoms.contains(&hash2));
+
+        let hash = atom3.hash();
+        let res = graph.upsert(atom3);
+
+        assert_eq!(res.accepted, vec![hash]);
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert!(!res.existing);
+        assert_eq!(graph.entries.len(), 4);
+        assert_eq!(graph.main_head, hash);
+    }
+
+    #[tokio::test]
+    async fn will_not_include_conflicting_atoms() {
+        let atom = genesis_atom().0;
+        let peaks = atom.peaks.clone();
+        let mut graph = Graph::new(atom, None);
+
+        let height = TestConfig::GENESIS_HEIGHT + 1;
+        let cmd = generate_command();
+
+        let atom1 = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
+            .with_command(Some(cmd.clone()))
+            .build_sync();
+        let atom2 = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks)
+            .with_command(Some(cmd))
+            .build_sync();
+
+        let hash1 = atom1.hash();
+
+        let _ = graph.upsert(atom1);
+        let _ = graph.upsert(atom2);
+
+        let atom3 = graph.create_atom(None).await.unwrap();
+
+        // If two atoms contain conflicting commands, only the first one will be included
+        assert_eq!(atom3.atoms.len(), 1);
+        assert!(atom3.atoms.contains(&hash1));
+
+        let hash = atom3.hash();
+        let res = graph.upsert(atom3);
+
+        assert_eq!(res.accepted, vec![hash]);
+        assert!(res.rejected.is_empty());
+        assert!(res.missing.is_empty());
+        assert!(!res.existing);
     }
 }
