@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Display,
+};
 
 use derivative::Derivative;
 use libp2p::PeerId;
@@ -919,6 +922,29 @@ impl<T: Config> Graph<T> {
         }
 
         Ok(Command::new(code, inputs, outputs))
+    }
+}
+
+impl Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let main_head = &self
+            .main_head
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        let finalized = &self
+            .finalized
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+
+        write!(
+            f,
+            "Status {{ main_head: {}, main_height: {}, finalized: {}, finalized_height: {}, difficulty: {} }}",
+            main_head, self.main_height, finalized, self.finalized_height, self.difficulty
+        )
     }
 }
 
