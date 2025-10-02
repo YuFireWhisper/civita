@@ -872,9 +872,8 @@ impl<T: Config> Engine<T> {
 
         let finalized_height = self.graph.finalized_height();
 
-        if height > finalized_height {
-            let atoms = self.graph.current_atoms();
-            let response = Response::<T>::Blocks(atoms);
+        if height >= finalized_height {
+            let response = Response::<T>::Blocks(Vec::new());
             let data = encode_to_vec(&response, config::standard()).unwrap();
             if let Err(e) = self.request_response.send_response(channel, data).await {
                 log::error!("Failed to send blocks response: {e}");
