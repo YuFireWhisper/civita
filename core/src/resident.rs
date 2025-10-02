@@ -1,17 +1,17 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use derivative::Derivative;
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
 
 use crate::{
     consensus::{
-        engine,
+        engine::{self, EngineConfig, NodeType},
         graph::{self, Status},
-        validator::Validator,
         Engine,
     },
     crypto::Multihash,
     network::{transport, Transport},
+    traits,
     ty::token::Token,
 };
 
@@ -32,31 +32,18 @@ pub enum Error {
 
     #[error(transparent)]
     Transport(#[from] transport::Error),
+
+    #[error("{0}")]
+    Propose(String),
+
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
 }
 
 #[derive(Clone)]
 #[derive(Derivative)]
 #[derivative(Default)]
 pub struct Config {
-    // Graph config
-    #[derivative(Default(value = "1000"))]
-    pub block_threshold: u32,
-
-    #[derivative(Default(value = "6"))]
-    pub checkpoint_distance: u32,
-
-    #[derivative(Default(value = "60"))]
-    pub target_block_time: u64,
-
-    #[derivative(Default(value = "50000"))]
-    pub init_vdf_difficulty: u64,
-
-    #[derivative(Default(value = "0.1"))]
-    pub max_difficulty_adjustment: f32,
-
-    #[derivative(Default(value = "1024"))]
-    pub vdf_params: u16,
-
     // Engine config
     #[derivative(Default(value = "Some(tokio::time::Duration::from_mins(5))"))]
     pub heartbeat_interval: Option<tokio::time::Duration>,
@@ -93,14 +80,17 @@ pub struct Config {
 
     #[derivative(Default(value = "tokio::time::Duration::from_secs(5)"))]
     pub bootstrap_timeout: tokio::time::Duration,
+
+    #[derivative(Default(value = "NodeType::Archive"))]
+    pub node_type: NodeType,
 }
 
-pub struct Resident<V> {
-    engine: Arc<Engine<V>>,
+pub struct Resident<T: traits::Config> {
+    handle: engine::Handle<T>,
     listen_addr: Multiaddr,
 }
 
-impl<V: Validator> Resident<V> {
+impl<T: traits::Config> Resident<T> {
     pub async fn new(keypair: Keypair, config: Config) -> Result<Self> {
         let transport_config = transport::Config {
             check_listen_timeout: config.check_listen_timeout,
@@ -116,14 +106,8 @@ impl<V: Validator> Resident<V> {
         let transport = Arc::new(tranpsort);
         let listen_addr = transport.listen_addr();
 
-        let engine_config = engine::Config {
+        let engine_config = EngineConfig {
             gossip_topic: GOSSIP_TOPIC,
-            block_threshold: config.block_threshold,
-            checkpoint_distance: config.checkpoint_distance,
-            target_block_time: config.target_block_time,
-            init_vdf_difficulty: config.init_vdf_difficulty,
-            max_difficulty_adjustment: config.max_difficulty_adjustment,
-            vdf_params: config.vdf_params,
             heartbeat_interval: config.heartbeat_interval,
         };
 
@@ -133,13 +117,12 @@ impl<V: Validator> Resident<V> {
             Some(BootstrapConfig {
                 peers: config.bootstrap_peers.clone(),
                 timeout: config.bootstrap_timeout,
+                node_type: config.node_type,
             })
         };
 
-        let engine = Engine::new(transport, &config.storage_dir, bc, engine_config).await?;
-
         Ok(Self {
-            engine,
+            handle: Engine::spawn(transport, &config.storage_dir, bc, engine_config).await?,
             listen_addr,
         })
     }
@@ -147,24 +130,26 @@ impl<V: Validator> Resident<V> {
     pub async fn propose(
         &self,
         code: u8,
-        inputs: impl IntoIterator<Item = (Multihash, impl Into<Vec<u8>>)>,
-        created: impl IntoIterator<Item = (impl Into<Vec<u8>>, impl Into<Vec<u8>>)>,
+        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
+        off_chain_inputs: Vec<T::OffChainInput>,
+        outpus: Vec<Token<T>>,
     ) -> Result<(), Error> {
-        self.engine
-            .propose(code, inputs, created)
+        self.handle
+            .propose(code, on_chain_inputs, off_chain_inputs, outpus)
             .await
-            .map_err(Error::from)
+            .await?
+            .map_err(|e| Error::Propose(e.to_string()))
     }
 
-    pub async fn tokens(&self) -> Vec<Token> {
-        self.engine.tokens().await
+    pub async fn tokens(&self) -> Result<HashMap<Multihash, Token<T>>> {
+        self.handle.tokens().await.await.map_err(Error::from)
     }
 
     pub fn listen_addr(&self) -> &Multiaddr {
         &self.listen_addr
     }
 
-    pub async fn status(&self) -> Status {
-        self.engine.status().await
+    pub async fn status(&self) -> Result<Status> {
+        self.handle.status().await.await.map_err(Error::from)
     }
 }
