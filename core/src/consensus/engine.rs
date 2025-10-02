@@ -481,7 +481,7 @@ impl<T: Config> Engine<T> {
         }
 
         let (initial_atom, proofs) = Self::recv_initial_state_response(&req_resp).await;
-        let mut graph = Graph::new(initial_atom, Some(peer_id));
+        let mut graph = Graph::new(initial_atom, Some(transport.local_peer_id()));
 
         if !graph.fill(proofs) {
             return Err(Error::InvalidInitialState);
