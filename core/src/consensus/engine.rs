@@ -205,12 +205,19 @@ impl<T: Config> Engine<T> {
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
         let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
+        log::info!("Start bootstrap process");
+
         let (graph, db, node_type) = if let Some(bootstrap_config) = bootstrap {
             if bootstrap_config.peers.is_empty() {
                 return Err(Error::NoBootstrapPeers);
             }
+
+            log::info!("Peer {} start bootstrap", transport.local_peer_id(),);
+
             Self::bootstrap(&transport, dir, bootstrap_config).await?
         } else {
+            log::info!("Peer {} is a genesis node", transport.local_peer_id());
+
             let (mmr, proofs) = Self::create_genesis_mmr();
             let genesis = Self::create_genesis_atom(mmr.peak_hashes());
 
@@ -554,6 +561,8 @@ impl<T: Config> Engine<T> {
         mut atom_result_rx: Receiver<Atom<T>>,
         mut request_rx: Receiver<EngineRequest<T>>,
     ) {
+        log::info!("Engine started");
+
         let mut hb_interval = self.heartbeat_interval.map(tokio::time::interval);
 
         loop {
@@ -691,6 +700,8 @@ impl<T: Config> Engine<T> {
             msg.data.as_slice(),
             bincode::config::standard(),
         ) else {
+            log::trace!("Failed to decode atom from gossip message");
+
             self.gossipsub
                 .report_validation_result(
                     &msg.id,
@@ -723,7 +734,7 @@ impl<T: Config> Engine<T> {
             if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer) in infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p))) {
                     self.gossipsub
-                        .report_validation_result(&msg_id, &peer, MessageAcceptance::Accept)
+                        .report_validation_result(&msg_id, &peer, MessageAcceptance::Ignore)
                         .await;
                 }
             }
@@ -731,6 +742,17 @@ impl<T: Config> Engine<T> {
         }
 
         for hash in result.accepted {
+            let hex = hash
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+
+            log::trace!(
+                "Atom accepted: {hex}, height {}",
+                self.graph.get(&hash).unwrap().height
+            );
+
             if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer_id) in
                     infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p)))
@@ -742,7 +764,15 @@ impl<T: Config> Engine<T> {
             }
         }
 
-        for (hash, _) in result.rejected {
+        for (hash, reason) in result.rejected {
+            let hex = hash
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+
+            log::trace!("Atom rejected: {hex}, reason: {reason:?}");
+
             if let Some(infos) = self.pending_atoms.remove(&hash) {
                 for (msg_id, peer_id) in infos {
                     if let Some(msg_id) = msg_id {
@@ -756,6 +786,21 @@ impl<T: Config> Engine<T> {
         }
 
         if !result.missing.is_empty() {
+            log::trace!(
+                "Atom missing dependencies: {}",
+                result
+                    .missing
+                    .iter()
+                    .map(|h| {
+                        h.to_bytes()
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+
             let req = Request::Atoms(result.missing);
             let msg = encode_to_vec(&req, config::standard()).unwrap();
             self.request_response.send_request(peer, msg).await;
