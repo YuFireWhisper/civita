@@ -204,8 +204,12 @@ impl<T: Config> Graph<T> {
         while let Some(u) = stk.pop_front() {
             for child in self.entries[&u].children.clone() {
                 let entry = self.entries.get_mut(&child).unwrap();
-                entry.pending_parents -= 1;
 
+                if entry.pending_parents == 0 {
+                    continue;
+                }
+
+                entry.pending_parents -= 1;
                 if entry.pending_parents == 0 {
                     if let Err(r) = self.final_validation(child, &mut result) {
                         self.remove_subgraph(child, r, &mut result);
