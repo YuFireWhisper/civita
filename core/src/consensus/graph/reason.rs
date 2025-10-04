@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::ty::atom::Height;
 
 #[derive(Clone, Copy)]
@@ -176,5 +178,88 @@ impl Reason {
         Self::Rejected(RejectReason::Inheritalbe(
             InheritableRejectReason::InvalidCommand,
         ))
+    }
+}
+
+impl fmt::Display for InheritableIgnoreReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyExisting => write!(f, "already existing"),
+            Self::HeightBelowFinalized(height, finalized) => {
+                write!(f, "height {} below finalized {}", height, finalized)
+            }
+        }
+    }
+}
+
+impl fmt::Display for NonInheritableIgnoreReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyIgnored(reason) => write!(f, "already ignored: {}", reason),
+            Self::IgnoredParent(reason) => write!(f, "parent ignored: {}", reason),
+        }
+    }
+}
+
+impl fmt::Display for IgnoreReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inheritalbe(reason) => write!(f, "{}", reason),
+            Self::NonInheritable(reason) => write!(f, "{}", reason),
+        }
+    }
+}
+
+impl fmt::Display for InheritableRejectReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SelfReference => write!(f, "self reference"),
+            Self::ParentInAtoms => write!(f, "parent in atoms"),
+            Self::InvalidNonce => write!(f, "invalid nonce"),
+            Self::InvalidHeight(height, parent_height) => {
+                write!(f, "invalid height {} (parent: {})", height, parent_height)
+            }
+            Self::BlockInAtoms => write!(f, "block in atoms"),
+            Self::MismatchDifficulty(expected, actual) => {
+                write!(
+                    f,
+                    "difficulty mismatch (expected: {}, actual: {})",
+                    expected, actual
+                )
+            }
+            Self::IncompleteAtomHistory => write!(f, "incomplete atom history"),
+            Self::EmptyInput => write!(f, "empty input"),
+            Self::DoubleSpend => write!(f, "double spend"),
+            Self::InvalidMmrProof => write!(f, "invalid MMR proof"),
+            Self::InvalidScriptSig => write!(f, "invalid script signature"),
+            Self::InvalidCommand => write!(f, "invalid command"),
+        }
+    }
+}
+
+impl fmt::Display for NonInheritableRejectReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyRejected(reason) => write!(f, "already rejected: {}", reason),
+            Self::RejectedParent(reason) => write!(f, "parent rejected: {}", reason),
+        }
+    }
+}
+
+impl fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inheritalbe(reason) => write!(f, "{}", reason),
+            Self::NonInheritable(reason) => write!(f, "{}", reason),
+        }
+    }
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ignored(reason) => write!(f, "Ignored: {}", reason),
+            Self::Rejected(reason) => write!(f, "Rejected: {}", reason),
+        }
     }
 }
