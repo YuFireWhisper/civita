@@ -696,14 +696,14 @@ impl<T: Config> Graph<T> {
     }
 
     fn calculate_difficulty(&self) -> u64 {
-        if self.finalized_blocks.len() < 2 {
+        if self.finalized_blocks.len() < 3 {
             return self.difficulty;
         }
 
         let mut time_diffs = Vec::new();
         let blocks: Vec<_> = self.finalized_blocks.iter().collect();
 
-        for i in 1..blocks.len() {
+        for i in 2..blocks.len() {
             let prev_entry = &self.entries[blocks[i - 1]];
             let curr_entry = &self.entries[blocks[i]];
             let time_diff = curr_entry
