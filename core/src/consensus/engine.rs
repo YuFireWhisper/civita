@@ -740,13 +740,21 @@ impl<T: Config> Engine<T> {
             log::debug!("Atom dismissed: {hex}, reason: {reason:?}");
 
             if let Some(infos) = self.pending_atoms.remove(&hash) {
-                for (msg_id, peer_id) in infos {
-                    if let Some(msg_id) = msg_id {
-                        self.gossipsub
-                            .report_validation_result(&msg_id, &peer_id, MessageAcceptance::Reject)
-                            .await;
+                for (msg_id, peer) in infos {
+                    if reason.is_ignore() {
+                        if let Some(msg_id) = msg_id {
+                            self.gossipsub
+                                .report_validation_result(&msg_id, &peer, MessageAcceptance::Ignore)
+                                .await;
+                        }
+                    } else {
+                        if let Some(msg_id) = msg_id {
+                            self.gossipsub
+                                .report_validation_result(&msg_id, &peer, MessageAcceptance::Reject)
+                                .await;
+                        }
+                        self.disconnect_peer(peer).await;
                     }
-                    self.disconnect_peer(peer_id).await;
                 }
             }
         }

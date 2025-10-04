@@ -179,6 +179,10 @@ impl Reason {
             InheritableRejectReason::InvalidCommand,
         ))
     }
+
+    pub fn is_ignore(&self) -> bool {
+        matches!(self, Self::Ignored(_))
+    }
 }
 
 impl fmt::Display for InheritableIgnoreReason {
