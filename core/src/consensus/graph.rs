@@ -17,29 +17,11 @@ use crate::{
     utils::mmr::{Mmr, MmrProof},
 };
 
-pub type Proofs<T> = HashMap<Multihash, (Token<T>, MmrProof)>;
+pub mod reason;
 
-#[derive(Clone, Copy)]
-#[derive(Debug)]
-pub enum RejectReason {
-    AlreadyDismissed,
-    DismissedParent,
-    HeightBelowFinalized,
-    SelfReference,
-    ParentInAtoms,
-    BlockInAtoms,
-    InvalidTokenId,
-    InvalidHeight,
-    InvalidScriptSig,
-    InvalidConversion,
-    InvalidNonce,
-    InvalidProof,
-    MissingInput,
-    MissingProof,
-    DoubleSpend,
-    EmptyInput,
-    IncompleteAtomHistory,
-}
+pub use reason::*;
+
+pub type Proofs<T> = HashMap<Multihash, (Token<T>, MmrProof)>;
 
 #[derive(Debug)]
 #[derive(thiserror::Error)]
@@ -82,10 +64,9 @@ pub struct Status {
 #[derive(Default)]
 pub struct UpdateResult {
     pub accepted: Vec<Multihash>,
-    pub rejected: HashMap<Multihash, RejectReason>,
+    pub dismissed: HashMap<Multihash, Reason>,
     pub missing: HashSet<Multihash>,
     pub finalized: Vec<Multihash>,
-    pub existing: bool,
 }
 
 #[derive(Derivative)]
@@ -103,7 +84,7 @@ struct Entry<T: Config> {
 
 pub struct Graph<T: Config> {
     entries: HashMap<Multihash, Entry<T>>,
-    dismissed: HashSet<Multihash>,
+    dismissed: HashMap<Multihash, Reason>,
     main_head: Multihash,
     finalized: Multihash,
     finalized_height: Height,
@@ -140,7 +121,7 @@ impl<T: Config> Graph<T> {
 
         Self {
             entries: HashMap::from_iter([(hash, Entry::new(atom))]),
-            dismissed: HashSet::new(),
+            dismissed: HashMap::new(),
             main_head: hash,
             finalized: hash,
             finalized_height: height,
@@ -157,15 +138,22 @@ impl<T: Config> Graph<T> {
         let mut result = UpdateResult::default();
         let hash = atom.hash();
 
-        if !self.insert_entry(atom) {
-            result.existing = true;
+        if self.contains(&hash) {
+            result.dismissed.insert(hash, Reason::already_existing());
             return result;
         }
 
-        if let Err(r) = self.basic_validation(&hash) {
+        if let Some(r) = self.dismissed.get(&hash) {
+            result.dismissed.insert(hash, r.inherit());
+            return result;
+        }
+
+        if let Some(r) = self.basic_validation(&atom) {
             self.remove_subgraph(hash, r, &mut result);
             return result;
         }
+
+        self.insert_entry(atom);
 
         match self.validate_parents(hash) {
             Ok(missing) => {
@@ -181,7 +169,7 @@ impl<T: Config> Graph<T> {
             }
         }
 
-        if let Err(r) = self.final_validation(hash, &mut result) {
+        if let Some(r) = self.final_validation(hash, &mut result) {
             self.remove_subgraph(hash, r, &mut result);
             return result;
         }
@@ -192,16 +180,23 @@ impl<T: Config> Graph<T> {
         stk.push_back(hash);
 
         while let Some(u) = stk.pop_front() {
-            for child in self.entries[&u].children.clone() {
-                let entry = self.entries.get_mut(&child).unwrap();
+            let Some(children) = self.entries.get(&u).map(|e| e.children.clone()) else {
+                continue;
+            };
+
+            for child in children {
+                let Some(entry) = self.entries.get_mut(&child) else {
+                    continue;
+                };
 
                 if entry.pending_parents == 0 {
                     continue;
                 }
 
                 entry.pending_parents -= 1;
+
                 if entry.pending_parents == 0 {
-                    if let Err(r) = self.final_validation(child, &mut result) {
+                    if let Some(r) = self.final_validation(child, &mut result) {
                         self.remove_subgraph(child, r, &mut result);
                     } else {
                         result.accepted.push(child);
@@ -214,101 +209,60 @@ impl<T: Config> Graph<T> {
         result
     }
 
-    fn insert_entry(&mut self, atom: Atom<T>) -> bool {
-        match self.entries.get_mut(&atom.hash()) {
-            Some(e) => {
-                if !e.is_missing {
-                    return false;
-                }
-
-                e.atom = atom;
-                e.is_missing = false;
-
-                true
-            }
-            None => {
-                self.entries.insert(atom.hash(), Entry::new(atom));
-                true
-            }
-        }
+    fn contains(&self, hash: &Multihash) -> bool {
+        self.entries.get(hash).is_some_and(|e| !e.is_missing)
     }
 
-    fn contains(&self, h: &Multihash) -> bool {
-        !self.dismissed.contains(h) && self.entries.get(h).is_some_and(|e| !e.is_missing)
-    }
-
-    fn basic_validation(&self, hash: &Multihash) -> Result<(), RejectReason> {
-        let atom = &self.entries[hash].atom;
-
-        if self.dismissed.contains(hash) {
-            return Err(RejectReason::AlreadyDismissed);
-        }
+    fn basic_validation(&mut self, atom: &Atom<T>) -> Option<Reason> {
+        let hash = atom.hash();
 
         if atom.height <= self.finalized_height {
-            return Err(RejectReason::HeightBelowFinalized);
+            return Some(Reason::below_finalized(atom.height, self.finalized_height));
         }
 
-        if &atom.parent == hash {
-            return Err(RejectReason::SelfReference);
-        }
-
-        if atom.atoms.contains(hash) {
-            return Err(RejectReason::SelfReference);
+        if atom.atoms.contains(&hash) {
+            return Some(Reason::self_reference());
         }
 
         if atom.atoms.contains(&atom.parent) {
-            return Err(RejectReason::ParentInAtoms);
+            return Some(Reason::parent_in_atoms());
         }
 
-        Ok(())
+        // Pre-check, we will check difficulty again in final_validation
+        if !atom.verify_nonce(atom.difficulty) {
+            return Some(Reason::invalid_nonce());
+        }
+
+        None
     }
 
-    fn remove_subgraph(
-        &mut self,
-        hash: Multihash,
-        reason: RejectReason,
-        result: &mut UpdateResult,
-    ) {
-        if !self.dismissed.insert(hash) {
-            return;
+    fn insert_entry(&mut self, atom: Atom<T>) {
+        let hash = atom.hash();
+        match self.entries.get_mut(&hash) {
+            Some(e) => {
+                assert!(e.is_missing);
+
+                e.atom = atom;
+                e.is_missing = false;
+            }
+            None => {
+                self.entries.insert(hash, Entry::new(atom));
+            }
         }
+    }
 
-        result.rejected.insert(hash, reason);
-
-        let Some(entry) = self.entries.remove(&hash) else {
-            return;
-        };
-
-        entry
-            .atom
-            .atoms
-            .iter()
-            .chain(std::iter::once(&entry.atom.parent))
-            .for_each(|p| {
-                if let Some(parent) = self.entries.get_mut(p) {
-                    parent.children.remove(&hash);
-                }
-            });
-
-        let mut stk = VecDeque::new();
-        stk.extend(entry.children);
+    fn remove_subgraph(&mut self, hash: Multihash, mut reason: Reason, result: &mut UpdateResult) {
+        let mut stk = VecDeque::from_iter([hash]);
 
         while let Some(u) = stk.pop_front() {
-            if !self.dismissed.insert(u) {
-                continue;
-            }
-
             let Some(entry) = self.entries.remove(&u) else {
                 continue;
             };
 
             if !entry.is_missing {
-                result.rejected.insert(u, RejectReason::DismissedParent);
+                self.dismissed.insert(u, reason);
+                result.dismissed.entry(u).or_insert(reason);
             }
-
-            entry.children.into_iter().for_each(|p| {
-                stk.push_back(p);
-            });
 
             entry
                 .atom
@@ -320,10 +274,13 @@ impl<T: Config> Graph<T> {
                         parent.children.remove(&u);
                     }
                 });
+            stk.extend(entry.children);
+
+            reason = reason.inherit_parent();
         }
     }
 
-    fn validate_parents(&mut self, hash: Multihash) -> Result<HashSet<Multihash>, RejectReason> {
+    fn validate_parents(&mut self, hash: Multihash) -> Result<HashSet<Multihash>, Reason> {
         let mut missing = HashSet::new();
 
         let parents = {
@@ -333,18 +290,15 @@ impl<T: Config> Graph<T> {
             atoms
         };
 
-        for parent_hash in parents {
-            if self.dismissed.contains(&parent_hash) {
-                return Err(RejectReason::DismissedParent);
+        for phash in parents {
+            if let Some(reason) = self.dismissed.get(&phash) {
+                return Err(reason.inherit_parent());
             }
 
-            let parent = self
-                .entries
-                .entry(parent_hash)
-                .or_insert_with(Entry::new_missing);
+            let parent = self.entries.entry(phash).or_insert_with(Entry::new_missing);
 
             if parent.is_missing {
-                missing.insert(parent_hash);
+                missing.insert(phash);
             }
 
             parent.children.insert(hash);
@@ -353,37 +307,45 @@ impl<T: Config> Graph<T> {
         Ok(missing)
     }
 
-    fn final_validation(
-        &mut self,
-        hash: Multihash,
-        result: &mut UpdateResult,
-    ) -> Result<(), RejectReason> {
+    fn final_validation(&mut self, hash: Multihash, result: &mut UpdateResult) -> Option<Reason> {
         let atom = &self.entries[&hash].atom;
+        let parent_height = self.entries[&atom.parent].atom.height;
 
-        if atom.height != self.entries[&atom.parent].atom.height + 1 {
-            return Err(RejectReason::InvalidHeight);
+        if atom.height != parent_height + 1 {
+            return Some(Reason::invalid_height(atom.height, parent_height));
         }
 
         if atom.atoms.iter().any(|h| self.entries[h].is_block) {
-            return Err(RejectReason::BlockInAtoms);
+            return Some(Reason::block_in_atoms());
         }
 
-        if !atom.verify_nonce(self.difficulty) {
-            return Err(RejectReason::InvalidNonce);
+        // We already checked nonce in basic_validation, only check difficulty here
+        if atom.difficulty != self.difficulty {
+            return Some(Reason::mismatch_difficulty(
+                self.difficulty,
+                atom.difficulty,
+            ));
         }
 
         if !self.validate_atom_history(hash) {
-            return Err(RejectReason::IncompleteAtomHistory);
+            return Some(Reason::incomplete_atom_history());
         }
 
-        if !self.validate_execution(&hash)? {
-            return Ok(());
+        match self.validate_execution(&hash) {
+            Ok(is_block) => {
+                if !is_block {
+                    return None;
+                }
+            }
+            Err(r) => {
+                return Some(r);
+            }
         }
 
         self.update_weight(hash);
         self.recompute_main_chain_and_finalized(result);
 
-        Ok(())
+        None
     }
 
     fn validate_atom_history(&self, hash: Multihash) -> bool {
@@ -399,7 +361,7 @@ impl<T: Config> Graph<T> {
         })
     }
 
-    fn validate_execution(&mut self, target_hash: &Multihash) -> Result<bool, RejectReason> {
+    fn validate_execution(&mut self, target_hash: &Multihash) -> Result<bool, Reason> {
         let mut consumed = HashMap::<Multihash, (T::ScriptPk, MmrProof)>::new();
         let mut cmd_children = HashSet::new();
         let mut excluded = false;
@@ -419,7 +381,7 @@ impl<T: Config> Graph<T> {
             cmd_children.insert(atom.hash());
 
             if cmd.inputs.is_empty() {
-                return Err(RejectReason::EmptyInput);
+                return Err(Reason::empty_input());
             }
 
             for input in &cmd.inputs {
@@ -427,35 +389,42 @@ impl<T: Config> Graph<T> {
                     continue;
                 };
 
-                if self.consumed_tokens.contains(id) {
-                    excluded = true;
-                    continue;
-                }
+                excluded |= entry.excluded;
 
                 if consumed
                     .insert(*id, (token.script_pk.clone(), proof.clone()))
                     .is_some()
                 {
-                    return Err(RejectReason::DoubleSpend);
+                    return Err(Reason::double_spend());
                 }
 
                 if !self.mmr.verify(*id, proof) {
-                    return Err(RejectReason::MissingProof);
+                    return Err(Reason::invalid_mmr_proof());
                 }
 
                 if !token.script_pk.verify(sig) {
-                    return Err(RejectReason::InvalidScriptSig);
+                    return Err(Reason::invalid_script_sig());
                 }
             }
 
             if !T::validate_command(cmd) {
-                return Err(RejectReason::InvalidConversion);
+                return Err(Reason::invalid_command());
             }
         }
 
         if target.atom.atoms.len() + 1 < T::BLOCK_THRESHOLD as usize {
+            excluded |= target.atom.cmd.as_ref().is_some_and(|cmd| {
+                cmd.inputs.iter().any(|input| {
+                    if let Input::OnChain(_, id, _, _) = input {
+                        self.consumed_tokens.contains(&id)
+                    } else {
+                        false
+                    }
+                })
+            });
+
             if excluded {
-                let parent_hash = self.entries[target_hash].atom.parent;
+                let parent_hash = target.atom.parent;
                 let parent = self.entries.get_mut(&parent_hash).unwrap();
                 parent.children.remove(target_hash);
             } else {
@@ -597,11 +566,6 @@ impl<T: Config> Graph<T> {
                 let Input::OnChain(token, id, proof, _sig) = input else {
                     continue;
                 };
-
-                if self.consumed_tokens.contains(id) {
-                    continue;
-                }
-
                 consumed.insert(*id, (token.script_pk.clone(), proof.clone()));
             }
 
@@ -683,9 +647,7 @@ impl<T: Config> Graph<T> {
         if let Some(entry) = self.entries.remove(&block_hash) {
             for atom_hash in &entry.atom.atoms {
                 self.entries.remove(atom_hash);
-                self.dismissed.insert(*atom_hash);
             }
-            self.dismissed.insert(block_hash);
         }
     }
 
@@ -710,7 +672,6 @@ impl<T: Config> Graph<T> {
 
         for hash in to_remove {
             self.entries.remove(&hash);
-            self.dismissed.insert(hash);
         }
     }
 
@@ -1139,9 +1100,8 @@ mod tests {
 
         let res = graph.upsert(atom);
         assert_eq!(res.accepted, vec![hash]);
-        assert!(res.rejected.is_empty());
+        assert!(res.dismissed.is_empty());
         assert!(res.missing.is_empty());
-        assert!(!res.existing);
         assert_eq!(graph.entries.len(), 2);
         // Atom do not reach block threshold, so main head and finalized remain the same
         assert_eq!(graph.main_head, genesis_hash);
@@ -1176,9 +1136,8 @@ mod tests {
         let res = graph.upsert(block_atom);
 
         assert_eq!(res.accepted, vec![hash]);
-        assert!(res.rejected.is_empty());
+        assert!(res.dismissed.is_empty());
         assert!(res.missing.is_empty());
-        assert!(!res.existing);
         assert_eq!(graph.entries.len(), 3);
         // Atom2 reaches block threshold(2), so main head advances to atom2
         assert_eq!(graph.main_head, hash);
@@ -1229,9 +1188,8 @@ mod tests {
         let res = graph.upsert(block_atom2);
 
         assert_eq!(res.accepted, vec![hash2]);
-        assert!(res.rejected.is_empty());
+        assert!(res.dismissed.is_empty());
         assert!(res.missing.is_empty());
-        assert!(!res.existing);
         assert_eq!(graph.entries.len(), 5);
         assert_eq!(graph.main_head, hash2);
         // Atom1 is confirmed by Atom2, so finalized advances to Atom1
@@ -1308,9 +1266,8 @@ mod tests {
         let res = graph.upsert(atom3);
 
         assert_eq!(res.accepted, vec![hash]);
-        assert!(res.rejected.is_empty());
+        assert!(res.dismissed.is_empty());
         assert!(res.missing.is_empty());
-        assert!(!res.existing);
         assert_eq!(graph.entries.len(), 4);
         assert_eq!(graph.main_head, hash);
     }
@@ -1346,8 +1303,7 @@ mod tests {
         let res = graph.upsert(atom3);
 
         assert_eq!(res.accepted, vec![hash]);
-        assert!(res.rejected.is_empty());
+        assert!(res.dismissed.is_empty());
         assert!(res.missing.is_empty());
-        assert!(!res.existing);
     }
 }
