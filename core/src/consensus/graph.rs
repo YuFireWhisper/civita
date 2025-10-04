@@ -416,7 +416,7 @@ impl<T: Config> Graph<T> {
             excluded |= target.atom.cmd.as_ref().is_some_and(|cmd| {
                 cmd.inputs.iter().any(|input| {
                     if let Input::OnChain(_, id, _, _) = input {
-                        self.consumed_tokens.contains(&id)
+                        self.consumed_tokens.contains(id)
                     } else {
                         false
                     }
