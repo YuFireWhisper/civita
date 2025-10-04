@@ -157,20 +157,10 @@ impl<T: Config> Graph<T> {
         let mut result = UpdateResult::default();
         let hash = atom.hash();
 
-        if self.contains(&hash) {
+        if !self.insert_entry(atom) {
             result.existing = true;
             return result;
         }
-
-        match self.entries.get_mut(&hash) {
-            Some(e) => {
-                e.atom = atom;
-                e.is_missing = false;
-            }
-            None => {
-                self.entries.insert(hash, Entry::new(atom));
-            }
-        };
 
         if let Err(r) = self.basic_validation(&hash) {
             self.remove_subgraph(hash, r, &mut result);
@@ -222,6 +212,25 @@ impl<T: Config> Graph<T> {
         }
 
         result
+    }
+
+    fn insert_entry(&mut self, atom: Atom<T>) -> bool {
+        match self.entries.get_mut(&atom.hash()) {
+            Some(e) => {
+                if !e.is_missing {
+                    return false;
+                }
+
+                e.atom = atom;
+                e.is_missing = false;
+
+                true
+            }
+            None => {
+                self.entries.insert(atom.hash(), Entry::new(atom));
+                true
+            }
+        }
     }
 
     fn contains(&self, h: &Multihash) -> bool {
