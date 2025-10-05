@@ -69,7 +69,7 @@ async fn basic_operations() {
     let config = Config {
         bootstrap_peers: vec![(peer_id_1(), resident1.listen_addr().clone())],
         storage_dir: str.to_string(),
-        node_type: NodeType::Regular(peer_id_5()),
+        node_type: NodeType::Regular,
         ..config
     };
 

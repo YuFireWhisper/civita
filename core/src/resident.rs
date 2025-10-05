@@ -1,11 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::{HashMap, HashSet};
 
 use derivative::Derivative;
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
 
 use crate::{
     consensus::{
-        engine::{self, EngineConfig, NodeType},
+        engine::{self, NodeType},
         graph::{self, Status},
         Engine,
     },
@@ -17,8 +17,6 @@ use crate::{
 
 pub use engine::BootstrapConfig;
 
-const GOSSIP_TOPIC: u8 = 0;
-
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
@@ -29,9 +27,6 @@ pub enum Error {
 
     #[error(transparent)]
     Graph(#[from] graph::Error),
-
-    #[error(transparent)]
-    Transport(#[from] transport::Error),
 
     #[error("{0}")]
     Propose(String),
@@ -50,25 +45,13 @@ pub struct Config {
 
     // Transport config
     #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
-    pub check_listen_timeout: tokio::time::Duration,
+    pub listen_timeout: tokio::time::Duration,
+
+    #[derivative(Default(value = "tokio::time::Duration::from_secs(10)"))]
+    pub dial_timeout: tokio::time::Duration,
 
     #[derivative(Default(value = "1000"))]
     pub channel_size: usize,
-
-    #[derivative(Default(value = "tokio::time::Duration::from_secs(5)"))]
-    pub get_swarm_lock_timeout: tokio::time::Duration,
-
-    #[derivative(Default(value = "tokio::time::Duration::from_secs(10)"))]
-    pub wait_for_gossipsub_peer_timeout: tokio::time::Duration,
-
-    #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
-    pub wait_for_gossipsub_peer_interval: tokio::time::Duration,
-
-    #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
-    pub wait_next_event_timeout: tokio::time::Duration,
-
-    #[derivative(Default(value = "tokio::time::Duration::from_millis(100)"))]
-    pub receive_interval: tokio::time::Duration,
 
     #[derivative(Default(value = "\"/ip4/0.0.0.0/tcp/0\".parse().unwrap()"))]
     pub listen_addr: Multiaddr,
@@ -78,7 +61,7 @@ pub struct Config {
 
     pub bootstrap_peers: Vec<(PeerId, Multiaddr)>,
 
-    #[derivative(Default(value = "tokio::time::Duration::from_secs(5)"))]
+    #[derivative(Default(value = "tokio::time::Duration::from_secs(15)"))]
     pub bootstrap_timeout: tokio::time::Duration,
 
     #[derivative(Default(value = "NodeType::Archive"))]
@@ -93,36 +76,40 @@ pub struct Resident<T: traits::Config> {
 impl<T: traits::Config> Resident<T> {
     pub async fn new(keypair: Keypair, config: Config) -> Result<Self> {
         let transport_config = transport::Config {
-            check_listen_timeout: config.check_listen_timeout,
+            listen_timeout: config.listen_timeout,
             channel_capacity: config.channel_size,
-            get_swarm_lock_timeout: config.get_swarm_lock_timeout,
-            wait_for_gossipsub_peer_timeout: config.wait_for_gossipsub_peer_timeout,
-            wait_for_gossipsub_peer_interval: config.wait_for_gossipsub_peer_interval,
-            wait_next_event_timeout: config.wait_next_event_timeout,
-            receive_interval: config.receive_interval,
+            dial_timeout: config.dial_timeout,
         };
 
-        let tranpsort = Transport::new(keypair, config.listen_addr, transport_config).await?;
-        let transport = Arc::new(tranpsort);
-        let listen_addr = transport.listen_addr();
+        let peers = HashSet::from_iter(config.bootstrap_peers.iter().map(|(peer_id, _)| *peer_id));
 
-        let engine_config = EngineConfig {
-            gossip_topic: GOSSIP_TOPIC,
-            heartbeat_interval: config.heartbeat_interval,
-        };
+        let transport = Transport::new(
+            keypair,
+            config.listen_addr,
+            config.bootstrap_peers.clone(),
+            transport_config,
+        )
+        .await;
 
+        let listen_addr = transport.addr.clone();
         let bc = if config.bootstrap_peers.is_empty() {
             None
         } else {
             Some(BootstrapConfig {
-                peers: config.bootstrap_peers.clone(),
+                peers,
                 timeout: config.bootstrap_timeout,
                 node_type: config.node_type,
             })
         };
 
         Ok(Self {
-            handle: Engine::spawn(transport, &config.storage_dir, bc, engine_config).await?,
+            handle: Engine::spawn(
+                transport,
+                &config.storage_dir,
+                config.heartbeat_interval,
+                bc,
+            )
+            .await?,
             listen_addr,
         })
     }

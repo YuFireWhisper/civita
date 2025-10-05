@@ -1,31 +1,28 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{HashMap, HashSet};
 
 use bincode::error::DecodeError;
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
     request_response::ResponseChannel,
-    Multiaddr, PeerId,
+    PeerId,
 };
 use multihash_derive::MultihashDigest;
 use rocksdb::{Options, DB};
 use tokio::{
     sync::{
-        mpsc::{Receiver, Sender},
+        mpsc::{self, Receiver, Sender},
         oneshot,
     },
     task::JoinHandle,
+    time::Instant,
 };
 
 use crate::{
     consensus::graph::{self, Graph, Proofs, Reason, Status},
     crypto::Multihash,
     network::{
-        gossipsub,
-        request_response::{Message, RequestResponse},
-        transport, Gossipsub, Transport,
+        transport::{Message, Request, Response},
+        Transport,
     },
     traits::Config,
     ty::{atom::Atom, token::Token},
@@ -59,12 +56,6 @@ pub enum StorageError {
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error(transparent)]
-    Gossipsub(#[from] gossipsub::Error),
-
-    #[error(transparent)]
-    Transport(#[from] transport::Error),
-
     #[error("Bootstrap peers is empty")]
     NoBootstrapPeers,
 
@@ -84,39 +75,17 @@ pub enum Error {
     EngineStopped,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-enum Request {
-    Atoms(HashSet<Multihash>),
-    Blocks(u32),
-    InitialState(PeerId),
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound(serialize = "T: Config", deserialize = "T: Config"))]
-enum Response<T: Config> {
-    Atoms(Vec<Atom<T>>),
-    Blocks(Vec<Atom<T>>),
-    InitialState(Box<(Atom<T>, Proofs<T>)>),
-    AlreadyUpToDate,
-}
-
 #[derive(Clone, Copy)]
 pub enum NodeType {
     Archive,
-    Regular(PeerId),
+    Regular,
 }
 
 #[derive(Clone)]
 pub struct BootstrapConfig {
-    pub peers: Vec<(PeerId, Multiaddr)>,
+    pub peers: HashSet<PeerId>,
     pub timeout: tokio::time::Duration,
     pub node_type: NodeType,
-}
-
-#[derive(Clone, Copy)]
-pub struct EngineConfig {
-    pub gossip_topic: u8,
-    pub heartbeat_interval: Option<tokio::time::Duration>,
 }
 
 enum EngineRequest<T: Config> {
@@ -134,18 +103,11 @@ enum EngineRequest<T: Config> {
 
 pub struct Handle<T: Config>(Sender<EngineRequest<T>>);
 pub struct Engine<T: Config> {
-    transport: Arc<Transport>,
-    gossipsub: Arc<Gossipsub>,
-    request_response: Arc<RequestResponse>,
-
+    transport: Transport<T>,
     graph: Graph<T>,
-
     pending_atoms: HashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
     atom_result_tx: Sender<Atom<T>>,
-
-    gossip_topic: u8,
     heartbeat_interval: Option<tokio::time::Duration>,
-
     db: Option<DB>,
     node_type: NodeType,
 }
@@ -195,21 +157,18 @@ impl<T: Config> Handle<T> {
 
 impl<T: Config> Engine<T> {
     pub async fn spawn(
-        transport: Arc<Transport>,
+        mut transport: Transport<T>,
         dir: &str,
+        heartbeat_interval: Option<tokio::time::Duration>,
         bootstrap: Option<BootstrapConfig>,
-        config: EngineConfig,
     ) -> Result<Handle<T>> {
-        let gossipsub = transport.gossipsub();
-        let req_resp = transport.request_response();
         let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-        let gossip_rx = gossipsub.subscribe(config.gossip_topic).await?;
 
         let (graph, db, node_type) = if let Some(bootstrap_config) = bootstrap {
             if bootstrap_config.peers.is_empty() {
                 return Err(Error::NoBootstrapPeers);
             }
-            Self::bootstrap(&transport, dir, bootstrap_config).await?
+            Self::bootstrap(&mut transport, dir, bootstrap_config).await?
         } else {
             let (mmr, proofs) = Self::create_genesis_mmr();
             let genesis = Self::create_genesis_atom(mmr.peak_hashes());
@@ -218,27 +177,23 @@ impl<T: Config> Engine<T> {
             graph.fill(proofs);
 
             let db = Self::open_db(dir)?;
-
             (graph, Some(db), NodeType::Archive)
         };
 
         let engine = Self {
-            transport: transport.clone(),
-            gossipsub,
-            request_response: req_resp,
-            gossip_topic: config.gossip_topic,
+            transport,
             graph,
             pending_atoms: HashMap::new(),
             atom_result_tx,
-            heartbeat_interval: config.heartbeat_interval,
+            heartbeat_interval,
             db,
             node_type,
         };
 
-        let (request_tx, request_rx) = tokio::sync::mpsc::channel(100);
+        let (request_tx, request_rx) = mpsc::channel(1000);
 
         tokio::spawn(async move {
-            engine.run(gossip_rx, atom_result_rx, request_rx).await;
+            engine.run(atom_result_rx, request_rx).await;
         });
 
         Ok(Handle(request_tx))
@@ -286,6 +241,7 @@ impl<T: Config> Engine<T> {
         )
         .with_command(T::genesis_command())
         .with_random(0)
+        .with_nonce(vec![])
         .with_timestamp(0)
         .build_sync()
     }
@@ -297,41 +253,34 @@ impl<T: Config> Engine<T> {
     }
 
     async fn bootstrap(
-        transport: &Transport,
+        transport: &mut Transport<T>,
         dir: &str,
-        bootstrap_config: BootstrapConfig,
+        config: BootstrapConfig,
     ) -> Result<(Graph<T>, Option<DB>, NodeType)> {
-        let mut peers = HashSet::with_capacity(bootstrap_config.peers.len());
-
-        for (peer, addr) in bootstrap_config.peers {
-            transport.dial(peer, addr).await?;
-            peers.insert(peer);
-        }
-
-        tokio::time::timeout(bootstrap_config.timeout, async {
-            match bootstrap_config.node_type {
-                NodeType::Archive => Self::bootstrap_archive(transport, dir, &peers)
+        tokio::time::timeout(config.timeout, async {
+            match config.node_type {
+                NodeType::Archive => Self::bootstrap_archive(transport, dir, &config.peers)
                     .await
                     .map(|(g, d)| (g, Some(d), NodeType::Archive)),
-                NodeType::Regular(peer_id) => Self::bootstrap_regular(transport, peer_id, &peers)
+                NodeType::Regular => Self::bootstrap_regular(transport, &config.peers)
                     .await
-                    .map(|g| (g, None, NodeType::Regular(peer_id))),
+                    .map(|g| (g, None, NodeType::Regular)),
             }
         })
         .await
-        .map_err(|_| Error::BootstrapTimeout)
+        .map_err(|_| {
+            println!("Bootstrap timed out, peer: {}", transport.peer_id);
+            Error::BootstrapTimeout
+        })
         .and_then(|res| res)
     }
 
     async fn bootstrap_archive(
-        transport: &Transport,
+        transport: &mut Transport<T>,
         dir: &str,
         peers: &HashSet<PeerId>,
     ) -> Result<(Graph<T>, DB)> {
-        use bincode::{
-            config,
-            serde::{decode_from_slice, encode_to_vec},
-        };
+        use bincode::{config, serde::decode_from_slice};
 
         let (mmr, proofs) = Self::create_genesis_mmr();
         let genesis = Self::create_genesis_atom(mmr.peak_hashes());
@@ -403,18 +352,16 @@ impl<T: Config> Engine<T> {
             height += 1;
         }
 
-        let req_resp = transport.request_response();
         let mut cur_height = graph.finalized_height();
 
         loop {
             let req = Request::Blocks(cur_height);
-            let msg = encode_to_vec(&req, config::standard()).unwrap();
 
             for peer in peers {
-                req_resp.send_request(*peer, msg.clone()).await;
+                transport.send_request(req.clone(), *peer).await;
             }
 
-            let atoms = Self::recv_blocks_response(&req_resp).await;
+            let atoms = Self::recv_blocks_response(transport).await;
 
             if atoms.is_empty() {
                 break;
@@ -434,22 +381,15 @@ impl<T: Config> Engine<T> {
         Ok((graph, db))
     }
 
-    async fn recv_blocks_response(req_resp: &RequestResponse) -> Vec<Atom<T>> {
-        use bincode::{config, serde::decode_from_slice};
-
-        while let Some(msg) = req_resp.recv().await {
-            let Message::Response { response, .. } = msg else {
+    async fn recv_blocks_response(transport: &mut Transport<T>) -> Vec<Atom<T>> {
+        while let Some(msg) = transport.recv().await {
+            let Message::Response { resp, .. } = msg else {
                 log::warn!("Expected response message, got request");
                 continue;
             };
 
-            let Ok((resp, _)) = decode_from_slice::<Response<T>, _>(&response, config::standard())
-            else {
-                log::warn!("Failed to decode response");
-                continue;
-            };
-
             if let Response::AlreadyUpToDate = resp {
+                println!("Peer is already up-to-date");
                 return Vec::new();
             }
 
@@ -464,23 +404,16 @@ impl<T: Config> Engine<T> {
     }
 
     async fn bootstrap_regular(
-        transport: &Transport,
-        peer_id: PeerId,
+        transport: &mut Transport<T>,
         peers: &HashSet<PeerId>,
     ) -> Result<Graph<T>> {
-        use bincode::{config, serde::encode_to_vec};
-
-        let req_resp = transport.request_response();
-
-        let req = Request::InitialState(peer_id);
-        let msg = encode_to_vec(&req, config::standard()).unwrap();
-
         for peer in peers {
-            req_resp.send_request(*peer, msg.clone()).await;
+            log::info!("Sending state request to {}", peer);
+            transport.send_request(Request::State, *peer).await;
         }
 
-        let (initial_atom, proofs) = Self::recv_initial_state_response(&req_resp).await;
-        let mut graph = Graph::new(initial_atom, Some(transport.local_peer_id()));
+        let (initial_atom, proofs) = Self::recv_state_response(transport).await;
+        let mut graph = Graph::new(initial_atom, Some(transport.peer_id));
 
         if !graph.fill(proofs) {
             return Err(Error::InvalidInitialState);
@@ -490,15 +423,15 @@ impl<T: Config> Engine<T> {
 
         loop {
             let req = Request::Blocks(current_height);
-            let msg = encode_to_vec(&req, config::standard()).unwrap();
 
             for peer in peers {
-                req_resp.send_request(*peer, msg.clone()).await;
+                transport.send_request(req.clone(), *peer).await;
             }
 
-            let atoms = Self::recv_blocks_response(&req_resp).await;
+            let atoms = Self::recv_blocks_response(transport).await;
 
             if atoms.is_empty() {
+                println!("Bootstrap completed at height {}", current_height);
                 break;
             }
 
@@ -516,28 +449,22 @@ impl<T: Config> Engine<T> {
         Ok(graph)
     }
 
-    async fn recv_initial_state_response(req_resp: &RequestResponse) -> (Atom<T>, Proofs<T>) {
-        use bincode::{config, serde::decode_from_slice};
+    async fn recv_state_response(transport: &mut Transport<T>) -> (Atom<T>, Proofs<T>) {
+        while let Some(msg) = transport.recv().await {
+            println!("Received message during state bootstrap");
 
-        while let Some(msg) = req_resp.recv().await {
-            let Message::Response { response, .. } = msg else {
-                log::warn!("Expected response message, got request");
-                continue;
-            };
-
-            let Ok((resp, _)) = decode_from_slice::<Response<T>, _>(&response, config::standard())
-            else {
-                log::warn!("Failed to decode response");
+            let Message::Response { resp, .. } = msg else {
                 continue;
             };
 
             if let Response::AlreadyUpToDate = resp {
+                println!("Peer is already up-to-date, using genesis state");
                 let (mmr, proofs) = Self::create_genesis_mmr();
                 let atom = Self::create_genesis_atom(mmr.peak_hashes());
                 return (atom, proofs);
             }
 
-            if let Response::InitialState(boxed) = resp {
+            if let Response::State(boxed) = resp {
                 return *boxed;
             } else {
                 log::warn!("Unexpected response type");
@@ -549,168 +476,67 @@ impl<T: Config> Engine<T> {
 
     async fn run(
         mut self,
-        mut gossip_rx: Receiver<gossipsub::Message>,
         mut atom_result_rx: Receiver<Atom<T>>,
         mut request_rx: Receiver<EngineRequest<T>>,
     ) {
         log::info!("Engine started");
 
-        let mut hb_interval = self.heartbeat_interval.map(tokio::time::interval);
+        let mut hb_instant = self.heartbeat_interval.map(|d| Instant::now() + d);
 
         loop {
-            let mut gossip_msg = None;
-            let mut req_resp_msg = None;
-            let mut atom_result = None;
-            let mut engine_request = None;
-            let mut hb_tick = false;
-
-            tokio::select! {
-                Some(msg) = gossip_rx.recv() => {
-                    gossip_msg = Some(msg);
-                }
-                Some(msg) = self.request_response.recv() => {
-                    req_resp_msg = Some(msg);
-                }
-                Some(atom) = atom_result_rx.recv() => {
-                    atom_result = Some(atom);
-                }
-                Some(req) = request_rx.recv() => {
-                    engine_request = Some(req);
-                }
-                _ = async {
-                    if let Some(ref mut interval) = hb_interval {
-                        interval.tick().await;
-                    } else {
-                        std::future::pending::<()>().await;
+            if let Some(msg) = self.transport.try_recv().await {
+                match msg {
+                    Message::Gossipsub {
+                        id,
+                        propagation_source,
+                        atom,
+                    } => {
+                        self.on_recv_atom(Some(id), propagation_source, *atom).await;
                     }
-                } => {
-                    hb_tick = true;
-                }
-            }
-
-            if let Some(msg) = gossip_msg {
-                self.handle_gossip_message(msg).await;
-            }
-
-            if let Some(msg) = req_resp_msg {
-                self.on_recv_request_response(msg).await;
-            }
-
-            if let Some(atom) = atom_result {
-                if self.on_atom_ready(atom).await {
-                    if let Some(interval) = hb_interval.as_mut() {
-                        interval.reset();
+                    Message::Request { peer, req, channel } => {
+                        self.on_recv_request(peer, req, channel).await;
+                    }
+                    Message::Response { peer, resp } => {
+                        self.on_recv_response(peer, resp).await;
                     }
                 }
             }
 
-            if let Some(req) = engine_request {
+            if let Ok(atom) = atom_result_rx.try_recv() {
+                if !self.on_atom_ready(atom).await {
+                    hb_instant = self.heartbeat_interval.map(|d| Instant::now() + d);
+                }
+            }
+
+            if let Ok(req) = request_rx.try_recv() {
                 if self.handle_engine_request(req).await {
                     break;
                 }
             }
 
-            if hb_tick {
-                let handle = self.graph.create_atom(None);
-                let tx = self.atom_result_tx.clone();
-                tokio::spawn(async move {
-                    let atom = handle.await.expect("Atom creation failed");
-                    if let Err(e) = tx.send(atom).await {
-                        log::error!("Failed to send atom result: {e}");
-                    }
-                });
+            if let Some(instant) = hb_instant {
+                if Instant::now() >= instant {
+                    let handle = self.graph.create_atom(None);
+                    let tx = self.atom_result_tx.clone();
+
+                    tokio::spawn(async move {
+                        let atom = handle.await.expect("Atom creation failed");
+                        if let Err(e) = tx.send(atom).await {
+                            log::error!("Failed to send atom result: {e}");
+                        }
+                    });
+
+                    hb_instant = Some(Instant::now() + self.heartbeat_interval.unwrap());
+                }
             }
+
+            tokio::task::yield_now().await;
         }
 
         log::info!("Engine stopped");
     }
 
-    async fn handle_engine_request(&mut self, request: EngineRequest<T>) -> bool {
-        match request {
-            EngineRequest::Propose {
-                code,
-                on_chain_inputs,
-                off_chain_inputs,
-                outputs,
-                response,
-            } => {
-                let result = self
-                    .propose(code, on_chain_inputs, off_chain_inputs, outputs)
-                    .await;
-                let _ = response.send(result);
-                false
-            }
-            EngineRequest::Tokens(tx) => {
-                let peer_id = self.transport.local_peer_id();
-                let tokens = self.graph.tokens(&peer_id).unwrap();
-                let _ = tx.send(tokens);
-                false
-            }
-            EngineRequest::Status(tx) => {
-                let status = self.graph.status();
-                let _ = tx.send(status);
-                false
-            }
-            EngineRequest::Stop(tx) => {
-                let _ = tx.send(());
-                true
-            }
-        }
-    }
-
-    async fn propose(
-        &mut self,
-        code: u8,
-        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
-        off_chain_inputs: Vec<T::OffChainInput>,
-        outputs: Vec<Token<T>>,
-    ) -> Result<(), graph::Error> {
-        let peer_id = self.transport.local_peer_id();
-        let cmd = self.graph.create_command(
-            &peer_id,
-            code,
-            on_chain_inputs,
-            off_chain_inputs,
-            outputs,
-        )?;
-        let handle = self.graph.create_atom(Some(cmd));
-
-        let tx = self.atom_result_tx.clone();
-
-        tokio::spawn(async move {
-            let atom = handle.await.expect("Atom creation failed");
-            if let Err(e) = tx.send(atom).await {
-                log::error!("Failed to send atom result: {e}");
-            }
-        });
-
-        Ok(())
-    }
-
-    async fn handle_gossip_message(&mut self, msg: gossipsub::Message) {
-        let Ok((atom, _)) = bincode::serde::decode_from_slice::<Atom<T>, _>(
-            msg.data.as_slice(),
-            bincode::config::standard(),
-        ) else {
-            log::trace!("Failed to decode atom from gossip message");
-
-            self.gossipsub
-                .report_validation_result(
-                    &msg.id,
-                    &msg.propagation_source,
-                    MessageAcceptance::Reject,
-                )
-                .await;
-            return;
-        };
-
-        self.on_recv_atom(atom, Some(msg.id), msg.propagation_source)
-            .await;
-    }
-
-    async fn on_recv_atom(&mut self, atom: Atom<T>, msg_id: Option<MessageId>, peer: PeerId) {
-        use bincode::{config, serde::encode_to_vec};
-
+    async fn on_recv_atom(&mut self, msg_id: Option<MessageId>, peer: PeerId, atom: Atom<T>) {
         for hash in atom.atoms.iter().chain(&[atom.hash(), atom.parent]) {
             self.pending_atoms
                 .entry(*hash)
@@ -721,12 +547,25 @@ impl<T: Config> Engine<T> {
         let result = self.graph.upsert(atom);
 
         for hash in result.accepted {
-            if let Some(infos) = self.pending_atoms.remove(&hash) {
-                for (msg_id, peer) in infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p))) {
-                    self.gossipsub
-                        .report_validation_result(&msg_id, &peer, MessageAcceptance::Accept)
-                        .await;
-                }
+            let hex = hash
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+
+            println!(
+                "Atom accepted: {hex}, height {}",
+                self.graph.get(&hash).unwrap().height
+            );
+
+            let Some(infos) = self.pending_atoms.remove(&hash) else {
+                continue;
+            };
+
+            for (msg_id, peer) in infos.into_iter().filter_map(|(id, p)| id.map(|id| (id, p))) {
+                self.transport
+                    .report(msg_id, peer, MessageAcceptance::Accept)
+                    .await;
             }
         }
 
@@ -739,30 +578,31 @@ impl<T: Config> Engine<T> {
 
             log::debug!("Atom dismissed: {hex}, reason: {reason:?}");
 
-            if let Some(infos) = self.pending_atoms.remove(&hash) {
-                for (msg_id, peer) in infos {
-                    if reason.is_ignore() {
-                        if let Some(msg_id) = msg_id {
-                            self.gossipsub
-                                .report_validation_result(&msg_id, &peer, MessageAcceptance::Ignore)
-                                .await;
-                        }
-                    } else {
-                        if let Some(msg_id) = msg_id {
-                            self.gossipsub
-                                .report_validation_result(&msg_id, &peer, MessageAcceptance::Reject)
-                                .await;
-                        }
-                        self.disconnect_peer(peer).await;
+            let Some(infos) = self.pending_atoms.remove(&hash) else {
+                continue;
+            };
+
+            for (msg_id, peer) in infos {
+                if reason.is_ignore() {
+                    if let Some(msg_id) = msg_id {
+                        self.transport
+                            .report(msg_id, peer, MessageAcceptance::Ignore)
+                            .await;
                     }
+                    continue;
+                }
+
+                if let Some(msg_id) = msg_id {
+                    self.transport
+                        .report(msg_id, peer, MessageAcceptance::Reject)
+                        .await;
                 }
             }
         }
 
         if !result.missing.is_empty() {
             let req = Request::Atoms(result.missing);
-            let msg = encode_to_vec(&req, config::standard()).unwrap();
-            self.request_response.send_request(peer, msg).await;
+            self.transport.send_request(req, peer).await;
         }
 
         self.on_finalized(&result.finalized);
@@ -796,54 +636,21 @@ impl<T: Config> Engine<T> {
         }
     }
 
-    async fn disconnect_peer(&self, source: PeerId) {
-        if let Err(e) = self.transport.disconnect(source).await {
-            log::error!("Failed to disconnect peer: {e}");
-        }
-    }
-
-    async fn on_recv_request_response(&mut self, msg: Message) {
-        use bincode::{config, serde::decode_from_slice};
-
-        match msg {
-            Message::Request {
-                peer,
-                request,
-                channel,
-            } => {
-                let Ok((req, _)) = decode_from_slice::<Request, _>(&request, config::standard())
-                else {
-                    log::warn!("Failed to decode request from {peer:?}");
-                    return;
-                };
-
-                match req {
-                    Request::Atoms(hashes) => {
-                        self.handle_atom_request(hashes, channel).await;
-                    }
-                    Request::Blocks(height) => {
-                        self.handle_blocks_request(height, channel).await;
-                    }
-                    Request::InitialState(peer_id) => {
-                        self.handle_initial_state_request(peer_id, channel).await;
-                    }
-                }
+    async fn on_recv_request(
+        &mut self,
+        peer: PeerId,
+        request: Request,
+        channel: ResponseChannel<Response<T>>,
+    ) {
+        match request {
+            Request::Atoms(hashes) => {
+                self.handle_atom_request(hashes, channel).await;
             }
-            Message::Response { peer, response } => {
-                let Ok((resp, _)) =
-                    decode_from_slice::<Response<T>, _>(&response, config::standard())
-                else {
-                    log::warn!("Failed to decode response from {peer:?}");
-                    return;
-                };
-
-                if let Response::Atoms(atoms) = resp {
-                    for atom in atoms {
-                        self.on_recv_atom(atom, None, peer).await;
-                    }
-                } else {
-                    log::warn!("Unexpected response type from {peer:?}");
-                }
+            Request::Blocks(height) => {
+                self.handle_blocks_request(height, channel).await;
+            }
+            Request::State => {
+                self.handle_state_request(peer, channel).await;
             }
         }
     }
@@ -851,30 +658,27 @@ impl<T: Config> Engine<T> {
     async fn handle_atom_request(
         &self,
         hashes: HashSet<Multihash>,
-        channel: ResponseChannel<Vec<u8>>,
+        channel: ResponseChannel<Response<T>>,
     ) {
         if hashes.is_empty() {
             return;
         }
 
-        let atoms: Vec<Atom<T>> = hashes
-            .iter()
-            .filter_map(|h| self.graph.get(h).cloned())
-            .collect();
+        let Some(atoms) = hashes.into_iter().try_fold(Vec::new(), |mut acc, hash| {
+            self.graph.get(&hash).map(|atom| {
+                acc.push(atom.clone());
+                acc
+            })
+        }) else {
+            return;
+        };
 
-        let response = Response::<T>::Atoms(atoms);
-        let data = bincode::serde::encode_to_vec(&response, bincode::config::standard()).unwrap();
-
-        if let Err(e) = self.request_response.send_response(channel, data).await {
-            log::error!("Failed to send atom response: {e}");
-        }
+        let resp = Response::<T>::Atoms(atoms);
+        self.transport.send_response(resp, channel).await;
     }
 
-    async fn handle_blocks_request(&self, height: u32, channel: ResponseChannel<Vec<u8>>) {
-        use bincode::{
-            config,
-            serde::{decode_from_slice, encode_to_vec},
-        };
+    async fn handle_blocks_request(&self, height: u32, channel: ResponseChannel<Response<T>>) {
+        use bincode::{config, serde::decode_from_slice};
 
         let Some(ref db) = self.db else {
             return;
@@ -884,10 +688,7 @@ impl<T: Config> Engine<T> {
 
         if height >= finalized_height {
             let resp = Response::<T>::AlreadyUpToDate;
-            let data = encode_to_vec(&resp, config::standard()).unwrap();
-            if let Err(e) = self.request_response.send_response(channel, data).await {
-                log::error!("Failed to send blocks response: {e}");
-            }
+            self.transport.send_response(resp, channel).await;
             return;
         }
 
@@ -921,23 +722,12 @@ impl<T: Config> Engine<T> {
             atoms.push(atom);
         }
 
-        let response = Response::<T>::Blocks(atoms);
-        let data = encode_to_vec(&response, config::standard()).unwrap();
-
-        if let Err(e) = self.request_response.send_response(channel, data).await {
-            log::error!("Failed to send blocks response: {e}");
-        }
+        let resp = Response::<T>::Blocks(atoms);
+        self.transport.send_response(resp, channel).await;
     }
 
-    async fn handle_initial_state_request(
-        &self,
-        peer_id: PeerId,
-        channel: ResponseChannel<Vec<u8>>,
-    ) {
-        use bincode::{
-            config,
-            serde::{decode_from_slice, encode_to_vec},
-        };
+    async fn handle_state_request(&self, peer_id: PeerId, channel: ResponseChannel<Response<T>>) {
+        use bincode::{config, serde::decode_from_slice};
 
         if !matches!(self.node_type, NodeType::Archive) {
             return;
@@ -947,11 +737,9 @@ impl<T: Config> Engine<T> {
         let start_height = finalized_height.saturating_sub(T::MAINTENANCE_WINDOW);
 
         if start_height == 0 {
-            let resp = Response::<T>::AlreadyUpToDate;
-            let data = encode_to_vec(&resp, config::standard()).unwrap();
-            if let Err(e) = self.request_response.send_response(channel, data).await {
-                log::error!("Failed to send initial state response: {e}");
-            }
+            let resp = Response::AlreadyUpToDate;
+            self.transport.send_response(resp, channel).await;
+            log::debug!("Sent already up-to-date response to {}", peer_id);
             return;
         }
 
@@ -973,29 +761,91 @@ impl<T: Config> Engine<T> {
         };
 
         let proofs = self.graph.tokens_and_proof(&peer_id).unwrap_or_default();
-        let response = Response::InitialState(Box::new((atom, proofs)));
-        let data = encode_to_vec(&response, config::standard()).unwrap();
+        let resp = Response::State(Box::new((atom, proofs)));
+        self.transport.send_response(resp, channel).await;
+        log::debug!("Sent state response to {}", peer_id);
+    }
 
-        if let Err(e) = self.request_response.send_response(channel, data).await {
-            log::error!("Failed to send initial state response: {e}");
+    async fn on_recv_response(&mut self, peer: PeerId, response: Response<T>) {
+        let Response::Atoms(atoms) = response else {
+            return;
+        };
+
+        for atom in atoms {
+            self.on_recv_atom(None, peer, atom).await;
         }
     }
 
-    async fn on_atom_ready(&mut self, atom: Atom<T>) -> bool {
-        use bincode::{config, serde::encode_to_vec};
+    async fn handle_engine_request(&mut self, request: EngineRequest<T>) -> bool {
+        match request {
+            EngineRequest::Propose {
+                code,
+                on_chain_inputs,
+                off_chain_inputs,
+                outputs,
+                response,
+            } => {
+                let result = self
+                    .propose(code, on_chain_inputs, off_chain_inputs, outputs)
+                    .await;
+                let _ = response.send(result);
+                false
+            }
+            EngineRequest::Tokens(tx) => {
+                let tokens = self.graph.tokens(&self.transport.peer_id).unwrap();
+                let _ = tx.send(tokens);
+                false
+            }
+            EngineRequest::Status(tx) => {
+                let status = self.graph.status();
+                let _ = tx.send(status);
+                false
+            }
+            EngineRequest::Stop(tx) => {
+                let _ = tx.send(());
+                true
+            }
+        }
+    }
 
-        let vec = encode_to_vec(&atom, config::standard()).unwrap();
+    async fn propose(
+        &mut self,
+        code: u8,
+        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
+        off_chain_inputs: Vec<T::OffChainInput>,
+        outputs: Vec<Token<T>>,
+    ) -> Result<(), graph::Error> {
+        let cmd = self.graph.create_command(
+            &self.transport.peer_id,
+            code,
+            on_chain_inputs,
+            off_chain_inputs,
+            outputs,
+        )?;
+
+        let handle = self.graph.create_atom(Some(cmd));
+        let tx = self.atom_result_tx.clone();
+
+        tokio::spawn(async move {
+            let atom = handle.await.expect("Atom creation failed");
+            if let Err(e) = tx.send(atom).await {
+                log::error!("Failed to send atom result: {e}");
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn on_atom_ready(&mut self, atom: Atom<T>) -> bool {
+        let hash = atom.hash();
         let result = self.graph.upsert(atom);
 
-        if !result.dismissed.is_empty() {
+        if !result.dismissed.is_empty() || !result.missing.is_empty() {
             return false;
         }
 
-        if let Err(e) = self.gossipsub.publish(self.gossip_topic, vec).await {
-            log::error!("Failed to publish atom: {e}");
-            return false;
-        }
-
+        let atom = self.graph.get(&hash).expect("Finalized atom should exist");
+        self.transport.publish(atom.clone()).await;
         self.on_finalized(&result.finalized);
 
         true

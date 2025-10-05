@@ -1,250 +1,297 @@
-use std::{io, sync::Arc};
+use std::collections::HashSet;
 
+use derivative::Derivative;
 use futures::StreamExt;
 use libp2p::{
-    core::upgrade,
+    gossipsub::{IdentTopic, MessageAcceptance, MessageId},
     identity::Keypair,
     noise,
-    swarm::{self, SwarmEvent},
-    Multiaddr, PeerId, Swarm, Transport as _,
+    request_response::ResponseChannel,
+    swarm::SwarmEvent,
+    tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use tokio::{
-    sync::{Mutex, MutexGuard},
-    time::Duration,
+use serde::{Deserialize, Serialize};
+use tokio::{sync::mpsc, time::Duration};
+
+use crate::{
+    consensus::graph::Proofs,
+    crypto::Multihash,
+    network::{behaviour::Behaviour, transport::inner::Inner},
+    traits,
+    ty::Atom,
 };
 
-use crate::network::{
-    behaviour::{self, Behaviour},
-    gossipsub,
-    request_response::{self},
-    Gossipsub,
-};
-
-type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[derive(Debug)]
-#[derive(thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Dial(#[from] libp2p::swarm::DialError),
-
-    #[error(transparent)]
-    TransportIo(#[from] libp2p::TransportError<io::Error>),
-
-    #[error(transparent)]
-    Io(#[from] io::Error),
-
-    #[error(transparent)]
-    Timeout(#[from] tokio::time::error::Elapsed),
-
-    #[error("Lock contention")]
-    LockContention,
-
-    #[error(transparent)]
-    Behaviour(#[from] behaviour::Error),
-}
+mod inner;
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Default)]
 pub struct Config {
-    pub check_listen_timeout: Duration,
+    #[derivative(Default(value = "10000"))]
     pub channel_capacity: usize,
-    pub get_swarm_lock_timeout: Duration,
-    pub wait_for_gossipsub_peer_timeout: Duration,
-    pub wait_for_gossipsub_peer_interval: Duration,
-    pub wait_next_event_timeout: Duration,
-    pub receive_interval: Duration,
+
+    #[derivative(Default(value = "Duration::from_secs(10)"))]
+    pub listen_timeout: Duration,
+
+    #[derivative(Default(value = "Duration::from_secs(10)"))]
+    pub dial_timeout: Duration,
 }
 
-pub struct Transport {
-    swarm: Arc<Mutex<Swarm<Behaviour>>>,
-    gossipsub: Arc<Gossipsub>,
-    req_resp: Arc<request_response::RequestResponse>,
-    local_peer_id: PeerId,
-    keypair: Keypair,
-    listen_addr: Multiaddr,
-    config: Config,
+enum Command<T: traits::Config> {
+    Disconnect(PeerId),
+    Publish(Vec<u8>),
+    Report(MessageId, PeerId, MessageAcceptance),
+    SendRequest(Request, PeerId),
+    SendResponse(Response<T>, ResponseChannel<Response<T>>),
+    Stop,
 }
 
-impl Transport {
-    pub async fn new(keypair: Keypair, listen_addr: Multiaddr, config: Config) -> Result<Self> {
-        let transport = libp2p::tcp::tokio::Transport::default()
-            .upgrade(upgrade::Version::V1)
-            .authenticate(noise::Config::new(&keypair).expect("Failed to create Noise config"))
-            .multiplex(libp2p::yamux::Config::default())
-            .boxed();
+#[derive(Clone)]
+#[derive(Serialize, Deserialize)]
+pub enum Request {
+    Atoms(HashSet<Multihash>),
+    Blocks(u32),
+    State,
+}
 
-        let peer_id = keypair.public().to_peer_id();
-        let behaviour = Behaviour::new(keypair.clone(), peer_id)?;
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "T: traits::Config")]
+pub enum Response<T: traits::Config> {
+    Atoms(Vec<Atom<T>>),
+    Blocks(Vec<Atom<T>>),
+    State(Box<(Atom<T>, Proofs<T>)>),
+    AlreadyUpToDate,
+}
 
-        let swarm_config = swarm::Config::with_tokio_executor();
-        let mut swarm = Swarm::new(transport, behaviour, peer_id, swarm_config);
+pub enum Message<T: traits::Config> {
+    Gossipsub {
+        id: MessageId,
+        propagation_source: PeerId,
+        atom: Box<Atom<T>>,
+    },
+    Request {
+        peer: PeerId,
+        req: Request,
+        channel: ResponseChannel<Response<T>>,
+    },
+    Response {
+        peer: PeerId,
+        resp: Response<T>,
+    },
+}
 
-        let listen_addr =
-            Self::listen_on(&mut swarm, listen_addr, config.check_listen_timeout).await?;
+pub struct Transport<T: traits::Config> {
+    pub peer_id: PeerId,
+    pub addr: Multiaddr,
 
-        let swarm = Arc::new(Mutex::new(swarm));
+    tx: mpsc::Sender<Command<T>>,
+    rx: mpsc::Receiver<Message<T>>,
+}
 
-        let gossipsub_config = gossipsub::Config {
-            timeout: config.wait_for_gossipsub_peer_timeout,
-            channel_size: config.channel_capacity,
-        };
-        let gossipsub = Gossipsub::new(swarm.clone(), peer_id, gossipsub_config).await;
-        let gossipsub = Arc::new(gossipsub);
+impl Request {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap()
+    }
 
-        let req_resp = request_response::RequestResponse::new(swarm.clone());
-        let req_resp = Arc::new(req_resp);
+    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::serde::decode_from_slice(data, bincode::config::standard()).map(|(msg, _)| msg)
+    }
+}
 
-        let transport = Self {
-            swarm,
-            gossipsub,
-            req_resp,
-            local_peer_id: peer_id,
-            keypair,
-            listen_addr,
-            config,
-        };
+impl<T: traits::Config> Response<T> {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap()
+    }
 
-        transport.receive().await;
+    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::serde::decode_from_slice(data, bincode::config::standard()).map(|(msg, _)| msg)
+    }
+}
 
-        Ok(transport)
+impl<T: traits::Config> Message<T> {
+    pub fn gossipsub(id: MessageId, source: PeerId, atom: Atom<T>) -> Self {
+        Message::Gossipsub {
+            id,
+            propagation_source: source,
+            atom: Box::new(atom),
+        }
+    }
+
+    pub fn request(peer: PeerId, req: Request, channel: ResponseChannel<Response<T>>) -> Self {
+        Message::Request { peer, req, channel }
+    }
+
+    pub fn response(peer: PeerId, resp: Response<T>) -> Self {
+        Message::Response { peer, resp }
+    }
+}
+
+impl<T: traits::Config> Transport<T> {
+    pub async fn new(
+        keypair: Keypair,
+        listen_addr: Multiaddr,
+        bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+        config: Config,
+    ) -> Self {
+        let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .expect("Failed to create transport")
+            .with_behaviour(|key| Behaviour::new(key.clone()))
+            .expect("Failed to create swarm")
+            .build();
+
+        let addr = Self::listen_on(&mut swarm, listen_addr, config.listen_timeout).await;
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&IdentTopic::new(0u8.to_string()))
+            .unwrap();
+        Self::dial_peers(&mut swarm, bootstrap_peers, config.dial_timeout).await;
+
+        let peer_id = *swarm.local_peer_id();
+        let (cmd_tx, cmd_rx) = mpsc::channel(config.channel_capacity);
+        let (msg_tx, msg_rx) = mpsc::channel(config.channel_capacity);
+
+        Inner::spawn(swarm, cmd_rx, msg_tx);
+
+        Self {
+            peer_id,
+            addr,
+            tx: cmd_tx,
+            rx: msg_rx,
+        }
     }
 
     async fn listen_on(
-        swarm: &mut Swarm<Behaviour>,
+        swarm: &mut Swarm<Behaviour<T>>,
         addr: Multiaddr,
-        check_timeout: Duration,
-    ) -> Result<Multiaddr> {
-        swarm.listen_on(addr)?;
+        timeout: Duration,
+    ) -> Multiaddr {
+        swarm.listen_on(addr).expect("Failed to listen on address");
 
-        tokio::time::timeout(check_timeout, async {
+        tokio::time::timeout(timeout, async {
             loop {
                 match swarm.select_next_some().await {
-                    SwarmEvent::NewListenAddr { address, .. } => return Ok(address),
-                    SwarmEvent::ListenerError { error, .. } => {
-                        return Err(Error::from(error));
-                    }
+                    SwarmEvent::NewListenAddr { address, .. } => return address,
+                    SwarmEvent::ListenerError { error, .. } => panic!("Listener error: {error}"),
                     _ => continue,
                 }
             }
         })
         .await
-        .map_err(Error::from)
-        .and_then(|result| result)
+        .expect("Timeout waiting for listen address")
     }
 
-    async fn receive(&self) {
-        let swarm = self.swarm.clone();
-        let gossipsub = self.gossipsub.clone();
-        let req_resp = self.req_resp.clone();
-        let receive_interval = self.config.receive_interval;
+    async fn dial_peers(
+        swarm: &mut Swarm<Behaviour<T>>,
+        bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+        timeout: Duration,
+    ) -> bool {
+        if bootstrap_peers.is_empty() {
+            return true;
+        }
 
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    event = Self::next_behaviour_event(&swarm) => {
-                        match event {
-                            behaviour::Event::Gossipsub(event) => {
-                                if let Err(e) = gossipsub.handle_event(*event).await {
-                                    log::error!("Error handling gossipsub event: {e:?}");
-                                }
-                            },
-                            behaviour::Event::RequestResponse(event) => {
-                                if let Err(e) = req_resp.handle_event(*event).await {
-                                    log::error!("Error handling request response event: {e:?}");
-                                }
-                            },
-                            behaviour::Event::Kad(_) => {
-                                // Do nothing
-                            },
+        let mut peers = HashSet::new();
+
+        for (peer, addr) in bootstrap_peers {
+            swarm.behaviour_mut().kad.add_address(&peer, addr.clone());
+            swarm.dial(addr).expect("Failed to dial bootstrap peer");
+            peers.insert(peer);
+        }
+
+        let mut counter = 0;
+        let _ = tokio::time::timeout(timeout, async {
+            while !peers.is_empty() {
+                match swarm.select_next_some().await {
+                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                        if peers.remove(&peer_id) {
+                            counter += 1;
                         }
-                    },
-                    _ = async { tokio::time::sleep(receive_interval).await } => {},
+                    }
+                    SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                        if let Some(peer) = peer_id {
+                            if peers.remove(&peer) {
+                                log::error!("Failed to connect to bootstrap peer {peer}: {error}");
+                            }
+                        }
+                    }
+                    _ => continue,
                 }
             }
-        });
+        })
+        .await;
+
+        counter > 0
     }
 
-    async fn next_behaviour_event(swarm: &Arc<Mutex<Swarm<Behaviour>>>) -> behaviour::Event {
-        loop {
-            if let SwarmEvent::Behaviour(event) = swarm.lock().await.select_next_some().await {
-                return event;
-            }
-        }
+    pub async fn disconnect(&self, peer_id: PeerId) {
+        let _ = self.tx.send(Command::Disconnect(peer_id)).await;
     }
 
-    pub async fn swarm<'a>(&'a self) -> Result<MutexGuard<'a, Swarm<Behaviour>>> {
-        match tokio::time::timeout(self.config.get_swarm_lock_timeout, self.swarm.lock()).await {
-            Ok(guard) => Ok(guard),
-            Err(_) => Err(Error::LockContention),
-        }
+    pub async fn publish(&self, atom: Atom<T>) {
+        let _ = self.tx.send(Command::Publish(atom.to_bytes())).await;
     }
 
-    pub async fn dial(&self, peer_id: PeerId, addr: Multiaddr) -> Result<()> {
-        let mut swarm = self.swarm().await?;
-        swarm
-            .behaviour_mut()
-            .kad_mut()
-            .add_address(&peer_id, addr.clone());
-        swarm.add_peer_address(peer_id, addr.clone());
-        swarm.dial(addr)?;
-        Ok(())
+    pub async fn report(&self, msg_id: MessageId, peer_id: PeerId, acceptance: MessageAcceptance) {
+        let _ = self
+            .tx
+            .send(Command::Report(msg_id, peer_id, acceptance))
+            .await;
     }
 
-    pub fn local_peer_id(&self) -> PeerId {
-        self.local_peer_id
+    pub async fn send_request(&self, req: Request, peer: PeerId) {
+        let _ = self.tx.send(Command::SendRequest(req, peer)).await;
     }
 
-    pub fn listen_addr(&self) -> Multiaddr {
-        self.listen_addr.clone()
+    pub async fn send_response(&self, resp: Response<T>, channel: ResponseChannel<Response<T>>) {
+        let _ = self.tx.send(Command::SendResponse(resp, channel)).await;
     }
 
-    pub fn gossipsub(&self) -> Arc<Gossipsub> {
-        self.gossipsub.clone()
+    pub async fn stop(&self) {
+        let _ = self.tx.send(Command::Stop).await;
     }
 
-    pub fn request_response(&self) -> Arc<request_response::RequestResponse> {
-        self.req_resp.clone()
+    pub async fn recv(&mut self) -> Option<Message<T>> {
+        self.rx.recv().await
     }
 
-    pub async fn disconnect(&self, peer_id: PeerId) -> Result<()> {
-        let mut swarm = self.swarm().await?;
-        swarm.behaviour_mut().kad_mut().remove_peer(&peer_id);
-        let _ = swarm.disconnect_peer_id(peer_id);
-        Ok(())
-    }
-
-    pub fn keypair(&self) -> Keypair {
-        self.keypair.clone()
+    pub async fn try_recv(&mut self) -> Option<Message<T>> {
+        self.rx.try_recv().ok()
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        const DEFAULT_CHECK_LISTEN_TIMEOUT: Duration = Duration::from_millis(100);
-        const DEFAULT_CHANNEL_SIZE: usize = 1000;
-        const DEFAULT_GET_SWARM_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-        const DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_TIMEOUT: Duration = Duration::from_secs(10);
-        const DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_INTERVAL: Duration = Duration::from_millis(100);
-        const DEFAULT_WAIT_NEXT_EVENT_TIMEOUT: Duration = Duration::from_millis(10);
-        const DEFAULT_RECEIVE_INTERVAL: Duration = Duration::from_millis(100);
+use std::fmt;
 
-        let check_listen_timeout = DEFAULT_CHECK_LISTEN_TIMEOUT;
-        let channel_capacity = DEFAULT_CHANNEL_SIZE;
-        let get_swarm_lock_timeout = DEFAULT_GET_SWARM_LOCK_TIMEOUT;
-        let wait_for_gossipsub_peer_timeout = DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_TIMEOUT;
-        let wait_for_gossipsub_peer_interval = DEFAULT_WAIT_FOR_GOSSIPSUB_PEER_INTERVAL;
-        let wait_next_event_timeout = DEFAULT_WAIT_NEXT_EVENT_TIMEOUT;
-        let receive_interval = DEFAULT_RECEIVE_INTERVAL;
-
-        Self {
-            check_listen_timeout,
-            channel_capacity,
-            get_swarm_lock_timeout,
-            wait_for_gossipsub_peer_timeout,
-            wait_for_gossipsub_peer_interval,
-            wait_next_event_timeout,
-            receive_interval,
+impl fmt::Display for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Request::Atoms(hashes) => {
+                write!(f, "Atoms({{")?;
+                let mut first = true;
+                for hash in hashes {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    let bytes = hash.to_bytes();
+                    for byte in bytes {
+                        write!(f, "{:02x}", byte)?;
+                    }
+                }
+                write!(f, "}}")
+            }
+            Request::Blocks(num) => {
+                write!(f, "Blocks({})", num)
+            }
+            Request::State => {
+                write!(f, "State")
+            }
         }
     }
 }

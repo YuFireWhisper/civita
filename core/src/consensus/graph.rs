@@ -6,6 +6,7 @@ use std::{
 use derivative::Derivative;
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     crypto::Multihash,
@@ -51,7 +52,9 @@ pub enum Error {
     PeerNotTracked,
 }
 
+#[derive(Debug)]
 #[derive(Clone, Copy)]
+#[derive(Serialize, Deserialize)]
 pub struct Status {
     pub main_head: Multihash,
     pub main_height: Height,
@@ -507,6 +510,16 @@ impl<T: Config> Graph<T> {
         debug_assert_eq!(
             self.entries[&new_finalized].atom.parent, self.finalized,
             "New finalized block's parent must be the current finalized block"
+        );
+
+        log::info!(
+            "Finalized block at height {}: {}",
+            target_finalized_height,
+            new_finalized
+                .digest()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
         );
 
         self.apply_block_to_mmr(new_finalized);
