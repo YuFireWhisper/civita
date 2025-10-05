@@ -12,7 +12,7 @@ use crate::{
     crypto::Multihash,
     traits::{Config, ScriptPubKey},
     ty::{
-        atom::{Atom, AtomBuilder, Height},
+        atom::{Atom, Height},
         Command, Input, Token,
     },
     utils::mmr::{Mmr, MmrProof},
@@ -758,16 +758,17 @@ impl<T: Config> Graph<T> {
             .and_then(|e| (!e.is_missing).then_some(&e.atom))
     }
 
-    pub fn create_atom(&self, cmd: Option<Command<T>>) -> tokio::task::JoinHandle<Atom<T>> {
-        let parent_entry = &self.entries[&self.main_head];
-
-        let height = parent_entry.atom.height + 1;
-        let peaks = self.mmr.peak_hashes();
-
-        AtomBuilder::new(self.main_head, height, self.difficulty, peaks)
+    /// Returns a unsolved atom
+    pub fn create_atom(&self, cmd: Option<Command<T>>) -> Atom<T> {
+        Atom::default()
+            .with_parent(self.main_head)
+            .with_height(self.entries[&self.main_head].atom.height + 1)
+            .with_random(rand::random())
+            .with_timestamp_now()
+            .with_difficulty(self.difficulty)
+            .with_peaks(self.mmr.peak_hashes())
             .with_command(cmd)
             .with_atoms(self.get_children(self.main_head))
-            .build()
     }
 
     fn get_children(&self, h: Multihash) -> Vec<Multihash> {
@@ -1032,17 +1033,12 @@ mod tests {
             proofs.insert(id, (t, mmr.prove(idx).unwrap()));
         });
 
-        let atom = AtomBuilder::new(
-            Multihash::default(),
-            TestConfig::GENESIS_HEIGHT,
-            TestConfig::GENESIS_VAF_DIFFICULTY,
-            mmr.peak_hashes(),
-        )
-        .with_command(TestConfig::genesis_command())
-        .with_random(0)
-        .with_timestamp(0)
-        .with_nonce(vec![])
-        .build_sync();
+        let atom = Atom::default()
+            .with_parent(Multihash::default())
+            .with_height(TestConfig::GENESIS_HEIGHT)
+            .with_difficulty(TestConfig::GENESIS_VAF_DIFFICULTY)
+            .with_peaks(mmr.peak_hashes())
+            .with_command(TestConfig::genesis_command());
 
         (atom, proofs)
     }
@@ -1071,8 +1067,13 @@ mod tests {
         cmd.outputs.iter().enumerate().for_each(|(i, _)| {
             let mut buf = first_input.clone();
             encode_into_std_write(i as u32, &mut buf, config::standard()).unwrap();
-            let id = TestConfig::HASHER.digest(&buf);
-            mmr.append(id);
+            mmr.append(TestConfig::HASHER.digest(&buf));
+        });
+
+        cmd.inputs.iter().for_each(|input| {
+            if let Input::OnChain(_, id, proof, _) = input {
+                mmr.delete(*id, proof);
+            }
         });
 
         mmr.commit();
@@ -1102,13 +1103,12 @@ mod tests {
         let peaks = atom.peaks.clone();
         let mut graph = Graph::new(atom, None);
 
-        let atom = AtomBuilder::new(
-            graph.main_head,
-            TestConfig::GENESIS_HEIGHT + 1,
-            graph.difficulty,
-            graph.mmr.peak_hashes(),
-        )
-        .build_sync();
+        let atom = Atom::default()
+            .with_parent(graph.main_head)
+            .with_height(TestConfig::GENESIS_HEIGHT + 1)
+            .with_difficulty(graph.difficulty)
+            .with_peaks(graph.mmr.peak_hashes())
+            .solve();
         let hash = atom.hash();
 
         let res = graph.upsert(atom);
@@ -1131,18 +1131,24 @@ mod tests {
         let mut graph = Graph::new(atom, None);
 
         let block_atom = {
-            let height = TestConfig::GENESIS_HEIGHT + 1;
-            let cmd = generate_command();
-            let normal = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
-                .with_command(Some(cmd))
-                .build_sync();
-            let hash = normal.hash();
+            let normal = Atom::default()
+                .with_parent(graph.main_head)
+                .with_height(TestConfig::GENESIS_HEIGHT + 1)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
+                .with_command(Some(generate_command()))
+                .solve();
 
+            let hash = normal.hash();
             let _ = graph.upsert(normal);
 
-            AtomBuilder::new(genesis_hash, height, graph.difficulty, peaks.clone())
+            Atom::default()
+                .with_parent(graph.main_head)
+                .with_height(TestConfig::GENESIS_HEIGHT + 1)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
                 .with_atoms(vec![hash])
-                .build_sync()
+                .solve()
         };
 
         let hash = block_atom.hash();
@@ -1164,39 +1170,51 @@ mod tests {
     #[test]
     fn finalized_advance() {
         let atom = genesis_atom().0;
-        let genesis_hash = atom.hash();
-        let peaks = atom.peaks.clone();
         let mut graph = Graph::new(atom, None);
 
         let block_atom1 = {
-            let height = TestConfig::GENESIS_HEIGHT + 1;
-            let cmd = generate_command();
-
-            let normal = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
-                .with_command(Some(cmd))
-                .build_sync();
+            let normal = Atom::default()
+                .with_parent(graph.main_head)
+                .with_height(TestConfig::GENESIS_HEIGHT + 1)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
+                .with_command(Some(generate_command()))
+                .solve();
 
             let hash = normal.hash();
             let _ = graph.upsert(normal);
 
-            AtomBuilder::new(genesis_hash, height, graph.difficulty, peaks.clone())
+            Atom::default()
+                .with_parent(graph.main_head)
+                .with_height(TestConfig::GENESIS_HEIGHT + 1)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
                 .with_atoms(vec![hash])
-                .build_sync()
+                .solve()
         };
         let hash1 = block_atom1.hash();
 
         let block_atom2 = {
-            let height = TestConfig::GENESIS_HEIGHT + 2;
-            let normal =
-                AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone()).build_sync();
-            let block = AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone())
-                .with_atoms(vec![normal.hash()])
-                .build_sync();
-            let _ = graph.upsert(normal);
-            block
-        };
-        let hash2 = block_atom2.hash();
+            let normal = Atom::default()
+                .with_parent(hash1)
+                .with_height(TestConfig::GENESIS_HEIGHT + 2)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
+                .solve();
 
+            let hash = normal.hash();
+            let _ = graph.upsert(normal);
+
+            Atom::default()
+                .with_parent(hash1)
+                .with_height(TestConfig::GENESIS_HEIGHT + 2)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
+                .with_atoms(vec![hash])
+                .solve()
+        };
+
+        let hash2 = block_atom2.hash();
         let _ = graph.upsert(block_atom1);
         let res = graph.upsert(block_atom2);
 
@@ -1214,33 +1232,52 @@ mod tests {
     #[test]
     fn get_tokens() {
         let atom = genesis_atom().0;
-        let peaks = atom.peaks.clone();
         let mut graph = Graph::new(atom, None);
 
         let hash1 = {
-            let height = TestConfig::GENESIS_HEIGHT + 1;
-            let cmd = generate_command();
-            let normal = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
-                .with_command(Some(cmd))
-                .build_sync();
-            let block = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
+            let normal = Atom::default()
+                .with_parent(graph.main_head)
+                .with_height(TestConfig::GENESIS_HEIGHT + 1)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
+                .with_command(Some(generate_command()))
+                .solve();
+
+            let block = Atom::default()
+                .with_parent(graph.main_head)
+                .with_height(TestConfig::GENESIS_HEIGHT + 1)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
                 .with_atoms(vec![normal.hash()])
-                .build_sync();
+                .solve();
+
             let hash = block.hash();
             let _ = graph.upsert(normal);
             let _ = graph.upsert(block);
+
             hash
         };
 
         {
-            let height = TestConfig::GENESIS_HEIGHT + 2;
-            let normal =
-                AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone()).build_sync();
-            let block = AtomBuilder::new(hash1, height, graph.difficulty, peaks.clone())
-                .with_atoms(vec![normal.hash()])
-                .build_sync();
+            let normal = Atom::default()
+                .with_parent(hash1)
+                .with_height(TestConfig::GENESIS_HEIGHT + 2)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
+                .solve();
+
+            let hash = normal.hash();
             let _ = graph.upsert(normal);
-            let _ = graph.upsert(block);
+
+            let block_atom = Atom::default()
+                .with_parent(hash1)
+                .with_height(TestConfig::GENESIS_HEIGHT + 2)
+                .with_difficulty(graph.difficulty)
+                .with_peaks(graph.mmr.peak_hashes())
+                .with_atoms(vec![hash])
+                .solve();
+
+            let _ = graph.upsert(block_atom);
         }
 
         let peer1_tokens = graph.tokens(&PeerId::from_bytes(&PEER1).unwrap()).unwrap();
@@ -1250,16 +1287,26 @@ mod tests {
         assert_eq!(peer2_tokens.len(), 1);
     }
 
-    #[tokio::test]
-    async fn create_atom_will_contain_other_normal_atoms() {
+    #[test]
+    fn create_atom_will_contain_other_normal_atoms() {
         let atom = genesis_atom().0;
         let peaks = atom.peaks.clone();
         let mut graph = Graph::new(atom, None);
 
-        let height = TestConfig::GENESIS_HEIGHT + 1;
-        let atom1 =
-            AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone()).build_sync();
-        let atom2 = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks).build_sync();
+        let atom1 = Atom::default()
+            .with_parent(graph.main_head)
+            .with_height(TestConfig::GENESIS_HEIGHT + 1)
+            .with_difficulty(graph.difficulty)
+            .with_peaks(peaks.clone())
+            .solve();
+
+        let atom2 = Atom::default()
+            .with_parent(graph.main_head)
+            .with_height(TestConfig::GENESIS_HEIGHT + 1)
+            .with_random(rand::random())
+            .with_difficulty(graph.difficulty)
+            .with_peaks(peaks.clone())
+            .solve();
 
         let hash1 = atom1.hash();
         let hash2 = atom2.hash();
@@ -1267,10 +1314,10 @@ mod tests {
         let _ = graph.upsert(atom1);
         let _ = graph.upsert(atom2);
 
-        let atom3 = graph.create_atom(None).await.unwrap();
+        let atom3 = graph.create_atom(None).solve();
 
         assert_eq!(atom3.parent, graph.main_head);
-        assert_eq!(atom3.height, height);
+        assert_eq!(atom3.height, TestConfig::GENESIS_HEIGHT + 1);
         assert_eq!(atom3.atoms.len(), 2);
         assert!(atom3.atoms.contains(&hash1));
         assert!(atom3.atoms.contains(&hash2));
@@ -1285,28 +1332,35 @@ mod tests {
         assert_eq!(graph.main_head, hash);
     }
 
-    #[tokio::test]
-    async fn will_not_include_conflicting_atoms() {
+    #[test]
+    fn will_not_include_conflicting_atoms() {
         let atom = genesis_atom().0;
         let peaks = atom.peaks.clone();
         let mut graph = Graph::new(atom, None);
 
-        let height = TestConfig::GENESIS_HEIGHT + 1;
-        let cmd = generate_command();
+        let atom1 = Atom::default()
+            .with_parent(graph.main_head)
+            .with_height(TestConfig::GENESIS_HEIGHT + 1)
+            .with_difficulty(graph.difficulty)
+            .with_peaks(peaks.clone())
+            .with_command(Some(generate_command()))
+            .solve();
 
-        let atom1 = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks.clone())
-            .with_command(Some(cmd.clone()))
-            .build_sync();
-        let atom2 = AtomBuilder::new(graph.main_head, height, graph.difficulty, peaks)
-            .with_command(Some(cmd))
-            .build_sync();
+        let atom2 = Atom::default()
+            .with_parent(graph.main_head)
+            .with_height(TestConfig::GENESIS_HEIGHT + 1)
+            .with_random(rand::random())
+            .with_difficulty(graph.difficulty)
+            .with_peaks(peaks.clone())
+            .with_command(Some(generate_command()))
+            .solve();
 
         let hash1 = atom1.hash();
 
         let _ = graph.upsert(atom1);
         let _ = graph.upsert(atom2);
 
-        let atom3 = graph.create_atom(None).await.unwrap();
+        let atom3 = graph.create_atom(None).solve();
 
         // If two atoms contain conflicting commands, only the first one will be included
         assert_eq!(atom3.atoms.len(), 1);

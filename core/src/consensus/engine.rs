@@ -13,8 +13,7 @@ use tokio::{
         mpsc::{self, Receiver, Sender},
         oneshot,
     },
-    task::JoinHandle,
-    time::Instant,
+    task::{JoinHandle, JoinSet},
 };
 
 use crate::{
@@ -106,7 +105,7 @@ pub struct Engine<T: Config> {
     transport: Transport<T>,
     graph: Graph<T>,
     pending_atoms: HashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
-    atom_result_tx: Sender<Atom<T>>,
+    task_set: JoinSet<Atom<T>>,
     heartbeat_interval: Option<tokio::time::Duration>,
     db: Option<DB>,
     node_type: NodeType,
@@ -162,8 +161,6 @@ impl<T: Config> Engine<T> {
         heartbeat_interval: Option<tokio::time::Duration>,
         bootstrap: Option<BootstrapConfig>,
     ) -> Result<Handle<T>> {
-        let (atom_result_tx, atom_result_rx) = tokio::sync::mpsc::channel(100);
-
         let (graph, db, node_type) = if let Some(bootstrap_config) = bootstrap {
             if bootstrap_config.peers.is_empty() {
                 return Err(Error::NoBootstrapPeers);
@@ -184,19 +181,17 @@ impl<T: Config> Engine<T> {
             transport,
             graph,
             pending_atoms: HashMap::new(),
-            atom_result_tx,
+            task_set: JoinSet::new(),
             heartbeat_interval,
             db,
             node_type,
         };
 
-        let (request_tx, request_rx) = mpsc::channel(1000);
+        let (req_tx, req_rx) = mpsc::channel(1000);
 
-        tokio::spawn(async move {
-            engine.run(atom_result_rx, request_rx).await;
-        });
+        tokio::spawn(engine.run(req_rx));
 
-        Ok(Handle(request_tx))
+        Ok(Handle(req_tx))
     }
 
     fn create_genesis_mmr() -> (Mmr, Proofs<T>) {
@@ -230,20 +225,12 @@ impl<T: Config> Engine<T> {
     }
 
     fn create_genesis_atom(peaks: Vec<(u64, Multihash)>) -> Atom<T> {
-        use crate::ty::atom::AtomBuilder;
-
-        let genesis_hash = Multihash::default();
-        AtomBuilder::new(
-            genesis_hash,
-            T::GENESIS_HEIGHT,
-            T::GENESIS_VAF_DIFFICULTY,
-            peaks,
-        )
-        .with_command(T::genesis_command())
-        .with_random(0)
-        .with_nonce(vec![])
-        .with_timestamp(0)
-        .build_sync()
+        Atom::default()
+            .with_parent(Multihash::default())
+            .with_height(T::GENESIS_HEIGHT)
+            .with_difficulty(T::GENESIS_VAF_DIFFICULTY)
+            .with_peaks(peaks)
+            .with_command(T::genesis_command())
     }
 
     fn open_db(dir: &str) -> Result<DB> {
@@ -474,59 +461,44 @@ impl<T: Config> Engine<T> {
         panic!("channel closed");
     }
 
-    async fn run(
-        mut self,
-        mut atom_result_rx: Receiver<Atom<T>>,
-        mut request_rx: Receiver<EngineRequest<T>>,
-    ) {
+    async fn run(mut self, mut request_rx: Receiver<EngineRequest<T>>) {
         log::info!("Engine started");
 
-        let mut hb_instant = self.heartbeat_interval.map(|d| Instant::now() + d);
+        let mut hb_interval = self
+            .heartbeat_interval
+            .map(|d| tokio::time::interval(d))
+            .unwrap_or(tokio::time::interval(tokio::time::Duration::MAX));
 
         loop {
-            if let Some(msg) = self.transport.try_recv().await {
-                match msg {
-                    Message::Gossipsub {
-                        id,
-                        propagation_source,
-                        atom,
-                    } => {
-                        self.on_recv_atom(Some(id), propagation_source, *atom).await;
-                    }
-                    Message::Request { peer, req, channel } => {
-                        self.on_recv_request(peer, req, channel).await;
-                    }
-                    Message::Response { peer, resp } => {
-                        self.on_recv_response(peer, resp).await;
-                    }
-                }
-            }
-
-            if let Ok(atom) = atom_result_rx.try_recv() {
-                if !self.on_atom_ready(atom).await {
-                    hb_instant = self.heartbeat_interval.map(|d| Instant::now() + d);
-                }
-            }
-
-            if let Ok(req) = request_rx.try_recv() {
-                if self.handle_engine_request(req).await {
-                    break;
-                }
-            }
-
-            if let Some(instant) = hb_instant {
-                if Instant::now() >= instant {
-                    let handle = self.graph.create_atom(None);
-                    let tx = self.atom_result_tx.clone();
-
-                    tokio::spawn(async move {
-                        let atom = handle.await.expect("Atom creation failed");
-                        if let Err(e) = tx.send(atom).await {
-                            log::error!("Failed to send atom result: {e}");
+            tokio::select! {
+                Some(msg) = self.transport.recv() => {
+                    match msg {
+                        Message::Gossipsub { id, propagation_source, atom } => {
+                            self.on_recv_atom(Some(id), propagation_source, *atom).await;
                         }
-                    });
-
-                    hb_instant = Some(Instant::now() + self.heartbeat_interval.unwrap());
+                        Message::Request { peer, req, channel } => {
+                            self.on_recv_request(peer, req, channel).await;
+                        }
+                        Message::Response { peer, resp } => {
+                            self.on_recv_response(peer, resp).await;
+                        }
+                    }
+                }
+                Some(req) = request_rx.recv() => {
+                    if self.handle_engine_request(req).await {
+                        break;
+                    }
+                }
+                Some(Ok(atom)) = self.task_set.join_next() => {
+                    if !self.on_atom_ready(atom).await {
+                        let atom = self.graph.create_atom(None);
+                        self.task_set.spawn_blocking(|| atom.solve());
+                        hb_interval.reset();
+                    }
+                }
+                _ = hb_interval.tick() => {
+                    let atom = self.graph.create_atom(None);
+                    self.task_set.spawn_blocking(|| atom.solve());
                 }
             }
 
@@ -823,15 +795,8 @@ impl<T: Config> Engine<T> {
             outputs,
         )?;
 
-        let handle = self.graph.create_atom(Some(cmd));
-        let tx = self.atom_result_tx.clone();
-
-        tokio::spawn(async move {
-            let atom = handle.await.expect("Atom creation failed");
-            if let Err(e) = tx.send(atom).await {
-                log::error!("Failed to send atom result: {e}");
-            }
-        });
+        let atom = self.graph.create_atom(Some(cmd));
+        self.task_set.spawn_blocking(|| atom.solve());
 
         Ok(())
     }
