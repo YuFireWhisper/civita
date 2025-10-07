@@ -255,10 +255,7 @@ impl<T: Config> Engine<T> {
             }
         })
         .await
-        .map_err(|_| {
-            println!("Bootstrap timed out, peer: {}", transport.peer_id);
-            Error::BootstrapTimeout
-        })
+        .map_err(|_| Error::BootstrapTimeout)
         .and_then(|res| res)
     }
 
@@ -376,7 +373,6 @@ impl<T: Config> Engine<T> {
             };
 
             if let Response::AlreadyUpToDate = resp {
-                println!("Peer is already up-to-date");
                 return Vec::new();
             }
 
@@ -418,7 +414,6 @@ impl<T: Config> Engine<T> {
             let atoms = Self::recv_blocks_response(transport).await;
 
             if atoms.is_empty() {
-                println!("Bootstrap completed at height {}", current_height);
                 break;
             }
 
@@ -438,14 +433,11 @@ impl<T: Config> Engine<T> {
 
     async fn recv_state_response(transport: &mut Transport<T>) -> (Atom<T>, Proofs<T>) {
         while let Some(msg) = transport.recv().await {
-            println!("Received message during state bootstrap");
-
             let Message::Response { resp, .. } = msg else {
                 continue;
             };
 
             if let Response::AlreadyUpToDate = resp {
-                println!("Peer is already up-to-date, using genesis state");
                 let (mmr, proofs) = Self::create_genesis_mmr();
                 let atom = Self::create_genesis_atom(mmr.peak_hashes());
                 return (atom, proofs);
@@ -519,17 +511,6 @@ impl<T: Config> Engine<T> {
         let result = self.graph.upsert(atom);
 
         for hash in result.accepted {
-            let hex = hash
-                .to_bytes()
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>();
-
-            println!(
-                "Atom accepted: {hex}, height {}",
-                self.graph.get(&hash).unwrap().height
-            );
-
             let Some(infos) = self.pending_atoms.remove(&hash) else {
                 continue;
             };
@@ -542,12 +523,7 @@ impl<T: Config> Engine<T> {
         }
 
         for (hash, reason) in result.dismissed {
-            let hex = hash
-                .to_bytes()
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>();
-
+            let hex = hex::encode(hash.to_bytes());
             log::debug!("Atom dismissed: {hex}, reason: {reason:?}");
 
             let Some(infos) = self.pending_atoms.remove(&hash) else {
@@ -583,12 +559,24 @@ impl<T: Config> Engine<T> {
     fn on_finalized(&self, hashes: &[Multihash]) {
         use bincode::{config, serde::encode_to_vec};
 
-        let Some(ref db) = self.db else {
+        if hashes.is_empty() {
             return;
-        };
+        }
+
+        // let Some(ref db) = self.db else {
+        //     return;
+        // };
 
         for hash in hashes {
+            let hex = hex::encode(hash.to_bytes());
             let atom = self.graph.get(hash).expect("Finalized atom should exist");
+
+            log::info!("Atom finalized: {hex}, height {}", atom.height);
+
+            let Some(ref db) = self.db else {
+                continue;
+            };
+
             let key = atom.height.to_be_bytes();
             let value = encode_to_vec(atom, config::standard()).unwrap();
             if let Err(e) = db.put(key, value) {
@@ -678,8 +666,11 @@ impl<T: Config> Engine<T> {
             };
 
             for hash in &atom.atoms {
-                let Ok(Some(data)) = db.get(hash.to_bytes()) else {
-                    log::warn!("Missing atom {hash:?} at height {h}");
+                let bytes = hash.to_bytes();
+
+                let Ok(Some(data)) = db.get(&bytes) else {
+                    let hex = hex::encode(bytes);
+                    log::warn!("Missing atom {hex} at height {h}");
                     return;
                 };
 
@@ -711,7 +702,6 @@ impl<T: Config> Engine<T> {
         if start_height == 0 {
             let resp = Response::AlreadyUpToDate;
             self.transport.send_response(resp, channel).await;
-            log::debug!("Sent already up-to-date response to {}", peer_id);
             return;
         }
 
@@ -735,7 +725,6 @@ impl<T: Config> Engine<T> {
         let proofs = self.graph.tokens_and_proof(&peer_id).unwrap_or_default();
         let resp = Response::State(Box::new((atom, proofs)));
         self.transport.send_response(resp, channel).await;
-        log::debug!("Sent state response to {}", peer_id);
     }
 
     async fn on_recv_response(&mut self, peer: PeerId, response: Response<T>) {
@@ -807,6 +796,12 @@ impl<T: Config> Engine<T> {
 
         if !result.dismissed.is_empty() || !result.missing.is_empty() {
             return false;
+        }
+
+        if !result.finalized.is_empty() {
+            let hex = hex::encode(hash.to_bytes());
+            let height = self.graph.get(&hash).unwrap().height;
+            log::info!("Atom finalized: {hex}, height {height}");
         }
 
         let atom = self.graph.get(&hash).expect("Finalized atom should exist");
