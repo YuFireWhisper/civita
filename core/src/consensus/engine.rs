@@ -823,3 +823,12 @@ impl<T: Config> Clone for Handle<T> {
         Self(self.0.clone())
     }
 }
+
+impl<T: Config> Drop for Handle<T> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .clone()
+            .try_send(EngineRequest::Stop(oneshot::channel().0));
+    }
+}
