@@ -512,16 +512,6 @@ impl<T: Config> Graph<T> {
             "New finalized block's parent must be the current finalized block"
         );
 
-        log::info!(
-            "Finalized block at height {}: {}",
-            target_finalized_height,
-            new_finalized
-                .digest()
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>()
-        );
-
         self.apply_block_to_mmr(new_finalized);
 
         self.finalized_blocks.push_back(new_finalized);
