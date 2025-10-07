@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use bincode::error::DecodeError;
 use libp2p::{
@@ -815,6 +818,15 @@ impl<T: Config> Engine<T> {
 impl From<rocksdb::Error> for Error {
     fn from(value: rocksdb::Error) -> Self {
         Error::Storage(StorageError::Rocksdb(value))
+    }
+}
+
+impl fmt::Display for NodeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeType::Archive => write!(f, "Archive"),
+            NodeType::Regular => write!(f, "Regular"),
+        }
     }
 }
 
