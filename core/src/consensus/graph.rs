@@ -452,7 +452,9 @@ impl<T: Config> Graph<T> {
         };
 
         while cur != self.finalized {
-            let entry = self.entries.get_mut(&cur).unwrap();
+            let Some(entry) = self.entries.get_mut(&cur) else {
+                break;
+            };
             entry.cmd_children.extend(cmds.iter().copied());
             cur = entry.atom.parent;
         }
