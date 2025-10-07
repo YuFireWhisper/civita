@@ -40,7 +40,7 @@ pub enum Error {
 #[derivative(Default)]
 pub struct Config {
     // Engine config
-    #[derivative(Default(value = "Some(tokio::time::Duration::from_mins(5))"))]
+    #[derivative(Default(value = "Some(tokio::time::Duration::from_secs(5 * 60))"))]
     pub heartbeat_interval: Option<tokio::time::Duration>,
 
     // Transport config
