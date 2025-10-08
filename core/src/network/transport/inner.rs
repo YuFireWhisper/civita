@@ -112,12 +112,12 @@ impl<T: traits::Config> Inner<T> {
                 libp2p::request_response::Message::Request {
                     request, channel, ..
                 } => {
-                    println!("Received request from {peer}");
+                    log::debug!("Received request from {peer}: {request}");
                     let msg = Message::request(peer, request, channel);
                     let _ = self.tx.send(msg).await;
                 }
                 libp2p::request_response::Message::Response { response, .. } => {
-                    println!("Received response from {peer}");
+                    log::debug!("Received response from {peer}: {response}");
                     let msg = Message::response(peer, response);
                     let _ = self.tx.send(msg).await;
                 }
@@ -130,9 +130,7 @@ impl<T: traits::Config> Inner<T> {
             }
             request_response::Event::ResponseSent { peer, .. } => {
                 log::info!("Response sent to {peer}");
-            } // _ => {
-              //     // Handle other request-response events if necessary
-              // }
+            }
         }
     }
 
