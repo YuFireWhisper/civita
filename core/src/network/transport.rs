@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use derivative::Derivative;
 use futures::StreamExt;
@@ -266,31 +266,47 @@ impl<T: traits::Config> Transport<T> {
     }
 }
 
-use std::fmt;
-
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Request::Atoms(hashes) => {
-                write!(f, "Atoms({{")?;
-                let mut first = true;
-                for hash in hashes {
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    first = false;
-                    let bytes = hash.to_bytes();
-                    for byte in bytes {
-                        write!(f, "{:02x}", byte)?;
-                    }
-                }
-                write!(f, "}}")
+                writeln!(f, "Atom:")?;
+                writeln!(f, "   count: {}", hashes.len())
             }
             Request::Blocks(num) => {
-                write!(f, "Blocks({})", num)
+                writeln!(f, "Blocks:")?;
+                writeln!(f, "   last height: {}", num)
             }
             Request::State => {
                 write!(f, "State")
+            }
+        }
+    }
+}
+
+impl<T: traits::Config> fmt::Display for Response<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Response::Atoms(atoms) => {
+                writeln!(f, "Atoms:")?;
+                writeln!(f, "   count: {}", atoms.len())
+            }
+            Response::Blocks(blocks) => {
+                let heights: Vec<u32> = blocks.iter().map(|b| b.height).collect();
+                writeln!(f, "Blocks:")?;
+                writeln!(f, "   count: {}", blocks.len())?;
+                writeln!(f, "   heights: {:?}", heights)
+            }
+            Response::State(b) => {
+                let atom = &b.as_ref().0;
+                let hash_hex = hex::encode(atom.hash().to_bytes());
+                writeln!(f, "State:")?;
+                writeln!(f, "   atom hash: {}", hash_hex)?;
+                writeln!(f, "   atom height: {}", atom.height)?;
+                writeln!(f, "   aifficulty: {}", atom.difficulty)
+            }
+            Response::AlreadyUpToDate => {
+                write!(f, "AlreadyUpToDate")
             }
         }
     }
