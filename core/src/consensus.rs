@@ -1,4 +1,4 @@
 pub mod engine;
-pub mod graph;
+pub mod tree;
 
 pub use engine::Engine;

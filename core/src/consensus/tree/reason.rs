@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::ty::atom::Height;
+use crate::ty::atom::{Difficulty, Height};
 
 #[derive(Clone, Copy)]
 #[derive(Debug)]
@@ -27,17 +27,17 @@ pub enum IgnoreReason {
 #[derive(Debug)]
 pub enum InheritableRejectReason {
     SelfReference,
-    ParentInAtoms,
     InvalidNonce,
     InvalidHeight(Height, Height),
     BlockInAtoms,
-    MismatchDifficulty(u64, u64),
-    IncompleteAtomHistory,
+    MismatchDifficulty(Difficulty, Difficulty),
     EmptyInput,
     DoubleSpend,
     InvalidMmrProof,
     InvalidScriptSig,
     InvalidCommand,
+    InvalidAtomThreshold(usize, usize),
+    NonBlockParent,
 }
 
 #[derive(Clone, Copy)]
@@ -114,12 +114,6 @@ impl Reason {
         ))
     }
 
-    pub fn parent_in_atoms() -> Self {
-        Self::Rejected(RejectReason::Inheritalbe(
-            InheritableRejectReason::ParentInAtoms,
-        ))
-    }
-
     pub fn invalid_nonce() -> Self {
         Self::Rejected(RejectReason::Inheritalbe(
             InheritableRejectReason::InvalidNonce,
@@ -138,15 +132,9 @@ impl Reason {
         ))
     }
 
-    pub fn mismatch_difficulty(expected: u64, actual: u64) -> Self {
+    pub fn mismatch_difficulty(expected: Difficulty, actual: Difficulty) -> Self {
         Self::Rejected(RejectReason::Inheritalbe(
             InheritableRejectReason::MismatchDifficulty(expected, actual),
-        ))
-    }
-
-    pub fn incomplete_atom_history() -> Self {
-        Self::Rejected(RejectReason::Inheritalbe(
-            InheritableRejectReason::IncompleteAtomHistory,
         ))
     }
 
@@ -177,6 +165,18 @@ impl Reason {
     pub fn invalid_command() -> Self {
         Self::Rejected(RejectReason::Inheritalbe(
             InheritableRejectReason::InvalidCommand,
+        ))
+    }
+
+    pub fn invalid_atom_threshold(got: usize, exp: usize) -> Self {
+        Self::Rejected(RejectReason::Inheritalbe(
+            InheritableRejectReason::InvalidAtomThreshold(got, exp),
+        ))
+    }
+
+    pub fn non_block_parent() -> Self {
+        Self::Rejected(RejectReason::Inheritalbe(
+            InheritableRejectReason::NonBlockParent,
         ))
     }
 
@@ -218,7 +218,6 @@ impl fmt::Display for InheritableRejectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SelfReference => write!(f, "self reference"),
-            Self::ParentInAtoms => write!(f, "parent in atoms"),
             Self::InvalidNonce => write!(f, "invalid nonce"),
             Self::InvalidHeight(height, parent_height) => {
                 write!(f, "invalid height {} (parent: {})", height, parent_height)
@@ -231,12 +230,19 @@ impl fmt::Display for InheritableRejectReason {
                     expected, actual
                 )
             }
-            Self::IncompleteAtomHistory => write!(f, "incomplete atom history"),
             Self::EmptyInput => write!(f, "empty input"),
             Self::DoubleSpend => write!(f, "double spend"),
             Self::InvalidMmrProof => write!(f, "invalid MMR proof"),
             Self::InvalidScriptSig => write!(f, "invalid script signature"),
             Self::InvalidCommand => write!(f, "invalid command"),
+            Self::InvalidAtomThreshold(got, exp) => {
+                write!(
+                    f,
+                    "invalid atom threshold (got: {}, expected: {})",
+                    got, exp
+                )
+            }
+            Self::NonBlockParent => write!(f, "non-block parent"),
         }
     }
 }

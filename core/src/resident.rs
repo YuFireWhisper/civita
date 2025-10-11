@@ -1,13 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use derivative::Derivative;
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
 
 use crate::{
     consensus::{
-        engine::{self, NodeType},
-        graph::{self, Status},
-        Engine,
+        engine::{self, Engine, NodeType},
+        tree::Status,
     },
     crypto::Multihash,
     network::{transport, Transport},
@@ -22,15 +21,6 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error(transparent)]
-    Engine(#[from] engine::Error),
-
-    #[error(transparent)]
-    Graph(#[from] graph::Error),
-
-    #[error("{0}")]
-    Propose(String),
-
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
 }
@@ -59,7 +49,7 @@ pub struct Config {
     #[derivative(Default(value = "\"./data\".to_string()"))]
     pub storage_dir: String,
 
-    pub bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+    pub bootstrap_peer: Option<(PeerId, Multiaddr)>,
 
     #[derivative(Default(value = "tokio::time::Duration::from_secs(15)"))]
     pub bootstrap_timeout: tokio::time::Duration,
@@ -81,26 +71,25 @@ impl<T: traits::Config> Resident<T> {
             dial_timeout: config.dial_timeout,
         };
 
-        let peers = HashSet::from_iter(config.bootstrap_peers.iter().map(|(peer_id, _)| *peer_id));
-
         let transport = Transport::new(
             keypair,
             config.listen_addr,
-            config.bootstrap_peers.clone(),
+            config
+                .bootstrap_peer
+                .clone()
+                .map(|(peer_id, addr)| vec![(peer_id, addr)])
+                .unwrap_or_default(),
             transport_config,
         )
         .await;
 
         let listen_addr = transport.addr.clone();
-        let bc = if config.bootstrap_peers.is_empty() {
-            None
-        } else {
-            Some(BootstrapConfig {
-                peers,
-                timeout: config.bootstrap_timeout,
-                node_type: config.node_type,
-            })
-        };
+
+        let bc = config.bootstrap_peer.map(|(peer, _)| BootstrapConfig {
+            peer,
+            timeout: config.bootstrap_timeout,
+            node_type: config.node_type,
+        });
 
         Ok(Self {
             handle: Engine::spawn(
@@ -109,7 +98,7 @@ impl<T: traits::Config> Resident<T> {
                 config.heartbeat_interval,
                 bc,
             )
-            .await?,
+            .await,
             listen_addr,
         })
     }
@@ -120,12 +109,10 @@ impl<T: traits::Config> Resident<T> {
         on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
         off_chain_inputs: Vec<T::OffChainInput>,
         outpus: Vec<Token<T>>,
-    ) -> Result<(), Error> {
+    ) {
         self.handle
             .propose(code, on_chain_inputs, off_chain_inputs, outpus)
             .await
-            .await?
-            .map_err(|e| Error::Propose(e.to_string()))
     }
 
     pub async fn tokens(&self) -> Result<HashMap<Multihash, Token<T>>> {

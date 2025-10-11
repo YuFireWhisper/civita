@@ -33,6 +33,6 @@ multihash-codetable = { version = "0.1", features = ["sha2", "sha3", "blake3"] }
 rand = "0.9"
 rocksdb = "0.24"
 hex = "0.4"
+tempfile = "3.23"
 
 [dev-dependencies]
-tempfile = "3.23"

@@ -8,3 +8,5 @@ pub mod utils;
 
 pub use libp2p::identity;
 pub use libp2p::Multiaddr;
+
+const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();

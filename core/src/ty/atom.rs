@@ -4,7 +4,7 @@ use derivative::Derivative;
 use multihash_derive::MultihashDigest;
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
-use crate::{crypto::Multihash, traits::Config, ty::Command};
+use crate::{crypto::Multihash, traits::Config, ty::Command, utils::mmr::State};
 
 pub type Height = u32;
 pub type Random = u32;
@@ -33,16 +33,25 @@ pub struct Atom<T: Config> {
     pub height: Height,
     pub random: Random,
     pub difficulty: Difficulty,
-    pub peaks: Vec<(u64, Multihash)>,
-
+    pub state: State,
     pub timestamp: Timestamp,
     pub cmd: Option<Command<T>>,
     pub nonce: Nonce,
-
     pub atoms: Vec<Pruned<T>>,
 
     #[serde(skip)]
     cache: OnceLock<Multihash>,
+}
+
+impl<T: Config> Pruned<T> {
+    pub fn from_atom(atom: Atom<T>) -> Self {
+        Self {
+            random: atom.random,
+            timestamp: atom.timestamp,
+            cmd: atom.cmd,
+            nonce: atom.nonce,
+        }
+    }
 }
 
 impl<T: Config> Atom<T> {
@@ -84,8 +93,8 @@ impl<T: Config> Atom<T> {
         self
     }
 
-    pub fn with_peaks(mut self, peaks: Vec<(u64, Multihash)>) -> Self {
-        self.peaks = peaks;
+    pub fn with_state(mut self, state: State) -> Self {
+        self.state = state;
         self
     }
 
@@ -117,7 +126,7 @@ impl<T: Config> Atom<T> {
         encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.peaks, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.state, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
         encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
@@ -146,7 +155,7 @@ impl<T: Config> Atom<T> {
         encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.peaks, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.state, &mut buf, config::standard()).unwrap();
 
         if self.atoms.len() < T::BLOCK_THRESHOLD as usize {
             encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
@@ -184,7 +193,7 @@ impl<T: Config> Atom<T> {
         encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
         encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.peaks, &mut buf, config::standard()).unwrap();
+        encode_into_std_write(&self.state, &mut buf, config::standard()).unwrap();
 
         for atom in &self.atoms {
             let mut input = buf.clone();

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt};
+use std::collections::HashSet;
 
 use derivative::Derivative;
 use futures::StreamExt;
@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, time::Duration};
 
 use crate::{
-    consensus::graph::Proofs,
+    consensus::tree::Proofs,
     crypto::Multihash,
     network::{behaviour::Behaviour, transport::inner::Inner},
     traits,
-    ty::Atom,
+    ty::{atom::Height, Atom},
 };
 
 mod inner;
@@ -28,7 +28,7 @@ mod inner;
 #[derive(Derivative)]
 #[derivative(Default)]
 pub struct Config {
-    #[derivative(Default(value = "10000"))]
+    #[derivative(Default(value = "100"))]
     pub channel_capacity: usize,
 
     #[derivative(Default(value = "Duration::from_secs(10)"))]
@@ -47,21 +47,23 @@ enum Command<T: traits::Config> {
     Stop,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[derive(Serialize, Deserialize)]
 pub enum Request {
-    Atoms(HashSet<Multihash>),
-    Blocks(u32),
-    State,
+    AtomByHash(Multihash),
+    AtomByHeight(Height),
+    Headers(Height, Height), // (start, count)
+    CurrentHeight,
+    Proofs,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "T: traits::Config")]
 pub enum Response<T: traits::Config> {
-    Atoms(Vec<Atom<T>>),
-    Blocks(Vec<Atom<T>>),
-    State(Box<(Atom<T>, Proofs<T>)>),
-    AlreadyUpToDate,
+    Atom(Box<Atom<T>>),
+    Headers(Vec<Multihash>),
+    CurrentHeight(Height),
+    Proofs(Height, Proofs<T>),
 }
 
 pub enum Message<T: traits::Config> {
@@ -257,57 +259,69 @@ impl<T: traits::Config> Transport<T> {
         let _ = self.tx.send(Command::Stop).await;
     }
 
-    pub async fn recv(&mut self) -> Option<Message<T>> {
-        self.rx.recv().await
+    pub async fn recv(&mut self) -> Message<T> {
+        self.rx.recv().await.expect("Channel closed")
     }
 
     pub async fn try_recv(&mut self) -> Option<Message<T>> {
         self.rx.try_recv().ok()
     }
-}
 
-impl fmt::Display for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Request::Atoms(hashes) => {
-                writeln!(f, "Atom:")?;
-                writeln!(f, "   count: {}", hashes.len())
-            }
-            Request::Blocks(num) => {
-                writeln!(f, "Blocks:")?;
-                writeln!(f, "   last height: {}", num)
-            }
-            Request::State => {
-                write!(f, "State")
-            }
+    pub async fn recv_response(&mut self) -> Response<T> {
+        while let Some(msg) = self.rx.recv().await {
+            let Message::Response { resp, .. } = msg else {
+                continue;
+            };
+            return resp;
         }
+        panic!("Channel closed")
     }
-}
 
-impl<T: traits::Config> fmt::Display for Response<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Response::Atoms(atoms) => {
-                writeln!(f, "Atoms:")?;
-                writeln!(f, "   count: {}", atoms.len())
-            }
-            Response::Blocks(blocks) => {
-                let heights: Vec<u32> = blocks.iter().map(|b| b.height).collect();
-                writeln!(f, "Blocks:")?;
-                writeln!(f, "   count: {}", blocks.len())?;
-                writeln!(f, "   heights: {:?}", heights)
-            }
-            Response::State(b) => {
-                let atom = &b.as_ref().0;
-                let hash_hex = hex::encode(atom.hash().to_bytes());
-                writeln!(f, "State:")?;
-                writeln!(f, "   atom hash: {}", hash_hex)?;
-                writeln!(f, "   atom height: {}", atom.height)?;
-                writeln!(f, "   aifficulty: {}", atom.difficulty)
-            }
-            Response::AlreadyUpToDate => {
-                write!(f, "AlreadyUpToDate")
+    pub async fn recv_headers(&mut self) -> Vec<Multihash> {
+        while let Some(msg) = self.rx.recv().await {
+            let Message::Response { resp, .. } = msg else {
+                continue;
+            };
+            if let Response::Headers(hashes) = resp {
+                return hashes;
             }
         }
+        panic!("Channel closed")
+    }
+
+    pub async fn recv_current_height(&mut self) -> Height {
+        while let Some(msg) = self.rx.recv().await {
+            let Message::Response { resp, .. } = msg else {
+                continue;
+            };
+            if let Response::CurrentHeight(height) = resp {
+                return height;
+            }
+        }
+        panic!("Channel closed")
+    }
+
+    pub async fn recv_atom(&mut self) -> Atom<T> {
+        while let Some(msg) = self.rx.recv().await {
+            let Message::Response { resp, .. } = msg else {
+                continue;
+            };
+            if let Response::Atom(atom) = resp {
+                return *atom;
+            }
+        }
+        panic!("Channel closed")
+    }
+
+    pub async fn recv_proofs(&mut self) -> (Height, Proofs<T>) {
+        while let Some(msg) = self.rx.recv().await {
+            let Message::Response { resp, .. } = msg else {
+                continue;
+            };
+            if let Response::Proofs(height, proofs) = resp {
+                return (height, proofs);
+            }
+        }
+        panic!("Channel closed")
     }
 }
