@@ -552,7 +552,7 @@ impl<T: Config> Tree<T> {
             owner_db_path: entry_owner_db_path,
         };
 
-        if entry.atom.height.saturating_sub(self.finalized_height) + 1 >= T::MAINTENANCE_WINDOW {
+        if entry.atom.height.saturating_sub(self.atom_height_start) + 1 >= T::MAINTENANCE_WINDOW {
             let timestamps = self
                 .collect_timestamps(entry.atom.parent, entry.atom.height, T::MAINTENANCE_WINDOW)
                 .expect("Chain continuity is guaranteed here");
