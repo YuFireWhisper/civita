@@ -1,5 +1,6 @@
 pub mod consensus;
 pub mod crypto;
+pub mod event;
 pub mod network;
 pub mod resident;
 pub mod traits;
