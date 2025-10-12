@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use derivative::Derivative;
 use libp2p::{identity::Keypair, Multiaddr, PeerId};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     consensus::{
@@ -9,6 +10,7 @@ use crate::{
         tree::Status,
     },
     crypto::Multihash,
+    event::Event,
     network::{transport, Transport},
     traits,
     ty::token::Token,
@@ -23,6 +25,9 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
+
+    #[error("channel closed")]
+    ChannelClosed,
 }
 
 #[derive(Clone)]
@@ -59,26 +64,31 @@ pub struct Config {
 }
 
 pub struct Resident<T: traits::Config> {
-    handle: engine::Handle<T>,
     listen_addr: Multiaddr,
+    tx: mpsc::Sender<Event<T>>,
 }
 
 impl<T: traits::Config> Resident<T> {
     pub async fn new(keypair: Keypair, config: Config) -> Result<Self> {
+        let (tx, rx) = mpsc::channel(config.channel_size);
+
         let transport_config = transport::Config {
             listen_timeout: config.listen_timeout,
             channel_capacity: config.channel_size,
             dial_timeout: config.dial_timeout,
         };
 
+        let bootstrap_peer = config
+            .bootstrap_peer
+            .clone()
+            .map(|(peer_id, addr)| vec![(peer_id, addr)])
+            .unwrap_or_default();
+
         let transport = Transport::new(
             keypair,
             config.listen_addr,
-            config
-                .bootstrap_peer
-                .clone()
-                .map(|(peer_id, addr)| vec![(peer_id, addr)])
-                .unwrap_or_default(),
+            bootstrap_peer,
+            tx.clone(),
             transport_config,
         )
         .await;
@@ -91,16 +101,17 @@ impl<T: traits::Config> Resident<T> {
             node_type: config.node_type,
         });
 
-        Ok(Self {
-            handle: Engine::spawn(
-                transport,
-                &config.storage_dir,
-                config.heartbeat_interval,
-                bc,
-            )
-            .await,
-            listen_addr,
-        })
+        Engine::spawn(
+            transport,
+            &config.storage_dir,
+            config.heartbeat_interval,
+            bc,
+            tx.clone(),
+            rx,
+        )
+        .await;
+
+        Ok(Self { tx, listen_addr })
     }
 
     pub async fn propose(
@@ -110,13 +121,15 @@ impl<T: traits::Config> Resident<T> {
         off_chain_inputs: Vec<T::OffChainInput>,
         outpus: Vec<Token<T>>,
     ) {
-        self.handle
-            .propose(code, on_chain_inputs, off_chain_inputs, outpus)
-            .await
+        let event = Event::Propose(code, on_chain_inputs, off_chain_inputs, outpus);
+        let _ = self.tx.send(event).await;
     }
 
     pub async fn tokens(&self) -> Result<HashMap<Multihash, Token<T>>> {
-        self.handle.tokens().await.await.map_err(Error::from)
+        let (tx, rx) = oneshot::channel();
+        let event = Event::Tokens(tx);
+        let _ = self.tx.send(event).await;
+        rx.await.map_err(|_| Error::ChannelClosed)
     }
 
     pub fn listen_addr(&self) -> &Multiaddr {
@@ -124,14 +137,16 @@ impl<T: traits::Config> Resident<T> {
     }
 
     pub async fn status(&self) -> Result<Status> {
-        self.handle.status().await.await.map_err(Error::from)
+        let (tx, rx) = oneshot::channel();
+        let event = Event::Status(tx);
+        let _ = self.tx.send(event).await;
+        rx.await.map_err(|_| Error::ChannelClosed)
     }
 
     pub async fn stop(self) {
-        self.handle.stop().await
-    }
-
-    pub fn handle(&self) -> engine::Handle<T> {
-        self.handle.clone()
+        let (tx, rx) = oneshot::channel();
+        let event = Event::Stop(tx);
+        let _ = self.tx.send(event).await;
+        let _ = rx.await;
     }
 }

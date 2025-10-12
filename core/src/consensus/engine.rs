@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, path::Path};
 
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
@@ -6,32 +6,28 @@ use libp2p::{
     PeerId,
 };
 use tokio::{
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        oneshot,
-    },
-    task::{JoinHandle, JoinSet},
+    sync::mpsc::{self, Receiver, Sender},
+    task::JoinSet,
+    time::{Duration, Instant},
 };
 
 use crate::{
-    consensus::{
-        engine::bootstraper::Bootstraper,
-        tree::{Status, Tree},
-    },
+    consensus::tree::Tree,
     crypto::Multihash,
+    event::Event,
     network::{
-        transport::{Message, Request, Response},
+        transport::{Request, Response},
         Transport,
     },
     traits::Config,
-    ty::{atom::Atom, token::Token},
+    ty::atom::Atom,
 };
 
 pub const MMR_DIR: &str = "mmr";
 pub const OWNER_DIR: &str = "owner";
 pub const ATOM_DIR: &str = "atom";
 
-mod bootstraper;
+const MAX_ATOMS_PER_REQUEST: u32 = 1000;
 
 #[derive(Clone, Copy)]
 pub enum NodeType {
@@ -46,85 +42,38 @@ pub struct BootstrapConfig {
     pub node_type: NodeType,
 }
 
-enum EngineRequest<T: Config> {
-    Propose(
-        u8,
-        Vec<(Multihash, T::ScriptSig)>,
-        Vec<T::OffChainInput>,
-        Vec<Token<T>>,
-    ),
-    Tokens(oneshot::Sender<HashMap<Multihash, Token<T>>>),
-    Status(oneshot::Sender<Status>),
-    Stop(oneshot::Sender<()>),
-}
-
-pub struct Handle<T: Config>(Sender<EngineRequest<T>>);
 pub struct Engine<T: Config> {
     transport: Transport<T>,
     tree: Tree<T>,
     pending_atoms: HashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
-    task_set: JoinSet<Atom<T>>,
-    heartbeat_interval: tokio::time::Interval,
+    task_set: JoinSet<()>,
+    heartbeat_instant: tokio::time::Instant,
+    heartbeat_duration: Duration,
     is_archive: bool,
-}
-
-impl<T: Config> Handle<T> {
-    pub async fn propose(
-        &self,
-        code: u8,
-        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
-        off_chain_inputs: Vec<T::OffChainInput>,
-        outputs: Vec<Token<T>>,
-    ) {
-        let req = EngineRequest::Propose(code, on_chain_inputs, off_chain_inputs, outputs);
-        self.0.send(req).await.expect("Engine stopped");
-    }
-
-    pub async fn tokens(&self) -> JoinHandle<HashMap<Multihash, Token<T>>> {
-        let (tx, rx) = oneshot::channel();
-        let req = EngineRequest::Tokens(tx);
-        self.0.send(req).await.expect("Engine stopped");
-        tokio::spawn(async move { rx.await.expect("Engine stopped") })
-    }
-
-    pub async fn status(&self) -> JoinHandle<Status> {
-        let (tx, rx) = oneshot::channel();
-        let req = EngineRequest::Status(tx);
-        self.0.send(req).await.expect("Engine stopped");
-        tokio::spawn(async move { rx.await.expect("Engine stopped") })
-    }
-
-    pub async fn stop(self) {
-        let (tx, rx) = oneshot::channel();
-        let req = EngineRequest::Stop(tx);
-        if self.0.send(req).await.is_ok() {
-            let _ = rx.await;
-        }
-    }
 }
 
 impl<T: Config> Engine<T> {
     pub async fn spawn(
-        transport: Transport<T>,
+        mut transport: Transport<T>,
         dir: &str,
-        heartbeat_interval: Option<tokio::time::Duration>,
+        heartbeat_duration: Option<tokio::time::Duration>,
         bootstrap: Option<BootstrapConfig>,
-    ) -> Handle<T> {
-        let heartbeat_interval = heartbeat_interval
-            .map(|d| tokio::time::interval(d))
-            .unwrap_or(tokio::time::interval(tokio::time::Duration::MAX));
+        tx: mpsc::Sender<Event<T>>,
+        mut rx: mpsc::Receiver<Event<T>>,
+    ) {
+        let heartbeat_duration = heartbeat_duration.unwrap_or(Duration::MAX);
+        let heartbeat_instant = Instant::now() + heartbeat_duration;
 
         let engine = if let Some(config) = bootstrap {
             let is_archive = matches!(config.node_type, NodeType::Archive);
-            let mut bootstraper = Bootstraper::new(transport, config.peer, dir, is_archive);
-            bootstraper.bootstrap().await;
-            let (transport, tree) = bootstraper.take();
+            let tree = Self::bootstrap(&mut transport, &mut rx, config, dir).await;
             Self {
                 transport,
                 tree,
                 pending_atoms: HashMap::new(),
                 task_set: JoinSet::new(),
-                heartbeat_interval,
+                heartbeat_instant,
+                heartbeat_duration,
                 is_archive,
             }
         } else {
@@ -133,63 +82,204 @@ impl<T: Config> Engine<T> {
                 tree: Tree::load_or_genesis(dir).expect("Failed to load or create genesis"),
                 pending_atoms: HashMap::new(),
                 task_set: JoinSet::new(),
-                heartbeat_interval,
+                heartbeat_instant,
+                heartbeat_duration,
                 is_archive: true,
             }
         };
-        let (req_tx, req_rx) = mpsc::channel(100);
-        tokio::spawn(engine.run(req_rx));
-        Handle(req_tx)
+
+        tokio::spawn(engine.run(tx, rx));
     }
 
-    async fn run(mut self, mut request_rx: Receiver<EngineRequest<T>>) {
-        log::info!("Engine started");
+    async fn bootstrap<P>(
+        transport: &mut Transport<T>,
+        rx: &mut Receiver<Event<T>>,
+        config: BootstrapConfig,
+        dir: P,
+    ) -> Tree<T>
+    where
+        P: AsRef<Path>,
+    {
+        let mut tree_opt = match config.node_type {
+            NodeType::Archive => {
+                Some(Tree::load_or_genesis(&dir).expect("Failed to load or create genesis"))
+            }
+            NodeType::Regular => None,
+        };
 
         loop {
-            tokio::select! {
-                msg = self.transport.recv() => {
-                    match msg {
-                        Message::Gossipsub { id, propagation_source, atom } => {
-                            self.on_recv_atom(Some(id), propagation_source, *atom).await;
+            let req = Request::CurrentHeight;
+            transport.send_request(req, config.peer).await;
+            let local_height = tree_opt
+                .as_ref()
+                .map(|t| t.head_height())
+                .unwrap_or_default();
+
+            let remote_height = recv_response(rx, |resp| {
+                if let Response::CurrentHeight(height) = resp {
+                    Some(height)
+                } else {
+                    None
+                }
+            })
+            .await;
+
+            if remote_height < local_height {
+                return tree_opt.expect("Tree should be initialized");
+            }
+
+            if remote_height == local_height {
+                let tree =
+                    tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
+
+                if !matches!(config.node_type, NodeType::Archive) {
+                    let req = Request::Proofs;
+                    transport.send_request(req, config.peer).await;
+
+                    let (height, proofs) = recv_response(rx, |resp| {
+                        if let Response::Proofs(height, proofs) = resp {
+                            Some((height, proofs))
+                        } else {
+                            None
                         }
-                        Message::Request { peer, req, channel } => {
-                            self.on_recv_request(peer, req, channel).await;
-                        }
-                        Message::Response { peer, resp } => {
-                            if let Response::Atom(atom) = resp {
-                                self.on_recv_atom(None, peer, *atom).await;
-                            }
-                        }
+                    })
+                    .await;
+
+                    if height != local_height {
+                        continue;
+                    }
+
+                    assert!(tree.fill(proofs));
+                }
+
+                return tree_opt.expect("Tree should be initialized");
+            }
+
+            let start = if matches!(config.node_type, NodeType::Archive) {
+                local_height + 1
+            } else {
+                remote_height
+                    .saturating_sub(T::MAINTENANCE_WINDOW)
+                    .max(T::GENESIS_HEIGHT)
+            };
+            let end = remote_height.min(start + MAX_ATOMS_PER_REQUEST - 1);
+
+            let req = Request::Headers(start, end);
+            transport.send_request(req, config.peer).await;
+
+            let headers = recv_response(rx, |resp| {
+                if let Response::Headers(headers) = resp {
+                    Some(headers)
+                } else {
+                    None
+                }
+            })
+            .await;
+            let mut atoms = vec![None; headers.len()];
+            let mut count = 0;
+
+            for header in &headers {
+                let req = Request::AtomByHash(*header);
+                transport.send_request(req, config.peer).await;
+            }
+
+            while count < atoms.len() {
+                let atom = recv_response(rx, |resp| {
+                    if let Response::Atom(atom) = resp {
+                        Some(*atom)
+                    } else {
+                        None
+                    }
+                })
+                .await;
+
+                if atom.height < start || atom.height > end {
+                    continue;
+                }
+
+                let idx = (atom.height - start) as usize;
+
+                if headers[idx] != atom.parent {
+                    continue;
+                }
+
+                if atoms[idx].is_none() {
+                    atoms[idx] = Some(atom);
+                    count += 1;
+                }
+            }
+
+            let tree = tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
+
+            assert!(tree.execute_chain(atoms.into_iter().flatten()));
+        }
+    }
+
+    async fn run(mut self, tx: Sender<Event<T>>, mut rx: Receiver<Event<T>>) {
+        log::info!("Engine started");
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                Event::Gossipsub(id, propagation_source, atom) => {
+                    self.on_recv_atom(Some(id), propagation_source, *atom).await;
+                }
+                Event::Request(req, peer, channel) => {
+                    self.on_recv_request(peer, req, channel).await;
+                }
+                Event::Response(resp, peer) => {
+                    if let Response::Atom(atom) = resp {
+                        self.on_recv_atom(None, peer, *atom).await;
                     }
                 }
-                Some(req) = request_rx.recv() => {
-                    match req {
-                        EngineRequest::Propose(code, on_chain, off_chain, outputs) => {
-                            self.propose(code, on_chain, off_chain, outputs).await;
-                        }
-                        EngineRequest::Tokens(tx) => {
-                            let _ = tx.send(self.tree.tokens(&self.transport.peer_id));
-                        }
-                        EngineRequest::Status(tx) => {
-                            let _ = tx.send(self.tree.status());
-                        }
-                        EngineRequest::Stop(tx) => {
-                            let _ = tx.send(());
-                            break;
-                        }
+                Event::Propose(code, on_chain, off_chain, outputs) => {
+                    let Some(cmd) = self.tree.create_command(
+                        &self.transport.peer_id,
+                        code,
+                        on_chain,
+                        off_chain,
+                        outputs,
+                    ) else {
+                        log::error!("Invalid command proposed");
+                        continue;
+                    };
+
+                    let atom = self.tree.create_atom(Some(cmd));
+                    let tx_clone = tx.clone();
+
+                    self.task_set.spawn_blocking(move || {
+                        let atom = atom.solve();
+                        let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
+                    });
+
+                    self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
+                }
+                Event::Tokens(tx) => {
+                    let _ = tx.send(self.tree.tokens(&self.transport.peer_id));
+                }
+                Event::Status(tx) => {
+                    let _ = tx.send(self.tree.status());
+                }
+                Event::Stop(tx) => {
+                    let _ = tx.send(());
+                    break;
+                }
+                Event::AtomReady(atom) => {
+                    if !self.on_atom_ready(*atom).await {
+                        log::error!("Heartbeat atom rejected");
                     }
                 }
-                Some(Ok(atom)) = self.task_set.join_next() => {
-                    if !self.on_atom_ready(atom).await {
-                        let atom = self.tree.create_atom(None);
-                        self.task_set.spawn_blocking(|| atom.solve());
-                        self.heartbeat_interval.reset();
-                    }
-                }
-                _ = self.heartbeat_interval.tick() => {
-                    let atom = self.tree.create_atom(None);
-                    self.task_set.spawn_blocking(|| atom.solve());
-                }
+            }
+
+            if tokio::time::Instant::now() >= self.heartbeat_instant {
+                let atom = self.tree.create_atom(None);
+                let tx_clone = tx.clone();
+
+                self.task_set.spawn_blocking(move || {
+                    let atom = atom.solve();
+                    let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
+                });
+
+                self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
             }
 
             tokio::task::yield_now().await;
@@ -297,24 +387,6 @@ impl<T: Config> Engine<T> {
         }
     }
 
-    async fn propose(
-        &mut self,
-        code: u8,
-        on_chain: Vec<(Multihash, T::ScriptSig)>,
-        off_chain: Vec<T::OffChainInput>,
-        outputs: Vec<Token<T>>,
-    ) {
-        let Some(cmd) =
-            self.tree
-                .create_command(&self.transport.peer_id, code, on_chain, off_chain, outputs)
-        else {
-            log::error!("Invalid command proposed");
-            return;
-        };
-        let atom = self.tree.create_atom(Some(cmd));
-        self.task_set.spawn_blocking(|| atom.solve());
-    }
-
     async fn on_atom_ready(&mut self, atom: Atom<T>) -> bool {
         let result = self.tree.upsert(atom.clone());
 
@@ -328,26 +400,25 @@ impl<T: Config> Engine<T> {
     }
 }
 
+async fn recv_response<T: Config, F, U>(rx: &mut Receiver<Event<T>>, f: F) -> U
+where
+    F: Fn(Response<T>) -> Option<U>,
+{
+    while let Some(event) = rx.recv().await {
+        if let Event::Response(resp, _) = event {
+            if let Some(result) = f(resp) {
+                return result;
+            }
+        }
+    }
+    panic!("Channel closed");
+}
+
 impl fmt::Display for NodeType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NodeType::Archive => write!(f, "Archive"),
             NodeType::Regular => write!(f, "Regular"),
         }
-    }
-}
-
-impl<T: Config> Clone for Handle<T> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T: Config> Drop for Handle<T> {
-    fn drop(&mut self) {
-        let _ = self
-            .0
-            .clone()
-            .try_send(EngineRequest::Stop(oneshot::channel().0));
     }
 }

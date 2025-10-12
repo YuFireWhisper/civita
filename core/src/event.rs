@@ -21,4 +21,5 @@ pub enum Event<T: traits::Config> {
     Tokens(oneshot::Sender<HashMap<Multihash, Token<T>>>),
     Status(oneshot::Sender<Status>),
     Stop(oneshot::Sender<()>),
+    AtomReady(Box<Atom<T>>),
 }

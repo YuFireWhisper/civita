@@ -16,6 +16,7 @@ use tokio::{sync::mpsc, time::Duration};
 use crate::{
     consensus::tree::Proofs,
     crypto::Multihash,
+    event::Event,
     network::{behaviour::Behaviour, transport::inner::Inner},
     traits,
     ty::{atom::Height, Atom},
@@ -66,29 +67,10 @@ pub enum Response<T: traits::Config> {
     Proofs(Height, Proofs<T>),
 }
 
-pub enum Message<T: traits::Config> {
-    Gossipsub {
-        id: MessageId,
-        propagation_source: PeerId,
-        atom: Box<Atom<T>>,
-    },
-    Request {
-        peer: PeerId,
-        req: Request,
-        channel: ResponseChannel<Response<T>>,
-    },
-    Response {
-        peer: PeerId,
-        resp: Response<T>,
-    },
-}
-
 pub struct Transport<T: traits::Config> {
     pub peer_id: PeerId,
     pub addr: Multiaddr,
-
     tx: mpsc::Sender<Command<T>>,
-    rx: mpsc::Receiver<Message<T>>,
 }
 
 impl Request {
@@ -111,29 +93,12 @@ impl<T: traits::Config> Response<T> {
     }
 }
 
-impl<T: traits::Config> Message<T> {
-    pub fn gossipsub(id: MessageId, source: PeerId, atom: Atom<T>) -> Self {
-        Message::Gossipsub {
-            id,
-            propagation_source: source,
-            atom: Box::new(atom),
-        }
-    }
-
-    pub fn request(peer: PeerId, req: Request, channel: ResponseChannel<Response<T>>) -> Self {
-        Message::Request { peer, req, channel }
-    }
-
-    pub fn response(peer: PeerId, resp: Response<T>) -> Self {
-        Message::Response { peer, resp }
-    }
-}
-
 impl<T: traits::Config> Transport<T> {
     pub async fn new(
         keypair: Keypair,
         listen_addr: Multiaddr,
         bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+        tx: mpsc::Sender<Event<T>>,
         config: Config,
     ) -> Self {
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
@@ -158,15 +123,13 @@ impl<T: traits::Config> Transport<T> {
 
         let peer_id = *swarm.local_peer_id();
         let (cmd_tx, cmd_rx) = mpsc::channel(config.channel_capacity);
-        let (msg_tx, msg_rx) = mpsc::channel(config.channel_capacity);
 
-        Inner::spawn(swarm, cmd_rx, msg_tx);
+        Inner::spawn(swarm, cmd_rx, tx);
 
         Self {
             peer_id,
             addr,
             tx: cmd_tx,
-            rx: msg_rx,
         }
     }
 
@@ -257,71 +220,5 @@ impl<T: traits::Config> Transport<T> {
 
     pub async fn stop(&self) {
         let _ = self.tx.send(Command::Stop).await;
-    }
-
-    pub async fn recv(&mut self) -> Message<T> {
-        self.rx.recv().await.expect("Channel closed")
-    }
-
-    pub async fn try_recv(&mut self) -> Option<Message<T>> {
-        self.rx.try_recv().ok()
-    }
-
-    pub async fn recv_response(&mut self) -> Response<T> {
-        while let Some(msg) = self.rx.recv().await {
-            let Message::Response { resp, .. } = msg else {
-                continue;
-            };
-            return resp;
-        }
-        panic!("Channel closed")
-    }
-
-    pub async fn recv_headers(&mut self) -> Vec<Multihash> {
-        while let Some(msg) = self.rx.recv().await {
-            let Message::Response { resp, .. } = msg else {
-                continue;
-            };
-            if let Response::Headers(hashes) = resp {
-                return hashes;
-            }
-        }
-        panic!("Channel closed")
-    }
-
-    pub async fn recv_current_height(&mut self) -> Height {
-        while let Some(msg) = self.rx.recv().await {
-            let Message::Response { resp, .. } = msg else {
-                continue;
-            };
-            if let Response::CurrentHeight(height) = resp {
-                return height;
-            }
-        }
-        panic!("Channel closed")
-    }
-
-    pub async fn recv_atom(&mut self) -> Atom<T> {
-        while let Some(msg) = self.rx.recv().await {
-            let Message::Response { resp, .. } = msg else {
-                continue;
-            };
-            if let Response::Atom(atom) = resp {
-                return *atom;
-            }
-        }
-        panic!("Channel closed")
-    }
-
-    pub async fn recv_proofs(&mut self) -> (Height, Proofs<T>) {
-        while let Some(msg) = self.rx.recv().await {
-            let Message::Response { resp, .. } = msg else {
-                continue;
-            };
-            if let Response::Proofs(height, proofs) = resp {
-                return (height, proofs);
-            }
-        }
-        panic!("Channel closed")
     }
 }

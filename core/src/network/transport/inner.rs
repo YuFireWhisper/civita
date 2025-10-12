@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use libp2p::{
-    gossipsub::{self, IdentTopic},
+    gossipsub::{self, IdentTopic, MessageAcceptance},
     request_response::{self},
     swarm::SwarmEvent,
     Swarm,
@@ -8,9 +8,10 @@ use libp2p::{
 use tokio::sync::mpsc;
 
 use crate::{
+    event::Event,
     network::{
         behaviour::{Behaviour, BehaviourEvent},
-        transport::{Command, Message, Request, Response},
+        transport::{Command, Request, Response},
     },
     traits,
     ty::Atom,
@@ -19,7 +20,7 @@ use crate::{
 pub struct Inner<T: traits::Config> {
     swarm: Swarm<Behaviour<T>>,
     rx: mpsc::Receiver<Command<T>>,
-    tx: mpsc::Sender<Message<T>>,
+    tx: mpsc::Sender<Event<T>>,
     topic: IdentTopic,
 }
 
@@ -27,7 +28,7 @@ impl<T: traits::Config> Inner<T> {
     pub fn spawn(
         swarm: Swarm<Behaviour<T>>,
         rx: mpsc::Receiver<Command<T>>,
-        tx: mpsc::Sender<Message<T>>,
+        tx: mpsc::Sender<Event<T>>,
     ) {
         let topic = IdentTopic::new(0u8.to_string());
 
@@ -83,8 +84,8 @@ impl<T: traits::Config> Inner<T> {
                 message,
             } => match Atom::from_bytes(&message.data) {
                 Ok(atom) => {
-                    let msg = Message::gossipsub(message_id, propagation_source, atom);
-                    let _ = self.tx.send(msg).await;
+                    let event = Event::Gossipsub(message_id, propagation_source, Box::new(atom));
+                    let _ = self.tx.send(event).await;
                 }
                 Err(_) => {
                     self.swarm
@@ -93,7 +94,7 @@ impl<T: traits::Config> Inner<T> {
                         .report_message_validation_result(
                             &message_id,
                             &propagation_source,
-                            gossipsub::MessageAcceptance::Reject,
+                            MessageAcceptance::Reject,
                         );
                 }
             },
@@ -112,14 +113,12 @@ impl<T: traits::Config> Inner<T> {
                 libp2p::request_response::Message::Request {
                     request, channel, ..
                 } => {
-                    // log::debug!("Received request from {peer}: {request}");
-                    let msg = Message::request(peer, request, channel);
-                    let _ = self.tx.send(msg).await;
+                    let event = Event::Request(request, peer, channel);
+                    let _ = self.tx.send(event).await;
                 }
                 libp2p::request_response::Message::Response { response, .. } => {
-                    // log::debug!("Received response from {peer}: {response}");
-                    let msg = Message::response(peer, response);
-                    let _ = self.tx.send(msg).await;
+                    let event = Event::Response(response, peer);
+                    let _ = self.tx.send(event).await;
                 }
             },
             request_response::Event::OutboundFailure { peer, error, .. } => {
