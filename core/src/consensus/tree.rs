@@ -36,6 +36,7 @@ pub struct UpdateResult {
     pub accepted: Vec<Multihash>,
     pub dismissed: HashMap<Multihash, Reason>,
     pub missing: Option<Multihash>,
+    pub is_finalized_advanced: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -493,7 +494,7 @@ impl<T: Config> Tree<T> {
         result.accepted.push(hash);
 
         self.update_weight(hash);
-        self.recompute_main_chain_and_finalized();
+        result.is_finalized_advanced |= self.recompute_main_chain_and_finalized();
 
         let Some(children) = self.pending.remove(&hash) else {
             return;
@@ -725,12 +726,14 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn recompute_main_chain_and_finalized(&mut self) {
+    fn recompute_main_chain_and_finalized(&mut self) -> bool {
         let start = self.finalized;
         let new_head = self.select_heaviest_chain(start);
         if new_head != self.head {
             self.head = new_head;
-            self.try_advance_finalized();
+            self.try_advance_finalized()
+        } else {
+            false
         }
     }
 
@@ -759,12 +762,12 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn try_advance_finalized(&mut self) {
+    fn try_advance_finalized(&mut self) -> bool {
         let head_height = self.entries[&self.head].atom.height;
         let target_height = head_height.saturating_sub(T::CONFIRMATION_DEPTH);
 
         if self.finalized_height >= target_height {
-            return;
+            return false;
         }
 
         let hash = self.get_block_at_height(self.head, target_height);
@@ -791,6 +794,8 @@ impl<T: Config> Tree<T> {
             self.atom_db.delete(key).unwrap();
             self.atom_height_start += 1;
         }
+
+        true
     }
 
     fn get_block_at_height(&self, mut cur: Multihash, height: Height) -> Multihash {
