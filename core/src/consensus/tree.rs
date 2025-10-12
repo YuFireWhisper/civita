@@ -250,7 +250,7 @@ impl<T: Config> Tree<T> {
 
             self.final_validation(atom, check_difficulty, &mut result);
 
-            if !result.dismissed.is_empty() || !result.accepted.is_empty() || self.head != hash {
+            if !result.dismissed.is_empty() || result.accepted.is_empty() || self.head != hash {
                 return false;
             }
 
@@ -1034,14 +1034,14 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    pub fn headers(&self, from: Height, to: Height) -> Option<Vec<Multihash>> {
-        let mut result = Vec::with_capacity((to - from + 1) as usize);
+    pub fn headers(&self, start: Height, count: Height) -> Option<Vec<Multihash>> {
+        let mut result = Vec::with_capacity(count as usize);
 
-        if from > to || from < T::GENESIS_HEIGHT || to > self.finalized_height {
+        if start < T::GENESIS_HEIGHT || start + count - 1 > self.finalized_height {
             return None;
         }
 
-        for h in from..=to {
+        for h in start..start + count {
             let atom = self.get_by_height(h)?;
             result.push(atom.hash());
         }

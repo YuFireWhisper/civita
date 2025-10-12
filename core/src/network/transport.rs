@@ -49,11 +49,11 @@ enum Command<T: traits::Config> {
 }
 
 #[derive(Clone, Copy)]
+#[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     AtomByHash(Multihash),
     AtomByHeight(Height),
-    Headers(Height, Height), // (start, count)
     CurrentHeight,
     Proofs,
 }
@@ -62,9 +62,9 @@ pub enum Request {
 #[serde(bound = "T: traits::Config")]
 pub enum Response<T: traits::Config> {
     Atom(Box<Atom<T>>),
-    Headers(Vec<Multihash>),
     CurrentHeight(Height),
     Proofs(Height, Proofs<T>),
+    NotFound,
 }
 
 pub struct Transport<T: traits::Config> {
@@ -220,5 +220,27 @@ impl<T: traits::Config> Transport<T> {
 
     pub async fn stop(&self) {
         let _ = self.tx.send(Command::Stop).await;
+    }
+}
+
+impl std::fmt::Display for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Request::AtomByHash(hash) => write!(f, "AtomByHash({})", hex::encode(hash.to_bytes())),
+            Request::AtomByHeight(height) => write!(f, "AtomByHeight({})", height),
+            Request::CurrentHeight => write!(f, "CurrentHeight"),
+            Request::Proofs => write!(f, "Proofs"),
+        }
+    }
+}
+
+impl<T: traits::Config> std::fmt::Display for Response<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Response::Atom(atom) => write!(f, "Atom({})", hex::encode(atom.hash().to_bytes())),
+            Response::CurrentHeight(height) => write!(f, "CurrentHeight({})", height),
+            Response::Proofs(height, _) => write!(f, "proofs: height {}", height),
+            Response::NotFound => write!(f, "NotFound"),
+        }
     }
 }

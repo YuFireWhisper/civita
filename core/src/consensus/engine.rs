@@ -110,6 +110,7 @@ impl<T: Config> Engine<T> {
         loop {
             let req = Request::CurrentHeight;
             transport.send_request(req, config.peer).await;
+
             let local_height = tree_opt
                 .as_ref()
                 .map(|t| t.head_height())
@@ -160,26 +161,19 @@ impl<T: Config> Engine<T> {
             } else {
                 remote_height
                     .saturating_sub(T::MAINTENANCE_WINDOW)
-                    .max(T::GENESIS_HEIGHT)
+                    .max(T::GENESIS_HEIGHT + 1)
             };
             let end = remote_height.min(start + MAX_ATOMS_PER_REQUEST - 1);
 
-            let req = Request::Headers(start, end);
-            transport.send_request(req, config.peer).await;
+            if start == T::GENESIS_HEIGHT + 1 {
+                tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
+            }
 
-            let headers = recv_response(rx, |resp| {
-                if let Response::Headers(headers) = resp {
-                    Some(headers)
-                } else {
-                    None
-                }
-            })
-            .await;
-            let mut atoms = vec![None; headers.len()];
+            let mut atoms = vec![None; (end - start + 1) as usize];
             let mut count = 0;
 
-            for header in &headers {
-                let req = Request::AtomByHash(*header);
+            for i in start..=end {
+                let req = Request::AtomByHeight(i);
                 transport.send_request(req, config.peer).await;
             }
 
@@ -199,17 +193,15 @@ impl<T: Config> Engine<T> {
 
                 let idx = (atom.height - start) as usize;
 
-                if headers[idx] != atom.parent {
-                    continue;
-                }
-
                 if atoms[idx].is_none() {
                     atoms[idx] = Some(atom);
                     count += 1;
                 }
             }
 
-            let tree = tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
+            let tree = tree_opt.get_or_insert_with(|| {
+                Tree::with_atom(atoms.remove(0).unwrap(), &dir, transport.peer_id)
+            });
 
             assert!(tree.execute_chain(atoms.into_iter().flatten()));
         }
@@ -352,31 +344,31 @@ impl<T: Config> Engine<T> {
         channel: ResponseChannel<Response<T>>,
     ) {
         if !self.is_archive {
+            let resp = Response::NotFound;
+            self.transport.send_response(resp, channel).await;
             return;
         }
 
         match request {
             Request::AtomByHash(hash) => {
-                if let Some(atom) = self.tree.get(&hash) {
-                    let resp = Response::<T>::Atom(Box::new(atom.clone()));
-                    self.transport.send_response(resp, channel).await;
-                }
+                let resp = self
+                    .tree
+                    .get(&hash)
+                    .map(|atom| Response::Atom(Box::new(atom.clone())))
+                    .unwrap_or(Response::NotFound);
+                self.transport.send_response(resp, channel).await;
             }
             Request::AtomByHeight(height) => {
-                if let Some(atom) = self.tree.get_by_height(height) {
-                    let resp = Response::<T>::Atom(Box::new(atom));
-                    self.transport.send_response(resp, channel).await;
-                }
+                let resp = self
+                    .tree
+                    .get_by_height(height)
+                    .map(|atom| Response::Atom(Box::new(atom)))
+                    .unwrap_or(Response::NotFound);
+                self.transport.send_response(resp, channel).await;
             }
             Request::CurrentHeight => {
                 let resp = Response::<T>::CurrentHeight(self.tree.finalized_height());
                 self.transport.send_response(resp, channel).await;
-            }
-            Request::Headers(start, end) => {
-                if let Some(headers) = self.tree.headers(start, end) {
-                    let resp = Response::<T>::Headers(headers);
-                    self.transport.send_response(resp, channel).await;
-                }
             }
             Request::Proofs => {
                 let height = self.tree.finalized_height();
