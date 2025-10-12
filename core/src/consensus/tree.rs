@@ -47,6 +47,8 @@ pub struct Status {
     pub finalized: Multihash,
     pub finalized_height: Height,
     pub difficulty: Difficulty,
+    pub median_block_interval: Option<f64>,
+    pub average_tps: Option<f64>,
 }
 
 struct Entry<T: Config> {
@@ -1038,7 +1040,76 @@ impl<T: Config> Tree<T> {
             finalized: self.finalized,
             finalized_height: self.finalized_height,
             difficulty: self.entries[&self.head].difficulty,
+            median_block_interval: self.median_block_interval(),
+            average_tps: self.average_tps(),
         }
+    }
+
+    fn median_block_interval(&self) -> Option<f64> {
+        let mut timestamps = Vec::new();
+
+        let start_height = self.atom_height_start.max(T::GENESIS_HEIGHT + 1);
+
+        for height in start_height..=self.finalized_height {
+            let atom = self.get_by_height(height)?;
+            timestamps.push(atom.timestamp);
+        }
+
+        if timestamps.len() < 2 {
+            return None;
+        }
+
+        let mut intervals: Vec<u64> = timestamps
+            .windows(2)
+            .filter_map(|w| w[1].checked_sub(w[0]))
+            .collect();
+
+        if intervals.is_empty() {
+            return None;
+        }
+
+        intervals.sort_unstable();
+
+        let len = intervals.len();
+        let median = if len.is_multiple_of(2) {
+            let mid1 = intervals[len / 2 - 1] as f64;
+            let mid2 = intervals[len / 2] as f64;
+            (mid1 + mid2) / 2.0
+        } else {
+            intervals[len / 2] as f64
+        };
+
+        Some(median)
+    }
+
+    fn average_tps(&self) -> Option<f64> {
+        let mut total_commands = 0u64;
+        let mut first_timestamp = None;
+        let mut last_timestamp = None;
+
+        for height in self.atom_height_start..=self.finalized_height {
+            let atom = self.get_by_height(height)?;
+
+            if first_timestamp.is_none() {
+                first_timestamp = Some(atom.timestamp);
+            }
+            last_timestamp = Some(atom.timestamp);
+            total_commands += atom.atoms.iter().filter(|a| a.cmd.is_some()).count() as u64;
+            if atom.cmd.is_some() {
+                total_commands += 1;
+            }
+        }
+
+        let first_ts = first_timestamp?;
+        let last_ts = last_timestamp?;
+
+        let time_span = last_ts.checked_sub(first_ts)?;
+
+        if time_span == 0 {
+            return None;
+        }
+
+        Some(total_commands as f64 / time_span as f64)
     }
 
     pub fn headers(&self, start: Height, count: Height) -> Option<Vec<Multihash>> {
@@ -1149,6 +1220,24 @@ impl std::fmt::Display for Status {
         writeln!(f, "   finalized: {},", finalized)?;
         writeln!(f, "   finalized_height: {},", self.finalized_height)?;
         writeln!(f, "   difficulty: {}", self.difficulty)?;
+        writeln!(
+            f,
+            "   median_block_interval: {}",
+            if let Some(mbi) = self.median_block_interval {
+                format!("{:.2} sec", mbi)
+            } else {
+                "N/A".to_string()
+            }
+        )?;
+        writeln!(
+            f,
+            "   average_tps: {}",
+            if let Some(tps) = self.average_tps {
+                format!("{:.2} tps", tps)
+            } else {
+                "N/A".to_string()
+            }
+        )?;
         write!(f, "}}")
     }
 }
