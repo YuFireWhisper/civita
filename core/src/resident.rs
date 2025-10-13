@@ -10,7 +10,7 @@ use crate::{
         tree::Status,
     },
     crypto::Multihash,
-    event::Event,
+    event::{Event, Proposal},
     network::{transport, Transport},
     traits,
     ty::token::Token,
@@ -121,7 +121,8 @@ impl<T: traits::Config> Resident<T> {
         off_chain_inputs: Vec<T::OffChainInput>,
         outpus: Vec<Token<T>>,
     ) {
-        let event = Event::Propose(code, on_chain_inputs, off_chain_inputs, outpus);
+        let prposal = Proposal::new(code, on_chain_inputs, off_chain_inputs, outpus);
+        let event = Event::Propose(prposal);
         let _ = self.tx.send(event).await;
     }
 
