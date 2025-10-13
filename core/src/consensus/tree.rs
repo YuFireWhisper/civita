@@ -688,7 +688,7 @@ impl<T: Config> Tree<T> {
         timestamps.push(atom.timestamp);
         let mut cur_hash = atom.parent;
 
-        for height in start..atom.height {
+        for height in (start..atom.height).rev() {
             if height > self.finalized_height {
                 let entry = self.entries.get(&cur_hash)?;
                 timestamps.push(entry.atom.timestamp);
@@ -1036,14 +1036,8 @@ impl<T: Config> Tree<T> {
     }
 
     fn median_block_interval(&self) -> Option<f64> {
-        let mut timestamps = Vec::new();
-
-        let start_height = self.atom_height_start.max(1);
-
-        for height in start_height..=self.finalized_height {
-            let atom = self.get_by_height(height)?;
-            timestamps.push(atom.timestamp);
-        }
+        let head = &self.entries[&self.head];
+        let timestamps = self.collect_timestamps(&head.atom)?;
 
         if timestamps.len() < 2 {
             return None;
@@ -1051,7 +1045,7 @@ impl<T: Config> Tree<T> {
 
         let mut intervals: Vec<u64> = timestamps
             .windows(2)
-            .filter_map(|w| w[1].checked_sub(w[0]))
+            .filter_map(|w| w[0].checked_sub(w[1]))
             .collect();
 
         if intervals.is_empty() {
@@ -1061,6 +1055,7 @@ impl<T: Config> Tree<T> {
         intervals.sort_unstable();
 
         let len = intervals.len();
+
         let median = if len.is_multiple_of(2) {
             let mid1 = intervals[len / 2 - 1] as f64;
             let mid2 = intervals[len / 2] as f64;
@@ -1073,33 +1068,55 @@ impl<T: Config> Tree<T> {
     }
 
     fn average_tps(&self) -> Option<f64> {
-        let mut total_commands = 0u64;
-        let mut first_timestamp = None;
-        let mut last_timestamp = None;
+        let head_height = self.entries[&self.head].atom.height;
+        let start = head_height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
 
-        for height in self.atom_height_start..=self.finalized_height {
-            let atom = self.get_by_height(height)?;
-
-            if first_timestamp.is_none() {
-                first_timestamp = Some(atom.timestamp);
-            }
-            last_timestamp = Some(atom.timestamp);
-            total_commands += atom.atoms.iter().filter(|a| a.cmd.is_some()).count() as u64;
-            if atom.cmd.is_some() {
-                total_commands += 1;
-            }
-        }
-
-        let first_ts = first_timestamp?;
-        let last_ts = last_timestamp?;
-
-        let time_span = last_ts.checked_sub(first_ts)?;
-
-        if time_span == 0 {
+        if start == head_height {
             return None;
         }
 
-        Some(total_commands as f64 / time_span as f64)
+        let mut total_commands = 0u64;
+        let mut cur_hash = self.head;
+        let mut start_timestamp = None;
+        let mut end_timestamp = None;
+
+        for height in (start..=head_height).rev() {
+            if height == head_height {
+                end_timestamp = Some(self.entries[&cur_hash].atom.timestamp);
+            }
+
+            if height == start {
+                start_timestamp = Some(self.entries[&cur_hash].atom.timestamp);
+            }
+
+            if height > self.finalized_height {
+                let entry = self.entries.get(&cur_hash)?;
+                total_commands +=
+                    entry.atom.atoms.iter().filter(|a| a.cmd.is_some()).count() as u64;
+                if entry.atom.cmd.is_some() {
+                    total_commands += 1;
+                }
+                cur_hash = entry.atom.parent;
+            } else {
+                let value = self.atom_db.get(height.to_be_bytes()).unwrap()?;
+                let atom = Atom::<T>::from_bytes(&value).expect("Atom in DB must be valid");
+                total_commands += atom.atoms.iter().filter(|a| a.cmd.is_some()).count() as u64;
+                if atom.cmd.is_some() {
+                    total_commands += 1;
+                }
+                cur_hash = atom.parent;
+            }
+        }
+
+        let start_timestamp = start_timestamp.expect("start timestamp must be present");
+        let end_timestamp = end_timestamp.expect("end timestamp must be present");
+        let duration = end_timestamp.checked_sub(start_timestamp)?;
+
+        if duration == 0 {
+            return None;
+        }
+
+        Some(total_commands as f64 / duration as f64)
     }
 
     pub fn headers(&self, start: Height, count: Height) -> Option<Vec<Multihash>> {
