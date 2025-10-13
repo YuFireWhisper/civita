@@ -77,7 +77,6 @@ pub struct Tree<T: Config> {
     finalized_height: Height,
 
     mmr: Mmr,
-    atom_height_start: Height,
 
     mmr_db: DB,
     owner_db: DB,
@@ -200,7 +199,6 @@ impl<T: Config> Tree<T> {
             owner_db_path,
             temp_dir: temp_dir_path,
             temp_dir_count: 2,
-            atom_height_start: 0,
             peer_id,
         }
     }
@@ -275,12 +273,11 @@ impl<T: Config> Tree<T> {
             let value = entry.atom.to_bytes();
             self.atom_db.put(key, value).unwrap();
 
-            if self.peer_id.is_some()
-                && entry.atom.height - self.atom_height_start == T::MAINTENANCE_WINDOW
-            {
-                let key = self.atom_height_start.to_be_bytes();
-                self.atom_db.delete(key).unwrap();
-                self.atom_height_start += 1;
+            if self.peer_id.is_some() {
+                if let Some(height) = self.finalized_height.checked_sub(T::MAINTENANCE_WINDOW) {
+                    let key = height.to_be_bytes();
+                    let _ = self.atom_db.delete(key);
+                }
             }
         }
 
@@ -389,7 +386,6 @@ impl<T: Config> Tree<T> {
             temp_dir: temp_dir_path,
             temp_dir_count: 2,
             atom_db,
-            atom_height_start: height,
             peer_id: Some(peer_id),
         }
     }
@@ -780,12 +776,11 @@ impl<T: Config> Tree<T> {
         let value = entry.atom.to_bytes();
         self.atom_db.put(key, value).unwrap();
 
-        if entry.atom.height - self.atom_height_start == T::MAINTENANCE_WINDOW
-            && self.peer_id.is_some()
-        {
-            let key = self.atom_height_start.to_be_bytes();
-            self.atom_db.delete(key).unwrap();
-            self.atom_height_start += 1;
+        if self.peer_id.is_some() {
+            if let Some(height) = target_height.checked_sub(T::MAINTENANCE_WINDOW) {
+                let key = height.to_be_bytes();
+                let _ = self.atom_db.delete(key);
+            }
         }
     }
 
