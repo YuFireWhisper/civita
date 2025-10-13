@@ -257,14 +257,9 @@ impl<T: Config> Tree<T> {
                 return false;
             }
 
-            let check_difficulty = atom
-                .height
-                .saturating_sub(self.atom_height_start.saturating_sub(1))
-                >= T::MAINTENANCE_WINDOW;
-
             let mut result = UpdateResult::default();
 
-            self.final_validation(atom, check_difficulty, &mut result);
+            self.final_validation(atom, &mut result);
 
             if !result.dismissed.is_empty() || result.accepted.is_empty() || self.head != hash {
                 return false;
@@ -441,7 +436,7 @@ impl<T: Config> Tree<T> {
             return result;
         }
 
-        self.final_validation(atom, true, &mut result);
+        self.final_validation(atom, &mut result);
 
         result
     }
@@ -480,17 +475,14 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn final_validation(
-        &mut self,
-        atom: Atom<T>,
-        check_diffculty: bool,
-        result: &mut UpdateResult,
-    ) {
+    fn final_validation(&mut self, atom: Atom<T>, result: &mut UpdateResult) {
         let hash = atom.hash();
         let parent = atom.parent;
 
-        if let Some(reason) = validate(&self.entries[&parent], &atom, check_diffculty) {
-            log::debug!("Atom Height {} rejected: {}", atom.height, reason);
+        let ori_start = atom.height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
+        let check_difficulty = self.atom_db.get(ori_start.to_be_bytes()).unwrap().is_some();
+
+        if let Some(reason) = validate(&self.entries[&parent], &atom, check_difficulty) {
             self.remove_subtree(hash, reason, result);
             return;
         }
@@ -514,9 +506,9 @@ impl<T: Config> Tree<T> {
             return;
         };
 
-        children.into_values().for_each(|atom| {
-            self.final_validation(atom, check_diffculty, result);
-        });
+        children
+            .into_values()
+            .for_each(|atom| self.final_validation(atom, result));
     }
 
     fn remove_descendants(&mut self, hash: Multihash, reason: Reason, result: &mut UpdateResult) {
@@ -569,25 +561,15 @@ impl<T: Config> Tree<T> {
             owner_db_path: entry_owner_db_path,
         };
 
-        if entry
-            .atom
-            .height
-            .saturating_sub(self.atom_height_start.saturating_sub(1))
-            >= T::MAINTENANCE_WINDOW
-        {
-            let timestamps = self
-                .collect_timestamps(&entry.atom, T::MAINTENANCE_WINDOW)
-                .expect("Chain continuity is guaranteed here");
-
-            let mut diffs = timestamps
+        if let Some(timestamps) = self.collect_timestamps(&entry.atom) {
+            let diffs = timestamps
                 .windows(2)
                 .filter_map(|w| w[0].checked_sub(w[1]))
                 .collect::<Vec<_>>();
 
             if diffs.len() >= 2 {
-                diffs.sort_unstable();
-
                 let len = diffs.len();
+
                 let median = if len.is_multiple_of(2) {
                     let mid1 = diffs[len / 2 - 1] as f64;
                     let mid2 = diffs[len / 2] as f64;
@@ -693,32 +675,30 @@ impl<T: Config> Tree<T> {
         entry
     }
 
-    fn collect_timestamps(&self, atom: &Atom<T>, count: u32) -> Option<Vec<Timestamp>> {
-        let mut timestamps = Vec::with_capacity(count as usize);
+    fn collect_timestamps(&self, atom: &Atom<T>) -> Option<Vec<Timestamp>> {
+        let start = atom.height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
+
+        if start == atom.height {
+            return Some(vec![atom.timestamp]);
+        }
+
+        self.atom_db.get(start.to_be_bytes()).unwrap()?;
+
+        let mut timestamps = Vec::with_capacity((atom.height - start + 1) as usize);
         timestamps.push(atom.timestamp);
-
         let mut cur_hash = atom.parent;
-        let mut cur_height = atom.height - 1;
 
-        while timestamps.len() < count as usize {
-            let (timestamp, parent) = self
-                .entries
-                .get(&cur_hash)
-                .map(|e| (e.atom.timestamp, e.atom.parent))
-                .or_else(|| {
-                    self.atom_db
-                        .get(cur_height.to_be_bytes())
-                        .ok()
-                        .flatten()
-                        .map(|v| {
-                            let atom = Atom::<T>::from_bytes(&v).expect("Atom in DB must be valid");
-                            (atom.timestamp, atom.parent)
-                        })
-                })?;
-
-            timestamps.push(timestamp);
-            cur_hash = parent;
-            cur_height -= 1;
+        for height in start..atom.height {
+            if height > self.finalized_height {
+                let entry = self.entries.get(&cur_hash)?;
+                timestamps.push(entry.atom.timestamp);
+                cur_hash = entry.atom.parent;
+            } else {
+                let value = self.atom_db.get(height.to_be_bytes()).unwrap()?;
+                let atom = Atom::<T>::from_bytes(&value).expect("Atom in DB must be valid");
+                timestamps.push(atom.timestamp);
+                cur_hash = atom.parent;
+            }
         }
 
         Some(timestamps)
