@@ -30,10 +30,6 @@ use crate::{
     ty::atom::Atom,
 };
 
-pub const MMR_DIR: &str = "mmr";
-pub const OWNER_DIR: &str = "owner";
-pub const ATOM_DIR: &str = "atom";
-
 const MAX_ATOMS_PER_REQUEST: u32 = 1000;
 
 #[derive(Clone, Copy)]
@@ -192,7 +188,7 @@ impl<T: Config> Engine<T> {
                 match &mut tree_opt {
                     Some(tree) => {
                         let hash = atom.hash();
-                        let _ = tree.upsert(atom);
+                        let _ = tree.upsert(atom, true);
                         assert_eq!(tree.head(), hash);
                     }
                     None => {
@@ -318,7 +314,7 @@ impl<T: Config> Engine<T> {
                     .push((msg_id.clone(), peer));
             });
 
-        let result = self.tree.upsert(atom);
+        let result = self.tree.upsert(atom, false);
 
         for hash in result.accepted {
             let Some(infos) = self.pending_atoms.remove(&hash) else {
@@ -407,7 +403,7 @@ impl<T: Config> Engine<T> {
     }
 
     async fn on_atom_ready(&mut self, atom: Atom<T>) -> bool {
-        let result = self.tree.upsert(atom.clone());
+        let result = self.tree.upsert(atom.clone(), false);
 
         if !result.dismissed.is_empty() || result.missing.is_some() {
             return false;

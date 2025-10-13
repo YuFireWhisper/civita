@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use multihash_derive::MultihashDigest;
-use rocksdb::{WriteBatch, DB};
+use rocksdb::{ColumnFamily, WriteBatch, DB};
 
 use crate::crypto::{hasher::Hasher, Multihash};
 
@@ -205,6 +205,18 @@ impl Mmr {
     }
 
     pub fn prove_with_db(&self, idx: u64, db: &DB) -> Option<MmrProof> {
+        self.prove_inner(idx, |i| {
+            db.get(i.to_le_bytes())
+                .ok()
+                .flatten()
+                .and_then(|v| Multihash::from_bytes(&v).ok())
+        })
+    }
+
+    fn prove_inner<F>(&self, idx: u64, mut f: F) -> Option<MmrProof>
+    where
+        F: FnMut(u64) -> Option<Multihash>,
+    {
         let peak = floor(&self.peaks, &idx);
         let mut proof = MmrProof::new(vec![], idx);
 
@@ -230,16 +242,19 @@ impl Mmr {
                 return Some(proof);
             }
 
-            let h = self.entries.get(&is).copied().or_else(|| {
-                db.get(is.to_le_bytes())
-                    .ok()
-                    .flatten()
-                    .map(|v| Multihash::from_bytes(&v).expect("corrupted db"))
-            })?;
-
+            let h = self.entries.get(&is).copied().or_else(|| f(is))?;
             proof.hashes.push(h);
             g += 1;
         }
+    }
+
+    pub fn prove_with_cf(&self, idx: u64, db: &DB, cf: &ColumnFamily) -> Option<MmrProof> {
+        self.prove_inner(idx, |i| {
+            db.get_cf(cf, i.to_le_bytes())
+                .ok()
+                .flatten()
+                .and_then(|v| Multihash::from_bytes(&v).ok())
+        })
     }
 
     pub fn state(&self) -> State {
@@ -288,6 +303,20 @@ impl Mmr {
         self.entries
             .drain()
             .for_each(|(k, v)| batch.put(k.to_le_bytes(), v.to_bytes()));
+        self.entries = entries;
+        db.write(batch)
+    }
+
+    pub fn write_cf_and_remove_non_peaks(
+        &mut self,
+        db: &DB,
+        cf: &ColumnFamily,
+    ) -> Result<(), rocksdb::Error> {
+        let mut batch = WriteBatch::default();
+        let entries = HashMap::from_iter(self.peaks.iter().map(|p| (*p, self.entries[p])));
+        self.entries
+            .drain()
+            .for_each(|(k, v)| batch.put_cf(cf, k.to_le_bytes(), v.to_bytes()));
         self.entries = entries;
         db.write(batch)
     }

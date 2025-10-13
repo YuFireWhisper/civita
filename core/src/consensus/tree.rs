@@ -5,11 +5,10 @@ use std::{
 
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
-use rocksdb::{IteratorMode, Options, WriteBatch, DB};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    consensus::engine::{ATOM_DIR, MMR_DIR, OWNER_DIR},
     crypto::Multihash,
     event::Proposal,
     traits::{Config, ScriptPubKey},
@@ -25,6 +24,10 @@ mod reason;
 pub use reason::Reason;
 
 pub type Proofs<T> = HashMap<Multihash, (Token<T>, MmrProof)>;
+
+const MMR_CF: &str = "mmr";
+const OWNER_CF: &str = "owner";
+const ATOM_CF: &str = "atom";
 
 #[derive(Default)]
 pub struct UpdateResult {
@@ -64,12 +67,8 @@ pub struct Tree<T: Config> {
     finalized: Multihash,
     finalized_height: Height,
 
+    db: DB,
     mmr: Mmr,
-
-    mmr_db: DB,
-    owner_db: DB,
-    atom_db: DB,
-
     peer_id: Option<PeerId>,
 }
 
@@ -79,23 +78,26 @@ impl<T: Config> Tree<T> {
         P: AsRef<std::path::Path>,
     {
         let dir = dir.as_ref();
-        let mmr_db_path = dir.join(MMR_DIR);
-        let owner_db_path = dir.join(OWNER_DIR);
-        let atom_db_path = dir.join(ATOM_DIR);
+        fs::create_dir_all(dir).unwrap();
 
-        fs::create_dir_all(&mmr_db_path).unwrap();
-        fs::create_dir_all(&owner_db_path).unwrap();
-        fs::create_dir_all(&atom_db_path).unwrap();
+        let db = {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
 
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
+            let descs = [
+                ColumnFamilyDescriptor::new(MMR_CF, Options::default()),
+                ColumnFamilyDescriptor::new(OWNER_CF, Options::default()),
+                ColumnFamilyDescriptor::new(ATOM_CF, Options::default()),
+            ];
 
-        let mmr_db = DB::open(&opts, &mmr_db_path).unwrap();
-        let owner_db = DB::open(&opts, &owner_db_path).unwrap();
-        let atom_db = DB::open(&opts, &atom_db_path).unwrap();
+            DB::open_cf_descriptors(&opts, dir, descs).unwrap()
+        };
 
         let mut mmr = Mmr::default();
         let mut owner_batch = WriteBatch::default();
+        let mmr_cf = db.cf_handle(MMR_CF).unwrap();
+        let owner_cf = db.cf_handle(OWNER_CF).unwrap();
 
         if let Some(cmd) = T::genesis_command() {
             debug_assert!(T::validate_command(&cmd));
@@ -112,13 +114,13 @@ impl<T: Config> Tree<T> {
                 if let Some(peer_id) = peer_id {
                     if token.script_pk.is_related(peer_id) {
                         let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                        owner_batch.put(key, &value);
+                        owner_batch.put_cf(owner_cf, key, &value);
                         keep.push(idx);
                     }
                 } else {
                     for peer_id in token.script_pk.related_peers() {
                         let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                        owner_batch.put(key, &value);
+                        owner_batch.put_cf(owner_cf, key, &value);
                     }
                 }
             }
@@ -135,8 +137,8 @@ impl<T: Config> Tree<T> {
             .with_state(mmr.state().clone())
             .with_command(T::genesis_command());
 
-        mmr.write_and_remove_non_peaks(&mmr_db).unwrap();
-        owner_db.write(owner_batch).unwrap();
+        mmr.write_cf_and_remove_non_peaks(&db, mmr_cf).unwrap();
+        db.write(owner_batch).unwrap();
 
         let hash = genesis.hash();
         let height = genesis.height;
@@ -157,10 +159,8 @@ impl<T: Config> Tree<T> {
             head: hash,
             finalized: hash,
             finalized_height: height,
+            db,
             mmr,
-            mmr_db,
-            owner_db,
-            atom_db,
             peer_id,
         }
     }
@@ -170,25 +170,19 @@ impl<T: Config> Tree<T> {
         P: AsRef<std::path::Path>,
     {
         let mut tree = Self::genesis(dir.as_ref(), None);
-        let atoms = Self::resolve_from_atom_db(&tree.atom_db);
+        let atoms = tree.resolve_from_db();
 
         for atom in atoms {
-            let hash = atom.hash();
-            let result = tree.upsert(atom);
-
-            if !result.dismissed.is_empty() || tree.head != hash {
-                log::error!("Inconsistent Atom DB detected. Please check the database integrity.");
-                return None;
-            }
+            let _ = tree.upsert(atom, true);
         }
 
         Some(tree)
     }
 
-    fn resolve_from_atom_db(db: &DB) -> Vec<Atom<T>> {
-        let iter = db.iterator(IteratorMode::Start);
+    fn resolve_from_db(&self) -> Vec<Atom<T>> {
+        let cf = self.db.cf_handle(ATOM_CF).unwrap();
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
         let mut atoms = Vec::new();
-
         let mut prev = None;
 
         for item in iter {
@@ -206,19 +200,15 @@ impl<T: Config> Tree<T> {
     where
         P: AsRef<std::path::Path>,
     {
+        debug_assert_ne!(atom.height, 0);
+
         let dir = dir.as_ref();
-        let mmr_db_path = dir.join(MMR_DIR);
-        let owner_db_path = dir.join(OWNER_DIR);
-        let atom_db_path = dir.join(ATOM_DIR);
-
-        let mmr = Mmr::new(atom.state.clone()).expect("State in Atom must be valid");
-
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
+        fs::create_dir_all(dir).unwrap();
 
         let hash = atom.hash();
         let height = atom.height;
         let difficulty = atom.difficulty;
+        let mmr = Mmr::new(atom.state.clone()).expect("State in Atom must be valid");
 
         let entry = Entry {
             atom,
@@ -229,9 +219,22 @@ impl<T: Config> Tree<T> {
             difficulty,
         };
 
-        let mmr_db = DB::open(&opts, &mmr_db_path).unwrap();
-        let owner_db = DB::open(&opts, &owner_db_path).unwrap();
-        let atom_db = DB::open(&opts, &atom_db_path).unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+
+        let descs = [
+            ColumnFamilyDescriptor::new(MMR_CF, Options::default()),
+            ColumnFamilyDescriptor::new(OWNER_CF, Options::default()),
+            ColumnFamilyDescriptor::new(ATOM_CF, Options::default()),
+        ];
+
+        let db = DB::open_cf_descriptors(&opts, dir, descs).unwrap();
+
+        let cf = db.cf_handle(ATOM_CF).unwrap();
+        let key = height.to_be_bytes();
+        let value = entry.atom.to_bytes();
+        db.put_cf(cf, key, value).unwrap();
 
         Self {
             entries: HashMap::from([(hash, entry)]),
@@ -241,14 +244,12 @@ impl<T: Config> Tree<T> {
             finalized: hash,
             finalized_height: height,
             mmr,
-            mmr_db,
-            owner_db,
-            atom_db,
+            db,
             peer_id: Some(peer_id),
         }
     }
 
-    pub fn upsert(&mut self, atom: Atom<T>) -> UpdateResult {
+    pub fn upsert(&mut self, atom: Atom<T>, force: bool) -> UpdateResult {
         let mut result = UpdateResult::default();
         let hash = atom.hash();
 
@@ -290,7 +291,7 @@ impl<T: Config> Tree<T> {
             return result;
         }
 
-        self.final_validation(atom, &mut result);
+        self.final_validation(atom, force, &mut result);
 
         result
     }
@@ -329,12 +330,18 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn final_validation(&mut self, atom: Atom<T>, result: &mut UpdateResult) {
+    fn final_validation(&mut self, atom: Atom<T>, force: bool, result: &mut UpdateResult) {
         let hash = atom.hash();
         let parent = atom.parent;
 
         let ori_start = atom.height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
-        let check_difficulty = self.atom_db.get(ori_start.to_be_bytes()).unwrap().is_some();
+        let check_difficulty = {
+            let cf = self.db.cf_handle(ATOM_CF).unwrap();
+            self.db
+                .get_pinned_cf(cf, ori_start.to_be_bytes())
+                .unwrap()
+                .is_some()
+        };
 
         if let Some(reason) = validate(&self.entries[&parent], &self.mmr, &atom, check_difficulty) {
             self.remove_subtree(hash, reason, result);
@@ -354,7 +361,7 @@ impl<T: Config> Tree<T> {
         result.accepted.push(hash);
 
         self.update_weight(hash);
-        self.recompute_main_chain_and_finalized();
+        self.recompute_main_chain_and_finalized(force);
 
         let Some(children) = self.pending.remove(&hash) else {
             return;
@@ -362,7 +369,7 @@ impl<T: Config> Tree<T> {
 
         children
             .into_values()
-            .for_each(|atom| self.final_validation(atom, result));
+            .for_each(|atom| self.final_validation(atom, force, result));
     }
 
     fn remove_descendants(&mut self, hash: Multihash, reason: Reason, result: &mut UpdateResult) {
@@ -453,7 +460,11 @@ impl<T: Config> Tree<T> {
             return Some(vec![atom.timestamp]);
         }
 
-        self.atom_db.get(start.to_be_bytes()).unwrap()?;
+        let cf = self.db.cf_handle(ATOM_CF).unwrap();
+        self.db
+            .get_pinned_cf(cf, start.to_be_bytes())
+            .ok()
+            .flatten()?;
 
         let mut timestamps = Vec::with_capacity((atom.height - start + 1) as usize);
         timestamps.push(atom.timestamp);
@@ -465,8 +476,7 @@ impl<T: Config> Tree<T> {
                 timestamps.push(entry.atom.timestamp);
                 cur_hash = entry.atom.parent;
             } else {
-                let value = self.atom_db.get(height.to_be_bytes()).unwrap()?;
-                let atom = Atom::<T>::from_bytes(&value).expect("Atom in DB must be valid");
+                let atom = self.get_by_height(height)?;
                 timestamps.push(atom.timestamp);
                 cur_hash = atom.parent;
             }
@@ -492,12 +502,13 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn recompute_main_chain_and_finalized(&mut self) {
+    fn recompute_main_chain_and_finalized(&mut self, force: bool) {
         let start = self.finalized;
         let new_head = self.select_heaviest_chain(start);
+        debug_assert!(!force || new_head != self.head);
         if new_head != self.head {
             self.head = new_head;
-            self.try_advance_finalized()
+            self.try_advance_finalized(force)
         }
     }
 
@@ -526,19 +537,26 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn try_advance_finalized(&mut self) {
+    fn try_advance_finalized(&mut self, force: bool) {
         let head_height = self.entries[&self.head].atom.height;
-        let target_height = head_height.saturating_sub(T::CONFIRMATION_DEPTH);
 
-        if self.finalized_height >= target_height {
-            return;
-        }
-
-        let hash = self.get_block_at_height(self.head, target_height);
+        let (height, hash) = if force {
+            (head_height, self.head)
+        } else {
+            let target_height = head_height.saturating_sub(T::CONFIRMATION_DEPTH);
+            if self.finalized_height >= target_height {
+                return;
+            }
+            let hash = self.get_block_at_height(self.head, target_height);
+            (target_height, hash)
+        };
 
         {
             let entry = &self.entries[&hash];
             let mut batch = WriteBatch::default();
+
+            let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
+            let owner_cf = self.db.cf_handle(OWNER_CF).unwrap();
 
             for cmd in entry
                 .atom
@@ -558,12 +576,12 @@ impl<T: Config> Tree<T> {
                     if let Some(peer_id) = self.peer_id {
                         if token.script_pk.is_related(peer_id) {
                             let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.delete(key);
+                            batch.delete_cf(owner_cf, key);
                         }
                     } else {
                         for peer_id in token.script_pk.related_peers() {
                             let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.delete(key);
+                            batch.delete_cf(owner_cf, key);
                         }
                     }
                 }
@@ -580,24 +598,26 @@ impl<T: Config> Tree<T> {
                     if let Some(peer_id) = self.peer_id {
                         if token.script_pk.is_related(peer_id) {
                             let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.put(key, &value);
+                            batch.put_cf(owner_cf, key, &value);
                         }
                     } else {
                         for peer_id in token.script_pk.related_peers() {
                             let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.put(key, &value);
+                            batch.put_cf(owner_cf, key, &value);
                         }
                     }
                 }
             }
 
             self.mmr.commit();
-            self.mmr.write_and_remove_non_peaks(&self.mmr_db).unwrap();
-            self.owner_db.write(batch).unwrap();
+            self.mmr
+                .write_cf_and_remove_non_peaks(&self.db, mmr_cf)
+                .unwrap();
+            self.db.write(batch).unwrap();
         }
 
         self.finalized = hash;
-        self.finalized_height = target_height;
+        self.finalized_height = height;
 
         self.prune_non_descendants();
 
@@ -605,12 +625,13 @@ impl<T: Config> Tree<T> {
 
         let key = self.finalized_height.to_be_bytes();
         let value = entry.atom.to_bytes();
-        self.atom_db.put(key, value).unwrap();
+        let cf = self.db.cf_handle(ATOM_CF).unwrap();
+        self.db.put_cf(cf, key, value).unwrap();
 
         if self.peer_id.is_some() {
-            if let Some(height) = target_height.checked_sub(T::MAINTENANCE_WINDOW) {
+            if let Some(height) = height.checked_sub(T::MAINTENANCE_WINDOW) {
                 let key = height.to_be_bytes();
-                let _ = self.atom_db.delete(key);
+                let _ = self.db.delete_cf(cf, key);
             }
         }
     }
@@ -655,13 +676,16 @@ impl<T: Config> Tree<T> {
             Vec::with_capacity(proposal.on_chain_inputs.len() + proposal.off_chain_inputs.len());
 
         if !proposal.on_chain_inputs.is_empty() {
+            let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
+            let owner_cf = self.db.cf_handle(OWNER_CF).unwrap();
+
             let peer_bytes = peer_id.to_bytes();
             for (id, sig) in proposal.on_chain_inputs {
                 let key = [peer_bytes.as_slice(), id.to_bytes().as_slice()].concat();
-                let value = self.owner_db.get(key).ok().flatten()?;
+                let value = self.db.get_cf(owner_cf, key).ok().flatten()?;
                 let idx = u64::from_be_bytes(value[0..8].try_into().unwrap());
                 let token = Token::from_bytes(&value[8..]).expect("Token must be valid");
-                let proof = self.mmr.prove_with_db(idx, &self.mmr_db).unwrap();
+                let proof = self.mmr.prove_with_cf(idx, &self.db, mmr_cf).unwrap();
                 inputs.push(Input::OnChain(token, id, proof, sig));
             }
         }
@@ -738,7 +762,8 @@ impl<T: Config> Tree<T> {
     pub fn tokens(&self, peer: &PeerId) -> HashMap<Multihash, Token<T>> {
         debug_assert!(self.peer_id.is_none_or(|p| &p == peer));
 
-        let iter = self.owner_db.prefix_iterator(peer.to_bytes());
+        let cf = self.db.cf_handle(OWNER_CF).unwrap();
+        let iter = self.db.prefix_iterator_cf(cf, peer.to_bytes());
         let mut tokens = HashMap::new();
 
         for item in iter {
@@ -757,7 +782,8 @@ impl<T: Config> Tree<T> {
     pub fn proofs(&self, peer: &PeerId) -> Proofs<T> {
         debug_assert!(self.peer_id.is_none_or(|p| &p == peer));
 
-        let iter = self.owner_db.prefix_iterator(peer.to_bytes());
+        let cf = self.db.cf_handle(OWNER_CF).unwrap();
+        let iter = self.db.prefix_iterator_cf(cf, peer.to_bytes());
         let mut proofs = Proofs::new();
 
         for item in iter {
@@ -769,7 +795,7 @@ impl<T: Config> Tree<T> {
             let id = Multihash::from_bytes(&key[peer.to_bytes().len()..]).unwrap();
             let idx = u64::from_be_bytes(value[0..8].try_into().unwrap());
             let token = Token::from_bytes(&value[8..]).unwrap();
-            let proof = self.mmr.prove_with_db(idx, &self.mmr_db).unwrap();
+            let proof = self.mmr.prove_with_cf(idx, &self.db, cf).unwrap();
             proofs.insert(id, (token, proof));
         }
 
@@ -781,8 +807,9 @@ impl<T: Config> Tree<T> {
     }
 
     pub fn get_by_height(&self, height: Height) -> Option<Atom<T>> {
-        self.atom_db
-            .get(height.to_be_bytes())
+        let cf = self.db.cf_handle(ATOM_CF).unwrap();
+        self.db
+            .get_cf(cf, height.to_be_bytes())
             .ok()
             .flatten()
             .map(|v| Atom::<T>::from_bytes(&v).expect("Atom in DB must be valid"))
@@ -790,6 +817,9 @@ impl<T: Config> Tree<T> {
 
     pub fn fill(&mut self, proofs: Proofs<T>) -> bool {
         let mut batch = WriteBatch::default();
+
+        let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
+        let owner_cf = self.db.cf_handle(OWNER_CF).unwrap();
 
         for (id, (token, proof)) in proofs {
             if !self.mmr.resolve_and_fill(id, &proof) {
@@ -804,17 +834,19 @@ impl<T: Config> Tree<T> {
                     return false;
                 }
                 let key = [peer_id.to_bytes(), id_bytes].concat();
-                batch.put(key, &value);
+                batch.put_cf(owner_cf, key, &value);
             } else {
                 for peer_id in token.script_pk.related_peers() {
                     let key = [peer_id.to_bytes().as_slice(), id_bytes.as_slice()].concat();
-                    batch.put(key, &value);
+                    batch.put_cf(owner_cf, key, &value);
                 }
             }
         }
 
-        self.mmr.write_and_remove_non_peaks(&self.mmr_db).unwrap();
-        self.owner_db.write(batch).unwrap();
+        self.mmr
+            .write_cf_and_remove_non_peaks(&self.db, mmr_cf)
+            .unwrap();
+        self.db.write(batch).unwrap();
 
         true
     }
@@ -924,8 +956,7 @@ impl<T: Config> Tree<T> {
                 }
                 cur_hash = entry.atom.parent;
             } else {
-                let value = self.atom_db.get(height.to_be_bytes()).unwrap()?;
-                let atom = Atom::<T>::from_bytes(&value).expect("Atom in DB must be valid");
+                let atom = self.get_by_height(height)?;
                 total_commands += atom.atoms.iter().filter(|a| a.cmd.is_some()).count() as u64;
                 if atom.cmd.is_some() {
                     total_commands += 1;
