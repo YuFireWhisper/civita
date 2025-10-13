@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     consensus::engine::{ATOM_DIR, MMR_DIR, OWNER_DIR},
     crypto::Multihash,
+    event::Proposal,
     traits::{Config, ScriptPubKey},
     ty::{
         atom::{Difficulty, Height, Pruned, Timestamp},
@@ -831,21 +832,15 @@ impl<T: Config> Tree<T> {
         self.entries.retain(|h, _| keep.contains(h));
     }
 
-    pub fn create_command(
-        &self,
-        peer_id: &PeerId,
-        code: u8,
-        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
-        off_chain_inputs: Vec<T::OffChainInput>,
-        outputs: Vec<Token<T>>,
-    ) -> Option<Command<T>> {
+    pub fn create_command(&self, proposal: Proposal<T>, peer_id: &PeerId) -> Option<Command<T>> {
         debug_assert!(self.peer_id.is_none_or(|p| &p == peer_id));
 
-        let mut inputs = Vec::with_capacity(on_chain_inputs.len() + off_chain_inputs.len());
+        let mut inputs =
+            Vec::with_capacity(proposal.on_chain_inputs.len() + proposal.off_chain_inputs.len());
 
-        if !on_chain_inputs.is_empty() {
+        if !proposal.on_chain_inputs.is_empty() {
             let peer_bytes = peer_id.to_bytes();
-            for (id, sig) in on_chain_inputs {
+            for (id, sig) in proposal.on_chain_inputs {
                 let key = [peer_bytes.as_slice(), id.to_bytes().as_slice()].concat();
                 let value = self.owner_db.get(key).ok().flatten()?;
                 let idx = u64::from_be_bytes(value[0..8].try_into().unwrap());
@@ -855,11 +850,11 @@ impl<T: Config> Tree<T> {
             }
         }
 
-        for input in off_chain_inputs {
+        for input in proposal.off_chain_inputs {
             inputs.push(Input::OffChain(input));
         }
 
-        Some(Command::new(code, inputs, outputs))
+        Some(Command::new(proposal.code, inputs, proposal.outputs))
     }
 
     pub fn create_atom(&self, cmd: Option<Command<T>>) -> Atom<T> {
