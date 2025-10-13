@@ -5,7 +5,7 @@ use std::{
 
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch, DB};
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -94,42 +94,13 @@ impl<T: Config> Tree<T> {
             DB::open_cf_descriptors(&opts, dir, descs).unwrap()
         };
 
+        let mut batch = WriteBatch::default();
         let mut mmr = Mmr::default();
-        let mut owner_batch = WriteBatch::default();
-        let mmr_cf = db.cf_handle(MMR_CF).unwrap();
-        let owner_cf = db.cf_handle(OWNER_CF).unwrap();
 
         if let Some(cmd) = T::genesis_command() {
-            debug_assert!(T::validate_command(&cmd));
-
-            let mut keep = Vec::new();
-
-            for (i, token) in cmd.outputs.iter().enumerate() {
-                let buf = [[0, 0].as_slice(), &(i as u32).to_be_bytes()].concat();
-                let id = T::HASHER.digest(&buf);
-                let id_bytes = id.to_bytes();
-                let idx = mmr.append(id);
-                let value: Vec<u8> = [&idx.to_be_bytes(), token.to_bytes().as_slice()].concat();
-
-                if let Some(peer_id) = peer_id {
-                    if token.script_pk.is_related(peer_id) {
-                        let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                        owner_batch.put_cf(owner_cf, key, &value);
-                        keep.push(idx);
-                    }
-                } else {
-                    for peer_id in token.script_pk.related_peers() {
-                        let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                        owner_batch.put_cf(owner_cf, key, &value);
-                    }
-                }
-            }
-
-            mmr.commit();
-
-            if peer_id.is_some() {
-                mmr.prune(&keep);
-            }
+            let mmr_cf = db.cf_handle(MMR_CF).unwrap();
+            let owner_cf = db.cf_handle(OWNER_CF).unwrap();
+            apply_command(&cmd, &mut mmr, mmr_cf, owner_cf, &mut batch, peer_id);
         }
 
         let genesis = Atom::default()
@@ -137,8 +108,7 @@ impl<T: Config> Tree<T> {
             .with_state(mmr.state().clone())
             .with_command(T::genesis_command());
 
-        mmr.write_cf_and_remove_non_peaks(&db, mmr_cf).unwrap();
-        db.write(owner_batch).unwrap();
+        db.write(batch).unwrap();
 
         let hash = genesis.hash();
         let height = genesis.height;
@@ -551,10 +521,10 @@ impl<T: Config> Tree<T> {
             (target_height, hash)
         };
 
+        let mut batch = WriteBatch::default();
+
         {
             let entry = &self.entries[&hash];
-            let mut batch = WriteBatch::default();
-
             let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
             let owner_cf = self.db.cf_handle(OWNER_CF).unwrap();
 
@@ -565,55 +535,15 @@ impl<T: Config> Tree<T> {
                 .filter_map(|a| a.cmd.as_ref())
                 .chain(entry.atom.cmd.as_ref())
             {
-                for input in &cmd.inputs {
-                    let Input::OnChain(token, id, proof, _) = input else {
-                        continue;
-                    };
-
-                    let _ = self.mmr.delete(*id, proof);
-                    let id_bytes = id.to_bytes();
-
-                    if let Some(peer_id) = self.peer_id {
-                        if token.script_pk.is_related(peer_id) {
-                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.delete_cf(owner_cf, key);
-                        }
-                    } else {
-                        for peer_id in token.script_pk.related_peers() {
-                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.delete_cf(owner_cf, key);
-                        }
-                    }
-                }
-
-                let first_input = cmd.inputs[0].id().to_bytes();
-
-                for (i, token) in cmd.outputs.iter().enumerate() {
-                    let buf = [first_input.as_slice(), &(i as u32).to_be_bytes()].concat();
-                    let id = T::HASHER.digest(&buf);
-                    let id_bytes = id.to_bytes();
-                    let idx = self.mmr.append(id);
-                    let value: Vec<u8> = [&idx.to_be_bytes(), token.to_bytes().as_slice()].concat();
-
-                    if let Some(peer_id) = self.peer_id {
-                        if token.script_pk.is_related(peer_id) {
-                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.put_cf(owner_cf, key, &value);
-                        }
-                    } else {
-                        for peer_id in token.script_pk.related_peers() {
-                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                            batch.put_cf(owner_cf, key, &value);
-                        }
-                    }
-                }
+                apply_command(
+                    cmd,
+                    &mut self.mmr,
+                    mmr_cf,
+                    owner_cf,
+                    &mut batch,
+                    self.peer_id,
+                );
             }
-
-            self.mmr.commit();
-            self.mmr
-                .write_cf_and_remove_non_peaks(&self.db, mmr_cf)
-                .unwrap();
-            self.db.write(batch).unwrap();
         }
 
         self.finalized = hash;
@@ -621,19 +551,21 @@ impl<T: Config> Tree<T> {
 
         self.prune_non_descendants();
 
-        let entry = &self.entries[&self.finalized];
+        {
+            let cf = self.db.cf_handle(ATOM_CF).unwrap();
+            let key = self.finalized_height.to_be_bytes();
+            let value = self.entries[&self.finalized].atom.to_bytes();
+            batch.put_cf(cf, key, value);
 
-        let key = self.finalized_height.to_be_bytes();
-        let value = entry.atom.to_bytes();
-        let cf = self.db.cf_handle(ATOM_CF).unwrap();
-        self.db.put_cf(cf, key, value).unwrap();
-
-        if self.peer_id.is_some() {
-            if let Some(height) = height.checked_sub(T::MAINTENANCE_WINDOW) {
-                let key = height.to_be_bytes();
-                let _ = self.db.delete_cf(cf, key);
+            if self.peer_id.is_some() {
+                if let Some(height) = height.checked_sub(T::MAINTENANCE_WINDOW) {
+                    let key = height.to_be_bytes();
+                    let _ = self.db.delete_cf(cf, key);
+                }
             }
         }
+
+        self.db.write(batch).unwrap();
     }
 
     fn get_block_at_height(&self, mut cur: Multihash, height: Height) -> Multihash {
@@ -843,9 +775,7 @@ impl<T: Config> Tree<T> {
             }
         }
 
-        self.mmr
-            .write_cf_and_remove_non_peaks(&self.db, mmr_cf)
-            .unwrap();
+        self.mmr.write_cf(mmr_cf, &mut batch);
         self.db.write(batch).unwrap();
 
         true
@@ -990,6 +920,68 @@ impl<T: Config> Tree<T> {
 
         Some(result)
     }
+}
+
+fn apply_command<T: Config>(
+    cmd: &Command<T>,
+    mmr: &mut Mmr,
+    mmr_cf: &ColumnFamily,
+    owner_cf: &ColumnFamily,
+    batch: &mut WriteBatch,
+    peer_id: Option<PeerId>,
+) {
+    let mut keep = Vec::new();
+
+    for input in &cmd.inputs {
+        let Input::OnChain(token, id, proof, _) = input else {
+            continue;
+        };
+
+        let _ = mmr.delete(*id, proof);
+
+        let id_bytes = id.to_bytes();
+
+        if let Some(peer_id) = peer_id {
+            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+            batch.delete_cf(owner_cf, key);
+        } else {
+            for peer_id in token.script_pk.related_peers() {
+                let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+                batch.delete_cf(owner_cf, key);
+            }
+        }
+    }
+
+    let first_input = cmd.inputs[0].id().to_bytes();
+
+    for (i, token) in cmd.outputs.iter().enumerate() {
+        let buf = [first_input.as_slice(), &(i as u32).to_be_bytes()].concat();
+        let id = T::HASHER.digest(&buf);
+        let id_bytes = id.to_bytes();
+        let idx = mmr.append(id);
+        let value: Vec<u8> = [&idx.to_be_bytes(), token.to_bytes().as_slice()].concat();
+
+        if let Some(peer_id) = peer_id {
+            if token.script_pk.is_related(peer_id) {
+                let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+                keep.push(idx);
+                batch.put_cf(owner_cf, key, &value);
+            }
+        } else {
+            for peer_id in token.script_pk.related_peers() {
+                let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+                batch.put_cf(owner_cf, key, &value);
+            }
+        }
+    }
+
+    mmr.commit();
+
+    if peer_id.is_some() {
+        mmr.prune(&keep);
+    }
+
+    mmr.write_cf(mmr_cf, batch);
 }
 
 fn validate<T: Config>(

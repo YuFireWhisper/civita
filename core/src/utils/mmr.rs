@@ -289,37 +289,43 @@ impl Mmr {
         true
     }
 
-    pub fn write(&self, db: &DB) -> Result<(), rocksdb::Error> {
-        let mut batch = WriteBatch::default();
+    pub fn write_cf(&self, cf: &ColumnFamily, batch: &mut WriteBatch) {
         self.entries
             .iter()
-            .for_each(|(k, v)| batch.put(k.to_le_bytes(), v.to_bytes()));
-        db.write(batch)
-    }
-
-    pub fn write_and_remove_non_peaks(&mut self, db: &DB) -> Result<(), rocksdb::Error> {
-        let mut batch = WriteBatch::default();
-        let entries = HashMap::from_iter(self.peaks.iter().map(|p| (*p, self.entries[p])));
-        self.entries
-            .drain()
-            .for_each(|(k, v)| batch.put(k.to_le_bytes(), v.to_bytes()));
-        self.entries = entries;
-        db.write(batch)
-    }
-
-    pub fn write_cf_and_remove_non_peaks(
-        &mut self,
-        db: &DB,
-        cf: &ColumnFamily,
-    ) -> Result<(), rocksdb::Error> {
-        let mut batch = WriteBatch::default();
-        let entries = HashMap::from_iter(self.peaks.iter().map(|p| (*p, self.entries[p])));
-        self.entries
-            .drain()
             .for_each(|(k, v)| batch.put_cf(cf, k.to_le_bytes(), v.to_bytes()));
-        self.entries = entries;
-        db.write(batch)
     }
+
+    // pub fn write(&self, db: &DB) -> Result<(), rocksdb::Error> {
+    //     let mut batch = WriteBatch::default();
+    //     self.entries
+    //         .iter()
+    //         .for_each(|(k, v)| batch.put(k.to_le_bytes(), v.to_bytes()));
+    //     db.write(batch)
+    // }
+    //
+    // pub fn write_and_remove_non_peaks(&mut self, db: &DB) -> Result<(), rocksdb::Error> {
+    //     let mut batch = WriteBatch::default();
+    //     let entries = HashMap::from_iter(self.peaks.iter().map(|p| (*p, self.entries[p])));
+    //     self.entries
+    //         .drain()
+    //         .for_each(|(k, v)| batch.put(k.to_le_bytes(), v.to_bytes()));
+    //     self.entries = entries;
+    //     db.write(batch)
+    // }
+    //
+    // pub fn write_cf_and_remove_non_peaks(
+    //     &mut self,
+    //     db: &DB,
+    //     cf: &ColumnFamily,
+    // ) -> Result<(), rocksdb::Error> {
+    //     let mut batch = WriteBatch::default();
+    //     let entries = HashMap::from_iter(self.peaks.iter().map(|p| (*p, self.entries[p])));
+    //     self.entries
+    //         .drain()
+    //         .for_each(|(k, v)| batch.put_cf(cf, k.to_le_bytes(), v.to_bytes()));
+    //     self.entries = entries;
+    //     db.write(batch)
+    // }
 }
 
 fn index_height(i: u64) -> usize {
