@@ -211,7 +211,18 @@ impl<T: Config> Tree<T> {
     {
         let mut tree = Self::genesis(dir.as_ref(), None);
         let atoms = Self::resolve_from_atom_db(&tree.atom_db);
-        (atoms.is_empty() || tree.execute_chain(atoms)).then_some(tree)
+
+        for atom in atoms {
+            let hash = atom.hash();
+            let result = tree.upsert(atom);
+
+            if !result.dismissed.is_empty() || tree.head != hash {
+                log::error!("Inconsistent Atom DB detected. Please check the database integrity.");
+                return None;
+            }
+        }
+
+        Some(tree)
     }
 
     fn resolve_from_atom_db(db: &DB) -> Vec<Atom<T>> {
