@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fmt, path::Path};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use libp2p::{
     gossipsub::{MessageAcceptance, MessageId},
@@ -7,14 +15,13 @@ use libp2p::{
 };
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
-    task::JoinSet,
     time::{Duration, Instant},
 };
 
 use crate::{
     consensus::tree::Tree,
     crypto::Multihash,
-    event::Event,
+    event::{Event, Proposal},
     network::{
         transport::{Request, Response},
         Transport,
@@ -46,7 +53,8 @@ pub struct Engine<T: Config> {
     transport: Transport<T>,
     tree: Tree<T>,
     pending_atoms: HashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
-    task_set: JoinSet<()>,
+    pending_tasks: VecDeque<Proposal<T>>,
+    is_running_task: Arc<AtomicBool>,
     heartbeat_instant: tokio::time::Instant,
     heartbeat_duration: Duration,
     is_archive: bool,
@@ -71,7 +79,8 @@ impl<T: Config> Engine<T> {
                 transport,
                 tree,
                 pending_atoms: HashMap::new(),
-                task_set: JoinSet::new(),
+                pending_tasks: VecDeque::new(),
+                is_running_task: Arc::new(AtomicBool::new(false)),
                 heartbeat_instant,
                 heartbeat_duration,
                 is_archive,
@@ -81,7 +90,8 @@ impl<T: Config> Engine<T> {
                 transport,
                 tree: Tree::load_or_genesis(dir).expect("Failed to load or create genesis"),
                 pending_atoms: HashMap::new(),
-                task_set: JoinSet::new(),
+                pending_tasks: VecDeque::new(),
+                is_running_task: Arc::new(AtomicBool::new(false)),
                 heartbeat_instant,
                 heartbeat_duration,
                 is_archive: true,
@@ -207,27 +217,30 @@ impl<T: Config> Engine<T> {
                         self.on_recv_atom(None, peer, *atom).await;
                     }
                 }
-                Event::Propose(code, on_chain, off_chain, outputs) => {
-                    let Some(cmd) = self.tree.create_command(
-                        &self.transport.peer_id,
-                        code,
-                        on_chain,
-                        off_chain,
-                        outputs,
-                    ) else {
+                Event::Propose(proposal) => {
+                    self.pending_tasks.push_back(proposal);
+                    self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
+
+                    if self.is_running_task.load(Ordering::Relaxed) {
+                        continue;
+                    }
+
+                    let proposal = self.pending_tasks.pop_front().unwrap();
+                    let Some(cmd) = self.tree.create_command(proposal, &self.transport.peer_id)
+                    else {
                         log::error!("Invalid command proposed");
                         continue;
                     };
-
                     let atom = self.tree.create_atom(Some(cmd));
                     let tx_clone = tx.clone();
+                    let is_running_task = self.is_running_task.clone();
+                    is_running_task.store(true, Ordering::Relaxed);
 
-                    self.task_set.spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         let atom = atom.solve();
                         let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
+                        is_running_task.store(false, Ordering::Relaxed);
                     });
-
-                    self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
                 }
                 Event::Tokens(tx) => {
                     let _ = tx.send(self.tree.tokens(&self.transport.peer_id));
@@ -247,16 +260,43 @@ impl<T: Config> Engine<T> {
             }
 
             if tokio::time::Instant::now() >= self.heartbeat_instant {
+                self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
+
+                if self.is_running_task.load(Ordering::Relaxed) {
+                    continue;
+                }
+
+                if let Some(proposal) = self.pending_tasks.pop_front() {
+                    let Some(cmd) = self.tree.create_command(proposal, &self.transport.peer_id)
+                    else {
+                        log::error!("Invalid command proposed");
+                        continue;
+                    };
+
+                    let atom = self.tree.create_atom(Some(cmd));
+                    let tx_clone = tx.clone();
+                    let is_running_task = self.is_running_task.clone();
+                    is_running_task.store(true, Ordering::Relaxed);
+
+                    tokio::task::spawn_blocking(move || {
+                        let atom = atom.solve();
+                        let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
+                        is_running_task.store(false, Ordering::Relaxed);
+                    });
+
+                    continue;
+                }
+
                 let atom = self.tree.create_atom(None);
                 let tx_clone = tx.clone();
+                let is_running_task = self.is_running_task.clone();
+                is_running_task.store(true, Ordering::Relaxed);
 
-                self.task_set.spawn_blocking(move || {
+                tokio::task::spawn_blocking(move || {
                     let atom = atom.solve();
                     let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
-                    log::info!("Heartbeat atom created");
+                    is_running_task.store(false, Ordering::Relaxed);
                 });
-
-                self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
             }
 
             tokio::task::yield_now().await;
