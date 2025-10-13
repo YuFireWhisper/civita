@@ -28,3 +28,19 @@ pub enum Event<T: traits::Config> {
     Stop(oneshot::Sender<()>),
     AtomReady(Box<Atom<T>>),
 }
+
+impl<T: traits::Config> Proposal<T> {
+    pub fn new(
+        code: u8,
+        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
+        off_chain_inputs: Vec<T::OffChainInput>,
+        outputs: Vec<Token<T>>,
+    ) -> Self {
+        Self {
+            code,
+            on_chain_inputs,
+            off_chain_inputs,
+            outputs,
+        }
+    }
+}
