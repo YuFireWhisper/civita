@@ -202,50 +202,6 @@ impl<T: Config> Tree<T> {
         atoms
     }
 
-    pub fn execute_chain<I>(&mut self, chain: I) -> bool
-    where
-        I: IntoIterator<Item = Atom<T>>,
-    {
-        // for atom in chain {
-        //     let hash = atom.hash();
-        //
-        //     if atom.parent != self.head {
-        //         return false;
-        //     }
-        //
-        //     if self.basic_validation(&atom).is_some() {
-        //         return false;
-        //     }
-        //
-        //     let mut result = UpdateResult::default();
-        //
-        //     self.final_validation(atom, &mut result);
-        //
-        //     if !result.dismissed.is_empty() || result.accepted.is_empty() || self.head != hash {
-        //         return false;
-        //     }
-        //
-        //     self.replace_mmr_db(&hash);
-        //     self.replace_owner_db(&hash);
-        //
-        //     let entry = &self.entries[&hash];
-        //     self.mmr = entry.mmr.clone();
-        //
-        //     let key = self.finalized_height.to_be_bytes();
-        //     let value = entry.atom.to_bytes();
-        //     self.atom_db.put(key, value).unwrap();
-        //
-        //     if self.peer_id.is_some() {
-        //         if let Some(height) = self.finalized_height.checked_sub(T::MAINTENANCE_WINDOW) {
-        //             let key = height.to_be_bytes();
-        //             let _ = self.atom_db.delete(key);
-        //         }
-        //     }
-        // }
-
-        true
-    }
-
     pub fn with_atom<P>(atom: Atom<T>, dir: P, peer_id: PeerId) -> Self
     where
         P: AsRef<std::path::Path>,

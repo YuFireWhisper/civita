@@ -177,8 +177,6 @@ impl<T: Config> Engine<T> {
                 tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
             }
 
-            let mut atoms = Vec::with_capacity((end - start + 1) as usize);
-
             for i in start..=end {
                 let req = Request::AtomByHeight(i);
                 transport.send_request(req, config.peer).await;
@@ -190,12 +188,18 @@ impl<T: Config> Engine<T> {
                     }
                 })
                 .await;
-                atoms.push(atom);
-            }
 
-            let tree = tree_opt
-                .get_or_insert_with(|| Tree::with_atom(atoms.remove(0), &dir, transport.peer_id));
-            assert!(tree.execute_chain(atoms));
+                match &mut tree_opt {
+                    Some(tree) => {
+                        let hash = atom.hash();
+                        let _ = tree.upsert(atom);
+                        assert_eq!(tree.head(), hash);
+                    }
+                    None => {
+                        tree_opt = Some(Tree::with_atom(atom, &dir, transport.peer_id));
+                    }
+                }
+            }
         }
     }
 
