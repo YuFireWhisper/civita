@@ -1,14 +1,11 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    mem::ManuallyDrop,
-    path::PathBuf,
 };
 
-use bincode::serde::encode_to_vec;
 use libp2p::PeerId;
 use multihash_derive::MultihashDigest;
-use rocksdb::{checkpoint::Checkpoint, IteratorMode, Options, WriteBatch, DB};
+use rocksdb::{IteratorMode, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -21,7 +18,6 @@ use crate::{
         Atom, Command, Input, Token,
     },
     utils::mmr::{Mmr, MmrProof},
-    BINCODE_CONFIG,
 };
 
 mod reason;
@@ -29,8 +25,6 @@ mod reason;
 pub use reason::Reason;
 
 pub type Proofs<T> = HashMap<Multihash, (Token<T>, MmrProof)>;
-
-const TEMP_DIR_PREFIX: &str = "temp";
 
 #[derive(Default)]
 pub struct UpdateResult {
@@ -56,15 +50,9 @@ struct Entry<T: Config> {
     pub atom: Atom<T>,
     pub pruned_children: HashMap<Multihash, Pruned<T>>,
     pub block_children: HashSet<Multihash>,
-
     pub descendants: HashSet<Multihash>,
+    pub consumed: HashSet<Multihash>,
     pub difficulty: Difficulty,
-    pub mmr: Mmr,
-
-    pub mmr_db: Option<DB>,
-    pub mmr_db_path: PathBuf,
-    pub owner_db: Option<DB>,
-    pub owner_db_path: PathBuf,
 }
 
 pub struct Tree<T: Config> {
@@ -82,11 +70,6 @@ pub struct Tree<T: Config> {
     owner_db: DB,
     atom_db: DB,
 
-    mmr_db_path: PathBuf,
-    owner_db_path: PathBuf,
-    temp_dir: PathBuf,
-    temp_dir_count: u32,
-
     peer_id: Option<PeerId>,
 }
 
@@ -99,13 +82,10 @@ impl<T: Config> Tree<T> {
         let mmr_db_path = dir.join(MMR_DIR);
         let owner_db_path = dir.join(OWNER_DIR);
         let atom_db_path = dir.join(ATOM_DIR);
-        let temp_dir_path = dir.join(TEMP_DIR_PREFIX);
 
         fs::create_dir_all(&mmr_db_path).unwrap();
         fs::create_dir_all(&owner_db_path).unwrap();
         fs::create_dir_all(&atom_db_path).unwrap();
-        let _ = fs::remove_dir_all(&temp_dir_path);
-        fs::create_dir_all(&temp_dir_path).unwrap();
 
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -158,16 +138,6 @@ impl<T: Config> Tree<T> {
         mmr.write_and_remove_non_peaks(&mmr_db).unwrap();
         owner_db.write(owner_batch).unwrap();
 
-        let temp_mmr_dir = temp_dir_path.join(1.to_string());
-        let temp_owner_dir = temp_dir_path.join(2.to_string());
-
-        {
-            let cp = Checkpoint::new(&mmr_db).unwrap();
-            cp.create_checkpoint(&temp_mmr_dir).unwrap();
-            let cp = Checkpoint::new(&owner_db).unwrap();
-            cp.create_checkpoint(&temp_owner_dir).unwrap();
-        }
-
         let hash = genesis.hash();
         let height = genesis.height;
 
@@ -176,12 +146,8 @@ impl<T: Config> Tree<T> {
             pruned_children: HashMap::new(),
             block_children: HashSet::new(),
             descendants: HashSet::new(),
+            consumed: HashSet::new(),
             difficulty: T::GENESIS_VAF_DIFFICULTY,
-            mmr: mmr.clone(),
-            mmr_db: Some(DB::open_default(&temp_mmr_dir).unwrap()),
-            owner_db: Some(DB::open_default(&temp_owner_dir).unwrap()),
-            mmr_db_path: temp_mmr_dir,
-            owner_db_path: temp_owner_dir,
         };
 
         Self {
@@ -195,10 +161,6 @@ impl<T: Config> Tree<T> {
             mmr_db,
             owner_db,
             atom_db,
-            mmr_db_path,
-            owner_db_path,
-            temp_dir: temp_dir_path,
-            temp_dir_count: 2,
             peer_id,
         }
     }
@@ -244,83 +206,44 @@ impl<T: Config> Tree<T> {
     where
         I: IntoIterator<Item = Atom<T>>,
     {
-        for atom in chain {
-            let hash = atom.hash();
-
-            if atom.parent != self.head {
-                return false;
-            }
-
-            if self.basic_validation(&atom).is_some() {
-                return false;
-            }
-
-            let mut result = UpdateResult::default();
-
-            self.final_validation(atom, &mut result);
-
-            if !result.dismissed.is_empty() || result.accepted.is_empty() || self.head != hash {
-                return false;
-            }
-
-            self.replace_mmr_db(&hash);
-            self.replace_owner_db(&hash);
-
-            let entry = &self.entries[&hash];
-            self.mmr = entry.mmr.clone();
-
-            let key = self.finalized_height.to_be_bytes();
-            let value = entry.atom.to_bytes();
-            self.atom_db.put(key, value).unwrap();
-
-            if self.peer_id.is_some() {
-                if let Some(height) = self.finalized_height.checked_sub(T::MAINTENANCE_WINDOW) {
-                    let key = height.to_be_bytes();
-                    let _ = self.atom_db.delete(key);
-                }
-            }
-        }
+        // for atom in chain {
+        //     let hash = atom.hash();
+        //
+        //     if atom.parent != self.head {
+        //         return false;
+        //     }
+        //
+        //     if self.basic_validation(&atom).is_some() {
+        //         return false;
+        //     }
+        //
+        //     let mut result = UpdateResult::default();
+        //
+        //     self.final_validation(atom, &mut result);
+        //
+        //     if !result.dismissed.is_empty() || result.accepted.is_empty() || self.head != hash {
+        //         return false;
+        //     }
+        //
+        //     self.replace_mmr_db(&hash);
+        //     self.replace_owner_db(&hash);
+        //
+        //     let entry = &self.entries[&hash];
+        //     self.mmr = entry.mmr.clone();
+        //
+        //     let key = self.finalized_height.to_be_bytes();
+        //     let value = entry.atom.to_bytes();
+        //     self.atom_db.put(key, value).unwrap();
+        //
+        //     if self.peer_id.is_some() {
+        //         if let Some(height) = self.finalized_height.checked_sub(T::MAINTENANCE_WINDOW) {
+        //             let key = height.to_be_bytes();
+        //             let _ = self.atom_db.delete(key);
+        //         }
+        //     }
+        // }
 
         true
-    }
-
-    fn next_temp_dir(&mut self) -> PathBuf {
-        self.temp_dir_count += 1;
-        self.temp_dir.join(self.temp_dir_count.to_string())
-    }
-
-    fn replace_mmr_db(&mut self, hash: &Multihash) {
-        unsafe {
-            ManuallyDrop::drop(&mut ManuallyDrop::new(std::ptr::read(&self.mmr_db)));
-        }
-
-        let _ = fs::remove_dir_all(&self.mmr_db_path);
-        let cp = Checkpoint::new(self.entries[hash].mmr_db.as_ref().unwrap()).unwrap();
-        cp.create_checkpoint(&self.mmr_db_path).unwrap();
-
-        unsafe {
-            std::ptr::write(
-                &mut self.mmr_db,
-                DB::open_default(&self.mmr_db_path).unwrap(),
-            );
-        }
-    }
-
-    fn replace_owner_db(&mut self, hash: &Multihash) {
-        unsafe {
-            ManuallyDrop::drop(&mut ManuallyDrop::new(std::ptr::read(&self.owner_db)));
-        }
-
-        fs::remove_dir_all(&self.owner_db_path).unwrap();
-        let cp = Checkpoint::new(self.entries[hash].owner_db.as_ref().unwrap()).unwrap();
-        cp.create_checkpoint(&self.owner_db_path).unwrap();
-
-        unsafe {
-            std::ptr::write(
-                &mut self.owner_db,
-                DB::open_default(&self.owner_db_path).unwrap(),
-            );
-        }
     }
 
     pub fn with_atom<P>(atom: Atom<T>, dir: P, peer_id: PeerId) -> Self
@@ -331,21 +254,8 @@ impl<T: Config> Tree<T> {
         let mmr_db_path = dir.join(MMR_DIR);
         let owner_db_path = dir.join(OWNER_DIR);
         let atom_db_path = dir.join(ATOM_DIR);
-        let temp_dir_path = dir.join(TEMP_DIR_PREFIX);
-
-        let _ = fs::remove_dir_all(&temp_dir_path);
-        fs::create_dir_all(&mmr_db_path).unwrap();
-        let _ = fs::remove_dir_all(&temp_dir_path);
-        fs::create_dir_all(&owner_db_path).unwrap();
-        let _ = fs::remove_dir_all(&temp_dir_path);
-        fs::create_dir_all(&atom_db_path).unwrap();
-        let _ = fs::remove_dir_all(&temp_dir_path);
-        fs::create_dir_all(&temp_dir_path).unwrap();
 
         let mmr = Mmr::new(atom.state.clone()).expect("State in Atom must be valid");
-
-        let entry_mmr_db_path = temp_dir_path.join(1.to_string());
-        let entry_owner_db_path = temp_dir_path.join(2.to_string());
 
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -359,12 +269,8 @@ impl<T: Config> Tree<T> {
             pruned_children: HashMap::new(),
             block_children: HashSet::new(),
             descendants: HashSet::new(),
+            consumed: HashSet::new(),
             difficulty,
-            mmr: mmr.clone(),
-            mmr_db: Some(DB::open(&opts, &entry_mmr_db_path).unwrap()),
-            owner_db: Some(DB::open(&opts, &entry_owner_db_path).unwrap()),
-            mmr_db_path: entry_mmr_db_path,
-            owner_db_path: entry_owner_db_path,
         };
 
         let mmr_db = DB::open(&opts, &mmr_db_path).unwrap();
@@ -378,13 +284,9 @@ impl<T: Config> Tree<T> {
             head: hash,
             finalized: hash,
             finalized_height: height,
-            mmr_db_path,
-            mmr_db,
             mmr,
-            owner_db_path,
+            mmr_db,
             owner_db,
-            temp_dir: temp_dir_path,
-            temp_dir_count: 2,
             atom_db,
             peer_id: Some(peer_id),
         }
@@ -478,7 +380,7 @@ impl<T: Config> Tree<T> {
         let ori_start = atom.height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
         let check_difficulty = self.atom_db.get(ori_start.to_be_bytes()).unwrap().is_some();
 
-        if let Some(reason) = validate(&self.entries[&parent], &atom, check_difficulty) {
+        if let Some(reason) = validate(&self.entries[&parent], &self.mmr, &atom, check_difficulty) {
             self.remove_subtree(hash, reason, result);
             return;
         }
@@ -526,35 +428,15 @@ impl<T: Config> Tree<T> {
         debug_assert!(atom.atoms.len() >= T::BLOCK_THRESHOLD as usize);
 
         let hash = atom.hash();
-
-        let entry_mmr_db_path = self.next_temp_dir();
-        let entry_owner_db_path = self.next_temp_dir();
-
         let parent = &self.entries[&atom.parent];
-
-        Checkpoint::new(parent.mmr_db.as_ref().unwrap())
-            .unwrap()
-            .create_checkpoint(&entry_mmr_db_path)
-            .unwrap();
-        Checkpoint::new(parent.owner_db.as_ref().unwrap())
-            .unwrap()
-            .create_checkpoint(&entry_owner_db_path)
-            .unwrap();
-
-        let mmr_db = DB::open_default(&entry_mmr_db_path).unwrap();
-        let owner_db = DB::open_default(&entry_owner_db_path).unwrap();
 
         let mut entry = Entry {
             atom,
             pruned_children: HashMap::new(),
             block_children: HashSet::new(),
             descendants: HashSet::new(),
+            consumed: parent.consumed.clone(),
             difficulty: parent.difficulty,
-            mmr: parent.mmr.clone(),
-            mmr_db: Some(mmr_db),
-            owner_db: Some(owner_db),
-            mmr_db_path: entry_mmr_db_path,
-            owner_db_path: entry_owner_db_path,
         };
 
         if let Some(timestamps) = self.collect_timestamps(&entry.atom) {
@@ -593,74 +475,11 @@ impl<T: Config> Tree<T> {
             .chain(entry.atom.cmd.as_ref())
         {
             for input in &cmd.inputs {
-                let Input::OnChain(token, id, proof, _) = input else {
-                    continue;
-                };
-
-                entry.mmr.delete(*id, proof);
-                let id_bytes = id.to_bytes();
-
-                if let Some(peer_id) = self.peer_id {
-                    if token.script_pk.is_related(peer_id) {
-                        let key = [peer_id.to_bytes(), id_bytes.clone()].concat();
-                        entry.owner_db.as_ref().unwrap().delete(key).unwrap();
-                    }
-                } else {
-                    for peer_id in token.script_pk.related_peers() {
-                        let key = [peer_id.to_bytes(), id_bytes.clone()].concat();
-                        entry.owner_db.as_ref().unwrap().delete(key).unwrap();
-                    }
-                }
-            }
-
-            let first_input = encode_to_vec(cmd.inputs[0].id(), BINCODE_CONFIG).unwrap();
-            let first_input_ref = first_input.as_slice();
-            for (i, token) in cmd.outputs.iter().enumerate() {
-                let buf = [first_input_ref, &(i as u32).to_be_bytes()].concat();
-                let id = T::HASHER.digest(&buf);
-                let idx = entry.mmr.append(id);
-                let id_bytes = id.to_bytes();
-                let value: Vec<u8> = [&idx.to_be_bytes(), token.to_bytes().as_slice()].concat();
-
-                if let Some(peer_id) = self.peer_id {
-                    if token.script_pk.is_related(peer_id) {
-                        let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                        entry.owner_db.as_ref().unwrap().put(key, &value).unwrap();
-                    }
-                } else {
-                    for peer_id in token.script_pk.related_peers() {
-                        let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                        entry.owner_db.as_ref().unwrap().put(key, &value).unwrap();
-                    }
+                if let Input::OnChain(_, id, _, _) = input {
+                    entry.consumed.insert(*id);
                 }
             }
         }
-
-        entry.mmr.commit();
-
-        if let Some(peer_id) = self.peer_id {
-            let mut keep = Vec::new();
-            let bytes = peer_id.to_bytes();
-            let iter = entry.owner_db.as_ref().unwrap().prefix_iterator(&bytes);
-
-            for item in iter {
-                let (key, value) = item.unwrap();
-
-                if !key.starts_with(&bytes) {
-                    break;
-                }
-
-                let idx = u64::from_be_bytes(value[0..8].try_into().unwrap());
-                keep.push(idx);
-            }
-
-            entry.mmr.prune(&keep);
-        }
-
-        entry
-            .mmr
-            .write_and_remove_non_peaks(entry.mmr_db.as_ref().unwrap())
-            .unwrap();
 
         self.entries
             .get_mut(&entry.atom.parent)
@@ -761,16 +580,72 @@ impl<T: Config> Tree<T> {
 
         let hash = self.get_block_at_height(self.head, target_height);
 
+        {
+            let entry = &self.entries[&hash];
+            let mut batch = WriteBatch::default();
+
+            for cmd in entry
+                .atom
+                .atoms
+                .iter()
+                .filter_map(|a| a.cmd.as_ref())
+                .chain(entry.atom.cmd.as_ref())
+            {
+                for input in &cmd.inputs {
+                    let Input::OnChain(token, id, proof, _) = input else {
+                        continue;
+                    };
+
+                    let _ = self.mmr.delete(*id, proof);
+                    let id_bytes = id.to_bytes();
+
+                    if let Some(peer_id) = self.peer_id {
+                        if token.script_pk.is_related(peer_id) {
+                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+                            batch.delete(key);
+                        }
+                    } else {
+                        for peer_id in token.script_pk.related_peers() {
+                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+                            batch.delete(key);
+                        }
+                    }
+                }
+
+                let first_input = cmd.inputs[0].id().to_bytes();
+
+                for (i, token) in cmd.outputs.iter().enumerate() {
+                    let buf = [first_input.as_slice(), &(i as u32).to_be_bytes()].concat();
+                    let id = T::HASHER.digest(&buf);
+                    let id_bytes = id.to_bytes();
+                    let idx = self.mmr.append(id);
+                    let value: Vec<u8> = [&idx.to_be_bytes(), token.to_bytes().as_slice()].concat();
+
+                    if let Some(peer_id) = self.peer_id {
+                        if token.script_pk.is_related(peer_id) {
+                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+                            batch.put(key, &value);
+                        }
+                    } else {
+                        for peer_id in token.script_pk.related_peers() {
+                            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
+                            batch.put(key, &value);
+                        }
+                    }
+                }
+            }
+
+            self.mmr.commit();
+            self.mmr.write_and_remove_non_peaks(&self.mmr_db).unwrap();
+            self.owner_db.write(batch).unwrap();
+        }
+
         self.finalized = hash;
         self.finalized_height = target_height;
+
         self.prune_non_descendants();
 
-        self.replace_mmr_db(&hash);
-        self.replace_owner_db(&hash);
-
         let entry = &self.entries[&self.finalized];
-
-        self.mmr = entry.mmr.clone();
 
         let key = self.finalized_height.to_be_bytes();
         let value = entry.atom.to_bytes();
@@ -1130,7 +1005,12 @@ impl<T: Config> Tree<T> {
     }
 }
 
-fn validate<T: Config>(parent: &Entry<T>, atom: &Atom<T>, check_diffculty: bool) -> Option<Reason> {
+fn validate<T: Config>(
+    parent: &Entry<T>,
+    mmr: &Mmr,
+    atom: &Atom<T>,
+    check_diffculty: bool,
+) -> Option<Reason> {
     if atom.height != parent.atom.height + 1 {
         return Some(Reason::invalid_height(atom.height, parent.atom.height));
     }
@@ -1160,7 +1040,7 @@ fn validate<T: Config>(parent: &Entry<T>, atom: &Atom<T>, check_diffculty: bool)
                 return Some(Reason::double_spend());
             }
 
-            if !parent.mmr.verify(*id, proof) {
+            if !mmr.verify(*id, proof) {
                 return Some(Reason::invalid_mmr_proof());
             }
 
@@ -1195,7 +1075,7 @@ fn validate<T: Config>(parent: &Entry<T>, atom: &Atom<T>, check_diffculty: bool)
                 return Some(Reason::double_spend());
             }
 
-            if !parent.mmr.verify(*id, proof) {
+            if !mmr.verify(*id, proof) {
                 return Some(Reason::invalid_mmr_proof());
             }
 
@@ -1241,14 +1121,5 @@ impl std::fmt::Display for Status {
             }
         )?;
         write!(f, "}}")
-    }
-}
-
-impl<T: Config> Drop for Entry<T> {
-    fn drop(&mut self) {
-        drop(self.mmr_db.take());
-        drop(self.owner_db.take());
-        let _ = fs::remove_dir_all(&self.mmr_db_path);
-        let _ = fs::remove_dir_all(&self.owner_db_path);
     }
 }
