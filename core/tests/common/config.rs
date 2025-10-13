@@ -42,9 +42,7 @@ impl traits::Config for Config {
     const MAINTENANCE_WINDOW: u32 = 10;
     const TARGET_BLOCK_TIME_SEC: u64 = 30;
     const MAX_VDF_DIFFICULTY_ADJUSTMENT: f64 = 1.5;
-    const GENESIS_HEIGHT: u32 = 0;
     const GENESIS_VAF_DIFFICULTY: u64 = 1;
-    const MAX_BLOCKS_PER_SYNC: u32 = 100;
 
     fn genesis_command() -> Option<Command<Self>> {
         let tokens = vec![

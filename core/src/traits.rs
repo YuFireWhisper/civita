@@ -26,7 +26,6 @@ pub trait Config: Sized + Send + Sync + 'static {
     const MAINTENANCE_WINDOW: u32;
     const TARGET_BLOCK_TIME_SEC: u64;
     const MAX_VDF_DIFFICULTY_ADJUSTMENT: f64;
-    const GENESIS_HEIGHT: u32;
     const GENESIS_VAF_DIFFICULTY: u64;
 
     fn genesis_command() -> Option<Command<Self>>;

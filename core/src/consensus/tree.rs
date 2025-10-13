@@ -200,7 +200,7 @@ impl<T: Config> Tree<T> {
             owner_db_path,
             temp_dir: temp_dir_path,
             temp_dir_count: 2,
-            atom_height_start: T::GENESIS_HEIGHT,
+            atom_height_start: 0,
             peer_id,
         }
     }
@@ -1058,7 +1058,7 @@ impl<T: Config> Tree<T> {
     fn median_block_interval(&self) -> Option<f64> {
         let mut timestamps = Vec::new();
 
-        let start_height = self.atom_height_start.max(T::GENESIS_HEIGHT + 1);
+        let start_height = self.atom_height_start.max(1);
 
         for height in start_height..=self.finalized_height {
             let atom = self.get_by_height(height)?;
@@ -1125,7 +1125,7 @@ impl<T: Config> Tree<T> {
     pub fn headers(&self, start: Height, count: Height) -> Option<Vec<Multihash>> {
         let mut result = Vec::with_capacity(count as usize);
 
-        if start < T::GENESIS_HEIGHT || start + count - 1 > self.finalized_height {
+        if start == 0 || start + count - 1 > self.finalized_height {
             return None;
         }
 

@@ -169,13 +169,11 @@ impl<T: Config> Engine<T> {
             let start = if matches!(config.node_type, NodeType::Archive) {
                 local_height + 1
             } else {
-                remote_height
-                    .saturating_sub(T::MAINTENANCE_WINDOW)
-                    .max(T::GENESIS_HEIGHT + 1)
+                remote_height.saturating_sub(T::MAINTENANCE_WINDOW).max(1)
             };
             let end = remote_height.min(start + MAX_ATOMS_PER_REQUEST - 1);
 
-            if start == T::GENESIS_HEIGHT + 1 {
+            if start == 1 {
                 tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
             }
 
