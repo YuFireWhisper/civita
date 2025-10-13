@@ -246,8 +246,10 @@ impl<T: Config> Tree<T> {
                 return false;
             }
 
-            let check_difficulty =
-                atom.height.saturating_sub(self.finalized_height) + 1 >= T::MAINTENANCE_WINDOW;
+            let check_difficulty = atom
+                .height
+                .saturating_sub(self.atom_height_start.saturating_sub(1))
+                >= T::MAINTENANCE_WINDOW;
 
             let mut result = UpdateResult::default();
 
@@ -477,6 +479,7 @@ impl<T: Config> Tree<T> {
         let parent = atom.parent;
 
         if let Some(reason) = validate(&self.entries[&parent], &atom, check_diffculty) {
+            log::debug!("Atom Height {} rejected: {}", atom.height, reason);
             self.remove_subtree(hash, reason, result);
             return;
         }
@@ -562,33 +565,35 @@ impl<T: Config> Tree<T> {
             >= T::MAINTENANCE_WINDOW
         {
             let timestamps = self
-                .collect_timestamps(entry.atom.parent, entry.atom.height, T::MAINTENANCE_WINDOW)
+                .collect_timestamps(&entry.atom, T::MAINTENANCE_WINDOW)
                 .expect("Chain continuity is guaranteed here");
 
             let mut diffs = timestamps
                 .windows(2)
-                .filter_map(|w| w[1].checked_sub(w[0]))
+                .filter_map(|w| w[0].checked_sub(w[1]))
                 .collect::<Vec<_>>();
 
-            diffs.sort_unstable();
+            if diffs.len() >= 2 {
+                diffs.sort_unstable();
 
-            let len = diffs.len();
-            let median = if len.is_multiple_of(2) {
-                let mid1 = diffs[len / 2 - 1] as f64;
-                let mid2 = diffs[len / 2] as f64;
-                (mid1 + mid2) / 2.0
-            } else {
-                diffs[len / 2] as f64
-            };
+                let len = diffs.len();
+                let median = if len.is_multiple_of(2) {
+                    let mid1 = diffs[len / 2 - 1] as f64;
+                    let mid2 = diffs[len / 2] as f64;
+                    (mid1 + mid2) / 2.0
+                } else {
+                    diffs[len / 2] as f64
+                };
 
-            let target = T::TARGET_BLOCK_TIME_SEC as f64;
-            let ratio_raw = target / median;
-            let ratio = ratio_raw.clamp(
-                1.0 / T::MAX_VDF_DIFFICULTY_ADJUSTMENT,
-                T::MAX_VDF_DIFFICULTY_ADJUSTMENT,
-            );
+                let target = T::TARGET_BLOCK_TIME_SEC as f64;
+                let ratio_raw = target / median;
+                let ratio = ratio_raw.clamp(
+                    1.0 / T::MAX_VDF_DIFFICULTY_ADJUSTMENT,
+                    T::MAX_VDF_DIFFICULTY_ADJUSTMENT,
+                );
 
-            entry.difficulty = ((parent.difficulty as f64 * ratio) as u64).max(1);
+                entry.difficulty = ((parent.difficulty as f64 * ratio) as u64).max(1);
+            }
         }
 
         for cmd in entry
@@ -677,13 +682,13 @@ impl<T: Config> Tree<T> {
         entry
     }
 
-    fn collect_timestamps(
-        &self,
-        mut cur_hash: Multihash,
-        mut cur_height: Height,
-        count: u32,
-    ) -> Option<Vec<Timestamp>> {
+    fn collect_timestamps(&self, atom: &Atom<T>, count: u32) -> Option<Vec<Timestamp>> {
         let mut timestamps = Vec::with_capacity(count as usize);
+        timestamps.push(atom.timestamp);
+
+        let mut cur_hash = atom.parent;
+        let mut cur_height = atom.height - 1;
+
         while timestamps.len() < count as usize {
             let (timestamp, parent) = self
                 .entries
@@ -704,6 +709,7 @@ impl<T: Config> Tree<T> {
             cur_hash = parent;
             cur_height -= 1;
         }
+
         Some(timestamps)
     }
 
