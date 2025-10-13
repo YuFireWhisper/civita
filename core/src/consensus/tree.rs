@@ -685,8 +685,6 @@ impl<T: Config> Tree<T> {
     ) -> Option<Vec<Timestamp>> {
         let mut timestamps = Vec::with_capacity(count as usize);
         while timestamps.len() < count as usize {
-            log::debug!("Collecting timestamp at height {cur_height}");
-
             let (timestamp, parent) = self
                 .entries
                 .get(&cur_hash)
