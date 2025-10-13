@@ -427,7 +427,7 @@ impl<T: Config> Tree<T> {
         let start = atom.height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
 
         if start == atom.height {
-            return Some(vec![atom.timestamp]);
+            return None;
         }
 
         let cf = self.db.cf_handle(ATOM_CF).unwrap();
@@ -869,16 +869,17 @@ impl<T: Config> Tree<T> {
         let mut end_timestamp = None;
 
         for height in (start..=head_height).rev() {
-            if height == head_height {
-                end_timestamp = Some(self.entries[&cur_hash].atom.timestamp);
-            }
-
-            if height == start {
-                start_timestamp = Some(self.entries[&cur_hash].atom.timestamp);
-            }
-
             if height > self.finalized_height {
                 let entry = self.entries.get(&cur_hash)?;
+
+                if height == head_height {
+                    end_timestamp = Some(entry.atom.timestamp);
+                }
+
+                if height == start {
+                    start_timestamp = Some(entry.atom.timestamp);
+                }
+
                 total_commands +=
                     entry.atom.atoms.iter().filter(|a| a.cmd.is_some()).count() as u64;
                 if entry.atom.cmd.is_some() {
@@ -887,6 +888,15 @@ impl<T: Config> Tree<T> {
                 cur_hash = entry.atom.parent;
             } else {
                 let atom = self.get_by_height(height)?;
+
+                if height == head_height {
+                    end_timestamp = Some(atom.timestamp);
+                }
+
+                if height == start {
+                    start_timestamp = Some(atom.timestamp);
+                }
+
                 total_commands += atom.atoms.iter().filter(|a| a.cmd.is_some()).count() as u64;
                 if atom.cmd.is_some() {
                     total_commands += 1;
@@ -995,6 +1005,14 @@ fn validate<T: Config>(
     }
 
     if check_diffculty && atom.difficulty != parent.difficulty {
+        log::warn!(
+            "Difficulty mismatch: parent {}, atom {}, atom height {}, parent {}",
+            parent.difficulty,
+            atom.difficulty,
+            atom.height,
+            hex::encode(parent.atom.hash().to_bytes())
+        );
+
         return Some(Reason::mismatch_difficulty(
             parent.difficulty,
             atom.difficulty,
