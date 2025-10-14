@@ -1,4 +1,9 @@
-use crate::{crypto::Multihash, BINCODE_CONFIG};
+use multihash_derive::MultihashDigest;
+
+use crate::{
+    crypto::{Hasher, Multihash},
+    BINCODE_CONFIG,
+};
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -18,6 +23,13 @@ impl Token {
             value,
             script_pk,
         }
+    }
+
+    pub fn id(&self, hasher: Hasher) -> Multihash {
+        let mut buf = Vec::with_capacity(self.cmd_id.encoded_len() + 4);
+        buf.extend(self.cmd_id.to_bytes());
+        buf.extend(&self.index.to_be_bytes());
+        hasher.digest(&buf)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
