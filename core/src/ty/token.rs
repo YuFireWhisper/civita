@@ -1,16 +1,23 @@
-use crate::BINCODE_CONFIG;
+use crate::{crypto::Multihash, BINCODE_CONFIG};
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Token {
+    pub cmd_id: Multihash,
+    pub index: u32,
     pub value: Vec<u8>,
     pub script_pk: Vec<u8>,
 }
 
 impl Token {
-    pub fn new(value: Vec<u8>, script_pk: Vec<u8>) -> Self {
-        Self { value, script_pk }
+    pub fn new(cmd_id: Multihash, index: u32, value: Vec<u8>, script_pk: Vec<u8>) -> Self {
+        Self {
+            cmd_id,
+            index,
+            value,
+            script_pk,
+        }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
