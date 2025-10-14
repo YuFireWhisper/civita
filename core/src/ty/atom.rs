@@ -42,8 +42,8 @@ pub struct Atom {
     cache: OnceLock<Multihash>,
 }
 
-impl<T: Config> Pruned<T> {
-    pub fn from_atom(atom: Atom<T>) -> Self {
+impl Pruned {
+    pub fn from_atom(atom: Atom) -> Self {
         Self {
             random: atom.random,
             timestamp: atom.timestamp,
