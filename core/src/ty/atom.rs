@@ -6,11 +6,7 @@ use serde::{Deserialize, Serialize};
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
 use crate::{
-    chain_config::ChainConfig,
-    crypto::{Hasher, Multihash},
-    ty::Command,
-    utils::mmr::State,
-    BINCODE_CONFIG,
+    chain_config::ChainConfig, crypto::Multihash, ty::Command, utils::mmr::State, BINCODE_CONFIG,
 };
 
 pub type Height = u32;
@@ -150,6 +146,11 @@ impl Atom {
         self
     }
 
+    pub fn with_chain_config(mut self, chain_config: ChainConfig) -> Self {
+        self.chain_config = chain_config;
+        self
+    }
+
     pub fn with_command(mut self, cmd: Option<Command>) -> Self {
         self.cmd = cmd;
         self
@@ -160,12 +161,12 @@ impl Atom {
         self
     }
 
-    pub fn solve(mut self, param: u16, hasher: Hasher) -> Self {
-        let vdf = WesolowskiVDFParams(param).new();
+    pub fn solve(mut self) -> Self {
+        let vdf = WesolowskiVDFParams(self.chain_config.vdf_param).new();
         let input = self.compute_input(false);
         self.nonce = vdf.solve(&input, self.difficulty).unwrap();
 
-        let id = self.id(hasher);
+        let id = self.id();
 
         if let Some(cmd) = &mut self.cmd {
             cmd.outputs.iter_mut().for_each(|t| {
@@ -213,17 +214,21 @@ impl Atom {
         })
     }
 
-    pub fn id(&self, hasher: Hasher) -> Multihash {
+    pub fn id(&self) -> Multihash {
         *self
             .id
-            .get_or_init(|| hasher.digest(&self.compute_input(true)))
+            .get_or_init(|| self.chain_config.hasher.digest(&self.compute_input(true)))
     }
 
-    pub fn atoms_ids(&self, hasher: Hasher) -> &[Multihash] {
+    pub fn atoms_ids(&self) -> &[Multihash] {
         self.atom_ids.get_or_init(|| {
             self.atoms
                 .iter()
-                .map(|a| hasher.digest(&self.compute_atoms_input(a, true)))
+                .map(|a| {
+                    self.chain_config
+                        .hasher
+                        .digest(&self.compute_atoms_input(a, true))
+                })
                 .collect()
         })
     }
@@ -234,8 +239,8 @@ impl Atom {
         buf
     }
 
-    pub fn verify_nonce(&self, param: u16) -> bool {
-        let vdf = WesolowskiVDFParams(param).new();
+    pub fn verify_nonce(&self) -> bool {
+        let vdf = WesolowskiVDFParams(self.chain_config.vdf_param).new();
         let input = self.compute_input(false);
 
         vdf.verify(&input, self.difficulty, &self.nonce).is_ok()
