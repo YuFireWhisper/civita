@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
 use crate::{
+    chain_config::ChainConfig,
     crypto::{Hasher, Multihash},
     ty::Command,
     utils::mmr::State,
@@ -30,13 +31,13 @@ pub struct Pruned {
 
 #[derive(Clone)]
 #[derive(Debug)]
-#[derive(Default)]
 #[derive(Serialize, Deserialize)]
 pub struct Atom {
     pub parent: Multihash,
     pub height: Height,
     pub difficulty: Difficulty,
     pub state: State,
+    pub chain_config: ChainConfig,
 
     pub nonce: Nonce,
     pub random: Random,
@@ -85,6 +86,27 @@ impl Pruned {
 }
 
 impl Atom {
+    pub fn new(chain_config: ChainConfig) -> Self {
+        Self {
+            parent: Default::default(),
+            height: 0,
+            difficulty: 0,
+            state: Default::default(),
+            chain_config,
+
+            nonce: Default::default(),
+            random: 0,
+            timestamp: 0,
+            cmd: None,
+
+            atoms: Vec::new(),
+
+            common_input: OnceLock::new(),
+            id: OnceLock::new(),
+            atom_ids: OnceLock::new(),
+        }
+    }
+
     pub fn with_parent(mut self, parent: Multihash) -> Self {
         self.parent = parent;
         self
