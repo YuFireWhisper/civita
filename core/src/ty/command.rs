@@ -1,15 +1,16 @@
 use derivative::Derivative;
 use multihash_derive::MultihashDigest;
+use serde::{Deserialize, Serialize};
 
 use crate::{crypto::Multihash, traits::Config, ty::token::Token, utils::mmr::MmrProof};
 
-#[derive(Derivative)]
-#[derivative(Clone(bound = "T: Config"))]
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound(serialize = "T: Config", deserialize = "T: Config"))]
-pub enum Input<T: Config> {
-    OnChain(Token<T>, Multihash, MmrProof, T::ScriptSig),
-    OffChain(T::OffChainInput),
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
+pub struct Input {
+    pub token: Token,
+    pub proof: MmrProof,
+    pub sig: Vec<u8>,
 }
 
 #[derive(Derivative)]
