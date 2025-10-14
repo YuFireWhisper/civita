@@ -208,6 +208,7 @@ impl Atom {
             encode_into_std_write(self.height, &mut buf, BINCODE_CONFIG).unwrap();
             encode_into_std_write(self.difficulty, &mut buf, BINCODE_CONFIG).unwrap();
             encode_into_std_write(&self.state, &mut buf, BINCODE_CONFIG).unwrap();
+            encode_into_std_write(&self.chain_config, &mut buf, BINCODE_CONFIG).unwrap();
             buf
         })
     }
