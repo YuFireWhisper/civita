@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use derivative::Derivative;
 use multihash_derive::MultihashDigest;
+use serde::{Deserialize, Serialize};
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
 use crate::{crypto::Multihash, traits::Config, ty::Command, utils::mmr::State};
@@ -12,14 +13,13 @@ pub type Difficulty = u64;
 pub type Timestamp = u64;
 pub type Nonce = Vec<u8>;
 
-#[derive(Derivative)]
-#[derivative(Clone(bound = "T: Config"))]
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound(serialize = "T: Config", deserialize = "T: Config"))]
-pub struct Pruned<T: Config> {
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
+pub struct Pruned {
     pub random: Random,
     pub timestamp: Timestamp,
-    pub cmd: Option<Command<T>>,
+    pub cmd: Option<Command>,
     pub nonce: Nonce,
 }
 
