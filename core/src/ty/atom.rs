@@ -1,11 +1,16 @@
 use std::sync::OnceLock;
 
-use derivative::Derivative;
+use bincode::{error::DecodeError, serde::encode_into_std_write};
 use multihash_derive::MultihashDigest;
 use serde::{Deserialize, Serialize};
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
-use crate::{crypto::Multihash, traits::Config, ty::Command, utils::mmr::State};
+use crate::{
+    crypto::{Hasher, Multihash},
+    ty::Command,
+    utils::mmr::State,
+    BINCODE_CONFIG,
+};
 
 pub type Height = u32;
 pub type Random = u32;
@@ -17,10 +22,10 @@ pub type Nonce = Vec<u8>;
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub struct Pruned {
+    pub nonce: Nonce,
     pub random: Random,
     pub timestamp: Timestamp,
     pub cmd: Option<Command>,
-    pub nonce: Nonce,
 }
 
 #[derive(Clone)]
@@ -30,16 +35,24 @@ pub struct Pruned {
 pub struct Atom {
     pub parent: Multihash,
     pub height: Height,
-    pub random: Random,
     pub difficulty: Difficulty,
     pub state: State,
+
+    pub nonce: Nonce,
+    pub random: Random,
     pub timestamp: Timestamp,
     pub cmd: Option<Command>,
-    pub nonce: Nonce,
+
     pub atoms: Vec<Pruned>,
 
     #[serde(skip)]
-    cache: OnceLock<Multihash>,
+    common_input: OnceLock<Vec<u8>>,
+
+    #[serde(skip)]
+    id: OnceLock<Multihash>,
+
+    #[serde(skip)]
+    atom_ids: OnceLock<Vec<Multihash>>,
 }
 
 impl Pruned {
@@ -51,9 +64,27 @@ impl Pruned {
             nonce: atom.nonce,
         }
     }
+
+    pub fn spec_input(&self, include_nonce: bool) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        if include_nonce {
+            encode_into_std_write(&self.nonce, &mut buf, BINCODE_CONFIG).unwrap();
+        }
+        encode_into_std_write(self.random, &mut buf, BINCODE_CONFIG).unwrap();
+        encode_into_std_write(self.timestamp, &mut buf, BINCODE_CONFIG).unwrap();
+        encode_into_std_write(
+            self.cmd.as_ref().map(|c| c.to_no_outputs_atom_id_bytes()),
+            &mut buf,
+            BINCODE_CONFIG,
+        )
+        .unwrap();
+
+        buf
+    }
 }
 
-impl<T: Config> Atom<T> {
+impl Atom {
     pub fn with_parent(mut self, parent: Multihash) -> Self {
         self.parent = parent;
         self
@@ -97,125 +128,109 @@ impl<T: Config> Atom<T> {
         self
     }
 
-    pub fn with_command(mut self, cmd: Option<Command<T>>) -> Self {
+    pub fn with_command(mut self, cmd: Option<Command>) -> Self {
         self.cmd = cmd;
         self
     }
 
-    pub fn with_atoms(mut self, atoms: Vec<Pruned<T>>) -> Self {
+    pub fn with_atoms(mut self, atoms: Vec<Pruned>) -> Self {
         self.atoms = atoms;
         self
     }
 
-    pub fn solve(mut self) -> Self {
-        let input = self.vdf_input();
-        let nonce = WesolowskiVDFParams(T::VDF_PARAM)
-            .new()
-            .solve(&input, self.difficulty)
-            .unwrap();
-        self.nonce = nonce;
+    pub fn solve(mut self, param: u16, hasher: Hasher) -> Self {
+        let vdf = WesolowskiVDFParams(param).new();
+        let input = self.compute_input(false);
+        self.nonce = vdf.solve(&input, self.difficulty).unwrap();
+
+        let id = self.id(hasher);
+
+        if let Some(cmd) = &mut self.cmd {
+            cmd.outputs.iter_mut().for_each(|t| {
+                t.atom_id = id;
+            });
+        }
+
         self
     }
 
-    fn vdf_input(&self) -> Vec<u8> {
-        use bincode::{config, serde::encode_into_std_write};
+    fn compute_input(&self, include_nonce: bool) -> Vec<u8> {
+        let mut buf = self.spec_input(include_nonce);
+        buf.extend_from_slice(self.common_input());
+        buf
+    }
 
+    fn spec_input(&self, include_nonce: bool) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.state, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
-
-        if self.atoms.len() >= T::BLOCK_THRESHOLD as usize {
-            encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
+        if include_nonce {
+            encode_into_std_write(&self.nonce, &mut buf, BINCODE_CONFIG).unwrap();
         }
+
+        encode_into_std_write(self.random, &mut buf, BINCODE_CONFIG).unwrap();
+        encode_into_std_write(self.timestamp, &mut buf, BINCODE_CONFIG).unwrap();
+        encode_into_std_write(
+            self.cmd.as_ref().map(|c| c.to_no_outputs_atom_id_bytes()),
+            &mut buf,
+            BINCODE_CONFIG,
+        )
+        .unwrap();
 
         buf
     }
 
-    pub fn hash(&self) -> Multihash {
+    fn common_input(&self) -> &[u8] {
+        self.common_input.get_or_init(|| {
+            let mut buf = Vec::new();
+            encode_into_std_write(self.parent, &mut buf, BINCODE_CONFIG).unwrap();
+            encode_into_std_write(self.height, &mut buf, BINCODE_CONFIG).unwrap();
+            encode_into_std_write(self.difficulty, &mut buf, BINCODE_CONFIG).unwrap();
+            encode_into_std_write(&self.state, &mut buf, BINCODE_CONFIG).unwrap();
+            buf
+        })
+    }
+
+    pub fn id(&self, hasher: Hasher) -> Multihash {
         *self
-            .cache
-            .get_or_init(|| T::HASHER.digest(&self.vdf_input()))
+            .id
+            .get_or_init(|| hasher.digest(&self.compute_input(true)))
     }
 
-    pub fn verify_nonce(&self) -> bool {
-        use bincode::{config, serde::encode_into_std_write};
-
-        let vdf = WesolowskiVDFParams(T::VDF_PARAM).new();
-        let difficulty = self.difficulty;
-
-        let mut buf = Vec::new();
-
-        encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.state, &mut buf, config::standard()).unwrap();
-
-        if self.atoms.len() < T::BLOCK_THRESHOLD as usize {
-            encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
-            encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
-            encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
-            return vdf.verify(&buf, difficulty, &self.nonce).is_ok();
-        }
-
-        for atom in &self.atoms {
-            let mut input = buf.clone();
-
-            encode_into_std_write(atom.random, &mut input, config::standard()).unwrap();
-            encode_into_std_write(atom.timestamp, &mut input, config::standard()).unwrap();
-            encode_into_std_write(&atom.cmd, &mut input, config::standard()).unwrap();
-
-            if vdf.verify(&input, difficulty, &atom.nonce).is_err() {
-                return false;
-            }
-        }
-
-        encode_into_std_write(self.random, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.timestamp, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.cmd, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.atoms, &mut buf, config::standard()).unwrap();
-
-        vdf.verify(&buf, difficulty, &self.nonce).is_ok()
+    pub fn atoms_ids(&self, hasher: Hasher) -> &[Multihash] {
+        self.atom_ids.get_or_init(|| {
+            self.atoms
+                .iter()
+                .map(|a| hasher.digest(&self.compute_atoms_input(a, true)))
+                .collect()
+        })
     }
 
-    pub fn atoms_hashes(&self) -> Vec<Multihash> {
-        use bincode::{config, serde::encode_into_std_write};
-
-        let mut hashes = Vec::with_capacity(self.atoms.len());
-
-        let mut buf = Vec::new();
-        encode_into_std_write(self.parent, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.height, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(self.difficulty, &mut buf, config::standard()).unwrap();
-        encode_into_std_write(&self.state, &mut buf, config::standard()).unwrap();
-
-        for atom in &self.atoms {
-            let mut input = buf.clone();
-
-            encode_into_std_write(atom.random, &mut input, config::standard()).unwrap();
-            encode_into_std_write(atom.timestamp, &mut input, config::standard()).unwrap();
-            encode_into_std_write(&atom.cmd, &mut input, config::standard()).unwrap();
-
-            hashes.push(T::HASHER.digest(&input));
-        }
-
-        hashes
+    fn compute_atoms_input(&self, atom: &Pruned, include_nonce: bool) -> Vec<u8> {
+        let mut buf = atom.spec_input(include_nonce);
+        buf.extend_from_slice(self.common_input());
+        buf
     }
 
-    pub fn validate_atoms_threshold(&self) -> bool {
-        self.atoms.is_empty() || self.atoms.len() >= T::BLOCK_THRESHOLD as usize
+    pub fn verify_nonce(&self, param: u16) -> bool {
+        let vdf = WesolowskiVDFParams(param).new();
+        let input = self.compute_input(false);
+
+        vdf.verify(&input, self.difficulty, &self.nonce).is_ok()
+            && self.atoms.iter().all(|atom| {
+                vdf.verify(
+                    &self.compute_atoms_input(atom, false),
+                    self.difficulty,
+                    &atom.nonce,
+                )
+                .is_ok()
+            })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap()
+        bincode::serde::encode_to_vec(self, BINCODE_CONFIG).unwrap()
     }
 
-    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        bincode::serde::decode_from_slice(data, bincode::config::standard()).map(|(msg, _)| msg)
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DecodeError> {
+        bincode::serde::decode_from_slice(data, BINCODE_CONFIG).map(|(msg, _)| msg)
     }
 }
