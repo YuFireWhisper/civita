@@ -23,21 +23,20 @@ pub struct Pruned {
     pub nonce: Nonce,
 }
 
-#[derive(Derivative)]
-#[derivative(Clone(bound = "T: Config"))]
-#[derivative(Default(bound = ""))]
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound(serialize = "T: Config", deserialize = "T: Config"))]
-pub struct Atom<T: Config> {
+#[derive(Clone)]
+#[derive(Debug)]
+#[derive(Default)]
+#[derive(Serialize, Deserialize)]
+pub struct Atom {
     pub parent: Multihash,
     pub height: Height,
     pub random: Random,
     pub difficulty: Difficulty,
     pub state: State,
     pub timestamp: Timestamp,
-    pub cmd: Option<Command<T>>,
+    pub cmd: Option<Command>,
     pub nonce: Nonce,
-    pub atoms: Vec<Pruned<T>>,
+    pub atoms: Vec<Pruned>,
 
     #[serde(skip)]
     cache: OnceLock<Multihash>,
