@@ -5,18 +5,21 @@ use crate::{
     BINCODE_CONFIG,
 };
 
+type Value = Vec<u8>;
+type ScriptPk = Vec<u8>;
+
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Token {
     pub atom_id: Multihash,
     pub index: u32,
-    pub value: Vec<u8>,
-    pub script_pk: Vec<u8>,
+    pub value: Value,
+    pub script_pk: ScriptPk,
 }
 
 impl Token {
-    pub fn new(atom_id: Multihash, index: u32, value: Vec<u8>, script_pk: Vec<u8>) -> Self {
+    pub fn new(atom_id: Multihash, index: u32, value: Value, script_pk: ScriptPk) -> Self {
         Self {
             atom_id,
             index,
