@@ -1,17 +1,15 @@
-use derivative::Derivative;
+use crate::BINCODE_CONFIG;
 
-use crate::{traits::Config, BINCODE_CONFIG};
-
-#[derive(Derivative)]
-#[derivative(Clone(bound = "T: Config"))]
+#[derive(Clone)]
+#[derive(Debug)]
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct Token<T: Config> {
-    pub value: T::Value,
-    pub script_pk: T::ScriptPk,
+pub struct Token {
+    pub value: Vec<u8>,
+    pub script_pk: Vec<u8>,
 }
 
-impl<T: Config> Token<T> {
-    pub fn new(value: T::Value, script_pk: T::ScriptPk) -> Self {
+impl Token {
+    pub fn new(value: Vec<u8>, script_pk: Vec<u8>) -> Self {
         Self { value, script_pk }
     }
 
