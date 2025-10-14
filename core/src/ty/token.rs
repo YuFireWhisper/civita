@@ -5,8 +5,8 @@ use crate::{
     BINCODE_CONFIG,
 };
 
-type Value = Vec<u8>;
-type ScriptPk = Vec<u8>;
+pub type Value = Vec<u8>;
+pub type ScriptPk = Vec<u8>;
 
 #[derive(Clone)]
 #[derive(Debug)]
