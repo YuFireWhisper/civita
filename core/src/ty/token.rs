@@ -9,16 +9,16 @@ use crate::{
 #[derive(Debug)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Token {
-    pub cmd_id: Multihash,
+    pub atom_id: Multihash,
     pub index: u32,
     pub value: Vec<u8>,
     pub script_pk: Vec<u8>,
 }
 
 impl Token {
-    pub fn new(cmd_id: Multihash, index: u32, value: Vec<u8>, script_pk: Vec<u8>) -> Self {
+    pub fn new(atom_id: Multihash, index: u32, value: Vec<u8>, script_pk: Vec<u8>) -> Self {
         Self {
-            cmd_id,
+            atom_id,
             index,
             value,
             script_pk,
@@ -26,8 +26,8 @@ impl Token {
     }
 
     pub fn id(&self, hasher: Hasher) -> Multihash {
-        let mut buf = Vec::with_capacity(self.cmd_id.encoded_len() + 4);
-        buf.extend(self.cmd_id.to_bytes());
+        let mut buf = Vec::with_capacity(self.atom_id.encoded_len() + 4);
+        buf.extend(self.atom_id.to_bytes());
         buf.extend(&self.index.to_be_bytes());
         hasher.digest(&buf)
     }
