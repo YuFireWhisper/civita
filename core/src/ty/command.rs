@@ -1,8 +1,9 @@
-use bincode::serde::encode_into_std_write;
+use bincode::serde::encode_to_vec;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ty::token::{ScriptPk, Token, Value},
+    crypto::Hasher,
+    ty::{token::Token, ScriptPk, Value},
     utils::mmr::MmrProof,
     BINCODE_CONFIG,
 };
@@ -25,18 +26,29 @@ pub struct Command {
     pub outputs: Vec<Token>,
 }
 
+impl Input {
+    pub fn new(token: Token, proof: MmrProof, sig: Vec<u8>) -> Self {
+        Self { token, proof, sig }
+    }
+}
+
 impl Command {
-    pub fn new(code: u8, inputs: Vec<Input>, outputs: Vec<(Value, ScriptPk)>) -> Self {
-        debug_assert!(outputs.len() <= u32::MAX as usize);
+    pub fn new<T, U, I>(code: u8, inputs: Vec<Input>, outputs: I, hasher: Hasher) -> Self
+    where
+        T: Into<Value>,
+        U: Into<ScriptPk>,
+        I: IntoIterator<Item = (T, U)>,
+    {
+        let first_input_id = inputs
+            .first()
+            .map(|input| input.token.id(hasher))
+            .unwrap_or_default();
 
         let outputs = outputs
             .into_iter()
             .enumerate()
-            .map(|(index, (value, script_pk))| Token {
-                atom_id: Default::default(),
-                index: index as u32,
-                value,
-                script_pk,
+            .map(|(index, (value, script_pk))| {
+                Token::new(first_input_id, index as u32, value, script_pk)
             })
             .collect();
 
@@ -47,16 +59,7 @@ impl Command {
         }
     }
 
-    pub fn to_no_outputs_atom_id_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        encode_into_std_write(&self.inputs, &mut buf, BINCODE_CONFIG).unwrap();
-
-        for output in &self.outputs {
-            buf.extend(&output.index.to_be_bytes());
-            buf.extend(&output.value);
-            buf.extend(&output.script_pk);
-        }
-
-        buf
+    pub fn to_bytes(&self) -> Vec<u8> {
+        encode_to_vec(self, BINCODE_CONFIG).unwrap()
     }
 }

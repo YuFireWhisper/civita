@@ -38,6 +38,8 @@ pub enum InheritableRejectReason {
     InvalidCommand,
     InvalidAtomThreshold(usize, usize),
     NonBlockParent,
+    MismatchState,
+    MismatchChainConfig,
 }
 
 #[derive(Clone, Copy)]
@@ -180,6 +182,18 @@ impl Reason {
         ))
     }
 
+    pub fn mismatch_state() -> Self {
+        Self::Rejected(RejectReason::Inheritalbe(
+            InheritableRejectReason::MismatchState,
+        ))
+    }
+
+    pub fn mismatch_chain_config() -> Self {
+        Self::Rejected(RejectReason::Inheritalbe(
+            InheritableRejectReason::MismatchChainConfig,
+        ))
+    }
+
     pub fn is_ignore(&self) -> bool {
         matches!(self, Self::Ignored(_))
     }
@@ -243,6 +257,8 @@ impl fmt::Display for InheritableRejectReason {
                 )
             }
             Self::NonBlockParent => write!(f, "non-block parent"),
+            Self::MismatchState => write!(f, "mismatch state"),
+            Self::MismatchChainConfig => write!(f, "mismatch chain config"),
         }
     }
 }

@@ -26,8 +26,8 @@ use crate::{
         transport::{Request, Response},
         Transport,
     },
-    traits::Config,
     ty::atom::Atom,
+    validator::ValidatorEngine,
 };
 
 const MAX_ATOMS_PER_REQUEST: u32 = 1000;
@@ -45,82 +45,78 @@ pub struct BootstrapConfig {
     pub node_type: NodeType,
 }
 
-pub struct Engine<T: Config> {
-    transport: Transport<T>,
-    tree: Tree<T>,
+pub struct Engine<V: ValidatorEngine> {
+    transport: Transport,
+    tree: Tree<V>,
     pending_atoms: HashMap<Multihash, Vec<(Option<MessageId>, PeerId)>>,
-    pending_tasks: VecDeque<Proposal<T>>,
+    pending_tasks: VecDeque<Proposal>,
     is_running_task: Arc<AtomicBool>,
     heartbeat_instant: tokio::time::Instant,
     heartbeat_duration: Duration,
     is_archive: bool,
 }
 
-impl<T: Config> Engine<T> {
-    pub async fn spawn(
-        mut transport: Transport<T>,
+impl<V: ValidatorEngine> Engine<V> {
+    pub async fn spawn_genesis(
+        transport: Transport,
         dir: &str,
-        heartbeat_duration: Option<tokio::time::Duration>,
-        bootstrap: Option<BootstrapConfig>,
-        tx: mpsc::Sender<Event<T>>,
-        mut rx: mpsc::Receiver<Event<T>>,
+        heartbeat_duration: Option<Duration>,
+        tx: mpsc::Sender<Event>,
+        rx: mpsc::Receiver<Event>,
+        atom: Atom,
     ) {
-        let heartbeat_duration = heartbeat_duration.unwrap_or(Duration::MAX);
-        let heartbeat_instant = Instant::now() + heartbeat_duration;
+        let engine = Self {
+            transport,
+            tree: Tree::new(atom, dir, None),
+            pending_atoms: HashMap::new(),
+            pending_tasks: VecDeque::new(),
+            is_running_task: Arc::new(AtomicBool::new(false)),
+            heartbeat_instant: Instant::now() + heartbeat_duration.unwrap_or(Duration::MAX),
+            heartbeat_duration: heartbeat_duration.unwrap_or(Duration::MAX),
+            is_archive: true,
+        };
 
-        let engine = if let Some(config) = bootstrap {
-            let is_archive = matches!(config.node_type, NodeType::Archive);
-            let tree = Self::bootstrap(&mut transport, &mut rx, config, dir).await;
-            Self {
-                transport,
-                tree,
-                pending_atoms: HashMap::new(),
-                pending_tasks: VecDeque::new(),
-                is_running_task: Arc::new(AtomicBool::new(false)),
-                heartbeat_instant,
-                heartbeat_duration,
-                is_archive,
-            }
-        } else {
-            Self {
-                transport,
-                tree: Tree::load_or_genesis(dir).expect("Failed to load or create genesis"),
-                pending_atoms: HashMap::new(),
-                pending_tasks: VecDeque::new(),
-                is_running_task: Arc::new(AtomicBool::new(false)),
-                heartbeat_instant,
-                heartbeat_duration,
-                is_archive: true,
-            }
+        tokio::spawn(engine.run(tx, rx));
+    }
+
+    pub async fn spawn(
+        mut transport: Transport,
+        dir: &str,
+        heartbeat_duration: Option<Duration>,
+        config: BootstrapConfig,
+        tx: mpsc::Sender<Event>,
+        mut rx: mpsc::Receiver<Event>,
+    ) {
+        let is_archive = matches!(config.node_type, NodeType::Archive);
+        let tree = Self::bootstrap(&mut transport, &mut rx, config, dir).await;
+        let engine = Self {
+            transport,
+            tree,
+            pending_atoms: HashMap::new(),
+            pending_tasks: VecDeque::new(),
+            is_running_task: Arc::new(AtomicBool::new(false)),
+            heartbeat_instant: Instant::now() + heartbeat_duration.unwrap_or(Duration::MAX),
+            heartbeat_duration: heartbeat_duration.unwrap_or(Duration::MAX),
+            is_archive,
         };
 
         tokio::spawn(engine.run(tx, rx));
     }
 
     async fn bootstrap<P>(
-        transport: &mut Transport<T>,
-        rx: &mut Receiver<Event<T>>,
+        transport: &mut Transport,
+        rx: &mut Receiver<Event>,
         config: BootstrapConfig,
         dir: P,
-    ) -> Tree<T>
+    ) -> Tree<V>
     where
         P: AsRef<Path>,
     {
-        let mut tree_opt = match config.node_type {
-            NodeType::Archive => {
-                Some(Tree::load_or_genesis(&dir).expect("Failed to load or create genesis"))
-            }
-            NodeType::Regular => None,
-        };
+        let mut tree_opt: Option<Tree<V>> = None;
 
         loop {
             let req = Request::CurrentHeight;
             transport.send_request(req, config.peer).await;
-
-            let local_height = tree_opt
-                .as_ref()
-                .map(|t| t.head_height())
-                .unwrap_or_default();
 
             let remote_height = recv_response(rx, |resp| {
                 if let Response::CurrentHeight(height) = resp {
@@ -131,15 +127,14 @@ impl<T: Config> Engine<T> {
             })
             .await;
 
-            if remote_height < local_height {
-                return tree_opt.expect("Tree should be initialized");
-            }
+            if let Some(tree) = &mut tree_opt {
+                let local_height = tree.head_height();
 
-            if remote_height == local_height {
-                let tree =
-                    tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
+                if local_height > remote_height {
+                    return tree_opt.unwrap();
+                }
 
-                if !matches!(config.node_type, NodeType::Archive) {
+                if local_height == remote_height {
                     let req = Request::Proofs;
                     transport.send_request(req, config.peer).await;
 
@@ -157,25 +152,17 @@ impl<T: Config> Engine<T> {
                     }
 
                     assert!(tree.fill(proofs));
+                    return tree_opt.unwrap();
                 }
-
-                return tree_opt.expect("Tree should be initialized");
             }
 
-            let start = if matches!(config.node_type, NodeType::Archive) {
-                local_height + 1
-            } else {
-                remote_height.saturating_sub(T::MAINTENANCE_WINDOW).max(1)
-            };
+            let start = tree_opt.as_ref().map(|t| t.head_height() + 1).unwrap_or(0);
             let end = remote_height.min(start + MAX_ATOMS_PER_REQUEST - 1);
-
-            if start == 1 {
-                tree_opt.get_or_insert_with(|| Tree::genesis(&dir, Some(transport.peer_id)));
-            }
 
             for i in start..=end {
                 let req = Request::AtomByHeight(i);
                 transport.send_request(req, config.peer).await;
+
                 let atom = recv_response(rx, |resp| {
                     if let Response::Atom(atom) = resp {
                         Some(*atom)
@@ -187,19 +174,19 @@ impl<T: Config> Engine<T> {
 
                 match &mut tree_opt {
                     Some(tree) => {
-                        let hash = atom.hash();
+                        let id = atom.id(tree.hasher());
                         let _ = tree.upsert(atom, true);
-                        assert_eq!(tree.head(), hash);
+                        assert_eq!(tree.head(), id);
                     }
                     None => {
-                        tree_opt = Some(Tree::with_atom(atom, &dir, transport.peer_id));
+                        tree_opt = Some(Tree::new(atom, &dir, transport.peer_id));
                     }
                 }
             }
         }
     }
 
-    async fn run(mut self, tx: Sender<Event<T>>, mut rx: Receiver<Event<T>>) {
+    async fn run(mut self, tx: Sender<Event>, mut rx: Receiver<Event>) {
         log::info!("Engine started");
 
         while let Some(event) = rx.recv().await {
@@ -216,29 +203,7 @@ impl<T: Config> Engine<T> {
                     }
                 }
                 Event::Propose(proposal) => {
-                    self.pending_tasks.push_back(proposal);
-                    self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
-
-                    if self.is_running_task.load(Ordering::Relaxed) {
-                        continue;
-                    }
-
-                    let proposal = self.pending_tasks.pop_front().unwrap();
-                    let Some(cmd) = self.tree.create_command(proposal, &self.transport.peer_id)
-                    else {
-                        log::error!("Invalid command proposed");
-                        continue;
-                    };
-                    let atom = self.tree.create_atom(Some(cmd));
-                    let tx_clone = tx.clone();
-                    let is_running_task = self.is_running_task.clone();
-                    is_running_task.store(true, Ordering::Relaxed);
-
-                    tokio::task::spawn_blocking(move || {
-                        let atom = atom.solve();
-                        let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
-                        is_running_task.store(false, Ordering::Relaxed);
-                    });
+                    self.add_task(Some(proposal), &tx).await;
                 }
                 Event::Tokens(tx) => {
                     let _ = tx.send(self.tree.tokens(&self.transport.peer_id));
@@ -258,43 +223,7 @@ impl<T: Config> Engine<T> {
             }
 
             if tokio::time::Instant::now() >= self.heartbeat_instant {
-                self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
-
-                if self.is_running_task.load(Ordering::Relaxed) {
-                    continue;
-                }
-
-                if let Some(proposal) = self.pending_tasks.pop_front() {
-                    let Some(cmd) = self.tree.create_command(proposal, &self.transport.peer_id)
-                    else {
-                        log::error!("Invalid command proposed");
-                        continue;
-                    };
-
-                    let atom = self.tree.create_atom(Some(cmd));
-                    let tx_clone = tx.clone();
-                    let is_running_task = self.is_running_task.clone();
-                    is_running_task.store(true, Ordering::Relaxed);
-
-                    tokio::task::spawn_blocking(move || {
-                        let atom = atom.solve();
-                        let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
-                        is_running_task.store(false, Ordering::Relaxed);
-                    });
-
-                    continue;
-                }
-
-                let atom = self.tree.create_atom(None);
-                let tx_clone = tx.clone();
-                let is_running_task = self.is_running_task.clone();
-                is_running_task.store(true, Ordering::Relaxed);
-
-                tokio::task::spawn_blocking(move || {
-                    let atom = atom.solve();
-                    let _ = tx_clone.blocking_send(Event::AtomReady(Box::new(atom)));
-                    is_running_task.store(false, Ordering::Relaxed);
-                });
+                self.add_task(None, &tx).await;
             }
 
             tokio::task::yield_now().await;
@@ -303,10 +232,42 @@ impl<T: Config> Engine<T> {
         log::info!("Engine stopped");
     }
 
-    async fn on_recv_atom(&mut self, msg_id: Option<MessageId>, peer: PeerId, atom: Atom<T>) {
-        atom.atoms_hashes()
+    async fn add_task(&mut self, proposal: Option<Proposal>, tx: &Sender<Event>) {
+        self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
+
+        if let Some(proposal) = proposal {
+            self.pending_tasks.push_back(proposal);
+        }
+
+        if self.is_running_task.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let cmd = std::iter::from_fn(|| self.pending_tasks.pop_front()).find_map(|proposal| {
+            self.tree
+                .create_command(proposal, &self.transport.peer_id)
+                .or_else(|| {
+                    log::error!("Invalid command proposed");
+                    None
+                })
+        });
+
+        let tx_clone = tx.clone();
+        let is_running_task = self.is_running_task.clone();
+        is_running_task.store(true, Ordering::Relaxed);
+
+        let handle = self.tree.create_atom(cmd);
+        tokio::spawn(async move {
+            let atom = handle.await.unwrap();
+            let _ = tx_clone.send(Event::AtomReady(Box::new(atom))).await;
+            is_running_task.store(false, Ordering::Relaxed);
+        });
+    }
+
+    async fn on_recv_atom(&mut self, msg_id: Option<MessageId>, peer: PeerId, atom: Atom) {
+        atom.atoms_ids(self.tree.hasher())
             .iter()
-            .chain(&[atom.hash(), atom.parent])
+            .chain(Some(&atom.id(self.tree.hasher())))
             .for_each(|hash| {
                 self.pending_atoms
                     .entry(*hash)
@@ -364,7 +325,7 @@ impl<T: Config> Engine<T> {
         &mut self,
         peer: PeerId,
         request: Request,
-        channel: ResponseChannel<Response<T>>,
+        channel: ResponseChannel<Response>,
     ) {
         if !self.is_archive {
             let resp = Response::NotFound;
@@ -390,19 +351,19 @@ impl<T: Config> Engine<T> {
                 self.transport.send_response(resp, channel).await;
             }
             Request::CurrentHeight => {
-                let resp = Response::<T>::CurrentHeight(self.tree.finalized_height());
+                let resp = Response::CurrentHeight(self.tree.finalized_height());
                 self.transport.send_response(resp, channel).await;
             }
             Request::Proofs => {
                 let height = self.tree.finalized_height();
                 let proofs = self.tree.proofs(&peer);
-                let resp = Response::<T>::Proofs(height, proofs);
+                let resp = Response::Proofs(height, proofs);
                 self.transport.send_response(resp, channel).await;
             }
         }
     }
 
-    async fn on_atom_ready(&mut self, atom: Atom<T>) -> bool {
+    async fn on_atom_ready(&mut self, atom: Atom) -> bool {
         let result = self.tree.upsert(atom.clone(), false);
 
         if !result.dismissed.is_empty() || result.missing.is_some() {
@@ -415,9 +376,9 @@ impl<T: Config> Engine<T> {
     }
 }
 
-async fn recv_response<T: Config, F, U>(rx: &mut Receiver<Event<T>>, f: F) -> U
+async fn recv_response<F, U>(rx: &mut Receiver<Event>, f: F) -> U
 where
-    F: Fn(Response<T>) -> Option<U>,
+    F: Fn(Response) -> Option<U>,
 {
     while let Some(event) = rx.recv().await {
         if let Event::Response(resp, _) = event {

@@ -16,6 +16,7 @@ pub struct MmrProof {
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(Default)]
+#[derive(PartialEq, Eq)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct State(u64, Vec<Multihash>);
 
@@ -39,6 +40,10 @@ impl MmrProof {
 
 impl Mmr {
     pub fn new(state: State) -> Option<Self> {
+        if state.0 == 0 {
+            return Some(Mmr::default());
+        }
+
         let peak_indices = peak_indices(state.0 - 1);
 
         if peak_indices.len() != state.1.len() {
@@ -289,10 +294,12 @@ impl Mmr {
         true
     }
 
-    pub fn write_cf(&self, cf: &ColumnFamily, batch: &mut WriteBatch) {
+    pub fn write_cf(&mut self, cf: &ColumnFamily, batch: &mut WriteBatch) {
+        let entries = HashMap::from_iter(self.peaks.iter().map(|p| (*p, self.entries[p])));
         self.entries
-            .iter()
+            .drain()
             .for_each(|(k, v)| batch.put_cf(cf, k.to_le_bytes(), v.to_bytes()));
+        self.entries = entries;
     }
 
     // pub fn write(&self, db: &DB) -> Result<(), rocksdb::Error> {

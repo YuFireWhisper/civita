@@ -18,7 +18,6 @@ use crate::{
     crypto::Multihash,
     event::Event,
     network::{behaviour::Behaviour, transport::inner::Inner},
-    traits,
     ty::{atom::Height, Atom},
 };
 
@@ -39,12 +38,12 @@ pub struct Config {
     pub dial_timeout: Duration,
 }
 
-enum Command<T: traits::Config> {
+enum Command {
     Disconnect(PeerId),
     Publish(Vec<u8>),
     Report(MessageId, PeerId, MessageAcceptance),
     SendRequest(Request, PeerId),
-    SendResponse(Response<T>, ResponseChannel<Response<T>>),
+    SendResponse(Response, ResponseChannel<Response>),
     Stop,
 }
 
@@ -58,19 +57,19 @@ pub enum Request {
     Proofs,
 }
 
+#[derive(Debug)]
 #[derive(Serialize, Deserialize)]
-#[serde(bound = "T: traits::Config")]
-pub enum Response<T: traits::Config> {
-    Atom(Box<Atom<T>>),
+pub enum Response {
+    Atom(Box<Atom>),
     CurrentHeight(Height),
-    Proofs(Height, Proofs<T>),
+    Proofs(Height, Proofs),
     NotFound,
 }
 
-pub struct Transport<T: traits::Config> {
+pub struct Transport {
     pub peer_id: PeerId,
     pub addr: Multiaddr,
-    tx: mpsc::Sender<Command<T>>,
+    tx: mpsc::Sender<Command>,
 }
 
 impl Request {
@@ -83,7 +82,7 @@ impl Request {
     }
 }
 
-impl<T: traits::Config> Response<T> {
+impl Response {
     pub fn to_bytes(&self) -> Vec<u8> {
         bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap()
     }
@@ -93,12 +92,12 @@ impl<T: traits::Config> Response<T> {
     }
 }
 
-impl<T: traits::Config> Transport<T> {
+impl Transport {
     pub async fn new(
         keypair: Keypair,
         listen_addr: Multiaddr,
         bootstrap_peers: Vec<(PeerId, Multiaddr)>,
-        tx: mpsc::Sender<Event<T>>,
+        tx: mpsc::Sender<Event>,
         config: Config,
     ) -> Self {
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
@@ -134,7 +133,7 @@ impl<T: traits::Config> Transport<T> {
     }
 
     async fn listen_on(
-        swarm: &mut Swarm<Behaviour<T>>,
+        swarm: &mut Swarm<Behaviour>,
         addr: Multiaddr,
         timeout: Duration,
     ) -> Multiaddr {
@@ -154,7 +153,7 @@ impl<T: traits::Config> Transport<T> {
     }
 
     async fn dial_peers(
-        swarm: &mut Swarm<Behaviour<T>>,
+        swarm: &mut Swarm<Behaviour>,
         bootstrap_peers: Vec<(PeerId, Multiaddr)>,
         timeout: Duration,
     ) -> bool {
@@ -199,7 +198,7 @@ impl<T: traits::Config> Transport<T> {
         let _ = self.tx.send(Command::Disconnect(peer_id)).await;
     }
 
-    pub async fn publish(&self, atom: Atom<T>) {
+    pub async fn publish(&self, atom: Atom) {
         let _ = self.tx.send(Command::Publish(atom.to_bytes())).await;
     }
 
@@ -214,7 +213,7 @@ impl<T: traits::Config> Transport<T> {
         let _ = self.tx.send(Command::SendRequest(req, peer)).await;
     }
 
-    pub async fn send_response(&self, resp: Response<T>, channel: ResponseChannel<Response<T>>) {
+    pub async fn send_response(&self, resp: Response, channel: ResponseChannel<Response>) {
         let _ = self.tx.send(Command::SendResponse(resp, channel)).await;
     }
 
@@ -234,10 +233,10 @@ impl std::fmt::Display for Request {
     }
 }
 
-impl<T: traits::Config> std::fmt::Display for Response<T> {
+impl std::fmt::Display for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Response::Atom(atom) => write!(f, "Atom({})", hex::encode(atom.hash().to_bytes())),
+            Response::Atom(_) => write!(f, "Atom"),
             Response::CurrentHeight(height) => write!(f, "CurrentHeight({})", height),
             Response::Proofs(height, _) => write!(f, "proofs: height {}", height),
             Response::NotFound => write!(f, "NotFound"),

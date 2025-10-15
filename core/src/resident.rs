@@ -12,8 +12,8 @@ use crate::{
     crypto::Multihash,
     event::{Event, Proposal},
     network::{transport, Transport},
-    traits,
-    ty::token::Token,
+    ty::{token::Token, Atom},
+    validator::ValidatorEngine,
 };
 
 pub use engine::BootstrapConfig;
@@ -63,13 +63,13 @@ pub struct Config {
     pub node_type: NodeType,
 }
 
-pub struct Resident<T: traits::Config> {
+pub struct Resident {
     listen_addr: Multiaddr,
-    tx: mpsc::Sender<Event<T>>,
+    tx: mpsc::Sender<Event>,
 }
 
-impl<T: traits::Config> Resident<T> {
-    pub async fn new(keypair: Keypair, config: Config) -> Result<Self> {
+impl Resident {
+    pub async fn new<V: ValidatorEngine>(keypair: Keypair, config: Config) -> Result<Self> {
         let (tx, rx) = mpsc::channel(config.channel_size);
 
         let transport_config = transport::Config {
@@ -95,13 +95,13 @@ impl<T: traits::Config> Resident<T> {
 
         let listen_addr = transport.addr.clone();
 
-        let bc = config.bootstrap_peer.map(|(peer, _)| BootstrapConfig {
-            peer,
+        let bc = BootstrapConfig {
+            peer: config.bootstrap_peer.expect("Bootstrap peer is required").0,
             timeout: config.bootstrap_timeout,
             node_type: config.node_type,
-        });
+        };
 
-        Engine::spawn(
+        Engine::<V>::spawn(
             transport,
             &config.storage_dir,
             config.heartbeat_interval,
@@ -114,19 +114,49 @@ impl<T: traits::Config> Resident<T> {
         Ok(Self { tx, listen_addr })
     }
 
-    pub async fn propose(
-        &self,
-        code: u8,
-        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
-        off_chain_inputs: Vec<T::OffChainInput>,
-        outpus: Vec<Token<T>>,
-    ) {
-        let prposal = Proposal::new(code, on_chain_inputs, off_chain_inputs, outpus);
-        let event = Event::Propose(prposal);
+    pub async fn new_genesis<V: ValidatorEngine>(
+        atom: Atom,
+        keypair: Keypair,
+        config: Config,
+    ) -> Result<Self> {
+        let (tx, rx) = mpsc::channel(config.channel_size);
+
+        let transport_config = transport::Config {
+            listen_timeout: config.listen_timeout,
+            channel_capacity: config.channel_size,
+            dial_timeout: config.dial_timeout,
+        };
+
+        let transport = Transport::new(
+            keypair,
+            config.listen_addr,
+            vec![],
+            tx.clone(),
+            transport_config,
+        )
+        .await;
+
+        let listen_addr = transport.addr.clone();
+
+        Engine::<V>::spawn_genesis(
+            transport,
+            &config.storage_dir,
+            config.heartbeat_interval,
+            tx.clone(),
+            rx,
+            atom,
+        )
+        .await;
+
+        Ok(Self { tx, listen_addr })
+    }
+
+    pub async fn propose(&self, proposal: Proposal) {
+        let event = Event::Propose(proposal);
         let _ = self.tx.send(event).await;
     }
 
-    pub async fn tokens(&self) -> Result<HashMap<Multihash, Token<T>>> {
+    pub async fn tokens(&self) -> Result<HashMap<Multihash, Token>> {
         let (tx, rx) = oneshot::channel();
         let event = Event::Tokens(tx);
         let _ = self.tx.send(event).await;

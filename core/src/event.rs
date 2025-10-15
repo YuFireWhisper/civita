@@ -7,39 +7,35 @@ use crate::{
     consensus::tree::Status,
     crypto::Multihash,
     network::transport::{Request, Response},
-    traits,
-    ty::{Atom, Token},
+    ty::{Atom, ScriptPk, ScriptSig, Token, Value},
 };
 
-pub struct Proposal<T: traits::Config> {
+pub struct Proposal {
     pub code: u8,
-    pub on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
-    pub off_chain_inputs: Vec<T::OffChainInput>,
-    pub outputs: Vec<Token<T>>,
+    pub inputs: Vec<(Multihash, ScriptSig)>,
+    pub outputs: Vec<(Value, ScriptPk)>,
 }
 
-pub enum Event<T: traits::Config> {
-    Gossipsub(MessageId, PeerId, Box<Atom<T>>),
-    Request(Request, PeerId, ResponseChannel<Response<T>>),
-    Response(Response<T>, PeerId),
-    Propose(Proposal<T>),
-    Tokens(oneshot::Sender<HashMap<Multihash, Token<T>>>),
+pub enum Event {
+    Gossipsub(MessageId, PeerId, Box<Atom>),
+    Request(Request, PeerId, ResponseChannel<Response>),
+    Response(Response, PeerId),
+    Propose(Proposal),
+    Tokens(oneshot::Sender<HashMap<Multihash, Token>>),
     Status(oneshot::Sender<Status>),
     Stop(oneshot::Sender<()>),
-    AtomReady(Box<Atom<T>>),
+    AtomReady(Box<Atom>),
 }
 
-impl<T: traits::Config> Proposal<T> {
+impl Proposal {
     pub fn new(
         code: u8,
-        on_chain_inputs: Vec<(Multihash, T::ScriptSig)>,
-        off_chain_inputs: Vec<T::OffChainInput>,
-        outputs: Vec<Token<T>>,
+        inputs: Vec<(Multihash, ScriptSig)>,
+        outputs: Vec<(Value, ScriptPk)>,
     ) -> Self {
         Self {
             code,
-            on_chain_inputs,
-            off_chain_inputs,
+            inputs,
             outputs,
         }
     }

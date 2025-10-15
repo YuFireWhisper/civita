@@ -6,7 +6,11 @@ use serde::{Deserialize, Serialize};
 use vdf::{VDFParams, WesolowskiVDFParams, VDF};
 
 use crate::{
-    chain_config::ChainConfig, crypto::Multihash, ty::Command, utils::mmr::State, BINCODE_CONFIG,
+    chain_config::ChainConfig,
+    crypto::{Hasher, Multihash},
+    ty::Command,
+    utils::mmr::{Mmr, State},
+    BINCODE_CONFIG,
 };
 
 pub type Height = u32;
@@ -32,14 +36,13 @@ pub struct Atom {
     pub parent: Multihash,
     pub height: Height,
     pub difficulty: Difficulty,
-    pub state: State,
     pub chain_config: ChainConfig,
 
+    pub state: State,
     pub nonce: Nonce,
     pub random: Random,
     pub timestamp: Timestamp,
     pub cmd: Option<Command>,
-
     pub atoms: Vec<Pruned>,
 
     #[serde(skip)]
@@ -68,14 +71,10 @@ impl Pruned {
         if include_nonce {
             encode_into_std_write(&self.nonce, &mut buf, BINCODE_CONFIG).unwrap();
         }
+
         encode_into_std_write(self.random, &mut buf, BINCODE_CONFIG).unwrap();
         encode_into_std_write(self.timestamp, &mut buf, BINCODE_CONFIG).unwrap();
-        encode_into_std_write(
-            self.cmd.as_ref().map(|c| c.to_no_outputs_atom_id_bytes()),
-            &mut buf,
-            BINCODE_CONFIG,
-        )
-        .unwrap();
+        encode_into_std_write(&self.cmd, &mut buf, BINCODE_CONFIG).unwrap();
 
         buf
     }
@@ -84,11 +83,11 @@ impl Pruned {
 impl Atom {
     pub fn new(chain_config: ChainConfig) -> Self {
         Self {
-            parent: Default::default(),
+            parent: Multihash::default(),
             height: 0,
             difficulty: 0,
-            state: Default::default(),
             chain_config,
+            state: State::default(),
 
             nonce: Default::default(),
             random: 0,
@@ -110,6 +109,16 @@ impl Atom {
 
     pub fn with_height(mut self, height: Height) -> Self {
         self.height = height;
+        self
+    }
+
+    pub fn with_difficulty(mut self, difficulty: Difficulty) -> Self {
+        self.difficulty = difficulty;
+        self
+    }
+
+    pub fn with_chain_config(mut self, chain_config: ChainConfig) -> Self {
+        self.chain_config = chain_config;
         self
     }
 
@@ -136,44 +145,45 @@ impl Atom {
         self
     }
 
-    pub fn with_difficulty(mut self, difficulty: Difficulty) -> Self {
-        self.difficulty = difficulty;
-        self
-    }
-
-    pub fn with_state(mut self, state: State) -> Self {
-        self.state = state;
-        self
-    }
-
-    pub fn with_chain_config(mut self, chain_config: ChainConfig) -> Self {
-        self.chain_config = chain_config;
-        self
-    }
-
     pub fn with_command(mut self, cmd: Option<Command>) -> Self {
         self.cmd = cmd;
         self
     }
 
-    pub fn with_atoms(mut self, atoms: Vec<Pruned>) -> Self {
-        self.atoms = atoms;
+    pub fn solve(mut self, vdf_param: u16) -> Self {
+        let vdf = WesolowskiVDFParams(vdf_param).new();
+        let input = self.compute_input(false);
+        self.nonce = vdf.solve(&input, self.difficulty).unwrap();
         self
     }
 
-    pub fn solve(mut self) -> Self {
-        let vdf = WesolowskiVDFParams(self.chain_config.vdf_param).new();
-        let input = self.compute_input(false);
-        self.nonce = vdf.solve(&input, self.difficulty).unwrap();
+    pub fn calculate_state(mut self, origin: State, hasher: Hasher) -> Self {
+        self.state = self.compute_state(origin, hasher);
+        self
+    }
 
-        let id = self.id();
+    fn compute_state(&self, origin: State, hasher: Hasher) -> State {
+        let mut mmr = Mmr::new(origin).unwrap();
 
-        if let Some(cmd) = &mut self.cmd {
-            cmd.outputs.iter_mut().for_each(|t| {
-                t.atom_id = id;
+        self.atoms
+            .iter()
+            .filter_map(|a| a.cmd.as_ref())
+            .chain(self.cmd.as_ref())
+            .for_each(|cmd| {
+                cmd.inputs.iter().for_each(|input| {
+                    mmr.delete(input.token.id(hasher), &input.proof);
+                });
+                cmd.outputs.iter().for_each(|output| {
+                    mmr.append(output.id(hasher));
+                });
             });
-        }
 
+        mmr.commit();
+        mmr.state()
+    }
+
+    pub fn with_atoms(mut self, atoms: Vec<Pruned>) -> Self {
+        self.atoms = atoms;
         self
     }
 
@@ -190,14 +200,10 @@ impl Atom {
             encode_into_std_write(&self.nonce, &mut buf, BINCODE_CONFIG).unwrap();
         }
 
+        encode_into_std_write(&self.state, &mut buf, BINCODE_CONFIG).unwrap();
         encode_into_std_write(self.random, &mut buf, BINCODE_CONFIG).unwrap();
         encode_into_std_write(self.timestamp, &mut buf, BINCODE_CONFIG).unwrap();
-        encode_into_std_write(
-            self.cmd.as_ref().map(|c| c.to_no_outputs_atom_id_bytes()),
-            &mut buf,
-            BINCODE_CONFIG,
-        )
-        .unwrap();
+        encode_into_std_write(&self.cmd, &mut buf, BINCODE_CONFIG).unwrap();
 
         buf
     }
@@ -208,27 +214,22 @@ impl Atom {
             encode_into_std_write(self.parent, &mut buf, BINCODE_CONFIG).unwrap();
             encode_into_std_write(self.height, &mut buf, BINCODE_CONFIG).unwrap();
             encode_into_std_write(self.difficulty, &mut buf, BINCODE_CONFIG).unwrap();
-            encode_into_std_write(&self.state, &mut buf, BINCODE_CONFIG).unwrap();
-            encode_into_std_write(&self.chain_config, &mut buf, BINCODE_CONFIG).unwrap();
+            encode_into_std_write(self.chain_config, &mut buf, BINCODE_CONFIG).unwrap();
             buf
         })
     }
 
-    pub fn id(&self) -> Multihash {
+    pub fn id(&self, hasher: Hasher) -> Multihash {
         *self
             .id
-            .get_or_init(|| self.chain_config.hasher.digest(&self.compute_input(true)))
+            .get_or_init(|| hasher.digest(&self.compute_input(true)))
     }
 
-    pub fn atoms_ids(&self) -> &[Multihash] {
+    pub fn atoms_ids(&self, hasher: Hasher) -> &[Multihash] {
         self.atom_ids.get_or_init(|| {
             self.atoms
                 .iter()
-                .map(|a| {
-                    self.chain_config
-                        .hasher
-                        .digest(&self.compute_atoms_input(a, true))
-                })
+                .map(|a| hasher.digest(&self.compute_atoms_input(a, true)))
                 .collect()
         })
     }
@@ -239,15 +240,15 @@ impl Atom {
         buf
     }
 
-    pub fn verify_nonce(&self) -> bool {
-        let vdf = WesolowskiVDFParams(self.chain_config.vdf_param).new();
+    pub fn verify_nonce(&self, vdf_param: u16, difficulty: Difficulty) -> bool {
+        let vdf = WesolowskiVDFParams(vdf_param).new();
         let input = self.compute_input(false);
 
         vdf.verify(&input, self.difficulty, &self.nonce).is_ok()
             && self.atoms.iter().all(|atom| {
                 vdf.verify(
                     &self.compute_atoms_input(atom, false),
-                    self.difficulty,
+                    difficulty,
                     &atom.nonce,
                 )
                 .is_ok()

@@ -7,19 +7,16 @@ use libp2p::{
     StreamProtocol,
 };
 
-use crate::{
-    network::transport::{Request, Response},
-    traits,
-};
+use crate::network::transport::{Request, Response};
 
 #[derive(NetworkBehaviour)]
-pub struct Behaviour<T: traits::Config> {
+pub struct Behaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub kad: kad::Behaviour<MemoryStore>,
-    pub request_response: request_response::Behaviour<Codec<Request, Response<T>>>,
+    pub request_response: request_response::Behaviour<Codec<Request, Response>>,
 }
 
-impl<T: traits::Config> Behaviour<T> {
+impl Behaviour {
     pub fn new(key: Keypair) -> Self {
         let peer_id = key.public().to_peer_id();
 

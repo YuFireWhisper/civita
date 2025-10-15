@@ -13,23 +13,18 @@ use crate::{
         behaviour::{Behaviour, BehaviourEvent},
         transport::{Command, Request, Response},
     },
-    traits,
     ty::Atom,
 };
 
-pub struct Inner<T: traits::Config> {
-    swarm: Swarm<Behaviour<T>>,
-    rx: mpsc::Receiver<Command<T>>,
-    tx: mpsc::Sender<Event<T>>,
+pub struct Inner {
+    swarm: Swarm<Behaviour>,
+    rx: mpsc::Receiver<Command>,
+    tx: mpsc::Sender<Event>,
     topic: IdentTopic,
 }
 
-impl<T: traits::Config> Inner<T> {
-    pub fn spawn(
-        swarm: Swarm<Behaviour<T>>,
-        rx: mpsc::Receiver<Command<T>>,
-        tx: mpsc::Sender<Event<T>>,
-    ) {
+impl Inner {
+    pub fn spawn(swarm: Swarm<Behaviour>, rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Event>) {
         let topic = IdentTopic::new(0u8.to_string());
 
         let mut inner = Self {
@@ -57,7 +52,7 @@ impl<T: traits::Config> Inner<T> {
         });
     }
 
-    async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent<T>>) {
+    async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             SwarmEvent::Behaviour(event) => match event {
                 BehaviourEvent::Gossipsub(event) => {
@@ -106,7 +101,7 @@ impl<T: traits::Config> Inner<T> {
 
     async fn handle_request_response_event(
         &mut self,
-        event: request_response::Event<Request, Response<T>>,
+        event: request_response::Event<Request, Response>,
     ) {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
@@ -133,7 +128,7 @@ impl<T: traits::Config> Inner<T> {
         }
     }
 
-    fn handle_command(&mut self, command: Command<T>) -> bool {
+    fn handle_command(&mut self, command: Command) -> bool {
         match command {
             Command::Disconnect(peer_id) => {
                 self.swarm.behaviour_mut().kad.remove_peer(&peer_id);

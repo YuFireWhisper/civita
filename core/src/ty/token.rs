@@ -2,35 +2,37 @@ use multihash_derive::MultihashDigest;
 
 use crate::{
     crypto::{Hasher, Multihash},
+    ty::{ScriptPk, Value},
     BINCODE_CONFIG,
 };
-
-pub type Value = Vec<u8>;
-pub type ScriptPk = Vec<u8>;
 
 #[derive(Clone)]
 #[derive(Debug)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Token {
-    pub atom_id: Multihash,
+    pub first_input_id: Multihash,
     pub index: u32,
     pub value: Value,
     pub script_pk: ScriptPk,
 }
 
 impl Token {
-    pub fn new(atom_id: Multihash, index: u32, value: Value, script_pk: ScriptPk) -> Self {
+    pub fn new<T, U>(first_input_id: Multihash, index: u32, value: T, script_pk: U) -> Self
+    where
+        T: Into<Value>,
+        U: Into<ScriptPk>,
+    {
         Self {
-            atom_id,
+            first_input_id,
             index,
-            value,
-            script_pk,
+            value: value.into(),
+            script_pk: script_pk.into(),
         }
     }
 
     pub fn id(&self, hasher: Hasher) -> Multihash {
-        let mut buf = Vec::with_capacity(self.atom_id.encoded_len() + 4);
-        buf.extend(self.atom_id.to_bytes());
+        let mut buf = Vec::with_capacity(self.first_input_id.encoded_len() + 4);
+        buf.extend(self.first_input_id.to_bytes());
         buf.extend(&self.index.to_be_bytes());
         hasher.digest(&buf)
     }

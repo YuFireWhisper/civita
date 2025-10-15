@@ -36,3 +36,4 @@ hex = "0.4"
 tempfile = "3.23"
 
 [dev-dependencies]
+env_logger = "0.11"

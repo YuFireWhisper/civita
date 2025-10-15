@@ -1,29 +1,32 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
+    marker::PhantomData,
+    time::SystemTime,
 };
 
 use libp2p::PeerId;
-use multihash_derive::MultihashDigest;
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch, DB};
+use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
 
 use crate::{
-    crypto::Multihash,
+    chain_config::ChainConfig,
+    crypto::{Hasher, Multihash},
     event::Proposal,
-    traits::{Config, ScriptPubKey},
     ty::{
         atom::{Difficulty, Height, Pruned, Timestamp},
         Atom, Command, Input, Token,
     },
     utils::mmr::{Mmr, MmrProof},
+    validator::ValidatorEngine,
 };
 
 mod reason;
 
 pub use reason::Reason;
 
-pub type Proofs<T> = HashMap<Multihash, (Token<T>, MmrProof)>;
+pub type Proofs = HashMap<Multihash, (Token, MmrProof)>;
 
 const MMR_CF: &str = "mmr";
 const OWNER_CF: &str = "owner";
@@ -49,18 +52,17 @@ pub struct Status {
     pub average_tps: Option<f64>,
 }
 
-struct Entry<T: Config> {
-    pub atom: Atom<T>,
-    pub pruned_children: HashMap<Multihash, Pruned<T>>,
+struct Entry {
+    pub atom: Atom,
+    pub pruned_children: HashMap<Multihash, Pruned>,
     pub block_children: HashSet<Multihash>,
     pub descendants: HashSet<Multihash>,
     pub consumed: HashSet<Multihash>,
-    pub difficulty: Difficulty,
 }
 
-pub struct Tree<T: Config> {
-    entries: HashMap<Multihash, Entry<T>>,
-    pending: HashMap<Multihash, HashMap<Multihash, Atom<T>>>,
+pub struct Tree<V: ValidatorEngine> {
+    entries: HashMap<Multihash, Entry>,
+    pending: HashMap<Multihash, HashMap<Multihash, Atom>>,
     dismissed: HashMap<Multihash, Reason>,
 
     head: Multihash,
@@ -69,116 +71,53 @@ pub struct Tree<T: Config> {
 
     db: DB,
     mmr: Mmr,
+    chain_config: ChainConfig,
+    next_chain_config: Option<(Height, ChainConfig)>,
+    window_start: Height,
+
     peer_id: Option<PeerId>,
+    _marker: PhantomData<V>,
 }
 
-impl<T: Config> Tree<T> {
-    pub fn genesis<P>(dir: P, peer_id: Option<PeerId>) -> Self
+impl<V: ValidatorEngine> Tree<V> {
+    pub fn new<P, T>(atom: Atom, dir: P, peer_id: T) -> Self
     where
         P: AsRef<std::path::Path>,
+        T: Into<Option<PeerId>>,
     {
-        let dir = dir.as_ref();
-        fs::create_dir_all(dir).unwrap();
-
-        let db = {
-            let mut opts = Options::default();
-            opts.create_if_missing(true);
-            opts.create_missing_column_families(true);
-
-            let descs = [
-                ColumnFamilyDescriptor::new(MMR_CF, Options::default()),
-                ColumnFamilyDescriptor::new(OWNER_CF, Options::default()),
-                ColumnFamilyDescriptor::new(ATOM_CF, Options::default()),
-            ];
-
-            DB::open_cf_descriptors(&opts, dir, descs).unwrap()
-        };
+        let peer_id = peer_id.into();
+        let db = Self::open_db(&dir);
 
         let mut batch = WriteBatch::default();
-        let mut mmr = Mmr::default();
 
-        if let Some(cmd) = T::genesis_command() {
-            let mmr_cf = db.cf_handle(MMR_CF).unwrap();
-            let owner_cf = db.cf_handle(OWNER_CF).unwrap();
-            apply_command(&cmd, &mut mmr, mmr_cf, owner_cf, &mut batch, peer_id);
+        let mmr = if peer_id.is_some() {
+            Mmr::new(atom.state.clone()).expect("State in Atom must be valid")
+        } else {
+            let mut mmr = Mmr::default();
+            apply_atom::<V>(
+                &atom,
+                atom.chain_config.hasher,
+                &mut mmr,
+                &db,
+                &mut batch,
+                peer_id,
+            );
+            assert_eq!(mmr.state(), atom.state);
+            mmr
+        };
+
+        {
+            let cf = db.cf_handle(ATOM_CF).unwrap();
+            let key = atom.height.to_be_bytes();
+            let value = atom.to_bytes();
+            batch.put_cf(cf, key, value);
         }
-
-        let genesis = Atom::default()
-            .with_difficulty(T::GENESIS_VAF_DIFFICULTY)
-            .with_state(mmr.state().clone())
-            .with_command(T::genesis_command());
 
         db.write(batch).unwrap();
 
-        let hash = genesis.hash();
-        let height = genesis.height;
-
-        let entry = Entry {
-            atom: genesis,
-            pruned_children: HashMap::new(),
-            block_children: HashSet::new(),
-            descendants: HashSet::new(),
-            consumed: HashSet::new(),
-            difficulty: T::GENESIS_VAF_DIFFICULTY,
-        };
-
-        Self {
-            entries: HashMap::from([(hash, entry)]),
-            pending: HashMap::new(),
-            dismissed: HashMap::new(),
-            head: hash,
-            finalized: hash,
-            finalized_height: height,
-            db,
-            mmr,
-            peer_id,
-        }
-    }
-
-    pub fn load_or_genesis<P>(dir: P) -> Option<Self>
-    where
-        P: AsRef<std::path::Path>,
-    {
-        let mut tree = Self::genesis(dir.as_ref(), None);
-        let atoms = tree.resolve_from_db();
-
-        for atom in atoms {
-            let _ = tree.upsert(atom, true);
-        }
-
-        Some(tree)
-    }
-
-    fn resolve_from_db(&self) -> Vec<Atom<T>> {
-        let cf = self.db.cf_handle(ATOM_CF).unwrap();
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
-        let mut atoms = Vec::new();
-        let mut prev = None;
-
-        for item in iter {
-            let (_key, value) = item.unwrap();
-            let atom = Atom::from_bytes(&value).expect("Atom in DB must be valid");
-            assert!(prev.is_none_or(|p| p + 1 != atom.height));
-            prev = Some(atom.height);
-            atoms.push(atom);
-        }
-
-        atoms
-    }
-
-    pub fn with_atom<P>(atom: Atom<T>, dir: P, peer_id: PeerId) -> Self
-    where
-        P: AsRef<std::path::Path>,
-    {
-        debug_assert_ne!(atom.height, 0);
-
-        let dir = dir.as_ref();
-        fs::create_dir_all(dir).unwrap();
-
-        let hash = atom.hash();
+        let id = atom.id(atom.chain_config.hasher);
         let height = atom.height;
-        let difficulty = atom.difficulty;
-        let mmr = Mmr::new(atom.state.clone()).expect("State in Atom must be valid");
+        let chain_config = atom.chain_config;
 
         let entry = Entry {
             atom,
@@ -186,8 +125,30 @@ impl<T: Config> Tree<T> {
             block_children: HashSet::new(),
             descendants: HashSet::new(),
             consumed: HashSet::new(),
-            difficulty,
         };
+
+        Self {
+            entries: HashMap::from([(id, entry)]),
+            pending: HashMap::new(),
+            dismissed: HashMap::new(),
+            head: id,
+            finalized: id,
+            finalized_height: height,
+            mmr,
+            db,
+            chain_config,
+            next_chain_config: None,
+            window_start: height,
+            peer_id,
+            _marker: PhantomData,
+        }
+    }
+
+    fn open_db<P>(dir: P) -> DB
+    where
+        P: AsRef<std::path::Path>,
+    {
+        fs::create_dir_all(&dir).unwrap();
 
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -199,56 +160,39 @@ impl<T: Config> Tree<T> {
             ColumnFamilyDescriptor::new(ATOM_CF, Options::default()),
         ];
 
-        let db = DB::open_cf_descriptors(&opts, dir, descs).unwrap();
-
-        let cf = db.cf_handle(ATOM_CF).unwrap();
-        let key = height.to_be_bytes();
-        let value = entry.atom.to_bytes();
-        db.put_cf(cf, key, value).unwrap();
-
-        Self {
-            entries: HashMap::from([(hash, entry)]),
-            pending: HashMap::new(),
-            dismissed: HashMap::new(),
-            head: hash,
-            finalized: hash,
-            finalized_height: height,
-            mmr,
-            db,
-            peer_id: Some(peer_id),
-        }
+        DB::open_cf_descriptors(&opts, &dir, descs).unwrap()
     }
 
-    pub fn upsert(&mut self, atom: Atom<T>, force: bool) -> UpdateResult {
+    pub fn upsert(&mut self, atom: Atom, in_sync: bool) -> UpdateResult {
         let mut result = UpdateResult::default();
-        let hash = atom.hash();
+        let id = atom.id(self.chain_config.hasher);
 
-        if let Some(reason) = self.dismissed.get(&hash) {
-            result.dismissed.insert(hash, reason.inherit());
+        if let Some(reason) = self.dismissed.get(&id) {
+            result.dismissed.insert(id, reason.inherit());
             return result;
         }
 
-        if self.entries.contains_key(&hash) {
-            result.dismissed.insert(hash, Reason::already_existing());
+        if self.entries.contains_key(&id) {
+            result.dismissed.insert(id, Reason::already_existing());
             return result;
         }
 
         if self
             .pending
             .get(&atom.parent)
-            .is_some_and(|m| m.contains_key(&hash))
+            .is_some_and(|m| m.contains_key(&id))
         {
-            result.dismissed.insert(hash, Reason::already_existing());
+            result.dismissed.insert(id, Reason::already_existing());
             return result;
         }
 
         if let Some(reason) = self.basic_validation(&atom) {
-            self.remove_subtree(hash, reason, &mut result);
+            self.remove_subtree(id, reason, &mut result);
             return result;
         }
 
         if let Some(reason) = self.dismissed.get(&atom.parent) {
-            self.remove_subtree(hash, reason.inherit_parent(), &mut result);
+            self.remove_subtree(id, reason.inherit_parent(), &mut result);
             return result;
         }
 
@@ -257,29 +201,25 @@ impl<T: Config> Tree<T> {
             self.pending
                 .entry(atom.parent)
                 .or_default()
-                .insert(hash, atom);
+                .insert(id, atom);
             return result;
         }
 
-        self.final_validation(atom, force, &mut result);
+        self.final_validation(atom, in_sync, &mut result);
 
         result
     }
 
-    fn basic_validation(&self, atom: &Atom<T>) -> Option<Reason> {
+    fn basic_validation(&self, atom: &Atom) -> Option<Reason> {
         if atom.height <= self.finalized_height {
             return Some(Reason::below_finalized(atom.height, self.finalized_height));
         }
 
-        if !atom.validate_atoms_threshold() {
+        if !atom.atoms.is_empty() && atom.atoms.len() < self.chain_config.block_threshold as usize {
             return Some(Reason::invalid_atom_threshold(
                 atom.atoms.len(),
-                T::BLOCK_THRESHOLD as usize,
+                atom.chain_config.block_threshold as usize,
             ));
-        }
-
-        if !atom.verify_nonce() {
-            return Some(Reason::invalid_nonce());
         }
 
         None
@@ -300,46 +240,124 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn final_validation(&mut self, atom: Atom<T>, force: bool, result: &mut UpdateResult) {
-        let hash = atom.hash();
-        let parent = atom.parent;
+    fn final_validation(&mut self, atom: Atom, in_sync: bool, result: &mut UpdateResult) {
+        let id = atom.id(self.chain_config.hasher);
 
-        let ori_start = atom.height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
-        let check_difficulty = {
-            let cf = self.db.cf_handle(ATOM_CF).unwrap();
-            self.db
-                .get_pinned_cf(cf, ori_start.to_be_bytes())
-                .unwrap()
-                .is_some()
+        let consumed = match self.validate(&atom, in_sync) {
+            Ok(c) => c,
+            Err(reason) => {
+                self.remove_subtree(id, reason, result);
+                return;
+            }
         };
 
-        if let Some(reason) = validate(&self.entries[&parent], &self.mmr, &atom, check_difficulty) {
-            self.remove_subtree(hash, reason, result);
-            return;
-        }
-
-        if atom.atoms.len() < T::BLOCK_THRESHOLD as usize {
+        if atom.atoms.len() < self.chain_config.block_threshold as usize {
             self.remove_descendants(atom.parent, Reason::non_block_parent(), result);
-            let parent = self.entries.get_mut(&parent).unwrap();
-            parent.pruned_children.insert(hash, Pruned::from_atom(atom));
-            result.accepted.push(hash);
+            let parent = self.entries.get_mut(&atom.parent).unwrap();
+            parent.pruned_children.insert(id, Pruned::from_atom(atom));
+            result.accepted.push(id);
             return;
         }
 
-        let entry = self.transform(atom);
-        self.entries.insert(hash, entry);
-        result.accepted.push(hash);
+        let entry = Entry {
+            atom,
+            pruned_children: HashMap::new(),
+            block_children: HashSet::new(),
+            descendants: HashSet::new(),
+            consumed,
+        };
 
-        self.update_weight(hash);
-        self.recompute_main_chain_and_finalized(force);
+        let parent = entry.atom.parent;
+        self.entries.insert(id, entry);
+        self.entries
+            .get_mut(&parent)
+            .unwrap()
+            .block_children
+            .insert(id);
 
-        let Some(children) = self.pending.remove(&hash) else {
+        result.accepted.push(id);
+
+        self.update_weight(id);
+        self.recompute_main_chain_and_finalized(in_sync);
+
+        let Some(children) = self.pending.remove(&id) else {
             return;
         };
 
         children
             .into_values()
-            .for_each(|atom| self.final_validation(atom, force, result));
+            .for_each(|atom| self.final_validation(atom, in_sync, result));
+    }
+
+    fn validate(&self, atom: &Atom, in_sync: bool) -> Result<HashSet<Multihash>, Reason> {
+        {
+            let exp = self.entries[&atom.parent].atom.height + 1;
+            if atom.height != exp {
+                return Err(Reason::invalid_height(atom.height, exp));
+            }
+        }
+
+        if in_sync {
+            let parent = self.entries[&atom.parent].atom.difficulty;
+
+            if !atom.verify_nonce(self.chain_config.vdf_param, parent) {
+                return Err(Reason::invalid_nonce());
+            }
+
+            let exp = self.calculate_difficulty(atom.parent, atom.height, atom.timestamp, parent);
+            if exp != atom.difficulty {
+                return Err(Reason::mismatch_difficulty(exp, atom.difficulty));
+            }
+        }
+
+        let mmr = (!in_sync)
+            .then(|| {
+                let height = atom
+                    .height
+                    .saturating_sub(self.chain_config.confirmation_depth + 1);
+                self.get_by_height(height).unwrap().state.clone()
+            })
+            .map(|s| Mmr::new(s).expect("State in Atom must be valid"));
+
+        let mut consumed = HashSet::new();
+
+        for cmd in atom
+            .atoms
+            .iter()
+            .filter_map(|p| p.cmd.as_ref())
+            .chain(atom.cmd.as_ref())
+        {
+            if cmd.inputs.is_empty() {
+                return Err(Reason::empty_input());
+            }
+
+            for input in &cmd.inputs {
+                let id = input.token.id(self.chain_config.hasher);
+
+                if !consumed.insert(id) {
+                    return Err(Reason::double_spend());
+                }
+
+                if mmr.as_ref().is_some_and(|m| !m.verify(id, &input.proof)) {
+                    return Err(Reason::invalid_mmr_proof());
+                }
+            }
+
+            if !V::validate(cmd) {
+                return Err(Reason::invalid_command());
+            }
+        }
+
+        let mut cur = atom.parent;
+        while cur != self.finalized {
+            let entry = &self.entries[&cur];
+            if !entry.consumed.is_disjoint(&consumed) {
+                return Err(Reason::double_spend());
+            }
+            cur = entry.atom.parent;
+        }
+
+        Ok(consumed)
     }
 
     fn remove_descendants(&mut self, hash: Multihash, reason: Reason, result: &mut UpdateResult) {
@@ -357,106 +375,58 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn transform(&mut self, atom: Atom<T>) -> Entry<T> {
-        debug_assert!(atom.atoms.len() >= T::BLOCK_THRESHOLD as usize);
-
-        let hash = atom.hash();
-        let parent = &self.entries[&atom.parent];
-
-        let mut entry = Entry {
-            atom,
-            pruned_children: HashMap::new(),
-            block_children: HashSet::new(),
-            descendants: HashSet::new(),
-            consumed: parent.consumed.clone(),
-            difficulty: parent.difficulty,
-        };
-
-        if let Some(timestamps) = self.collect_timestamps(&entry.atom) {
-            let diffs = timestamps
-                .windows(2)
-                .filter_map(|w| w[0].checked_sub(w[1]))
-                .collect::<Vec<_>>();
-
-            if diffs.len() >= 2 {
-                let len = diffs.len();
-
-                let median = if len.is_multiple_of(2) {
-                    let mid1 = diffs[len / 2 - 1] as f64;
-                    let mid2 = diffs[len / 2] as f64;
-                    (mid1 + mid2) / 2.0
-                } else {
-                    diffs[len / 2] as f64
-                };
-
-                let target = T::TARGET_BLOCK_TIME_SEC as f64;
-                let ratio_raw = target / median;
-                let ratio = ratio_raw.clamp(
-                    1.0 / T::MAX_VDF_DIFFICULTY_ADJUSTMENT,
-                    T::MAX_VDF_DIFFICULTY_ADJUSTMENT,
-                );
-
-                entry.difficulty = ((parent.difficulty as f64 * ratio) as u64).max(1);
-            }
-        }
-
-        for cmd in entry
-            .atom
-            .atoms
-            .iter()
-            .filter_map(|a| a.cmd.as_ref())
-            .chain(entry.atom.cmd.as_ref())
-        {
-            for input in &cmd.inputs {
-                if let Input::OnChain(_, id, _, _) = input {
-                    entry.consumed.insert(*id);
-                }
-            }
-        }
-
-        self.entries
-            .get_mut(&entry.atom.parent)
-            .unwrap()
-            .block_children
-            .insert(hash);
-
-        entry
+    fn calculate_difficulty(
+        &self,
+        parent: Multihash,
+        height: Height,
+        timestamp: Timestamp,
+        origin: Difficulty,
+    ) -> Difficulty {
+        let mut timestamps = self.collect_timestamps(parent, height, timestamp);
+        diff_median(&mut timestamps)
+            .map(|m| {
+                let ratio_raw = self.chain_config.target_block_time_sec as f64 / m;
+                let max_adj = self.chain_config.max_vdf_difficulty_adjustment as f64;
+                let ratio = ratio_raw.clamp(1.0 / max_adj, max_adj);
+                ((origin as f64 * ratio) as u64).max(1)
+            })
+            .unwrap_or(origin)
     }
 
-    fn collect_timestamps(&self, atom: &Atom<T>) -> Option<Vec<Timestamp>> {
-        let start = atom.height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
+    fn collect_timestamps(
+        &self,
+        parent: Multihash,
+        height: Height,
+        timestamp: Timestamp,
+    ) -> Vec<Timestamp> {
+        let start = height
+            .saturating_sub(self.chain_config.maintenance_window)
+            .max(self.window_start);
 
-        if start == atom.height {
-            return None;
-        }
+        let mut timestamps = Vec::with_capacity((height - start + 1) as usize);
+        timestamps.push(timestamp);
+        let mut cur_hash = parent;
 
-        let cf = self.db.cf_handle(ATOM_CF).unwrap();
-        self.db
-            .get_pinned_cf(cf, start.to_be_bytes())
-            .ok()
-            .flatten()?;
-
-        let mut timestamps = Vec::with_capacity((atom.height - start + 1) as usize);
-        timestamps.push(atom.timestamp);
-        let mut cur_hash = atom.parent;
-
-        for height in (start..atom.height).rev() {
+        for height in (start..height).rev() {
             if height > self.finalized_height {
-                let entry = self.entries.get(&cur_hash)?;
+                let entry = &self.entries[&cur_hash];
                 timestamps.push(entry.atom.timestamp);
                 cur_hash = entry.atom.parent;
             } else {
-                let atom = self.get_by_height(height)?;
+                let atom = self.get_by_height(height).unwrap();
                 timestamps.push(atom.timestamp);
                 cur_hash = atom.parent;
             }
         }
 
-        Some(timestamps)
+        timestamps
     }
 
     fn update_weight(&mut self, mut cur: Multihash) {
-        let hashes = self.entries[&cur].atom.atoms_hashes();
+        let hashes = self.entries[&cur]
+            .atom
+            .atoms_ids(self.chain_config.hasher)
+            .to_vec();
 
         while cur != self.finalized {
             if let Some(entry) = self.entries.get_mut(&cur) {
@@ -472,13 +442,13 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn recompute_main_chain_and_finalized(&mut self, force: bool) {
+    fn recompute_main_chain_and_finalized(&mut self, in_sync: bool) {
         let start = self.finalized;
         let new_head = self.select_heaviest_chain(start);
-        debug_assert!(!force || new_head != self.head);
+        debug_assert!(!in_sync || new_head != self.head);
         if new_head != self.head {
             self.head = new_head;
-            self.try_advance_finalized(force)
+            self.try_advance_finalized(in_sync)
         }
     }
 
@@ -507,47 +477,34 @@ impl<T: Config> Tree<T> {
         }
     }
 
-    fn try_advance_finalized(&mut self, force: bool) {
+    fn try_advance_finalized(&mut self, in_sync: bool) {
         let head_height = self.entries[&self.head].atom.height;
 
-        let (height, hash) = if force {
+        let (height, hash) = if in_sync {
             (head_height, self.head)
         } else {
-            let target_height = head_height.saturating_sub(T::CONFIRMATION_DEPTH);
-            if self.finalized_height >= target_height {
+            let height = head_height.saturating_sub(self.chain_config.confirmation_depth);
+            if self.finalized_height >= height {
                 return;
             }
-            let hash = self.get_block_at_height(self.head, target_height);
-            (target_height, hash)
+            let hash = self.get_block_at_height(self.head, height);
+            (height, hash)
         };
 
         let mut batch = WriteBatch::default();
 
-        {
-            let entry = &self.entries[&hash];
-            let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
-            let owner_cf = self.db.cf_handle(OWNER_CF).unwrap();
-
-            for cmd in entry
-                .atom
-                .atoms
-                .iter()
-                .filter_map(|a| a.cmd.as_ref())
-                .chain(entry.atom.cmd.as_ref())
-            {
-                apply_command(
-                    cmd,
-                    &mut self.mmr,
-                    mmr_cf,
-                    owner_cf,
-                    &mut batch,
-                    self.peer_id,
-                );
-            }
-        }
+        apply_atom::<V>(
+            &self.entries[&hash].atom,
+            self.chain_config.hasher,
+            &mut self.mmr,
+            &self.db,
+            &mut batch,
+            self.peer_id,
+        );
 
         self.finalized = hash;
         self.finalized_height = height;
+        self.entries.get_mut(&hash).unwrap().consumed.clear();
 
         self.prune_non_descendants();
 
@@ -557,15 +514,34 @@ impl<T: Config> Tree<T> {
             let value = self.entries[&self.finalized].atom.to_bytes();
             batch.put_cf(cf, key, value);
 
-            if self.peer_id.is_some() {
-                if let Some(height) = height.checked_sub(T::MAINTENANCE_WINDOW) {
-                    let key = height.to_be_bytes();
-                    let _ = self.db.delete_cf(cf, key);
+            let start = height.saturating_sub(self.chain_config.maintenance_window);
+            if start > self.window_start {
+                self.window_start = start;
+                if self.peer_id.is_some() {
+                    batch.delete_cf(cf, self.window_start.to_be_bytes());
                 }
             }
         }
 
         self.db.write(batch).unwrap();
+
+        // let iter = self.db.iterator_cf(
+        //     self.db.cf_handle(OWNER_CF).unwrap(),
+        //     rocksdb::IteratorMode::Start,
+        // );
+        //
+        // let mut set = HashMap::<_, u64>::new();
+        // for item in iter {
+        //     let (key, value) = item.unwrap();
+        //     let peer = PeerId::from_bytes(&key[0..39]).unwrap();
+        //     *set.entry(peer).or_default() += 1u64;
+        // }
+        //
+        // let mut str = String::new();
+        // for (peer, count) in set {
+        //     str.push_str(&format!("{}: {}, ", peer, count));
+        // }
+        // log::info!("{}", str);
     }
 
     fn get_block_at_height(&self, mut cur: Multihash, height: Height) -> Multihash {
@@ -574,12 +550,8 @@ impl<T: Config> Tree<T> {
             if e.atom.height == height {
                 return cur;
             }
-            if e.atom.height < height {
-                break;
-            }
             cur = e.atom.parent;
         }
-        cur
     }
 
     fn prune_non_descendants(&mut self) {
@@ -601,53 +573,80 @@ impl<T: Config> Tree<T> {
         self.entries.retain(|h, _| keep.contains(h));
     }
 
-    pub fn create_command(&self, proposal: Proposal<T>, peer_id: &PeerId) -> Option<Command<T>> {
+    pub fn create_command(&self, proposal: Proposal, peer_id: &PeerId) -> Option<Command> {
         debug_assert!(self.peer_id.is_none_or(|p| &p == peer_id));
 
-        let mut inputs =
-            Vec::with_capacity(proposal.on_chain_inputs.len() + proposal.off_chain_inputs.len());
+        let mut inputs = Vec::with_capacity(proposal.inputs.len());
 
-        if !proposal.on_chain_inputs.is_empty() {
+        if !proposal.inputs.is_empty() {
             let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
             let owner_cf = self.db.cf_handle(OWNER_CF).unwrap();
-
             let peer_bytes = peer_id.to_bytes();
-            for (id, sig) in proposal.on_chain_inputs {
-                let key = [peer_bytes.as_slice(), id.to_bytes().as_slice()].concat();
+
+            for (id, sig) in proposal.inputs {
+                let mut key = Vec::with_capacity(peer_bytes.len() + id.encoded_len());
+                key.extend_from_slice(peer_bytes.as_slice());
+                key.extend_from_slice(id.to_bytes().as_slice());
                 let value = self.db.get_cf(owner_cf, key).ok().flatten()?;
                 let idx = u64::from_be_bytes(value[0..8].try_into().unwrap());
                 let token = Token::from_bytes(&value[8..]).expect("Token must be valid");
                 let proof = self.mmr.prove_with_cf(idx, &self.db, mmr_cf).unwrap();
-                inputs.push(Input::OnChain(token, id, proof, sig));
+                inputs.push(Input::new(token, proof, sig));
             }
         }
 
-        for input in proposal.off_chain_inputs {
-            inputs.push(Input::OffChain(input));
-        }
-
-        Some(Command::new(proposal.code, inputs, proposal.outputs))
+        Some(Command::new(
+            proposal.code,
+            inputs,
+            proposal.outputs,
+            self.chain_config.hasher,
+        ))
     }
 
-    pub fn create_atom(&self, cmd: Option<Command<T>>) -> Atom<T> {
-        Atom::default()
-            .with_parent(self.head)
-            .with_height(self.entries[&self.head].atom.height + 1)
-            .with_random(rand::random())
-            .with_timestamp_now()
-            .with_difficulty(self.entries[&self.head].difficulty)
-            .with_state(self.mmr.state().clone())
-            .with_command(cmd)
-            .with_atoms(self.get_non_conflicting_children(self.head))
+    pub fn create_atom(&self, cmd: Option<Command>) -> JoinHandle<Atom> {
+        let atoms = self.get_non_conflicting_children(self.head);
+        let head = &self.entries[&self.head].atom;
+
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as Timestamp;
+
+        let difficulty = if !atoms.is_empty() {
+            self.calculate_difficulty(self.head, head.height + 1, timestamp, head.difficulty)
+        } else {
+            head.difficulty
+        };
+
+        let chain_config = self.chain_config;
+        let vdf_param = chain_config.vdf_param;
+        let height = head.height + 1;
+        let state = head.state.clone();
+        let hasher = chain_config.hasher;
+        let head = self.head;
+
+        tokio::task::spawn_blocking(move || {
+            Atom::new(chain_config)
+                .with_parent(head)
+                .with_height(height)
+                .with_difficulty(difficulty)
+                .with_random(rand::random())
+                .with_timestamp(timestamp)
+                .with_command(cmd)
+                .with_atoms(atoms)
+                .solve(vdf_param)
+                .calculate_state(state, hasher)
+        })
     }
 
-    fn get_non_conflicting_children(&self, hash: Multihash) -> Vec<Pruned<T>> {
+    fn get_non_conflicting_children(&self, hash: Multihash) -> Vec<Pruned> {
         let Some(entry) = self.entries.get(&hash) else {
             return vec![];
         };
 
         let len = entry.pruned_children.len();
-        if len < T::BLOCK_THRESHOLD as usize {
+
+        if len < self.chain_config.block_threshold as usize {
             return vec![];
         }
 
@@ -655,8 +654,7 @@ impl<T: Config> Tree<T> {
         let mut result = Vec::new();
 
         'outer: for (i, pruned) in entry.pruned_children.values().enumerate() {
-            if result.len() + (len - i) < T::BLOCK_THRESHOLD as usize {
-                // Not enough remaining children to reach the threshold
+            if result.len() + (len - i) < self.chain_config.block_threshold as usize {
                 return vec![];
             }
 
@@ -668,50 +666,45 @@ impl<T: Config> Tree<T> {
             let mut child_consumed = HashSet::new();
 
             for input in &cmd.inputs {
-                let Input::OnChain(_, id, _, _) = input else {
-                    continue;
-                };
-
-                if consumed.contains(id) || child_consumed.contains(id) {
+                let id = input.token.id(self.chain_config.hasher);
+                if consumed.contains(&id) || !child_consumed.insert(id) {
                     child_consumed.clear();
                     continue 'outer;
                 }
-
-                child_consumed.insert(*id);
             }
 
             consumed.extend(child_consumed);
             result.push(pruned.clone());
         }
 
-        if result.len() < T::BLOCK_THRESHOLD as usize {
+        if result.len() < self.chain_config.block_threshold as usize {
             return vec![];
         }
 
         result
     }
 
-    pub fn tokens(&self, peer: &PeerId) -> HashMap<Multihash, Token<T>> {
+    pub fn tokens(&self, peer: &PeerId) -> HashMap<Multihash, Token> {
         debug_assert!(self.peer_id.is_none_or(|p| &p == peer));
 
         let cf = self.db.cf_handle(OWNER_CF).unwrap();
-        let iter = self.db.prefix_iterator_cf(cf, peer.to_bytes());
+        let peer_bytes = peer.to_bytes();
+        let iter = self.db.prefix_iterator_cf(cf, &peer_bytes);
         let mut tokens = HashMap::new();
 
         for item in iter {
             let (key, value) = item.unwrap();
-            if !key.starts_with(&peer.to_bytes()) {
+            if !key.starts_with(&peer_bytes) {
                 break;
             }
-            let id = Multihash::from_bytes(&key[peer.to_bytes().len()..]).unwrap();
             let token = Token::from_bytes(&value[8..]).unwrap();
-            tokens.insert(id, token);
+            tokens.insert(token.id(self.chain_config.hasher), token);
         }
 
         tokens
     }
 
-    pub fn proofs(&self, peer: &PeerId) -> Proofs<T> {
+    pub fn proofs(&self, peer: &PeerId) -> Proofs {
         debug_assert!(self.peer_id.is_none_or(|p| &p == peer));
 
         let cf = self.db.cf_handle(OWNER_CF).unwrap();
@@ -723,31 +716,28 @@ impl<T: Config> Tree<T> {
             if !key.starts_with(&peer.to_bytes()) {
                 break;
             }
-
-            let id = Multihash::from_bytes(&key[peer.to_bytes().len()..]).unwrap();
             let idx = u64::from_be_bytes(value[0..8].try_into().unwrap());
             let token = Token::from_bytes(&value[8..]).unwrap();
             let proof = self.mmr.prove_with_cf(idx, &self.db, cf).unwrap();
-            proofs.insert(id, (token, proof));
+            proofs.insert(token.id(self.chain_config.hasher), (token, proof));
         }
 
         proofs
     }
 
-    pub fn get(&self, hash: &Multihash) -> Option<&Atom<T>> {
+    pub fn get(&self, hash: &Multihash) -> Option<&Atom> {
         self.entries.get(hash).map(|e| &e.atom)
     }
 
-    pub fn get_by_height(&self, height: Height) -> Option<Atom<T>> {
+    pub fn get_by_height(&self, height: Height) -> Option<Atom> {
         let cf = self.db.cf_handle(ATOM_CF).unwrap();
         self.db
-            .get_cf(cf, height.to_be_bytes())
-            .ok()
-            .flatten()
-            .map(|v| Atom::<T>::from_bytes(&v).expect("Atom in DB must be valid"))
+            .get_pinned_cf(cf, height.to_be_bytes())
+            .unwrap()
+            .map(|v| Atom::from_bytes(&v).expect("Atom in DB must be valid"))
     }
 
-    pub fn fill(&mut self, proofs: Proofs<T>) -> bool {
+    pub fn fill(&mut self, proofs: Proofs) -> bool {
         let mut batch = WriteBatch::default();
 
         let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
@@ -759,17 +749,25 @@ impl<T: Config> Tree<T> {
             }
 
             let id_bytes = id.to_bytes();
-            let value = [&proof.idx.to_be_bytes(), token.to_bytes().as_slice()].concat();
+
+            let mut value = Vec::with_capacity(8 + token.to_bytes().len());
+            value.extend(proof.idx.to_be_bytes());
+            value.extend(token.to_bytes());
 
             if let Some(peer_id) = self.peer_id {
-                if !token.script_pk.is_related(peer_id) {
+                if !V::is_related(&token.script_pk, &peer_id) {
                     return false;
                 }
-                let key = [peer_id.to_bytes(), id_bytes].concat();
+                let mut key = Vec::with_capacity(peer_id.as_ref().encoded_len() + id_bytes.len());
+                key.extend(peer_id.to_bytes());
+                key.extend(&id_bytes);
                 batch.put_cf(owner_cf, key, &value);
             } else {
-                for peer_id in token.script_pk.related_peers() {
-                    let key = [peer_id.to_bytes().as_slice(), id_bytes.as_slice()].concat();
+                for peer_id in V::related_peers(&token.script_pk) {
+                    let mut key =
+                        Vec::with_capacity(peer_id.as_ref().encoded_len() + id_bytes.len());
+                    key.extend(peer_id.to_bytes());
+                    key.extend(&id_bytes);
                     batch.put_cf(owner_cf, key, &value);
                 }
             }
@@ -797,7 +795,7 @@ impl<T: Config> Tree<T> {
         self.entries[&self.head].atom.height
     }
 
-    pub fn head_to_finalized(&self) -> Vec<Atom<T>> {
+    pub fn head_to_finalized(&self) -> Vec<Atom> {
         let mut result = Vec::new();
         let mut cur = self.head;
 
@@ -817,7 +815,7 @@ impl<T: Config> Tree<T> {
             head_height: self.entries[&self.head].atom.height,
             finalized: self.finalized,
             finalized_height: self.finalized_height,
-            difficulty: self.entries[&self.head].difficulty,
+            difficulty: self.entries[&self.head].atom.difficulty,
             median_block_interval: self.median_block_interval(),
             average_tps: self.average_tps(),
         }
@@ -825,39 +823,16 @@ impl<T: Config> Tree<T> {
 
     fn median_block_interval(&self) -> Option<f64> {
         let head = &self.entries[&self.head];
-        let timestamps = self.collect_timestamps(&head.atom)?;
-
-        if timestamps.len() < 2 {
-            return None;
-        }
-
-        let mut intervals: Vec<u64> = timestamps
-            .windows(2)
-            .filter_map(|w| w[0].checked_sub(w[1]))
-            .collect();
-
-        if intervals.is_empty() {
-            return None;
-        }
-
-        intervals.sort_unstable();
-
-        let len = intervals.len();
-
-        let median = if len.is_multiple_of(2) {
-            let mid1 = intervals[len / 2 - 1] as f64;
-            let mid2 = intervals[len / 2] as f64;
-            (mid1 + mid2) / 2.0
-        } else {
-            intervals[len / 2] as f64
-        };
-
-        Some(median)
+        let mut timestamps =
+            self.collect_timestamps(head.atom.parent, head.atom.height, head.atom.timestamp);
+        diff_median(&mut timestamps)
     }
 
     fn average_tps(&self) -> Option<f64> {
         let head_height = self.entries[&self.head].atom.height;
-        let start = head_height.saturating_sub(T::MAINTENANCE_WINDOW).max(1);
+        let start = head_height
+            .saturating_sub(self.chain_config.maintenance_window)
+            .max(1);
 
         if start == head_height {
             return None;
@@ -916,73 +891,93 @@ impl<T: Config> Tree<T> {
         Some(total_commands as f64 / duration as f64)
     }
 
-    pub fn headers(&self, start: Height, count: Height) -> Option<Vec<Multihash>> {
-        let mut result = Vec::with_capacity(count as usize);
+    pub fn hasher(&self) -> Hasher {
+        self.chain_config.hasher
+    }
 
-        if start == 0 || start + count - 1 > self.finalized_height {
-            return None;
-        }
-
-        for h in start..start + count {
-            let atom = self.get_by_height(h)?;
-            result.push(atom.hash());
-        }
-
-        Some(result)
+    pub fn vdf_param(&self) -> u16 {
+        self.chain_config.vdf_param
     }
 }
 
-fn apply_command<T: Config>(
-    cmd: &Command<T>,
+fn apply_atom<V: ValidatorEngine>(
+    atom: &Atom,
+    hasher: Hasher,
     mmr: &mut Mmr,
-    mmr_cf: &ColumnFamily,
-    owner_cf: &ColumnFamily,
+    db: &DB,
     batch: &mut WriteBatch,
     peer_id: Option<PeerId>,
 ) {
     let mut keep = Vec::new();
+    let mmr_cf = db.cf_handle(MMR_CF).unwrap();
+    let owner_cf = db.cf_handle(OWNER_CF).unwrap();
+    let mut changed = false;
 
-    for input in &cmd.inputs {
-        let Input::OnChain(token, id, proof, _) = input else {
-            continue;
-        };
+    atom.atoms
+        .iter()
+        .filter_map(|a| a.cmd.as_ref())
+        .chain(atom.cmd.as_ref())
+        .for_each(|cmd| {
+            changed = true;
 
-        let _ = mmr.delete(*id, proof);
+            cmd.inputs.iter().for_each(|input| {
+                let id = input.token.id(hasher);
+                let _ = mmr.delete(id, &input.proof);
 
-        let id_bytes = id.to_bytes();
+                if let Some(peer_id) = peer_id {
+                    if V::is_related(&input.token.script_pk, &peer_id) {
+                        let mut key =
+                            Vec::with_capacity(peer_id.as_ref().encoded_len() + id.encoded_len());
+                        key.extend(peer_id.to_bytes());
+                        key.extend(id.to_bytes());
+                        batch.delete_cf(owner_cf, key);
+                    }
+                } else {
+                    let id_bytes = id.to_bytes();
+                    for peer_id in V::related_peers(&input.token.script_pk) {
+                        let mut key =
+                            Vec::with_capacity(peer_id.as_ref().encoded_len() + id_bytes.len());
+                        key.extend(peer_id.to_bytes());
+                        key.extend_from_slice(&id_bytes);
+                        batch.delete_cf(owner_cf, key);
+                    }
+                }
+            });
 
-        if let Some(peer_id) = peer_id {
-            let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-            batch.delete_cf(owner_cf, key);
-        } else {
-            for peer_id in token.script_pk.related_peers() {
-                let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                batch.delete_cf(owner_cf, key);
-            }
-        }
-    }
+            cmd.outputs.iter().for_each(|token| {
+                let id = token.id(hasher);
+                let idx = mmr.append(id);
 
-    let first_input = cmd.inputs[0].id().to_bytes();
+                if let Some(peer_id) = peer_id {
+                    if V::is_related(&token.script_pk, &peer_id) {
+                        keep.push(idx);
+                        let mut key =
+                            Vec::with_capacity(peer_id.as_ref().encoded_len() + id.encoded_len());
+                        key.extend(peer_id.to_bytes());
+                        key.extend(id.to_bytes());
+                        let mut value = Vec::new();
+                        value.extend(&idx.to_be_bytes());
+                        value.extend(token.to_bytes());
+                        batch.put_cf(owner_cf, key, value);
+                    }
+                } else {
+                    let id_bytes = id.to_bytes();
+                    for peer_id in V::related_peers(&token.script_pk) {
+                        let mut key =
+                            Vec::with_capacity(peer_id.as_ref().encoded_len() + id_bytes.len());
+                        key.extend(peer_id.to_bytes());
+                        key.extend_from_slice(&id_bytes);
+                        let mut value = Vec::new();
+                        value.extend(&idx.to_be_bytes());
+                        value.extend(token.to_bytes());
+                        batch.put_cf(owner_cf, key, value);
+                    }
+                }
+            });
+        });
 
-    for (i, token) in cmd.outputs.iter().enumerate() {
-        let buf = [first_input.as_slice(), &(i as u32).to_be_bytes()].concat();
-        let id = T::HASHER.digest(&buf);
-        let id_bytes = id.to_bytes();
-        let idx = mmr.append(id);
-        let value: Vec<u8> = [&idx.to_be_bytes(), token.to_bytes().as_slice()].concat();
-
-        if let Some(peer_id) = peer_id {
-            if token.script_pk.is_related(peer_id) {
-                let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                keep.push(idx);
-                batch.put_cf(owner_cf, key, &value);
-            }
-        } else {
-            for peer_id in token.script_pk.related_peers() {
-                let key = [peer_id.to_bytes().as_slice(), id_bytes.as_ref()].concat();
-                batch.put_cf(owner_cf, key, &value);
-            }
-        }
+    if !changed {
+        return;
     }
 
     mmr.commit();
@@ -994,99 +989,22 @@ fn apply_command<T: Config>(
     mmr.write_cf(mmr_cf, batch);
 }
 
-fn validate<T: Config>(
-    parent: &Entry<T>,
-    mmr: &Mmr,
-    atom: &Atom<T>,
-    check_diffculty: bool,
-) -> Option<Reason> {
-    if atom.height != parent.atom.height + 1 {
-        return Some(Reason::invalid_height(atom.height, parent.atom.height));
-    }
-
-    if check_diffculty && atom.difficulty != parent.difficulty {
-        log::warn!(
-            "Difficulty mismatch: parent {}, atom {}, atom height {}, parent {}",
-            parent.difficulty,
-            atom.difficulty,
-            atom.height,
-            hex::encode(parent.atom.hash().to_bytes())
-        );
-
-        return Some(Reason::mismatch_difficulty(
-            parent.difficulty,
-            atom.difficulty,
-        ));
-    }
-
-    let mut consumed = HashSet::new();
-
-    if atom.atoms.len() < T::BLOCK_THRESHOLD as usize {
-        let cmd = atom.cmd.as_ref()?;
-
-        if cmd.inputs.is_empty() {
-            return Some(Reason::empty_input());
-        }
-
-        for input in &cmd.inputs {
-            let Input::OnChain(token, id, proof, sig) = input else {
-                continue;
-            };
-
-            if !consumed.insert(*id) {
-                return Some(Reason::double_spend());
-            }
-
-            if !mmr.verify(*id, proof) {
-                return Some(Reason::invalid_mmr_proof());
-            }
-
-            if !token.script_pk.verify(sig) {
-                return Some(Reason::invalid_script_sig());
-            }
-        }
-
-        if !T::validate_command(cmd) {
-            return Some(Reason::invalid_command());
-        }
-
+fn diff_median(values: &mut [u64]) -> Option<f64> {
+    if values.len() < 2 {
         return None;
     }
 
-    for cmd in atom
-        .atoms
-        .iter()
-        .filter_map(|a| a.cmd.as_ref())
-        .chain(atom.cmd.as_ref())
-    {
-        if cmd.inputs.is_empty() {
-            return Some(Reason::empty_input());
-        }
+    let diffs = values
+        .windows(2)
+        .filter_map(|w| w[1].checked_sub(w[0]))
+        .collect::<Vec<_>>();
 
-        for input in &cmd.inputs {
-            let Input::OnChain(token, id, proof, sig) = input else {
-                continue;
-            };
-
-            if !consumed.insert(*id) {
-                return Some(Reason::double_spend());
-            }
-
-            if !mmr.verify(*id, proof) {
-                return Some(Reason::invalid_mmr_proof());
-            }
-
-            if !token.script_pk.verify(sig) {
-                return Some(Reason::invalid_script_sig());
-            }
-        }
-
-        if !T::validate_command(cmd) {
-            return Some(Reason::invalid_command());
-        }
+    match diffs.len() {
+        0 => None,
+        1 => Some(diffs[0] as f64),
+        n if n.is_multiple_of(2) => Some((diffs[n / 2 - 1] as f64 + diffs[n / 2] as f64) / 2.0),
+        n => Some(diffs[n / 2] as f64),
     }
-
-    None
 }
 
 impl std::fmt::Display for Status {
