@@ -524,24 +524,6 @@ impl<V: ValidatorEngine> Tree<V> {
         }
 
         self.db.write(batch).unwrap();
-
-        // let iter = self.db.iterator_cf(
-        //     self.db.cf_handle(OWNER_CF).unwrap(),
-        //     rocksdb::IteratorMode::Start,
-        // );
-        //
-        // let mut set = HashMap::<_, u64>::new();
-        // for item in iter {
-        //     let (key, value) = item.unwrap();
-        //     let peer = PeerId::from_bytes(&key[0..39]).unwrap();
-        //     *set.entry(peer).or_default() += 1u64;
-        // }
-        //
-        // let mut str = String::new();
-        // for (peer, count) in set {
-        //     str.push_str(&format!("{}: {}, ", peer, count));
-        // }
-        // log::info!("{}", str);
     }
 
     fn get_block_at_height(&self, mut cur: Multihash, height: Height) -> Multihash {
@@ -604,8 +586,10 @@ impl<V: ValidatorEngine> Tree<V> {
     }
 
     pub fn create_atom(&self, cmd: Option<Command>) -> JoinHandle<Atom> {
-        let atoms = self.get_non_conflicting_children(self.head);
-        let head = &self.entries[&self.head].atom;
+        let parent = self.select_parent_for_creation();
+        let atoms = self.get_non_conflicting_children(parent);
+        let parent_atom = &self.entries[&parent].atom;
+        let height = parent_atom.height + 1;
 
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -613,21 +597,19 @@ impl<V: ValidatorEngine> Tree<V> {
             .as_secs() as Timestamp;
 
         let difficulty = if !atoms.is_empty() {
-            self.calculate_difficulty(self.head, head.height + 1, timestamp, head.difficulty)
+            self.calculate_difficulty(self.head, height, timestamp, parent_atom.difficulty)
         } else {
-            head.difficulty
+            parent_atom.difficulty
         };
 
-        let chain_config = self.chain_config;
-        let vdf_param = chain_config.vdf_param;
-        let height = head.height + 1;
-        let state = head.state.clone();
-        let hasher = chain_config.hasher;
-        let head = self.head;
+        let chain_config = self.expected_chain_config(parent_atom.height + 1);
+        let vdf_param = self.chain_config.vdf_param;
+        let state = parent_atom.state.clone();
+        let hasher = self.chain_config.hasher;
 
         tokio::task::spawn_blocking(move || {
             Atom::new(chain_config)
-                .with_parent(head)
+                .with_parent(parent)
                 .with_height(height)
                 .with_difficulty(difficulty)
                 .with_random(rand::random())
@@ -637,6 +619,34 @@ impl<V: ValidatorEngine> Tree<V> {
                 .solve(vdf_param)
                 .calculate_state(state, hasher)
         })
+    }
+
+    fn select_parent_for_creation(&self) -> Multihash {
+        let exp = self.expected_chain_config(self.entries[&self.head].atom.height + 1);
+        let mut cur = self.finalized;
+
+        loop {
+            let entry = &self.entries[&cur];
+
+            let next = entry
+                .block_children
+                .iter()
+                .filter(|child| self.entries[*child].atom.chain_config == exp)
+                .max_by_key(|&&child| self.entries[&child].descendants.len())
+                .copied();
+
+            match next {
+                Some(child) => cur = child,
+                None => break cur,
+            }
+        }
+    }
+
+    fn expected_chain_config(&self, height: Height) -> ChainConfig {
+        self.next_chain_config
+            .filter(|(h, _)| height >= *h)
+            .map(|(_, c)| c)
+            .unwrap_or(self.chain_config)
     }
 
     fn get_non_conflicting_children(&self, hash: Multihash) -> Vec<Pruned> {
