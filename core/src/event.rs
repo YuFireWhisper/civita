@@ -7,7 +7,8 @@ use crate::{
     consensus::tree::Status,
     crypto::Multihash,
     network::transport::{Request, Response},
-    ty::{Atom, ScriptPk, ScriptSig, Token, Value},
+    ty::{atom::Height, Atom, ScriptPk, ScriptSig, Token, Value},
+    ChainConfig,
 };
 
 pub struct Proposal {
@@ -23,6 +24,7 @@ pub enum Event {
     Propose(Proposal),
     Tokens(oneshot::Sender<HashMap<Multihash, Token>>),
     Status(oneshot::Sender<Status>),
+    SetNextChainConfig(Height, ChainConfig),
     Stop(oneshot::Sender<()>),
     AtomReady(Box<Atom>),
 }

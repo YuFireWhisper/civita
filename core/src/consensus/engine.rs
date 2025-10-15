@@ -211,6 +211,9 @@ impl<V: ValidatorEngine> Engine<V> {
                 Event::Status(tx) => {
                     let _ = tx.send(self.tree.status());
                 }
+                Event::SetNextChainConfig(height, config) => {
+                    self.tree.set_next_chain_config(height, config);
+                }
                 Event::Stop(tx) => {
                     let _ = tx.send(());
                     break;
