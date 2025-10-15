@@ -832,7 +832,7 @@ impl<V: ValidatorEngine> Tree<V> {
         let head_height = self.entries[&self.head].atom.height;
         let start = head_height
             .saturating_sub(self.chain_config.maintenance_window)
-            .max(1);
+            .max(self.window_start);
 
         if start == head_height {
             return None;
