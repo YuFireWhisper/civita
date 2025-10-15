@@ -12,8 +12,9 @@ use crate::{
     crypto::Multihash,
     event::{Event, Proposal},
     network::{transport, Transport},
-    ty::{token::Token, Atom},
+    ty::{atom::Height, token::Token, Atom},
     validator::ValidatorEngine,
+    ChainConfig,
 };
 
 pub use engine::BootstrapConfig;
@@ -172,6 +173,11 @@ impl Resident {
         let event = Event::Status(tx);
         let _ = self.tx.send(event).await;
         rx.await.map_err(|_| Error::ChannelClosed)
+    }
+
+    pub async fn set_next_chain_config(&self, height: Height, config: ChainConfig) {
+        let event = Event::SetNextChainConfig(height, config);
+        let _ = self.tx.send(event).await;
     }
 
     pub async fn stop(self) {
