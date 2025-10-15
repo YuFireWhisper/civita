@@ -504,7 +504,16 @@ impl<V: ValidatorEngine> Tree<V> {
 
         self.finalized = hash;
         self.finalized_height = height;
+        self.chain_config = self.entries[&hash].atom.chain_config;
         self.entries.get_mut(&hash).unwrap().consumed.clear();
+
+        if self
+            .next_chain_config
+            .as_ref()
+            .is_some_and(|(h, _)| h < &height)
+        {
+            self.next_chain_config = None;
+        }
 
         self.prune_non_descendants();
 
