@@ -917,6 +917,19 @@ impl<V: ValidatorEngine> Tree<V> {
     pub fn vdf_param(&self) -> u16 {
         self.chain_config.vdf_param
     }
+
+    pub fn set_next_chain_config(&mut self, height: Height, config: ChainConfig) -> bool {
+        if self.next_chain_config.is_some() {
+            return false;
+        }
+
+        if height <= self.finalized_height {
+            return false;
+        }
+
+        self.next_chain_config = Some((height, config));
+        true
+    }
 }
 
 fn apply_atom<V: ValidatorEngine>(
