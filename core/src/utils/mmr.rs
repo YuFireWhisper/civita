@@ -425,6 +425,19 @@ fn pruned_indices(size: u64, leaves: &[u64]) -> HashSet<u64> {
     indices
 }
 
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "State({}, [", self.0)?;
+        for (i, h) in self.1.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", hex::encode(h.to_bytes()))?;
+        }
+        write!(f, "])")
+    }
+}
+
 impl Clone for Mmr {
     fn clone(&self) -> Self {
         Self {
