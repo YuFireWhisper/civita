@@ -213,7 +213,7 @@ impl Mmr {
 
     pub fn prove_with_db(&self, idx: u64, db: &DB) -> Option<MmrProof> {
         self.prove_inner(idx, |i| {
-            db.get(i.to_le_bytes())
+            db.get(i.to_be_bytes())
                 .expect("db error")
                 .map(|v| Multihash::from_bytes(&v).expect("invalid data"))
         })
@@ -221,7 +221,7 @@ impl Mmr {
 
     pub fn prove_with_cf(&self, idx: u64, db: &DB, cf: &ColumnFamily) -> Option<MmrProof> {
         self.prove_inner(idx, |i| {
-            db.get_cf(cf, i.to_le_bytes())
+            db.get_cf(cf, i.to_be_bytes())
                 .expect("db error")
                 .map(|v| Multihash::from_bytes(&v).expect("invalid data"))
         })
@@ -263,7 +263,7 @@ impl Mmr {
         let entries = HashMap::from_iter(self.peaks.iter().map(|p| (*p, self.entries[p])));
         self.entries
             .drain()
-            .for_each(|(k, v)| batch.put_cf(cf, k.to_le_bytes(), v.to_bytes()));
+            .for_each(|(k, v)| batch.put_cf(cf, k.to_be_bytes(), v.to_bytes()));
         self.entries = entries;
     }
 }
