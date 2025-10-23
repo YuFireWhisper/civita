@@ -384,3 +384,121 @@ impl Clone for Mmr {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rocksdb::Options;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::crypto::hasher::Hasher;
+
+    const CF_NAME: &str = "mmr";
+
+    struct Context {
+        mmr: Mmr,
+        hash_to_idx: HashMap<Multihash, u64>,
+        deleted: Vec<u64>,
+        _dir: TempDir,
+        db: DB,
+    }
+
+    impl Context {
+        pub fn new() -> Self {
+            let dir = TempDir::new().unwrap();
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
+            let db = DB::open_cf(&opts, dir.path(), vec![CF_NAME]).unwrap();
+
+            Self {
+                mmr: Mmr::default(),
+                hash_to_idx: HashMap::new(),
+                deleted: vec![],
+                db,
+                _dir: dir,
+            }
+        }
+
+        pub fn append(&mut self, start: u64, count: u64) {
+            for i in start..start + count {
+                let hash = Hasher::default().digest(&i.to_be_bytes());
+                let idx = self.mmr.append(hash);
+                self.hash_to_idx.insert(hash, idx);
+            }
+            self.mmr.commit();
+        }
+
+        pub fn delete(&mut self, start: u64, count: u64) {
+            for i in start..start + count {
+                let hash = Hasher::default().digest(&i.to_be_bytes());
+                let idx = self.hash_to_idx[&hash];
+                let proof = self.mmr.prove(idx).unwrap();
+                assert!(self.mmr.delete(hash, &proof));
+                self.deleted.push(idx);
+            }
+            self.mmr.commit();
+        }
+
+        pub fn verify(&self, start: u64, count: u64) {
+            for i in start..start + count {
+                let hash = Hasher::default().digest(&i.to_be_bytes());
+                let idx = self.hash_to_idx[&hash];
+                let proof = self.mmr.prove(idx).unwrap();
+                assert!(self.mmr.verify(hash, &proof));
+            }
+        }
+
+        pub fn verify_deleted(&self) {
+            self.deleted.iter().for_each(|idx| {
+                let proof = self.mmr.prove(*idx).unwrap();
+                assert!(self.mmr.verify(Multihash::default(), &proof));
+            });
+        }
+
+        pub fn write_to_db(&mut self) {
+            let mut batch = WriteBatch::default();
+            let cf = self.db.cf_handle(CF_NAME).unwrap();
+            self.mmr.write_cf(cf, &mut batch);
+            self.db.write(batch).unwrap();
+        }
+
+        pub fn prove_and_verify_with_db(&self, start: u64, count: u64) {
+            let cf = self.db.cf_handle(CF_NAME).unwrap();
+            for i in start..start + count {
+                let hash = Hasher::default().digest(&i.to_be_bytes());
+                let idx = self.hash_to_idx[&hash];
+                let proof = self
+                    .mmr
+                    .prove_with_cf(idx, &self.db, cf)
+                    .expect("failed to prove with db");
+                assert!(self.mmr.verify(hash, &proof));
+            }
+        }
+    }
+
+    #[test]
+    fn append_and_verify() {
+        let mut ctx = Context::new();
+        ctx.append(0, 1000);
+        ctx.verify(0, 1000);
+    }
+
+    #[test]
+    fn delete_and_verify() {
+        let mut ctx = Context::new();
+        ctx.append(0, 1000);
+        ctx.delete(200, 100);
+        ctx.verify(0, 200);
+        ctx.verify(300, 700);
+        ctx.verify_deleted();
+    }
+
+    #[test]
+    fn write_and_proof() {
+        let mut ctx = Context::new();
+        ctx.append(0, 1000);
+        ctx.write_to_db();
+        ctx.prove_and_verify_with_db(0, 1000);
+    }
+}
