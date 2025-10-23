@@ -214,18 +214,16 @@ impl Mmr {
     pub fn prove_with_db(&self, idx: u64, db: &DB) -> Option<MmrProof> {
         self.prove_inner(idx, |i| {
             db.get(i.to_le_bytes())
-                .ok()
-                .flatten()
-                .and_then(|v| Multihash::from_bytes(&v).ok())
+                .expect("db error")
+                .map(|v| Multihash::from_bytes(&v).expect("invalid data"))
         })
     }
 
     pub fn prove_with_cf(&self, idx: u64, db: &DB, cf: &ColumnFamily) -> Option<MmrProof> {
         self.prove_inner(idx, |i| {
             db.get_cf(cf, i.to_le_bytes())
-                .ok()
-                .flatten()
-                .and_then(|v| Multihash::from_bytes(&v).ok())
+                .expect("db error")
+                .map(|v| Multihash::from_bytes(&v).expect("invalid data"))
         })
     }
 
