@@ -143,9 +143,5 @@ async fn basic_operations() {
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].value, INIT_VALUE.to_be_bytes());
 
-    let _ = fs::remove_dir_all(DIR1);
-    let _ = fs::remove_dir_all(DIR2);
-    let _ = fs::remove_dir_all(DIR3);
-    let _ = fs::remove_dir_all(DIR4);
-    let _ = fs::remove_dir_all(DIR5);
+    let _ = fs::remove_dir_all("./data");
 }
