@@ -295,13 +295,13 @@ impl<V: ValidatorEngine> Tree<V> {
         }
 
         if in_sync {
-            let parent = self.entries[&atom.parent].atom.difficulty;
+            let difficulty = self.entries[&atom.parent].atom.difficulty;
 
-            if !atom.verify_nonce(self.chain_config.vdf_param, parent) {
+            if !atom.verify_nonce(self.chain_config.vdf_param, difficulty) {
                 return Err(Reason::invalid_nonce());
             }
 
-            let exp = self.calculate_difficulty(atom.parent, atom.height, atom.timestamp, parent);
+            let exp = self.calculate_difficulty(atom.parent, atom.timestamp);
             if exp != atom.difficulty {
                 return Err(Reason::mismatch_difficulty(exp, atom.difficulty));
             }
@@ -372,14 +372,10 @@ impl<V: ValidatorEngine> Tree<V> {
         }
     }
 
-    fn calculate_difficulty(
-        &self,
-        parent: Multihash,
-        height: Height,
-        timestamp: Timestamp,
-        origin: Difficulty,
-    ) -> Difficulty {
-        let mut timestamps = self.collect_timestamps(parent, height, timestamp);
+    fn calculate_difficulty(&self, parent: Multihash, timestamp: Timestamp) -> Difficulty {
+        let mut timestamps = self.collect_timestamps(parent, true);
+        timestamps[0] = timestamp;
+        let origin = self.entries[&parent].atom.difficulty;
         diff_median(&mut timestamps)
             .map(|m| {
                 let ratio_raw = self.chain_config.target_block_time_sec as f64 / m;
@@ -390,29 +386,27 @@ impl<V: ValidatorEngine> Tree<V> {
             .unwrap_or(origin)
     }
 
-    fn collect_timestamps(
-        &self,
-        parent: Multihash,
-        height: Height,
-        timestamp: Timestamp,
-    ) -> Vec<Timestamp> {
-        let start = height
+    fn collect_timestamps(&self, mut cur: Multihash, ignore_first: bool) -> Vec<Timestamp> {
+        let end = self.entries[&cur].atom.height;
+        let start = end
             .saturating_sub(self.chain_config.maintenance_window)
             .max(self.window_start);
 
-        let mut timestamps = Vec::with_capacity((height - start + 1) as usize);
-        timestamps.push(timestamp);
-        let mut cur_hash = parent;
+        let mut timestamps = Vec::with_capacity((end - start + 1) as usize);
 
-        for height in (start..height).rev() {
+        if ignore_first {
+            timestamps.push(Default::default());
+        }
+
+        for height in ((start + ignore_first as u32)..=end).rev() {
             if height > self.finalized_height {
-                let entry = &self.entries[&cur_hash];
+                let entry = &self.entries[&cur];
                 timestamps.push(entry.atom.timestamp);
-                cur_hash = entry.atom.parent;
+                cur = entry.atom.parent;
             } else {
                 let atom = self.get_by_height(height).unwrap();
                 timestamps.push(atom.timestamp);
-                cur_hash = atom.parent;
+                cur = atom.parent;
             }
         }
 
@@ -603,7 +597,7 @@ impl<V: ValidatorEngine> Tree<V> {
             .as_secs() as Timestamp;
 
         let difficulty = if !atoms.is_empty() {
-            self.calculate_difficulty(self.head, height, timestamp, parent_atom.difficulty)
+            self.calculate_difficulty(self.head, timestamp)
         } else {
             parent_atom.difficulty
         };
@@ -839,9 +833,7 @@ impl<V: ValidatorEngine> Tree<V> {
     }
 
     fn median_block_interval(&self) -> Option<f64> {
-        let head = &self.entries[&self.head];
-        let mut timestamps =
-            self.collect_timestamps(head.atom.parent, head.atom.height, head.atom.timestamp);
+        let mut timestamps = self.collect_timestamps(self.head, false);
         diff_median(&mut timestamps)
     }
 
@@ -1026,7 +1018,7 @@ fn diff_median(values: &mut [u64]) -> Option<f64> {
 
     let diffs = values
         .windows(2)
-        .filter_map(|w| w[1].checked_sub(w[0]))
+        .filter_map(|w| w[0].checked_sub(w[1]))
         .collect::<Vec<_>>();
 
     match diffs.len() {
