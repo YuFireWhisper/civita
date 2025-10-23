@@ -181,7 +181,9 @@ impl<V: ValidatorEngine> Engine<V> {
                         assert_eq!(tree.head(), id);
                     }
                     None => {
-                        tree_opt = Some(Tree::new(atom, &dir, transport.peer_id));
+                        let peer =
+                            (config.node_type != NodeType::Archive).then_some(transport.peer_id);
+                        tree_opt = Some(Tree::new(atom, &dir, peer));
                     }
                 }
             }
