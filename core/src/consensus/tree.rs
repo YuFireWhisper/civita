@@ -177,13 +177,10 @@ impl<V: ValidatorEngine> Tree<V> {
             return result;
         }
 
-        if self
-            .pending
-            .get(&atom.parent)
-            .is_some_and(|m| m.contains_key(&id))
-        {
-            result.dismissed.insert(id, Reason::already_existing());
-            return result;
+        if let Some(map) = self.pending.get_mut(&atom.parent) {
+            if map.remove(&id).is_some() && map.is_empty() {
+                self.pending.remove(&atom.parent);
+            }
         }
 
         if let Some(reason) = self.basic_validation(&atom) {
