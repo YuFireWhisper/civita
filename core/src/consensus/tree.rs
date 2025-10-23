@@ -726,8 +726,9 @@ impl<V: ValidatorEngine> Tree<V> {
     pub fn proofs(&self, peer: &PeerId) -> Proofs {
         debug_assert!(self.peer_id.is_none_or(|p| &p == peer));
 
-        let cf = self.db.cf_handle(OWNER_CF).unwrap();
-        let iter = self.db.prefix_iterator_cf(cf, peer.to_bytes());
+        let owner_cf = self.db.cf_handle(OWNER_CF).unwrap();
+        let mmr_cf = self.db.cf_handle(MMR_CF).unwrap();
+        let iter = self.db.prefix_iterator_cf(owner_cf, peer.to_bytes());
         let mut proofs = Proofs::new();
 
         for item in iter {
@@ -737,7 +738,7 @@ impl<V: ValidatorEngine> Tree<V> {
             }
             let idx = u64::from_be_bytes(value[0..8].try_into().unwrap());
             let token = Token::from_bytes(&value[8..]).unwrap();
-            let proof = self.mmr.prove_with_cf(idx, &self.db, cf).unwrap();
+            let proof = self.mmr.prove_with_cf(idx, &self.db, mmr_cf).unwrap();
             proofs.insert(token.id(self.chain_config.hasher), (token, proof));
         }
 
