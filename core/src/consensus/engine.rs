@@ -33,6 +33,7 @@ use crate::{
 const MAX_ATOMS_PER_REQUEST: u32 = 1000;
 
 #[derive(Clone, Copy)]
+#[derive(PartialEq, Eq)]
 pub enum NodeType {
     Archive,
     Regular,
@@ -134,7 +135,7 @@ impl<V: ValidatorEngine> Engine<V> {
                     return tree_opt.unwrap();
                 }
 
-                if local_height == remote_height {
+                if local_height == remote_height && config.node_type != NodeType::Archive {
                     let req = Request::Proofs;
                     transport.send_request(req, config.peer).await;
 
@@ -152,8 +153,9 @@ impl<V: ValidatorEngine> Engine<V> {
                     }
 
                     assert!(tree.fill(proofs));
-                    return tree_opt.unwrap();
                 }
+
+                return tree_opt.unwrap();
             }
 
             let start = tree_opt.as_ref().map(|t| t.head_height() + 1).unwrap_or(0);
@@ -194,16 +196,14 @@ impl<V: ValidatorEngine> Engine<V> {
                 Event::Gossipsub(id, propagation_source, atom) => {
                     self.on_recv_atom(Some(id), propagation_source, *atom).await;
                 }
+                Event::Response(Response::Atom(atom), peer) => {
+                    self.on_recv_atom(None, peer, *atom).await;
+                }
                 Event::Request(req, peer, channel) => {
                     self.on_recv_request(peer, req, channel).await;
                 }
-                Event::Response(resp, peer) => {
-                    if let Response::Atom(atom) = resp {
-                        self.on_recv_atom(None, peer, *atom).await;
-                    }
-                }
                 Event::Propose(proposal) => {
-                    self.add_task(Some(proposal), &tx).await;
+                    self.add_task(Some(proposal), false, &tx).await;
                 }
                 Event::Tokens(tx) => {
                     let _ = tx.send(self.tree.tokens(&self.transport.peer_id));
@@ -222,11 +222,13 @@ impl<V: ValidatorEngine> Engine<V> {
                     if !self.on_atom_ready(*atom).await {
                         log::error!("Heartbeat atom rejected");
                     }
+                    self.add_task(None, false, &tx).await;
                 }
+                _ => {}
             }
 
             if tokio::time::Instant::now() >= self.heartbeat_instant {
-                self.add_task(None, &tx).await;
+                self.add_task(None, true, &tx).await;
             }
 
             tokio::task::yield_now().await;
@@ -235,9 +237,7 @@ impl<V: ValidatorEngine> Engine<V> {
         log::info!("Engine stopped");
     }
 
-    async fn add_task(&mut self, proposal: Option<Proposal>, tx: &Sender<Event>) {
-        self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
-
+    async fn add_task(&mut self, proposal: Option<Proposal>, or_empty: bool, tx: &Sender<Event>) {
         if let Some(proposal) = proposal {
             self.pending_tasks.push_back(proposal);
         }
@@ -255,6 +255,10 @@ impl<V: ValidatorEngine> Engine<V> {
                 })
         });
 
+        if cmd.is_none() && !or_empty {
+            return;
+        }
+
         let tx_clone = tx.clone();
         let is_running_task = self.is_running_task.clone();
         is_running_task.store(true, Ordering::Relaxed);
@@ -265,6 +269,8 @@ impl<V: ValidatorEngine> Engine<V> {
             let _ = tx_clone.send(Event::AtomReady(Box::new(atom))).await;
             is_running_task.store(false, Ordering::Relaxed);
         });
+
+        self.heartbeat_instant = Instant::now() + self.heartbeat_duration;
     }
 
     async fn on_recv_atom(&mut self, msg_id: Option<MessageId>, peer: PeerId, atom: Atom) {
