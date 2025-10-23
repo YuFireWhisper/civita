@@ -83,18 +83,9 @@ impl Mmr {
     }
 
     fn resolve(&self, hash: Multihash, proof: &MmrProof) -> Option<HashMap<u64, Multihash>> {
-        let last = self.peaks.last()?;
+        let peak = peak_of(&self.peaks, &proof.idx)?;
 
-        if &proof.idx > last {
-            return None;
-        }
-
-        let c = {
-            let pos = self.peaks.partition_point(|p| *p < proof.idx);
-            *self.peaks.get(pos).unwrap_or_else(|| &self.peaks[pos - 1])
-        };
-
-        if proof.idx == c {
+        if proof.idx == peak {
             return proof.hashes.is_empty().then(HashMap::new);
         }
 
@@ -120,7 +111,7 @@ impl Mmr {
             g += 1;
         }
 
-        if idx != c || acc != self.entries[&c] {
+        if idx != peak || acc != self.entries[&peak] {
             return None;
         }
 
@@ -155,7 +146,7 @@ impl Mmr {
     fn recalculate_parents(&mut self, mut idx: u64) {
         let mut g = index_height(idx);
         let mut c = Multihash::default();
-        let peak = floor(&self.peaks, &idx);
+        let peak = peak_of(&self.peaks, &idx).unwrap();
 
         while idx != peak {
             let offset = 2u64 << g;
@@ -190,20 +181,10 @@ impl Mmr {
     where
         F: FnMut(u64) -> Option<Multihash>,
     {
-        let last = self.peaks.last()?;
-
-        if idx > *last {
-            return None;
-        }
-
-        let c = {
-            let pos = self.peaks.partition_point(|p| *p < idx);
-            *self.peaks.get(pos).unwrap_or_else(|| &self.peaks[pos - 1])
-        };
-
+        let peak = peak_of(&self.peaks, &idx)?;
         let mut proof = MmrProof::new(vec![], idx);
 
-        if idx == c {
+        if idx == peak {
             return Some(proof);
         }
 
@@ -220,7 +201,7 @@ impl Mmr {
                 idx - 1
             };
 
-            if is > c {
+            if is > peak {
                 return Some(proof);
             }
 
@@ -342,12 +323,10 @@ fn leaves_from_size(size: u64) -> u64 {
     lo
 }
 
-fn floor(idxs: &[u64], idx: &u64) -> u64 {
-    match idxs.binary_search(idx) {
-        Ok(i) => idxs[i],
-        Err(0) => idxs[0],
-        Err(i) => idxs[i - 1],
-    }
+fn peak_of(peaks: &[u64], idx: &u64) -> Option<u64> {
+    peaks.last().filter(|p| p >= &idx)?;
+    let pos = peaks.partition_point(|p| p < idx);
+    Some(*peaks.get(pos).unwrap_or_else(|| &peaks[pos - 1]))
 }
 
 fn pruned_indices(size: u64, leaves: &[u64]) -> HashSet<u64> {
